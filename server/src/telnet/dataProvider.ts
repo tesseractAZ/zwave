@@ -25,7 +25,7 @@ import type {
   LogEvent,
   NodeSnapshot,
 } from '../types';
-import { scoreNode } from '../zwave/health';
+import { scoreNode, DEFAULT_NOISE_FLOOR } from '../zwave/health';
 
 /**
  * The subset of the `zwave/zwaveData` layer this provider consumes. The data
@@ -43,6 +43,8 @@ export interface ZwaveDataSource {
   ready?(): boolean;
   /** Last fatal error string, if any. */
   lastError?(): string | null;
+  /** Epoch ms of the last SUCCESSFUL roster refresh (null before the first). */
+  lastUpdated?(): number | null;
   /**
    * Optional: trigger an expensive route/controller-statistics refresh. When
    * present it is driven on the `routePollMs` cadence; when absent the data
@@ -60,8 +62,6 @@ export interface CreateTuiDataProviderOptions {
   log: (msg: string) => void;
 }
 
-/** Representative background noise floor (dBm) when the controller has none. */
-const DEFAULT_NOISE_FLOOR = -95;
 /** RSSI sentinels the driver uses for "no reading" — excluded from the median. */
 const RSSI_SENTINELS = new Set([127, 126, 125]);
 
@@ -105,6 +105,8 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
   let cachedEvents: LogEvent[] = [];
   let cachedScores = new Map<number, HealthResult>();
   let cachedNoiseFloor = DEFAULT_NOISE_FLOOR;
+  let cachedHasNoise = false;
+  let cachedLastUpdated: number | null = null;
   let cachedReady = false;
   let cachedError: string | null = null;
 
@@ -142,6 +144,10 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     cachedController = controller;
     cachedScores = scores;
     cachedNoiseFloor = noise;
+    cachedHasNoise = (controller?.backgroundRSSI ?? []).some(
+      (v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v) && v < 0,
+    );
+    cachedLastUpdated = zwaveData.lastUpdated?.() ?? cachedLastUpdated;
     cachedReady = zwaveData.ready?.() ?? nodes.length > 0;
     cachedError = zwaveData.lastError?.() ?? null;
   };
@@ -177,6 +183,8 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     events: () => cachedEvents,
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,
+    hasRealNoise: () => cachedHasNoise,
+    lastUpdated: () => cachedLastUpdated,
     ready: () => cachedReady,
     lastError: () => cachedError,
   };

@@ -138,6 +138,8 @@ export interface DataProvider {
   events(): LogEvent[];
   scoreFor(nodeId: number): HealthResult;
   noiseFloor(): number; // representative background RSSI (dBm) for SNR-margin math
+  hasRealNoise(): boolean; // true when noiseFloor() is a real reading, not the fallback
+  lastUpdated(): number | null; // epoch ms of the last successful roster refresh
   ready(): boolean; // has the first roster load completed?
   lastError(): string | null;
 }
@@ -189,4 +191,6 @@ export interface ScreenCtx {
   data: DataProvider;
   /** sorted+filtered node list the overview/selection operate on */
   visibleNodes: NodeSnapshot[];
+  /** true while the `/` filter-capture mode is active (shows the live prompt) */
+  filtering?: boolean;
 }

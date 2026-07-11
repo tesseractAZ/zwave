@@ -67,8 +67,7 @@ over it and dismisses with `q` or `Esc`, preserving your selection.
 | --- | --- |
 | `j` / `k` or ↓ / ↑ | Move selection |
 | `Enter` | Open Detail for the selected node |
-| `/` | Filter by name substring |
-| `f` | Cycle status filter |
+| `/` | Filter by name substring (Esc cancels) |
 | `s` | Cycle sort key (health / id / name / rssi / seen) |
 | `t` | Toggle signal display (margin ↔ dBm) |
 | `1`–`6` | Jump to Overview / Detail / Controller / Topology / Heatmap / Log |

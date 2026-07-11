@@ -84,8 +84,9 @@ dismisses with `q` / `Esc`.
 > v0.1 ships the **Overview** home + the health model. The Detail / Controller /
 > Topology / Heatmap / Log overlays fill in over the v0.2–v0.3 releases.
 
-Overview keys: `j`/`k` move, `Enter` detail, `/` filter, `f` status filter,
-`s` sort, `t` margin↔dBm, `1`–`6` jump screens, `p` ping (gated), `q` quit.
+Overview keys: `j`/`k` move, `Enter` detail, `/` filter, `s` sort, `t`
+margin↔dBm, `1`–`6` jump screens, `c`/`e` Controller/Log, `p` ping (gated),
+`q` quit.
 
 Full keybinding and screen documentation is in
 [`zwave_tui/DOCS.md`](./zwave_tui/DOCS.md).

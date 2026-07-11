@@ -126,6 +126,8 @@ export interface ZwaveData {
   ready(): boolean;
   /** Last poll/discovery error, or null. */
   lastError(): string | null;
+  /** Epoch ms of the last successful roster refresh (null before the first). */
+  lastUpdated(): number | null;
   /** The resolved config-entry id (null until discovered). */
   getEntryId(): string | null;
   /** Stop polling and clear timers. */
@@ -174,8 +176,16 @@ function rfRegionLabel(n: number | null | undefined): string | null {
  * TUI frame) and caps the length so one long name can't blow the layout.
  */
 function sanitizeLabel(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 48);
+  return s
+    // Strip C0 + DEL + C1 controls (incl. ESC 0x1b and the 8-bit CSI 0x9b) so a
+    // crafted device name can't inject ANSI escapes into a TUI frame.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+    // Fold wide / astral code points (CJK, Hangul, kana, fullwidth, emoji, and
+    // lone surrogates) to a single-cell placeholder so they can't desync the
+    // fixed-width column accounting.
+    .replace(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\ud800-\udfff]/g, '?')
+    .slice(0, 48);
 }
 
 /** All-null stats — v0.1 has no live statistics subscription yet. */
@@ -223,6 +233,7 @@ class ZwaveDataImpl implements ZwaveData {
   /** True when the entry_id was explicitly configured (not auto-discovered) —
    *  a seeded id is never cleared by the self-heal path. */
   private entrySeeded = false;
+  private lastOkAt: number | null = null;
   private deviceByNodeId = new Map<number, DeviceRec>();
   private entitiesByDeviceId = new Map<string, NodeEntity[]>();
   private entityCount = 0;
@@ -277,6 +288,10 @@ class ZwaveDataImpl implements ZwaveData {
 
   getEntryId(): string | null {
     return this.entryId;
+  }
+
+  lastUpdated(): number | null {
+    return this.lastOkAt;
   }
 
   stop(): void {
@@ -346,10 +361,17 @@ class ZwaveDataImpl implements ZwaveData {
       this.lastErr = 'network_status returned no controller/nodes';
       return false;
     }
+    if (ctrl.nodes.length === 0) {
+      // A degenerate empty roster would wipe the last-good view; keep it and
+      // surface the condition instead (there is always at least the controller).
+      this.lastErr = 'network_status returned an empty node list';
+      return false;
+    }
     this.lastNodes = ctrl.nodes.map((n) => this.buildNode(n)).sort((a, b) => a.nodeId - b.nodeId);
     this.lastController = this.buildController(ctrl);
     this.lastErr = null;
     this.isReady = true;
+    this.lastOkAt = Date.now();
     return true;
   }
 

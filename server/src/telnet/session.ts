@@ -240,6 +240,7 @@ export class TuiSession {
       this.log(`auth: login OK for "${user}" from ${this.peer}`);
       this.mode = 'tui';
       this.resetLogin();
+      this.loginAttempts = 0; // fresh budget for any future idle re-lock
       this.loginError = '';
       this.lastFrameHash = ''; // force a full first paint of the TUI
       this.draw();
@@ -310,6 +311,7 @@ export class TuiSession {
       }
 
       const r = applyKey(this.view, ev, this.data, this.log);
+      if (r.quit) return { quit: true }; // 'q' from the Overview home disconnects
       if (r.filter === 'start') {
         this.filtering = true;
         dirty = true;
@@ -380,7 +382,7 @@ export class TuiSession {
     } else if (this.view.selected > vis.length - 1) {
       this.view.selected = vis.length - 1;
     }
-    const ctx: ScreenCtx = { view: this.view, data: this.data, visibleNodes: vis };
+    const ctx: ScreenCtx = { view: this.view, data: this.data, visibleNodes: vis, filtering: this.filtering };
     return renderScreen(ctx);
   }
 
@@ -401,6 +403,7 @@ export class TuiSession {
     ) {
       this.mode = 'login';
       this.resetLogin();
+      this.loginAttempts = 0; // restore the full retry budget on re-lock
       this.loginError = 'Session locked (idle) — please log in again.';
       this.lastFrameHash = '';
     }
