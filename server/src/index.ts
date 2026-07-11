@@ -65,6 +65,7 @@ async function main(): Promise<void> {
     events: (): LogEvent[] => [],
     ready: () => zwaveData.ready(),
     lastError: () => zwaveData.lastError(),
+    lastUpdated: () => zwaveData.lastUpdated(),
   };
 
   // 4) Shared, timer-refreshed render cache both transports read.
@@ -118,13 +119,17 @@ async function main(): Promise<void> {
   // Ingress landing → the terminal console.
   app.get('/', (_req, reply) => reply.redirect('/console'));
   app.get('/api/version', () => ({ version: config.version }));
-  app.get('/api/health', () => ({
-    ok: true,
-    ready: provider.ready(),
-    nodes: provider.nodes().length,
-    haReady: client.ready(),
-    error: provider.lastError(),
-  }));
+  app.get('/api/health', (_req, reply) => {
+    const healthy = client.ready() && provider.ready() && !provider.lastError();
+    reply.code(healthy ? 200 : 503).send({
+      ok: healthy,
+      ready: provider.ready(),
+      nodes: provider.nodes().length,
+      haReady: client.ready(),
+      lastUpdated: provider.lastUpdated(),
+      error: provider.lastError(),
+    });
+  });
 
   // 7) Telnet transport (opt-in).
   let telnet: { stop: () => void } | null = null;

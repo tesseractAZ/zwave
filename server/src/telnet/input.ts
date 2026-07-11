@@ -33,6 +33,8 @@ export interface KeyResult {
    * filter-capture mode (subsequent printable chars build `view.filter`).
    */
   filter?: 'start';
+  /** The user asked to quit from the Overview home — the transport disconnects. */
+  quit?: boolean;
 }
 
 /** The sort keys, in the order `s` cycles through them. */
@@ -184,9 +186,24 @@ export function applyKey(
       return moveSelection(view, data, -1);
     case 'q':
     case 'Q':
-      // Back out of an overlay to the Overview (ctrl-c is the disconnect key).
+      // On an overlay, back out to the Overview; on the Overview home, quit
+      // (matches the "q quit" legend + docs; Ctrl-C also disconnects anywhere).
       if (view.screen !== 'overview') {
         view.screen = 'overview';
+        return REDRAW;
+      }
+      return { redraw: false, quit: true };
+    case 'c':
+      // Jump to the Controller & Network screen.
+      if (view.screen !== 'controller') {
+        view.screen = 'controller';
+        return REDRAW;
+      }
+      return NOOP;
+    case 'e':
+      // Jump to the Event & Command Log screen.
+      if (view.screen !== 'log') {
+        view.screen = 'log';
         return REDRAW;
       }
       return NOOP;

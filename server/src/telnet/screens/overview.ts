@@ -128,12 +128,30 @@ function summaryBar(ctx: ScreenCtx): string {
     (flaky > 0 ? c.yellow(`${flaky} flaky`) : c.grey('0 flaky')) +
     c.grey(' · ') +
     c.grey('noise ') +
-    noiseColor(noise)(`${noise}dBm`);
+    // Only show a dBm figure when it's a real controller reading — otherwise a
+    // '—' (same convention as the deferred Margin/Hop/Rate/Seen columns) rather
+    // than presenting the fallback constant as if it were measured.
+    (data.hasRealNoise() ? noiseColor(noise)(`${noise}dBm`) : c.grey('—'));
+
+  // Staleness / disconnect band: if the data layer has an error or the last
+  // successful refresh is old, say so loudly instead of showing a stale roster
+  // as if it were live.
+  const err = data.lastError();
+  const lu = data.lastUpdated();
+  const ageMs = lu != null ? Math.max(0, Date.now() - lu) : null;
+  const stale = err != null || (ageMs != null && ageMs > 30_000);
 
   const range = c.grey(`${visibleNodes.length}`);
-  const right = view.filter
-    ? c.yellow(`/${view.filter}`) + ' ' + c.grey('· ') + range
-    : range;
+  let right: string;
+  if (stale) {
+    right = c.redB(`⚠ ${err ? 'HA OFFLINE' : 'STALE'}${ageMs != null ? ' ' + fmtAge(ageMs) : ''}`);
+  } else if (ctx.filtering || view.filter) {
+    // Live filter prompt — visible even with an empty buffer so the mode is
+    // never invisible and the next keystroke isn't silently swallowed.
+    right = c.yellow(`/${view.filter}`) + (ctx.filtering ? c.yellowB('▏') : '') + ' ' + c.grey('· ') + range;
+  } else {
+    right = range;
+  }
 
   return lr(left, right, view.cols);
 }
@@ -312,10 +330,15 @@ function fmtAge(ms: number): string {
 }
 
 function batteryCell(n: NodeSnapshot): Cell {
-  if (!n.battery) return { t: 'AC', color: c.grey };
-  const lvl = n.battery.level;
-  const color = lvl <= 25 ? c.red : lvl <= 50 ? c.yellow : c.green;
-  return { t: `${lvl}%`, color };
+  if (n.battery) {
+    const lvl = n.battery.level;
+    const color = lvl <= 25 ? c.red : lvl <= 50 ? c.yellow : c.green;
+    return { t: `${lvl}%`, color };
+  }
+  // No level yet (v0.1 reads no battery CC). Don't claim "AC" for a device that
+  // exposes a battery entity — that would be wrong for battery sensors.
+  const isBattery = n.entities.some((e) => /_battery/i.test(e.entityId));
+  return isBattery ? { t: 'bat', color: c.grey } : { t: 'AC', color: c.grey };
 }
 
 function flagsCell(flags: string[]): Cell {

@@ -47,7 +47,10 @@ import { NodeStatus, type NodeSnapshot, type HealthResult } from '../types';
 const RSSI_SENTINELS = new Set([125, 126, 127]);
 
 /** Fallback background-RSSI when the caller can't supply a real noise floor. */
-const DEFAULT_NOISE_FLOOR = -92;
+/** Fallback noise floor (dBm) when the controller reports no background RSSI.
+ *  Shared with dataProvider so the scorer's margin math and the displayed noise
+ *  agree on one value. */
+export const DEFAULT_NOISE_FLOOR = -95;
 
 /** SNR margin (dB) below which the Signal lane raises the W flag. */
 const WEAK_MARGIN_DB = 7;
