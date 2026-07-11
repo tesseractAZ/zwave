@@ -150,7 +150,9 @@ function titleBar(
     ...(lr_ > 0 ? [c.blue(`${lr_} LR`)] : []),
     ...(pend > 0 ? [c.yellow(`${pend} pending`)] : []),
   ];
-  return lr(c.cyanB('TOPOLOGY / ROUTES'), parts.join(c.grey(' · ')), view.cols);
+  // Clarify that the per-node dB here is the ROUTE (LWR) margin — distinct from
+  // the Overview's direct node-RSSI margin (they differ for multi-hop nodes).
+  return lr(c.cyanB('TOPOLOGY / ROUTES') + c.grey('  dB = route margin'), parts.join(c.grey(' · ')), view.cols);
 }
 
 /* ── group section header (── Title (n) ─────────) ───────────────────────── */

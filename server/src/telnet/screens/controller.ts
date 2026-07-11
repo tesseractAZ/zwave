@@ -64,7 +64,13 @@ export function renderController(ctx: ScreenCtx): string[] {
     out.push(...b);
   }
 
-  // Fill to H rows, then defensively clamp width + height (never overrun cols).
+  // If the sections don't fit, replace the last visible row with a marker
+  // rather than silently dropping the network-health roll-up.
+  if (out.length > H) {
+    const kept = out.slice(0, H - 1);
+    kept.push(c.grey(`  …${out.length - (H - 1)} more rows (taller terminal shows the full roll-up)`));
+    return kept.map((l) => truncate(l, W));
+  }
   while (out.length < H) out.push('');
   return out.slice(0, H).map((l) => truncate(l, W));
 }

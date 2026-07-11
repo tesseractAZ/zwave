@@ -38,6 +38,7 @@ const FLAG_MEANING: Record<string, string> = {
   W: 'weak signal',
   F: 'flaky TX',
   R: 'route failed',
+  L: 'high latency',
   I: 'interview incomplete',
   B: 'battery low',
 };
@@ -141,10 +142,11 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     }
     body.push(twoCol('RSSI', rssiVal, 'Margin', marginVal, inner));
 
-    // Drop% = (droppedTX + response timeouts) / max(1, TX).
+    // Drop% = (droppedTX + response timeouts) / TX, clamped so the headline and
+    // the "N of M" text stay sane even if the driver's counters briefly disagree.
     const denom = Math.max(1, s.commandsTX);
-    const drops = s.commandsDroppedTX + s.timeoutResponse;
-    const pct = (drops / denom) * 100;
+    const drops = Math.min(s.commandsDroppedTX + s.timeoutResponse, s.commandsTX);
+    const pct = Math.min(100, (drops / denom) * 100);
     const dropVal =
       s.commandsTX <= 0
         ? c.grey('— (no TX yet)')
@@ -291,10 +293,17 @@ function frameToHeight(
   const capacity = H - 2; // interior rows between top & bottom borders
   const footerRow = frame(footerContent);
 
-  // Reserve the last interior row for the footer; fit/pad the rest.
+  // Reserve the last interior row for the footer; fit/pad the rest. If the body
+  // doesn't fit, show a "…N more" marker instead of silently dropping sections.
   const contentCap = Math.max(0, capacity - 1);
-  let interior = body.slice(0, contentCap).map(frame);
-  while (interior.length < contentCap) interior.push(emptyRow);
+  let interior: string[];
+  if (body.length > contentCap && contentCap >= 1) {
+    interior = body.slice(0, contentCap - 1).map(frame);
+    interior.push(frame(c.grey(`  …${body.length - (contentCap - 1)} more rows (widen the terminal)`)));
+  } else {
+    interior = body.slice(0, contentCap).map(frame);
+    while (interior.length < contentCap) interior.push(emptyRow);
+  }
   if (capacity >= 1) interior.push(footerRow);
 
   const out: string[] = [];
@@ -393,7 +402,7 @@ function dropColor(pct: number): (s: string) => string {
 function flagColor(flags: string[]): (s: string) => string {
   const has = (f: string) => flags.includes(f);
   if (has('D') || has('F') || has('R')) return c.red;
-  if (has('W') || has('B')) return c.yellow;
+  if (has('W') || has('B') || has('L')) return c.yellow;
   if (has('S')) return c.cyan;
   return c.grey;
 }

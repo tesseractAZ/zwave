@@ -130,6 +130,8 @@ export interface ZwaveData {
   lastError(): string | null;
   /** Epoch ms of the last successful roster refresh (null before the first). */
   lastUpdated(): number | null;
+  /** Epoch ms of the last statistics event (node or controller), or null. */
+  lastStatsUpdated(): number | null;
   /** Event + command log ring (newest first). */
   events(): LogEvent[];
   /** The resolved config-entry id (null until discovered). */
@@ -246,6 +248,12 @@ class ZwaveDataImpl implements ZwaveData {
   // v0.2 live statistics, merged into each NodeSnapshot / ControllerSnapshot.
   private statsByNode = new Map<number, NodeStats>();
   private ctrlStats: ControllerSnapshot['statistics'] = null;
+  /** Battery level (%) per node, from get_states of the *_battery entities. */
+  private batteryByNode = new Map<number, number>();
+  /** Battery-level sensor entity_id → node id (built with the registry join). */
+  private batteryEntityToNode = new Map<string, number>();
+  /** Epoch ms of the last statistics event (node or controller) — freeze/health probe. */
+  private lastStatsAt: number | null = null;
   /** Node status from the previous poll — diffed to log alive/dead/wake events. */
   private prevStatus = new Map<number, NodeStatus>();
   /** Event + command log ring (newest first), consumed by the Log screen. */
@@ -356,6 +364,11 @@ class ZwaveDataImpl implements ZwaveData {
         this.log('repeated failures — re-discovering zwave_js entry + reloading registries');
         this.entryId = null;
         this.registriesLoaded = false;
+        // The old entry's statistics subscriptions are stale/orphaned — drop the
+        // frozen stats and re-subscribe once the new registry loads (below).
+        this.statsSubscribed = false;
+        this.statsByNode.clear();
+        this.batteryByNode.clear();
       }
       const backoff = this.refreshMs * 2 ** Math.min(this.errStreak, 5);
       this.scheduleNext(Math.max(this.refreshMs, Math.min(30_000, backoff)));
@@ -369,6 +382,10 @@ class ZwaveDataImpl implements ZwaveData {
       return false;
     }
     await this.ensureRegistries();
+    // Recover statistics subscriptions after a self-heal re-discovery (onReady
+    // won't fire without a Core-WS reconnect). No-op on the normal path where
+    // onReady already subscribed.
+    if (!this.statsSubscribed) void this.subscribeStatistics();
     // ANTI-FOOTGUN: entry_id, NOT config_entry_id.
     const net = await this.client.send<RawNetworkStatus>({
       type: 'zwave_js/network_status',
@@ -433,9 +450,11 @@ class ZwaveDataImpl implements ZwaveData {
       deviceByNodeId.set(nodeId, {
         id: d.id,
         name: sanitizeLabel(d.name_by_user || d.name || `Node ${nodeId}`),
-        area: d.area_id ?? null,
-        manufacturer: d.manufacturer ?? null,
-        model: d.model ?? null,
+        // Sanitize these too — they reach the Detail/Controller frames and are
+        // externally sourced (device DB / user config).
+        area: d.area_id ? sanitizeLabel(d.area_id) : null,
+        manufacturer: d.manufacturer ? sanitizeLabel(d.manufacturer) : null,
+        model: d.model ? sanitizeLabel(d.model) : null,
       });
       deviceIdToNodeId.set(d.id, nodeId);
     }
@@ -454,6 +473,10 @@ class ZwaveDataImpl implements ZwaveData {
       });
       entitiesByDeviceId.set(e.device_id, list);
       count++;
+      // Remember the battery-level sensor so we can read its % from get_states.
+      if (e.entity_id.startsWith('sensor.') && /battery/i.test(e.entity_id)) {
+        this.batteryEntityToNode.set(e.entity_id, deviceIdToNodeId.get(e.device_id)!);
+      }
     }
 
     this.deviceByNodeId = deviceByNodeId;
@@ -485,8 +508,9 @@ class ZwaveDataImpl implements ZwaveData {
       securityClass: securityClassLabel(raw.highest_security_class),
       manufacturer: dev?.manufacturer ?? null,
       model: dev?.model ?? null,
-      // v0.2 hook: read sensor.<slug>_battery_level via get_states for battery nodes.
-      battery: null,
+      battery: this.batteryByNode.has(nodeId)
+        ? { level: this.batteryByNode.get(nodeId)!, isLow: this.batteryByNode.get(nodeId)! <= 25 }
+        : null,
       stats: this.statsByNode.get(nodeId) ?? emptyStats(),
       entities: dev ? this.entitiesByDeviceId.get(dev.id) ?? [] : [],
     };
@@ -552,17 +576,41 @@ class ZwaveDataImpl implements ZwaveData {
         ),
       );
       this.log(`live statistics: subscribed controller + ${nodeDevices.length} nodes`);
+      void this.fetchBatteryLevels();
     } catch (e) {
       this.statsSubscribed = false;
       this.log(`subscribeStatistics failed: ${errMsg(e)}`);
     }
   }
 
-  /** Map a raw node-statistics event (snake_case) → cached NodeStats. */
+  /** Read battery-level sensor states once (levels move slowly; re-read on reconnect). */
+  private async fetchBatteryLevels(): Promise<void> {
+    if (this.batteryEntityToNode.size === 0) return;
+    try {
+      const states = await this.client.send<Array<{ entity_id: string; state: string }>>({ type: 'get_states' });
+      for (const s of states) {
+        const nodeId = this.batteryEntityToNode.get(s.entity_id);
+        if (nodeId == null) continue;
+        const lvl = Number(s.state);
+        if (Number.isFinite(lvl)) this.batteryByNode.set(nodeId, Math.round(lvl));
+      }
+    } catch (e) {
+      this.log(`battery levels fetch failed: ${errMsg(e)}`);
+    }
+  }
+
+  /** Epoch ms of the last statistics event (node or controller), or null. */
+  lastStatsUpdated(): number | null {
+    return this.lastStatsAt;
+  }
+
+  /** Map a raw node-statistics event → cached NodeStats. */
   private onNodeStats(ev: unknown): void {
     const e = ev as Record<string, unknown> | null;
-    if (!e || e.source !== 'node' || typeof e.nodeId !== 'number') return;
-    const nodeId = e.nodeId;
+    if (!e || e.source !== 'node') return;
+    const nodeId = statsNodeId(e);
+    if (nodeId == null) return;
+    this.lastStatsAt = Date.now();
     const prev = this.statsByNode.get(nodeId);
     const stats: NodeStats = {
       rtt: num(e.rtt),
@@ -587,6 +635,7 @@ class ZwaveDataImpl implements ZwaveData {
   private onControllerStats(ev: unknown): void {
     const e = ev as Record<string, unknown> | null;
     if (!e || e.source !== 'controller') return;
+    this.lastStatsAt = Date.now();
     this.ctrlStats = {
       messagesTX: int(e.messages_tx),
       messagesRX: int(e.messages_rx),
@@ -601,20 +650,47 @@ class ZwaveDataImpl implements ZwaveData {
 
   /** Convert a raw route (repeaters as HA device_ids) → RouteStat (node ids). */
   private mapRoute(r: unknown): RouteStat | null {
-    const raw = r as Record<string, unknown> | null;
-    if (!raw) return null;
-    const resolve = (devId: unknown): number => this.deviceIdToNodeId.get(String(devId)) ?? 0;
-    const repeaters = Array.isArray(raw.repeaters) ? raw.repeaters.map(resolve).filter((n) => n > 0) : [];
-    const rfb = raw.route_failed_between;
-    return {
-      repeaters,
-      protocolDataRate: num(raw.protocol_data_rate),
-      rssi: num(raw.rssi),
-      repeaterRSSI: Array.isArray(raw.repeater_rssi) ? raw.repeater_rssi.map(num).filter((x): x is number => x != null) : [],
-      routeFailedBetween:
-        Array.isArray(rfb) && rfb.length === 2 ? [resolve(rfb[0]), resolve(rfb[1])] : null,
-    };
+    return mapRouteRaw(r, (devId) => this.deviceIdToNodeId.get(String(devId)) ?? 0);
   }
+}
+
+/**
+ * Resolve the node id from a raw statistics event. ★ HA delivers the INITIAL
+ * (on-subscribe) event with `nodeId` (camelCase) but every SUBSEQUENT live push
+ * with `node_id` (snake_case) — accept both or the stats freeze at their
+ * subscribe-time values. Exported so a test pins this exact behaviour.
+ */
+export function statsNodeId(ev: Record<string, unknown> | null | undefined): number | null {
+  if (!ev) return null;
+  if (typeof ev.nodeId === 'number') return ev.nodeId;
+  if (typeof ev.node_id === 'number') return ev.node_id;
+  return null;
+}
+
+/**
+ * Pure route mapper: HA repeaters/route_failed_between are device_id strings —
+ * `resolve` maps them to node ids. repeaters + repeaterRSSI stay index-aligned
+ * (127 = the driver's "no reading" sentinel). Exported for testing.
+ */
+export function mapRouteRaw(r: unknown, resolve: (dev: unknown) => number): RouteStat | null {
+  const raw = r as Record<string, unknown> | null;
+  if (!raw) return null;
+  const rawReps = Array.isArray(raw.repeaters) ? raw.repeaters : [];
+  const rawRssi = Array.isArray(raw.repeater_rssi) ? raw.repeater_rssi : [];
+  const repeaters: number[] = [];
+  const repeaterRSSI: number[] = [];
+  for (let i = 0; i < rawReps.length; i++) {
+    repeaters.push(resolve(rawReps[i]));
+    repeaterRSSI.push(num(rawRssi[i]) ?? 127);
+  }
+  const rfb = raw.route_failed_between;
+  return {
+    repeaters,
+    protocolDataRate: num(raw.protocol_data_rate),
+    rssi: num(raw.rssi),
+    repeaterRSSI,
+    routeFailedBetween: Array.isArray(rfb) && rfb.length === 2 ? [resolve(rfb[0]), resolve(rfb[1])] : null,
+  };
 }
 
 /** Coerce to a finite number or null. */

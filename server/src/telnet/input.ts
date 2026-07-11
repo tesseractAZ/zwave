@@ -220,10 +220,7 @@ export function applyKey(
     case 't':
       view.signalDisplay = view.signalDisplay === 'margin' ? 'dbm' : 'margin';
       return REDRAW;
-    // ── log-screen toggles (harmless everywhere; wired now, surfaced in v0.2) ──
-    case 'F':
-      view.followTail = !view.followTail;
-      return REDRAW;
+    // ── Log-screen errors-only filter (the stream always auto-follows). ──
     case 'o':
       view.errorsOnly = !view.errorsOnly;
       return REDRAW;
