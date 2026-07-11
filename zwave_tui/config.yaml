@@ -1,0 +1,85 @@
+name: "Z-Wave TUI"
+version: "0.1.0"
+slug: zwave_tui
+description: "Telnet control-room TUI for Z-Wave mesh/node health"
+url: https://github.com/tesseractAZ/zwave
+arch:
+  - aarch64
+  - amd64
+# Pre-built multi-arch images on GHCR — built and pushed by
+# .github/workflows/images.yml. HA Supervisor substitutes {arch} with the
+# host's CPU arch (aarch64, amd64, …). Owner segment MUST be lowercase.
+image: ghcr.io/tesseractaz/{arch}-zwave-tui
+startup: services
+boot: auto
+stage: experimental
+# HA's `init: true` default wraps the container with Docker's tini, making
+# tini PID 1. The HA base image already ships its own s6-overlay init at
+# /init; with tini in front, s6-overlay-suexec sees it isn't PID 1 and
+# refuses to start (crash loop with "fatal: can only run as pid 1"). Turn
+# tini off so our /init (s6) runs as PID 1 — mandatory for any add-on built
+# on the official HA base images.
+init: false
+host_network: false
+# Only the telnet TUI port is published on the LAN. The web console (:8788) is
+# reached through HA Ingress (below), not a mapped host port.
+ports:
+  "2324/tcp": 2324
+ports_description:
+  "2324/tcp": "Telnet TUI (NO AUTH — keep on a trusted LAN)"
+# HA Ingress: makes the browser terminal appear as a sidebar item inside Home
+# Assistant (visible in the HA mobile app), authenticated through HA's normal
+# session. Same server, same port — HA's hassio_ingress reverse-proxies in.
+ingress: true
+ingress_port: 8788
+panel_icon: mdi:z-wave
+panel_title: "Z-Wave TUI"
+panel_admin: false
+map:
+  - data:rw
+# Request access to Home Assistant's Core WebSocket/REST API so the add-on can
+# issue zwave_js/* commands (network_status, node/controller statistics
+# subscriptions, node_status/metadata) and call_service (button.press for ping).
+# Without this flag SUPERVISOR_TOKEN is not granted access to /core/* and every
+# zwave_js call fails.
+homeassistant_api: true
+# No Supervisor-level calls are made — everything goes through the Core API
+# above, so the Supervisor API stays off.
+hassio_api: false
+# Per-field labels + help render on the Configuration page from
+# translations/en.yaml. Order below = the order shown in the HA form.
+options:
+  # Logging + display
+  log_level: info
+  signal_display: margin
+  # Live refresh cadence
+  refresh_interval: 2
+  route_poll_interval: 10
+  # Telnet control-room TUI (LAN-only, unauthenticated interface)
+  telnet_enabled: true
+  telnet_port: 2324
+  # Z-Wave JS connection (leave blank to auto-discover the entry id)
+  zwave_entry_id: ""
+  ha_ws_url: ws://supervisor/core/websocket
+  # Write-action safety gates (v0.1 ships read-only)
+  write_actions_enabled: false
+  confirm_destructive: true
+schema:
+  # Logging + display
+  log_level: list(trace|debug|info|notice|warning|error|fatal)
+  signal_display: list(margin|dbm)
+  # Live refresh cadence
+  refresh_interval: int(1,30)
+  route_poll_interval: int(5,120)
+  # Telnet control-room TUI (LAN-only, unauthenticated interface)
+  telnet_enabled: bool
+  telnet_port: port
+  # Z-Wave JS connection
+  # str? (not url?) on purpose: HA's voluptuous url? rejects an empty default on
+  # Save, and both of these ship empty / with a ws:// scheme. The runtime
+  # validates them. Do not "tidy" these to url?.
+  zwave_entry_id: "str?"
+  ha_ws_url: "str?"
+  # Write-action safety gates
+  write_actions_enabled: bool
+  confirm_destructive: bool
