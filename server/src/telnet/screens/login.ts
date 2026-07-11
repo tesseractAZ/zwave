@@ -26,6 +26,20 @@ export interface LoginViewOptions {
   checking?: boolean;
 }
 
+/** Greedy word-wrap to a max visible width (plain text, no ANSI). */
+function wrapText(s: string, width: number): string[] {
+  const w = Math.max(1, width);
+  const out: string[] = [];
+  let cur = '';
+  for (const word of s.split(/\s+/).filter(Boolean)) {
+    if (cur && cur.length + 1 + word.length > w) { out.push(cur); cur = word; }
+    else cur = cur ? `${cur} ${word}` : word;
+    while (cur.length > w) { out.push(cur.slice(0, w)); cur = cur.slice(w); }
+  }
+  if (cur) out.push(cur);
+  return out.length ? out : [''];
+}
+
 export function renderLogin(o: LoginViewOptions): string[] {
   const W = Math.max(20, o.cols);
   const boxW = Math.min(54, W - 4);
@@ -41,7 +55,8 @@ export function renderLogin(o: LoginViewOptions): string[] {
   inner.push('');
 
   if (o.denied) {
-    inner.push(c.red(o.deniedMsg ?? 'Access denied.'));
+    // Word-wrap the (possibly long) reason so it isn't clipped by the box.
+    for (const ln of wrapText(o.deniedMsg ?? 'Access denied.', innerW - 2)) inner.push(c.red(ln));
     inner.push('');
     inner.push(c.dim('Press any key to disconnect.'));
   } else {

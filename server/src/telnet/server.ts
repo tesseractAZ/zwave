@@ -45,6 +45,8 @@ interface TelnetConn {
   session: TuiSession;
   inbuf: Buffer;
   timer: NodeJS.Timeout | null;
+  /** Idle-flush timer for a lone trailing ESC byte (see onData). */
+  escTimer: NodeJS.Timeout | null;
 }
 
 /**
@@ -204,6 +206,10 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       clearInterval(conn.timer);
       conn.timer = null;
     }
+    if (conn.escTimer) {
+      clearTimeout(conn.escTimer);
+      conn.escTimer = null;
+    }
     try {
       if (!conn.socket.destroyed) {
         // Restore the user's primary screen buffer + cursor on exit so their
@@ -219,6 +225,9 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
   };
 
   const onData = (conn: TelnetConn, chunk: Buffer) => {
+    // New bytes arrived — any pending lone-ESC was actually the start of a
+    // sequence, so cancel its idle flush.
+    if (conn.escTimer) { clearTimeout(conn.escTimer); conn.escTimer = null; }
     conn.inbuf = conn.inbuf.length ? Buffer.concat([conn.inbuf, chunk]) : chunk;
     if (conn.inbuf.length > 4096) conn.inbuf = conn.inbuf.subarray(conn.inbuf.length - 64); // drop runaway garbage
     const { events, rest } = parseInput(conn.inbuf);
@@ -229,10 +238,28 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       return;
     }
     if (r.redraw) conn.session.draw();
+    // parseInput holds back a lone trailing ESC (it can't yet tell a bare Escape
+    // keypress from the start of an arrow sequence). Flush it as a real Escape
+    // after a short idle so a single Esc isn't dead until the next keystroke.
+    if (conn.inbuf.length === 1 && conn.inbuf[0] === 0x1b) {
+      conn.escTimer = setTimeout(() => {
+        conn.escTimer = null;
+        if (!(conn.inbuf.length === 1 && conn.inbuf[0] === 0x1b)) return;
+        conn.inbuf = Buffer.alloc(0);
+        const rr = conn.session.feed([{ type: 'escape' }]);
+        if (rr.quit) { endConn(conn); return; }
+        if (rr.redraw) conn.session.draw();
+      }, 60);
+    }
   };
 
   const server = createServer((socket) => {
     socket.setNoDelay(true);
+    // Attach an error listener IMMEDIATELY. A socket that errors (e.g. RST) with
+    // no 'error' listener throws an uncaught exception that would crash the whole
+    // add-on — this must exist before the cap-refuse `end()` and before the
+    // per-connection handlers below.
+    socket.on('error', () => { /* connection errors are handled by close/endConn */ });
     // Reject beyond the connection cap before doing any per-session work.
     if (conns.size >= MAX_TELNET_CONNS) {
       log(`telnet: connection cap (${MAX_TELNET_CONNS}) reached — refusing ${socket.remoteAddress ?? '?'}`);
@@ -249,7 +276,7 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       peer: socket.remoteAddress ?? '?',
       onClose: () => { try { socket.end(); } catch { /* already gone */ } },
     });
-    const conn: TelnetConn = { socket, session, inbuf: Buffer.alloc(0), timer: null };
+    const conn: TelnetConn = { socket, session, inbuf: Buffer.alloc(0), timer: null, escTimer: null };
     conns.add(conn);
     log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${conns.size} active)`);
 
