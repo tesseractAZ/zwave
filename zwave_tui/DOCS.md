@@ -55,9 +55,8 @@ over it and dismisses with `q` or `Esc`, preserving your selection.
 | **Heatmap** | Nodes grouped by HA area, cells graded by SNR-margin bucket against the live noise floor. |
 | **Log** | Scrolling stream of driver events (dead / alive / wake / route-change) and operator command outcomes, with severity coloring and a red-latch-until-ack. |
 
-> Note: v0.1 lands the Overview home and the health model. The Detail /
-> Controller / Topology / Heatmap / Log overlays fill in over the v0.2–v0.3
-> releases.
+> As of **v0.2** all six screens are live and the stat columns (Margin / Hop /
+> Rate / Seen) carry real data from live node + controller statistics.
 
 ## Keybindings
 

@@ -81,8 +81,9 @@ dismisses with `q` / `Esc`.
 | **Heatmap** | Nodes by HA area, cells graded by SNR-margin bucket. |
 | **Log** | Driver events + command outcomes, severity-colored, red-latch-until-ack. |
 
-> v0.1 ships the **Overview** home + the health model. The Detail / Controller /
-> Topology / Heatmap / Log overlays fill in over the v0.2–v0.3 releases.
+> All six screens are live as of **v0.2**, and health scores reflect real RSSI /
+> route / RTT data from live statistics. A freshly-seen node briefly shows `—`
+> in the stat columns until its first reading arrives (a second or two).
 
 Overview keys: `j`/`k` move, `Enter` detail, `/` filter, `s` sort, `t`
 margin↔dBm, `1`–`6` jump screens, `c`/`e` Controller/Log, `p` ping (gated),
