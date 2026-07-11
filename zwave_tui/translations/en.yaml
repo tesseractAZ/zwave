@@ -18,10 +18,25 @@ configuration:
     description: Seconds between the EXPENSIVE route / controller-statistics polls. These move slowly and are deliberately kept off the fast render tick to avoid hammering the mesh. 10s default, range 5–120.
   telnet_enabled:
     name: Enable Telnet TUI
-    description: Serve the control-room TUI on the telnet port. There is NO authentication — keep it on a trusted LAN only. Turn off to expose the browser console (ingress /console) exclusively.
+    description: Serve the control-room TUI on the telnet port. Telnet traffic is unencrypted; on an untrusted LAN, enable the login gate below (or leave telnet off and use the browser console over the HA sidebar). Turn off to expose the ingress /console exclusively.
   telnet_port:
     name: Telnet Port
-    description: TCP port for the telnet TUI. Default 2324 (chosen not to collide with other control-room add-ons). Published on the LAN; unauthenticated — trusted networks only.
+    description: TCP port for the telnet TUI. Default 2324 (chosen not to collide with other control-room add-ons). Published on the LAN.
+  auth_enabled:
+    name: Require Login (direct access)
+    description: Require a username + password before the TUI on DIRECT access (telnet, or hitting the port directly). Access through the HA sidebar is already authenticated by Home Assistant and is not gated (unless you turn on the next option). Add users below before enabling — with none configured, direct access is denied.
+  auth_require_on_ingress:
+    name: Also Require Login via HA Sidebar
+    description: Also present the login gate when opening the console from the Home Assistant sidebar. Off by default because HA already authenticated you there; turn on only if you want a second factor in front of the mesh controls.
+  users:
+    name: Login Users
+    description: "Allowed logins for the TUI. Each entry has a username and password. The password may be plaintext (masked in this UI, stored in the add-on options) or a scrypt hash of the form scrypt:<salt>:<hash> to avoid storing plaintext — see the add-on Documentation tab for how to generate one."
+  auth_max_attempts:
+    name: Max Login Attempts
+    description: Failed password attempts allowed before the connection is dropped. Default 3, range 1–10.
+  auth_idle_lock_min:
+    name: Idle Re-lock (minutes)
+    description: Re-require login after this many minutes with no keystrokes on a logged-in session. 0 disables idle re-locking. Applies only to sessions that passed the login gate (not HA-sidebar sessions). Range 0–240.
   zwave_entry_id:
     name: Z-Wave JS Entry ID (optional)
     description: Override for the zwave_js config-entry id. Leave blank to auto-discover it via config_entries/get (recommended — survives re-adds of the integration). Set only if you run multiple zwave_js entries.

@@ -1,7 +1,7 @@
 /**
  * CONTROLLER & NETWORK overlay — v0.2 stub.
  *
- * v0.2 fills this with node-1 radio health (Zooz ZST39 LR), per-channel
+ * v0.2 fills this with node-1 radio health (the primary controller), per-channel
  * background-RSSI noise floor with a jam flag, the controller traffic/timeout
  * counters, the network health distribution, and network-wide operations.
  */

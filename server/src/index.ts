@@ -19,7 +19,8 @@ import fastifyCompress from '@fastify/compress';
 import fastifyCors from '@fastify/cors';
 
 import { config } from './config';
-import { createAuth, isAllowedOrigin } from './auth';
+import { createAuth, isAllowedOrigin, isSupervisorSource } from './auth';
+import { createAuthPolicy } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
 import { createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
@@ -78,6 +79,23 @@ async function main(): Promise<void> {
   //    mutating routes, but the CORS + ws-origin policy still applies.
   const auth = createAuth({ host: config.host, port: config.port });
 
+  // TUI login policy — gates direct (non-ingress) telnet + console access.
+  const loginPolicy = createAuthPolicy(config.auth);
+  if (loginPolicy.enabled) {
+    log(
+      `login gate ENABLED (${config.auth.users.length} user(s)` +
+        `${loginPolicy.requireOnIngress ? ', required on ingress too' : ', trusted over HA ingress'}` +
+        `${loginPolicy.idleLockMs > 0 ? `, idle-lock ${config.auth.idleLockMin}m` : ''})`,
+    );
+    if (!loginPolicy.hasUsers()) {
+      log('login gate WARNING: auth_enabled but no users configured — direct LAN access will be denied');
+    }
+  }
+  // Ingress requests carry X-Ingress-Path AND originate from the Supervisor
+  // subnet (req.ip is the unspoofable socket peer; trustProxy is off).
+  const isIngressTrusted = (req: { headers: Record<string, unknown>; ip: string }): boolean =>
+    !!req.headers['x-ingress-path'] && isSupervisorSource(req.ip);
+
   // 6) HTTP + ingress console.
   const app = Fastify({ trustProxy: false });
   await app.register(fastifyCompress);
@@ -90,6 +108,8 @@ async function main(): Promise<void> {
     log,
     isOriginAllowed: (origin) => isAllowedOrigin(origin ?? '', auth.sameOrigins),
     signalDisplay: config.signalDisplay,
+    auth: loginPolicy,
+    isTrusted: isIngressTrusted,
   });
 
   // Ingress landing → the terminal console.
@@ -112,6 +132,7 @@ async function main(): Promise<void> {
       port: config.telnet.port,
       log,
       signalDisplay: config.signalDisplay,
+      auth: loginPolicy,
     });
     log(`telnet TUI on ${config.telnet.host}:${config.telnet.port} (no auth — trusted LAN only)`);
   } else {

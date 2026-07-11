@@ -23,6 +23,8 @@
  * without the other makes the knob dead.
  */
 
+import { parseUsers } from './auth/loginPolicy';
+
 const signalDisplay: 'margin' | 'dbm' =
   process.env.SIGNAL_DISPLAY === 'dbm' ? 'dbm' : 'margin';
 
@@ -85,6 +87,21 @@ export const config = {
    * (rebuild-all-routes, remove-failed-node). Defaults ON.
    */
   confirmDestructive: process.env.CONFIRM_DESTRUCTIVE !== '0',
+
+  /**
+   * TUI login gate. Direct LAN access (telnet :2324, or :8788 hit directly)
+   * requires a configured user when `enabled`. Access via the HA sidebar is
+   * already HA-authenticated, so it skips the gate unless `requireOnIngress`.
+   * `users` arrives as a JSON array string the run script lifts from
+   * /data/options.json. Passwords may be plaintext or `scrypt:<salt>:<hash>`.
+   */
+  auth: {
+    enabled: process.env.AUTH_ENABLED === '1',
+    requireOnIngress: process.env.AUTH_REQUIRE_ON_INGRESS === '1',
+    users: parseUsers(process.env.ZWAVE_USERS),
+    maxAttempts: Number(process.env.AUTH_MAX_ATTEMPTS ?? 3),
+    idleLockMin: Number(process.env.AUTH_IDLE_LOCK_MIN ?? 0),
+  },
 };
 
 export type Config = typeof config;

@@ -45,6 +45,27 @@ else
   export CONFIRM_DESTRUCTIVE=0
 fi
 
+# ── TUI login gate ───────────────────────────────────────────────────────────
+# Username/password auth for DIRECT (non-ingress) telnet + console access.
+# Access via the HA sidebar is already HA-authenticated, so it skips the gate
+# unless auth_require_on_ingress is set.
+if bashio::config.true 'auth_enabled'; then
+  export AUTH_ENABLED=1
+else
+  export AUTH_ENABLED=0
+fi
+if bashio::config.true 'auth_require_on_ingress'; then
+  export AUTH_REQUIRE_ON_INGRESS=1
+else
+  export AUTH_REQUIRE_ON_INGRESS=0
+fi
+export AUTH_MAX_ATTEMPTS="$(bashio::config 'auth_max_attempts')"
+export AUTH_IDLE_LOCK_MIN="$(bashio::config 'auth_idle_lock_min')"
+# The `users` list is a structured option; lift it straight from options.json as
+# compact JSON (bashio bundles jq). The server parses ZWAVE_USERS as a JSON array
+# of {username,password}. Fall back to an empty array if the key is absent.
+export ZWAVE_USERS="$(jq -c '.users // []' /data/options.json 2>/dev/null || echo '[]')"
+
 # ── Hard-coded runtime paths (dual-stack :: bind for HTTP + telnet) ───────────
 export PORT=8788
 export HOST=::

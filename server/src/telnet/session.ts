@@ -23,6 +23,8 @@ import type { DataProvider, ScreenCtx, ViewState } from '../types';
 import { applyKey, clampSelection, visibleNodes } from './input';
 import type { InputEvent } from './input';
 import { renderScreen } from './screens/index';
+import { renderLogin } from './screens/login';
+import type { AuthPolicy } from '../auth/loginPolicy';
 import {
   HIDE_CURSOR, CURSOR_HOME, CLEAR_EOL, CLEAR_BELOW,
   BEGIN_SYNC, END_SYNC,
@@ -52,7 +54,19 @@ export interface TuiSessionOptions {
   signalDisplay?: 'margin' | 'dbm';
   /** Sink for read-only action notices. Defaults to console. */
   log?: (msg: string) => void;
+  /** Login policy. When absent/disabled, the session opens straight into the TUI. */
+  auth?: AuthPolicy;
+  /** Connection is pre-authenticated (e.g. via HA Ingress) — skips the login
+   *  gate unless the policy sets `requireOnIngress`. Defaults to false. */
+  trusted?: boolean;
+  /** Peer IP — used in auth log lines AND as the throttle key. */
+  peer?: string;
+  /** Transport callback to drop the connection (used on login lockout). */
+  onClose?: () => void;
 }
+
+/** Session lifecycle mode: the login gate, the live TUI, or a terminal deny. */
+type SessionMode = 'login' | 'tui' | 'denied';
 
 /**
  * One TUI session: the render/input state machine. Construct one per
@@ -81,10 +95,32 @@ export class TuiSession {
    *  produces the same body, we skip the write entirely (zero flicker). */
   private lastFrameHash = '';
 
+  /* ── auth / login gate ─────────────────────────────────────────────────── */
+  private readonly auth?: AuthPolicy;
+  private readonly peer: string;
+  /** True when THIS connection must pass the login gate (drives idle re-lock). */
+  private readonly authRequired: boolean;
+  private mode: SessionMode = 'tui';
+  private loginStage: 'user' | 'pass' = 'user';
+  private loginUser = '';
+  private loginPass = '';
+  private loginAttempts = 0;
+  private loginError = '';
+  private deniedMsg = '';
+  /** True while an async credential check is in flight (input is ignored). */
+  private verifying = false;
+  /** Transport callback to drop the connection (e.g. on login lockout). */
+  private readonly onClose?: () => void;
+  /** Epoch ms of the last keystroke — drives the idle re-lock. */
+  private lastActivity = Date.now();
+
   constructor(opts: TuiSessionOptions) {
     this.write = opts.write;
     this.data = opts.data;
     this.log = opts.log ?? ((m) => console.log(m));
+    this.auth = opts.auth;
+    this.peer = opts.peer ?? '?';
+    this.onClose = opts.onClose;
     this.view = {
       screen: 'overview',
       cols: clamp(opts.width ?? 80, 60, 200),
@@ -97,6 +133,128 @@ export class TuiSession {
       followTail: true,
       errorsOnly: false,
     };
+
+    // Decide whether this connection faces the login gate. Trusted (ingress)
+    // connections skip it unless the policy explicitly requires it there.
+    const trusted = opts.trusted ?? false;
+    this.authRequired = !!this.auth?.enabled && (!trusted || !!this.auth?.requireOnIngress);
+    if (this.authRequired) {
+      if (!this.auth!.hasUsers()) {
+        // Misconfiguration: auth on, but no users. Fail CLOSED for untrusted
+        // access rather than silently allowing it.
+        this.mode = 'denied';
+        this.deniedMsg = 'No users configured — set the "users" option in the add-on config.';
+        this.log(`auth: connection from ${this.peer} denied — auth enabled but no users configured`);
+      } else {
+        this.mode = 'login';
+      }
+    }
+  }
+
+  /** Reset the login capture buffers back to the username field. */
+  private resetLogin(): void {
+    this.loginStage = 'user';
+    this.loginUser = '';
+    this.loginPass = '';
+  }
+
+  /**
+   * Login-mode keystroke handling. Returns true when the frame should redraw.
+   * The password submit kicks off an ASYNC verify (`submitPassword`) so the
+   * scrypt work never blocks the event loop; that path redraws (and, on
+   * lockout, closes) through its own callbacks.
+   */
+  private handleLoginKey(ev: InputEvent): boolean {
+    // Ignore all input while an async credential check is in flight.
+    if (this.verifying) return false;
+
+    if (ev.type === 'enter') {
+      if (this.loginStage === 'user') {
+        if (this.loginUser.length > 0) { this.loginStage = 'pass'; this.loginError = ''; return true; }
+        return false;
+      }
+      void this.submitPassword();
+      return true;
+    }
+    if (ev.type === 'escape') {
+      this.resetLogin();
+      this.loginError = '';
+      return true;
+    }
+    if (ev.type === 'char') {
+      const ch = ev.ch;
+      if (ch === '\x7f' || ch === '\b') {
+        if (this.loginStage === 'user') this.loginUser = this.loginUser.slice(0, -1);
+        else this.loginPass = this.loginPass.slice(0, -1);
+        return true;
+      }
+      if (ch >= ' ' && ch < '\x7f') {
+        if (this.loginStage === 'user') {
+          if (this.loginUser.length < 64) this.loginUser += ch;
+        } else if (this.loginPass.length < 128) {
+          this.loginPass += ch;
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Verify the submitted credentials. Async (scrypt off the event loop). A
+   * shared per-peer throttle enforces escalating backoff across reconnects, so
+   * dropping the socket and reconnecting does not reset the brute-force budget.
+   * Redraws through `draw()`; drops the connection through `onClose` on lockout.
+   */
+  private async submitPassword(): Promise<void> {
+    if (this.verifying || !this.auth) return;
+
+    // Refuse (without spending a scrypt) while this peer is in backoff.
+    const blockedMs = this.auth.blockedMsFor(this.peer);
+    if (blockedMs > 0) {
+      this.loginError = `Too many attempts — wait ${Math.ceil(blockedMs / 1000)}s.`;
+      this.resetLogin();
+      this.draw();
+      return;
+    }
+
+    const user = this.loginUser;
+    const pass = this.loginPass;
+    this.verifying = true;
+    this.loginError = '';
+    this.draw(); // show "Checking…"
+
+    let ok = false;
+    try {
+      ok = await this.auth.verify(user, pass);
+    } catch {
+      ok = false;
+    }
+    this.verifying = false;
+
+    if (ok) {
+      this.auth.registerSuccess(this.peer);
+      this.log(`auth: login OK for "${user}" from ${this.peer}`);
+      this.mode = 'tui';
+      this.resetLogin();
+      this.loginError = '';
+      this.lastFrameHash = ''; // force a full first paint of the TUI
+      this.draw();
+      return;
+    }
+
+    this.auth.registerFailure(this.peer);
+    this.loginAttempts += 1;
+    this.log(`auth: login FAILED for "${user}" from ${this.peer} (${this.loginAttempts}/${this.auth.maxAttempts})`);
+    this.resetLogin();
+    if (this.loginAttempts >= this.auth.maxAttempts) {
+      this.loginError = 'Too many failed attempts.';
+      this.draw();
+      this.onClose?.();
+      return;
+    }
+    this.loginError = 'Invalid username or password.';
+    this.draw();
   }
 
   /**
@@ -128,8 +286,20 @@ export class TuiSession {
         if (this.resize(ev.w, ev.h)) dirty = true;
         continue;
       }
-      // ctrl-c is the universal disconnect — even inside filter capture.
+      // ctrl-c is the universal disconnect — even inside login or filter capture.
       if (ev.type === 'ctrlc') return { quit: true };
+
+      // Terminal deny state: the message is shown, any key disconnects.
+      if (this.mode === 'denied') return { quit: true };
+
+      this.lastActivity = Date.now();
+
+      // Login gate — nothing reaches the TUI until credentials pass. The
+      // password submit runs async; lockout drops the socket via onClose.
+      if (this.mode === 'login') {
+        if (this.handleLoginKey(ev)) dirty = true;
+        continue;
+      }
 
       if (this.filtering) {
         if (this.handleFilterKey(ev)) dirty = true;
@@ -185,6 +355,20 @@ export class TuiSession {
 
   /** Build the array of frame lines for the current state. */
   private renderLines(): string[] {
+    if (this.mode === 'login' || this.mode === 'denied') {
+      return renderLogin({
+        cols: this.view.cols,
+        rows: this.view.rows,
+        title: 'Z-Wave TUI',
+        stage: this.loginStage,
+        username: this.loginUser,
+        passwordLen: this.loginPass.length,
+        error: this.loginError,
+        denied: this.mode === 'denied',
+        deniedMsg: this.deniedMsg,
+        checking: this.verifying,
+      });
+    }
     const vis = visibleNodes(this.data, this.view);
     // Defensive clamp — the roster can shrink between frames (a node drops out
     // of the filter, or leaves the mesh) and leave `selected` past the end.
@@ -202,6 +386,22 @@ export class TuiSession {
    * skips the write when the frame body is byte-identical to the previous one.
    */
   draw(): void {
+    // Idle re-lock: an authenticated session with no keystrokes for the
+    // configured window drops back to the login gate. Only applies when this
+    // connection actually passed the gate (trusted/ingress sessions are exempt).
+    if (
+      this.mode === 'tui' &&
+      this.authRequired &&
+      this.auth &&
+      this.auth.idleLockMs > 0 &&
+      Date.now() - this.lastActivity > this.auth.idleLockMs
+    ) {
+      this.mode = 'login';
+      this.resetLogin();
+      this.loginError = 'Session locked (idle) — please log in again.';
+      this.lastFrameHash = '';
+    }
+
     // Serialize frames. If a draw is already in flight, mark a pending redraw
     // and bail. The completing frame will run the pending one on its way out.
     if (this.drawing) {

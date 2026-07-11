@@ -16,11 +16,12 @@ One engine, two front doors:
 This repo is **also a Home Assistant add-on** — the add-on itself lives in
 [`./zwave_tui`](./zwave_tui).
 
-> **Live network context.** This add-on was built against a **Zooz ZST39 LR**
-> (700/800-series Long-Range) controller on node 1, a mesh of **39 devices /
-> 891 entities**. The `zwave_js` config-entry id is **auto-discovered** at
-> startup, so nothing is hard-coded — the add-on works on any HA install with
-> the Z-Wave JS integration.
+> **Works with any Z-Wave JS network.** Nothing about a specific controller or
+> mesh is hard-coded: the `zwave_js` config-entry id is **auto-discovered** at
+> startup, and the node roster comes from the device/entity registries — so the
+> add-on runs on any Home Assistant install with the Z-Wave JS integration.
+> (Developed and tested against a Zooz ZST39 LR 800-series controller on a
+> ~39-node mesh.)
 
 ## Install on Home Assistant
 
@@ -60,9 +61,11 @@ nc <homeassistant-IP> 2324
 telnet <homeassistant-IP> 2324
 ```
 
-The telnet transport and the browser console are **unauthenticated on the LAN
-by design** — keep them on a trusted network. Set **Enable Telnet TUI** to off
-to use only the sidebar console.
+Access over the HA sidebar is authenticated by Home Assistant. Direct access
+(telnet, or the port on the LAN) can be gated with the optional **login gate** —
+turn on **Require Login (direct access)** and add **Login Users** (plaintext or
+`scrypt:` hashed passwords). See [Authentication](./zwave_tui/DOCS.md) for
+details. Or set **Enable Telnet TUI** to off and use only the sidebar console.
 
 ## Screens & keys
 
@@ -103,9 +106,9 @@ problem · `I` incomplete interview · `B` battery low (advisory).
 v0.1 ships **read-only**. **Enable Write Actions** defaults off — the add-on
 only observes the mesh (ping is the sole safe/idempotent probe and is still
 gated). When enabled, network-disruptive operations (rebuild-all-routes,
-remove-failed-node) additionally require **Confirm Destructive Actions**.
-Because the transports are unauthenticated on the LAN, treat "can actuate the
-mesh" as a LAN-trust decision.
+remove-failed-node) additionally require **Confirm Destructive Actions**. If you
+expose mesh controls on an untrusted LAN, enable the login gate so actuating the
+mesh requires a credential.
 
 ## Releasing a new version
 

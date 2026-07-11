@@ -29,6 +29,7 @@ import { readFileSync } from 'node:fs';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { WebSocket } from '@fastify/websocket';
 import type { DataProvider } from '../types';
+import type { AuthPolicy } from '../auth/loginPolicy';
 import { TuiSession } from './session';
 import type { InputEvent } from './input';
 
@@ -66,6 +67,14 @@ export interface WsConsoleOptions {
   idleTimeoutMs?: number;
   /** Initial signal-unit default passed through to each session. */
   signalDisplay?: 'margin' | 'dbm';
+  /** Login policy applied to each console session. */
+  auth?: AuthPolicy;
+  /**
+   * Is this upgrade request pre-authenticated by HA (came through Ingress)?
+   * When it returns true the session skips the login gate unless the policy
+   * sets `requireOnIngress`. Direct LAN upgrades return false → gated.
+   */
+  isTrusted?: (req: FastifyRequest) => boolean;
 }
 
 /**
@@ -286,7 +295,7 @@ const CONSOLE_HTML = `<!doctype html>
  * call once after `@fastify/websocket` is registered.
  */
 export function registerWsConsole(opts: WsConsoleOptions): void {
-  const { app, data, log, isOriginAllowed, signalDisplay } = opts;
+  const { app, data, log, isOriginAllowed, signalDisplay, auth, isTrusted } = opts;
   const maxSessions = opts.maxSessions ?? MAX_WS_SESSIONS;
   const idleTimeoutMs = opts.idleTimeoutMs ?? WS_IDLE_TIMEOUT_MS;
 
@@ -335,7 +344,7 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
       }
       done();
     },
-  }, (socket: WebSocket) => {
+  }, (socket: WebSocket, req: FastifyRequest) => {
     // Concurrency cap: admit-then-close-1013 beyond the limit. We accept the
     // upgrade first (the cap fires post-handshake) and immediately close with
     // "Try Again Later" so the browser sees a clean, well-coded rejection.
@@ -346,6 +355,9 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
     }
     liveSessions += 1;
 
+    // HA Ingress upgrades are already authenticated; direct LAN upgrades are not.
+    const trusted = isTrusted ? isTrusted(req) : false;
+
     const session = new TuiSession({
       // xterm renders the bytes verbatim; no telnet alt-buffer dance needed.
       write: (payload) => {
@@ -354,6 +366,10 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
       data,
       signalDisplay,
       log,
+      auth,
+      trusted,
+      peer: req.ip,
+      onClose: () => { try { socket.close(); } catch { /* already closing */ } },
     });
 
     let alive = true;

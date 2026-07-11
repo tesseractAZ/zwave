@@ -116,10 +116,44 @@ still gated behind the same switch).
 
 When you later enable write actions, network-disruptive operations
 (rebuild-all-routes, remove-failed-node) additionally require the
-**Confirm Destructive Actions** prompt. Because the telnet transport and the
-browser console are **unauthenticated on the LAN by design**, treat the ability
-to actuate the mesh as a LAN-trust decision — leave write actions off unless
-your network is trusted.
+**Confirm Destructive Actions** prompt. If you expose the mesh controls on an
+untrusted LAN, turn on the **login gate** (below) so actuating the mesh requires
+a credential.
+
+## Authentication
+
+The TUI has an optional **login gate** for direct access.
+
+- **Over the Home Assistant sidebar**, you are already authenticated by HA, so
+  the console opens straight into the TUI. (Set **Also Require Login via HA
+  Sidebar** if you want a second prompt there too.)
+- **Direct access** — the telnet port, or hitting `:8788` directly on the LAN —
+  is *not* HA-authenticated. Turn on **Require Login (direct access)** and add
+  entries to **Login Users** to gate it. With auth on and no users configured,
+  direct access is denied (fail-closed).
+
+Each user has a `username` and `password`. The password can be:
+
+- **Plaintext** — masked in the Configuration UI; stored in the add-on's
+  `options.json` (root-only on the host). Simplest.
+- **A scrypt hash** — `scrypt:<saltHex>:<hashHex>`, so no plaintext is stored.
+  Generate one on any machine with Node:
+
+  ```
+  node -e "const c=require('crypto');const s=c.randomBytes(16);const p=process.argv[1];console.log('scrypt:'+s.toString('hex')+':'+c.scryptSync(p,s,32).toString('hex'))" 'your-password'
+  ```
+
+  Paste the printed `scrypt:...` value as the password.
+
+Passwords are verified with scrypt off the event loop, and a wrong username
+costs the same as a wrong password (no user enumeration). After **Max Login
+Attempts** failures the connection is dropped, and repeated failures from the
+same client trigger an **escalating backoff that persists across reconnects** —
+so dropping and reconnecting does not reset the brute-force budget. **Idle
+Re-lock** re-prompts a logged-in session after a period of inactivity.
+
+> A plaintext password must not begin with `scrypt:` — that prefix marks a
+> pre-hashed value. (Any other plaintext is fine.)
 
 ## Options
 
@@ -130,6 +164,9 @@ and help text). In brief:
 - **Refresh Interval** / **Route Poll Interval** — cheap render/roster cadence
   vs the expensive route/controller-statistics cadence.
 - **Enable Telnet TUI** / **Telnet Port** — the LAN telnet transport.
+- **Require Login (direct access)** / **Also Require Login via HA Sidebar** /
+  **Login Users** / **Max Login Attempts** / **Idle Re-lock** — the login gate
+  (see Authentication above).
 - **Z-Wave JS Entry ID** — leave blank to auto-discover.
 - **Home Assistant WebSocket URL** — leave at the default for a normal install.
 - **Enable Write Actions** / **Confirm Destructive Actions** — the safety gates

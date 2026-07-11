@@ -20,6 +20,7 @@
 import { createServer } from 'node:net';
 import type { Socket } from 'node:net';
 import type { DataProvider } from '../types';
+import type { AuthPolicy } from '../auth/loginPolicy';
 import { TuiSession } from './session';
 import type { SessionEvent } from './session';
 import {
@@ -166,10 +167,17 @@ export interface TelnetServerOptions {
   log: (msg: string) => void;
   /** Initial signal-unit default passed through to each session. */
   signalDisplay?: 'margin' | 'dbm';
+  /** Login policy. Telnet is always direct LAN — never trusted — so an enabled
+   *  policy always gates it. */
+  auth?: AuthPolicy;
 }
 
+/** Concurrent telnet connection cap — bounds resource use (and, with the login
+ *  gate, the number of in-flight credential checks). Mirrors the ws console. */
+const MAX_TELNET_CONNS = 16;
+
 export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void } {
-  const { data, host, port, log, signalDisplay } = opts;
+  const { data, host, port, log, signalDisplay, auth } = opts;
   const conns = new Set<TelnetConn>();
 
   const safeWrite = (socket: Socket, payload: string | Buffer) => {
@@ -216,11 +224,21 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
 
   const server = createServer((socket) => {
     socket.setNoDelay(true);
+    // Reject beyond the connection cap before doing any per-session work.
+    if (conns.size >= MAX_TELNET_CONNS) {
+      log(`telnet: connection cap (${MAX_TELNET_CONNS}) reached — refusing ${socket.remoteAddress ?? '?'}`);
+      try { socket.end('Too many connections — try again later.\r\n'); } catch { /* ignore */ }
+      return;
+    }
     const session = new TuiSession({
       write: (payload) => safeWrite(socket, payload),
       data,
       signalDisplay,
       log,
+      auth,
+      trusted: false, // telnet is direct LAN — never HA-authenticated
+      peer: socket.remoteAddress ?? '?',
+      onClose: () => { try { socket.end(); } catch { /* already gone */ } },
     });
     const conn: TelnetConn = { socket, session, inbuf: Buffer.alloc(0), timer: null };
     conns.add(conn);

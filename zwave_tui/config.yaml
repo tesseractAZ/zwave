@@ -55,9 +55,15 @@ options:
   # Live refresh cadence
   refresh_interval: 2
   route_poll_interval: 10
-  # Telnet control-room TUI (LAN-only, unauthenticated interface)
+  # Telnet control-room TUI
   telnet_enabled: true
   telnet_port: 2324
+  # TUI login gate — direct (non-ingress) access requires a configured user.
+  auth_enabled: false
+  auth_require_on_ingress: false
+  users: []
+  auth_max_attempts: 3
+  auth_idle_lock_min: 0
   # Z-Wave JS connection (leave blank to auto-discover the entry id)
   zwave_entry_id: ""
   ha_ws_url: ws://supervisor/core/websocket
@@ -71,9 +77,18 @@ schema:
   # Live refresh cadence
   refresh_interval: int(1,30)
   route_poll_interval: int(5,120)
-  # Telnet control-room TUI (LAN-only, unauthenticated interface)
+  # Telnet control-room TUI
   telnet_enabled: bool
   telnet_port: port
+  # TUI login gate. `users` is a list of {username, password}; password may be
+  # plaintext or a scrypt:<salt>:<hash> string (see DOCS.md).
+  auth_enabled: bool
+  auth_require_on_ingress: bool
+  users:
+    - username: str
+      password: password
+  auth_max_attempts: int(1,10)
+  auth_idle_lock_min: int(0,240)
   # Z-Wave JS connection
   # str? (not url?) on purpose: HA's voluptuous url? rejects an empty default on
   # Save, and both of these ship empty / with a ws:// scheme. The runtime

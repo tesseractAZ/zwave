@@ -7,7 +7,7 @@
  * (`subscribe_node_statistics`, `subscribe_controller_statistics`,
  * `subscribe_events`) that REST can't deliver.
  *
- * Two mechanisms, one persistent socket (adapted from ~/.claude-ha/ws-lib.mjs):
+ * Two mechanisms, one persistent socket:
  *
  *   1. `send(cmd, timeoutMs)` — request/response. Auto-increments a message id,
  *      writes `{id, ...cmd}`, and resolves on the FIRST `{type:'result', id}`
@@ -31,14 +31,13 @@
  *
  * Production reads `process.env.HA_WS_URL` (default `ws://supervisor/core/websocket`)
  * and `process.env.SUPERVISOR_TOKEN` (auto-injected by Supervisor). For local
- * dev the URL falls back to the Pi (`ws://192.168.5.152:8123/api/websocket`) and
- * the token to `~/.claude-ha/token`.
+ * dev outside the container, set `DEV_HA_WS_URL` and `DEV_HA_TOKEN` (or
+ * `DEV_HA_TOKEN_FILE`) to point at your own HA instance — nothing about a
+ * specific machine is hard-coded.
  */
 
 import WebSocket from 'ws';
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const HEARTBEAT_MS = 30_000;
@@ -120,29 +119,45 @@ function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** Resolve the bearer token: explicit → env → dev token file (non-production only). */
+/**
+ * Resolve the bearer token: explicit → SUPERVISOR_TOKEN (set by HA) → an
+ * optional dev token (non-production only).
+ *
+ * For local development outside the container, set either `DEV_HA_TOKEN` (the
+ * token itself) or `DEV_HA_TOKEN_FILE` (a path to read it from). Nothing about
+ * a specific machine is hard-coded — in the add-on NODE_ENV=production, so this
+ * dev branch never runs there.
+ */
 function resolveToken(explicit?: string | null): string | null {
   if (explicit != null && explicit !== '') return explicit;
   const env = process.env.SUPERVISOR_TOKEN;
   if (env && env.length > 0) return env;
-  // Dev convenience: read ~/.claude-ha/token when running outside the container.
-  // In the add-on NODE_ENV=production, so this branch never touches the FS there.
   if (process.env.NODE_ENV !== 'production') {
-    try {
-      const t = readFileSync(join(homedir(), '.claude-ha', 'token'), 'utf8').trim();
-      if (t) return t;
-    } catch {
-      /* no dev token file — fall through to unconfigured no-op */
+    if (process.env.DEV_HA_TOKEN) return process.env.DEV_HA_TOKEN.trim();
+    const file = process.env.DEV_HA_TOKEN_FILE;
+    if (file) {
+      try {
+        const t = readFileSync(file, 'utf8').trim();
+        if (t) return t;
+      } catch {
+        /* no readable dev token file — fall through to unconfigured no-op */
+      }
     }
   }
   return null;
 }
 
-/** Resolve the WS URL: explicit → env → supervisor (prod) / Pi (dev). */
+/**
+ * Resolve the WS URL: explicit → HA_WS_URL → the Supervisor proxy. For local
+ * dev, set HA_WS_URL (or DEV_HA_WS_URL) to your HA instance, e.g.
+ * `ws://homeassistant.local:8123/api/websocket`.
+ */
 function resolveUrl(explicit?: string): string {
   if (explicit) return explicit;
   if (process.env.HA_WS_URL) return process.env.HA_WS_URL;
-  if (process.env.NODE_ENV !== 'production') return 'ws://192.168.5.152:8123/api/websocket';
+  if (process.env.NODE_ENV !== 'production' && process.env.DEV_HA_WS_URL) {
+    return process.env.DEV_HA_WS_URL;
+  }
   return 'ws://supervisor/core/websocket';
 }
 
