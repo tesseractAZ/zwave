@@ -1,0 +1,72 @@
+name: CI
+
+# Type-check + test the server and smoke-build the add-on container on every
+# push and PR. Cheap insurance that no broken commit lands on main and gets
+# installed onto the Pi. This is the required check the release PR waits on.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least-privilege: both jobs only read the repo (checkout). Buildx GHA cache
+# uses the runtime token, not GITHUB_TOKEN, so no extra scopes are needed.
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    name: Type-check & test (server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install
+        working-directory: server
+        run: npm ci
+
+      - name: Type-check
+        working-directory: server
+        run: npm run typecheck
+
+      - name: Test
+        working-directory: server
+        run: npm test
+
+  docker-smoke:
+    # Build the Home Assistant add-on container (amd64 only) on every push/PR.
+    # Catches Dockerfile regressions before they reach the Pi. Buildx cache
+    # in GitHub Actions cache cuts subsequent runs to ~1–2 minutes.
+    name: Dockerfile smoke build (amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: false
+          build-args: |
+            BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.21
+            BUILD_ARCH=amd64
+            BUILD_DATE=ci
+            BUILD_DESCRIPTION=Z-Wave TUI (smoke)
+            BUILD_NAME=Z-Wave TUI
+            BUILD_REF=${{ github.sha }}
+            BUILD_REPOSITORY=${{ github.repository }}
+            BUILD_VERSION=ci
+          # ignore-error=true so a flaky GHA cache doesn't fail the smoke build.
+          cache-from: type=gha,scope=docker-smoke
+          cache-to: type=gha,mode=max,scope=docker-smoke,ignore-error=true

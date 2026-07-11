@@ -1,0 +1,49 @@
+# CodeQL security scanning for the Z-Wave TUI add-on (JS/TS).
+#
+# This repo is PRIVATE and owned by a personal account, so GitHub Advanced
+# Security (the Security-tab code scanning + SARIF upload) is not available
+# ("Advanced security has not been purchased"). Uploading results is therefore
+# impossible. Instead we run the full CodeQL analysis in CI, publish the SARIF
+# as a downloadable build artifact, and FAIL the job on any actionable finding
+# (see .github/scripts/check-sarif.mjs). Same defensive value, no GHAS required.
+name: CodeQL
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '27 4 * * 1'   # weekly, Monday 04:27 UTC
+
+permissions:
+  contents: read
+  actions: read            # CodeQL reads the workflow run for its analysis summary
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-extended   # broader than default: more CodeQL-class rules
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      - name: Perform CodeQL Analysis (local; no Security-tab upload — GHAS unavailable)
+        uses: github/codeql-action/analyze@v3
+        with:
+          upload: false
+          output: sarif-results
+      - name: Publish SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif
+          path: sarif-results
+          if-no-files-found: warn
+      - name: Fail on actionable CodeQL findings
+        run: node .github/scripts/check-sarif.mjs sarif-results/javascript.sarif

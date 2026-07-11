@@ -1,0 +1,169 @@
+#include <tunables/global>
+
+# AppArmor profile for the Z-Wave TUI add-on.
+#
+# Home Assistant Supervisor loads this file as the LSM profile for the
+# container. Beyond bumping the security rating, it provides defense-in-depth:
+# even if an HTTP endpoint or the telnet transport is exploited, the attacker
+# is confined to the file/network/capability set granted here.
+#
+# The profile name MUST be `addon_<slug>` (addon_zwave_tui) or Supervisor
+# silently skips loading it.
+#
+# Permissive enough for our runtime:
+#   - Node 22 + npm + s6-overlay init system
+#   - Fastify HTTP + WebSocket console (8788) + telnet TUI (2324)
+#   - SQLite writes under /data
+#   - Outbound to ws://supervisor/core/websocket (HA Core WS API)
+#
+# Restrictive enough to deny:
+#   - kernel module loading, mount, ptrace, raw IO, sysrq
+#   - reading /etc/shadow, /root/**, /etc/ssh/**
+#   - writing to /proc/sys/* or /sys/** (host kernel tunables)
+#
+# If the add-on misbehaves after this profile lands, the first thing to check
+# is /var/log/audit/audit.log on the host (Pi) — denied operations log there
+# with "type=AVC". Add corresponding rules below and rebuild.
+
+profile addon_zwave_tui flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  # ─── Capabilities ──────────────────────────────────────────────────
+  # Allow binding to ports (8788 and 2324 are unprivileged but s6-overlay
+  # needs net_bind_service for some pre-start tasks), plus setuid/setgid
+  # for the s6 user-switching dance.
+  capability net_bind_service,
+  capability setuid,
+  capability setgid,
+  capability chown,
+  capability dac_override,
+  capability dac_read_search,
+  capability fowner,
+  capability fsetid,
+  capability kill,
+  capability sys_chroot,
+
+  # Explicitly DENY the dangerous capabilities. AppArmor's default is
+  # "allow if not denied" — but these are worth calling out so any future
+  # change to the profile doesn't silently enable them.
+  deny capability sys_admin,
+  deny capability sys_module,
+  deny capability sys_rawio,
+  deny capability sys_ptrace,
+  deny capability sys_boot,
+  deny capability sys_time,
+  deny capability mac_admin,
+  deny capability mac_override,
+
+  # ─── File system ───────────────────────────────────────────────────
+  # General read access to the container rootfs (app code, libs,
+  # certificates, locale data). The Dockerfile is the source of truth
+  # for what files exist; this profile follows its layout.
+  file,
+  signal,
+  network,
+
+  # s6-overlay init system (HA base image uses s6).
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
+  /usr/local/bin/** ix,
+  /usr/sbin/** ix,
+  /sbin/** ix,
+  /lib/** mr,
+  /lib/**.so* mr,
+  /usr/lib/** mr,
+  /etc/s6/** ix,
+  /etc/s6-overlay/** ix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
+  /etc/services.d/** rwix,
+  /run/s6/** rwix,
+  /run/s6-rc** rwix,
+  /package/admin/s6/command/** ix,
+  /command/** rwix,
+
+  # Add-on source + node_modules. Read + execute (node calls dlopen on
+  # native modules under node_modules/.../*.node, which need mix).
+  /app/** r,
+  /app/server/node_modules/**/*.node mix,
+  /app/server/node_modules/**/*.so* mix,
+
+  # Persistent storage (/data is volume-mounted by HA Supervisor).
+  # SQLite needs the rwk permission for WAL + shm files.
+  /data/** rwk,
+
+  # Temp + runtime files.
+  /tmp/** rwk,
+  /var/tmp/** rwk,
+  /run/** rwk,
+
+  # Standard config files (read-only system info).
+  /etc/passwd r,
+  /etc/group r,
+  /etc/hosts r,
+  /etc/host.conf r,
+  /etc/resolv.conf r,
+  /etc/nsswitch.conf r,
+  /etc/services r,
+  /etc/protocols r,
+  /etc/localtime r,
+  /etc/timezone r,
+  /etc/ssl/** r,
+  /etc/ca-certificates/** r,
+  /etc/os-release r,
+  /usr/share/ca-certificates/** r,
+
+  # /proc — Node + s6 need to read process info. Writes to /proc/sys are
+  # denied below.
+  /proc/[0-9]*/** r,
+  /proc/sys/kernel/random/uuid r,
+  /proc/sys/kernel/ngroups_max r,
+  /proc/cpuinfo r,
+  /proc/meminfo r,
+  /proc/loadavg r,
+  /proc/uptime r,
+  /proc/stat r,
+  /proc/version r,
+  /proc/self/** rw,
+  /proc/[0-9]*/comm rw,
+
+  # /sys — read-only access to network info (for diagnostic endpoints that
+  # report interface state).
+  /sys/class/net/** r,
+  /sys/devices/** r,
+
+  # /dev — Node + crypto need urandom; tty for logging.
+  /dev/null rw,
+  /dev/zero r,
+  /dev/random r,
+  /dev/urandom r,
+  /dev/tty rw,
+  /dev/pts/** rw,
+  /dev/stdin r,
+  /dev/stdout w,
+  /dev/stderr w,
+
+  # ─── Deny: dangerous file ops ──────────────────────────────────────
+  # Never read secrets, never write to kernel tunables, never touch the
+  # audit subsystem.
+  deny /etc/shadow r,
+  deny /etc/gshadow r,
+  deny /root/** rw,
+  deny /home/** rw,
+  deny /etc/ssh/** r,
+  deny /proc/sys/** w,
+  deny /sys/** w,
+  deny /proc/sysrq-trigger w,
+  deny /sys/kernel/** w,
+  deny /sys/firmware/** rw,
+
+  # Deny mount / umount / pivot_root (no container escape attempts).
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny remount,
+
+  # Deny ptrace (no peeking at other processes).
+  deny ptrace,
+}
