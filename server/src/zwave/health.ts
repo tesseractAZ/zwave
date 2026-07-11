@@ -85,7 +85,7 @@ const UNKNOWN_SCORE_CAP = 15;
 const LR_NODE_ID = 256;
 
 /** Documented render order for the flag column. */
-const FLAG_ORDER = ['D', 'S', 'W', 'F', 'R', 'I', 'B'] as const;
+const FLAG_ORDER = ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B'] as const;
 
 // ── Small numeric helpers ────────────────────────────────────────────────────
 
@@ -178,15 +178,18 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   const isAsleep = node.status === NodeStatus.Asleep;
   const flags = new Set<string>();
 
-  // ── Lane: Reachability (30%) — lastSeen staleness vs an expected freshness window.
-  // A sleeping node is expected to be unreachable, so it is credited in full.
+  // ── Lane: Reachability (30%).
+  // The controller's alive-poll (network_status) is AUTHORITATIVE: an Alive/Awake
+  // node is reachable and earns full credit — regardless of how long ago we last
+  // received detailed STATISTICS (those push only on node activity, so a
+  // quiet-but-alive mains node must NOT decay into a false 'S' stale flag).
+  // The lastSeen-age decay + S flag are reserved for a node NOT confirmed alive.
+  const aliveNow = node.status === NodeStatus.Alive || node.status === NodeStatus.Awake;
   let reachFrac: number;
-  if (isAsleep) {
+  if (isAsleep || aliveNow) {
     reachFrac = 1;
   } else if (stats.lastSeen == null) {
-    // No timestamp: trust the live status if it says alive/awake.
-    reachFrac =
-      node.status === NodeStatus.Alive || node.status === NodeStatus.Awake ? 0.85 : 0.5;
+    reachFrac = 0.5;
   } else {
     const age = Math.max(0, Date.now() - stats.lastSeen);
     reachFrac =
@@ -235,6 +238,10 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
       routeFrac = base;
     }
   }
+
+  // Latency advisory: a sustained multi-second round-trip is worth surfacing
+  // even when the weighted route lane alone can't drop the grade.
+  if (stats.rtt != null && stats.rtt > RTT_HI_MS) flags.add('L');
 
   // ── Lane: TX Reliability (20%, 30% for LR) — dropped + timed-out over sent.
   let txFrac: number;

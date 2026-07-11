@@ -103,8 +103,8 @@ Long-Range nodes (id ≥ 256) redistribute route weight into signal + reliabilit
 
 Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 55, **F** < 55.
 
-Flags: `D` dead · `S` asleep · `W` weak signal · `F` failing TX · `R` route
-problem · `I` incomplete interview · `B` battery low (advisory).
+Flags: `D` dead · `S` stale · `W` weak signal · `F` failing TX · `R` route
+problem · `L` high latency · `I` incomplete interview · `B` battery low.
 
 ## Write actions & safety
 

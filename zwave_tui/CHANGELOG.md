@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.1 — 2026-07-11
+
+Fixes from an aggressive live verification (14 confirmed findings).
+
+- **Live statistics no longer freeze (was HIGH).** HA delivers the initial
+  on-subscribe event with `nodeId` (camelCase) but every subsequent live push
+  with `node_id` (snake_case); the handler only accepted `nodeId`, so after the
+  first reading every node's stats froze at their subscribe-time values. Now
+  accepts both — verified live that a pinged node's stats update again.
+- **Health: an alive node no longer decays.** Reachability now follows the
+  authoritative alive-poll, so a quiet-but-alive mains node can't drift into a
+  false `S` (stale) flag or lose score just because its detailed statistics
+  hadn't pushed recently.
+- **Battery %** now shown (and the `B` low-battery flag fires) — read from the
+  battery-level sensors.
+- New **`L` (high latency)** advisory flag for sustained multi-second RTT.
+- Route mapping keeps `repeaters`/`repeaterRSSI` index-aligned even if a hop
+  fails to resolve; `route_failed_between` guarded.
+- Statistics subscriptions re-establish after an entry self-heal (previously
+  they'd orphan until a Core-WS reconnect); frozen stats cleared on re-discovery.
+- Detail/Controller show a "…N more" marker instead of silently dropping
+  sections on a short terminal; Detail drop% clamped to ≤100%.
+- Topology labels its per-node dB as the route margin (vs the Overview's node
+  RSSI); Log drops the inert follow/pause toggle.
+- Sanitize device manufacturer/model/area (were bypassing the label sanitizer).
+- `/api/health` reports `lastStatsUpdated`. New tests pin the casing fix +
+  route mapping (30 total).
+
 ## 0.2.0 — 2026-07-11
 
 Live statistics + the full six-screen interface. The health scores now reflect
