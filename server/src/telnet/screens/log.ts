@@ -74,10 +74,9 @@ function headerLine(view: ScreenCtx['view'], shown: number, total: number): stri
     c.white(count) +
     c.grey(total === 1 ? ' event' : ' events');
 
-  // Right: the two live session toggles.
-  const tail = view.followTail ? c.green('⏵ tail') : c.grey('⏸ paused');
-  const errors = view.errorsOnly ? c.yellowB('errors only') : c.grey('all severities');
-  const right = tail + c.grey(' · ') + errors;
+  // Right: the live filter mode. (The stream always auto-follows newest-first;
+  // there's no scrollback yet, so no follow/pause toggle is shown.)
+  const right = view.errorsOnly ? c.yellowB('errors only') : c.grey('all severities');
 
   return lr(left, right, view.cols);
 }
@@ -140,7 +139,6 @@ function fmtTime(ts: number): string {
 function legend(view: ScreenCtx['view'], shown: number, cap: number): string {
   const key = (k: string, label: string) => c.cyanB(k) + ' ' + c.grey(label);
   const left = [
-    key('F', view.followTail ? 'pause' : 'tail'),
     key('o', view.errorsOnly ? 'all' : 'errors'),
     key('q/Esc', 'close'),
   ].join(c.grey(' · '));

@@ -104,6 +104,7 @@ Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 55, **F** < 55.
 | `W` | Weak signal (margin under ~7 dB) |
 | `F` | Failing TX (dropped + timeouts over ~15%) |
 | `R` | Route problem (failed-between / poor route) |
+| `L` | High latency (round-trip over ~1 s) — advisory |
 | `I` | Incomplete interview |
 | `B` | Battery low (≤ 25%) — advisory only |
 

@@ -127,6 +127,7 @@ async function main(): Promise<void> {
       nodes: provider.nodes().length,
       haReady: client.ready(),
       lastUpdated: provider.lastUpdated(),
+      lastStatsUpdated: zwaveData.lastStatsUpdated(),
       error: provider.lastError(),
     });
   });
