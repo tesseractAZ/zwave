@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.0 — 2026-07-11
+
+Live statistics + the full six-screen interface. The health scores now reflect
+real RF conditions instead of a uniform placeholder.
+
+- **Live node + controller statistics**: subscribes to
+  `zwave_js/subscribe_node_statistics` and `subscribe_controller_statistics`.
+  Subscribing delivers each node's current stats immediately (no pinging), so
+  the Overview populates within seconds. Fills the Margin / Hop / Rate / Seen
+  columns with real RSSI, route, data-rate, and last-seen data — and the health
+  score now spreads across the mesh (e.g. a weak, multi-hop node grades below a
+  strong direct one) instead of every node reading the same.
+- **Detail** screen: full per-node dossier — identity, security, live link
+  (RTT / RSSI / SNR margin / drop%), the LWR + NLWR route chains with per-hop
+  RSSI and data rate, TX/RX counters, and power source.
+- **Controller** screen: node-1 identity + roles, live traffic counters, and an
+  A–F network-health histogram.
+- **Topology** screen: nodes grouped by hop count with their repeater chains,
+  plus a repeater-load (single-point-of-failure) tally.
+- **Signal Heatmap** screen: nodes by area, cells graded by SNR margin,
+  worst-area-first.
+- **Event & Command Log** screen: node status changes and mesh re-routing,
+  severity-coloured.
+- Correct field mapping under the hood: HA's snake_case stat fields → the
+  internal model, the misspelled `timout_response` controller key, and route
+  `repeaters` given as HA device_ids resolved back to Z-Wave node ids.
+
 ## 0.1.0 — 2026-07-10
 
 Initial skeleton: a read-only Z-Wave mesh health TUI served over telnet

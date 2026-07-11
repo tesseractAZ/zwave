@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   const source: ZwaveDataSource = {
     snapshot: () => zwaveData.snapshot(),
     controller: () => zwaveData.controller(),
-    events: (): LogEvent[] => [],
+    events: (): LogEvent[] => zwaveData.events(),
     ready: () => zwaveData.ready(),
     lastError: () => zwaveData.lastError(),
     lastUpdated: () => zwaveData.lastUpdated(),
