@@ -1,0 +1,14 @@
+# Per-arch base images supplied by Home Assistant.
+# 3.21 ships Node 22 in the Alpine main repo (we apk-install nodejs+npm).
+build_from:
+  aarch64: ghcr.io/home-assistant/aarch64-base:3.21
+  amd64: ghcr.io/home-assistant/amd64-base:3.21
+
+# No build-time TZ arg — HA Supervisor sets the container timezone at runtime
+# from the Home Assistant configuration.
+
+labels:
+  org.opencontainers.image.title: Z-Wave TUI
+  org.opencontainers.image.description: Telnet control-room TUI for Z-Wave mesh/node health
+  org.opencontainers.image.source: https://github.com/tesseractAZ/zwave
+  org.opencontainers.image.licenses: MIT

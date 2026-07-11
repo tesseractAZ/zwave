@@ -1,0 +1,22 @@
+# Exclude bulky / dev-only / sensitive files from the Docker build context.
+**/node_modules
+**/dist
+**/web/dist
+**/server/dist
+**/.git
+**/.gitignore
+**/.env
+**/.env.local
+**/.env.production
+**/*.log
+**/*.tsbuildinfo
+**/.DS_Store
+**/.vscode
+**/.idea
+data/
+.claude/
+docs/
+README.md
+DOCS.md
+CHANGELOG.md
+LICENSE

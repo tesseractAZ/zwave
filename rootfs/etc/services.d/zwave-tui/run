@@ -1,0 +1,81 @@
+#!/usr/bin/with-contenv bashio
+# ==============================================================================
+# Z-Wave TUI — s6 service runner.
+# Translates the add-on's Options (Configuration tab in HA) into the env vars
+# the Node server expects, then execs npm start.
+#
+# The s6 service directory uses a HYPHEN (zwave-tui); the add-on slug uses an
+# underscore (zwave_tui). Keep them distinct.
+# ==============================================================================
+set -e
+
+# ── Logging + live refresh cadence ───────────────────────────────────────────
+export LOG_LEVEL="$(bashio::config 'log_level')"
+export SIGNAL_DISPLAY="$(bashio::config 'signal_display')"
+# The server reads intervals in milliseconds; the HA options are seconds.
+export REFRESH_INTERVAL_MS="$(( $(bashio::config 'refresh_interval') * 1000 ))"
+export ROUTE_POLL_INTERVAL_MS="$(( $(bashio::config 'route_poll_interval') * 1000 ))"
+
+# ── Z-Wave JS connection ─────────────────────────────────────────────────────
+# Empty ZWAVE_ENTRY_ID ⇒ the data layer auto-discovers it via config_entries/get.
+export ZWAVE_ENTRY_ID="$(bashio::config 'zwave_entry_id')"
+export HA_WS_URL="$(bashio::config 'ha_ws_url')"
+
+# ── Telnet "control-room" TUI ────────────────────────────────────────────────
+# bashio bool dance — a plain `export FOO=$(bashio::config 'foo')` yields the
+# literal strings "true"/"false", so the knob must be reduced to 1/0 here.
+# OMITTING the export entirely makes the option DEAD (server only ever sees its
+# code default). Every bool option below gets this treatment.
+if bashio::config.true 'telnet_enabled'; then
+  export TELNET_ENABLED=1
+else
+  export TELNET_ENABLED=0
+fi
+export TELNET_PORT="$(bashio::config 'telnet_port')"
+
+# ── Write-action safety gates ────────────────────────────────────────────────
+if bashio::config.true 'write_actions_enabled'; then
+  export WRITE_ACTIONS_ENABLED=1
+else
+  export WRITE_ACTIONS_ENABLED=0
+fi
+if bashio::config.true 'confirm_destructive'; then
+  export CONFIRM_DESTRUCTIVE=1
+else
+  export CONFIRM_DESTRUCTIVE=0
+fi
+
+# ── TUI login gate ───────────────────────────────────────────────────────────
+# Username/password auth for DIRECT (non-ingress) telnet + console access.
+# Access via the HA sidebar is already HA-authenticated, so it skips the gate
+# unless auth_require_on_ingress is set.
+if bashio::config.true 'auth_enabled'; then
+  export AUTH_ENABLED=1
+else
+  export AUTH_ENABLED=0
+fi
+if bashio::config.true 'auth_require_on_ingress'; then
+  export AUTH_REQUIRE_ON_INGRESS=1
+else
+  export AUTH_REQUIRE_ON_INGRESS=0
+fi
+export AUTH_MAX_ATTEMPTS="$(bashio::config 'auth_max_attempts')"
+export AUTH_IDLE_LOCK_MIN="$(bashio::config 'auth_idle_lock_min')"
+# The `users` list is a structured option; lift it straight from options.json as
+# compact JSON (bashio bundles jq). The server parses ZWAVE_USERS as a JSON array
+# of {username,password}. Fall back to an empty array if the key is absent.
+export ZWAVE_USERS="$(jq -c '.users // []' /data/options.json 2>/dev/null || echo '[]')"
+
+# ── Hard-coded runtime paths (dual-stack :: bind for HTTP + telnet) ───────────
+export PORT=8788
+export HOST=::
+export TELNET_HOST=::
+export DB_PATH=/data/zwave.db
+
+# SUPERVISOR_TOKEN is injected automatically by the HA Supervisor (unlocked by
+# homeassistant_api: true) — the Node process inherits it. Do NOT export it.
+
+bashio::log.info "Starting Z-Wave TUI on :${PORT} (telnet=${TELNET_ENABLED}:${TELNET_PORT})…"
+
+cd /app/server
+exec npm start
