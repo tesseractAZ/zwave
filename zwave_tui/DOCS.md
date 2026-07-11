@@ -36,9 +36,10 @@ or
 telnet <homeassistant-IP> 2324
 ```
 
-The telnet transport has **no authentication** — keep it on a trusted LAN.
-If you don't want it at all, set **Enable Telnet TUI** to off in the add-on
-Configuration and use only the sidebar console.
+By default the telnet transport has **no authentication** — keep it on a
+trusted LAN, or turn on the **login gate** (see [Authentication](#authentication))
+to require a username + password. To disable telnet entirely, set **Enable
+Telnet TUI** to off and use only the sidebar console.
 
 ## Screen map
 
@@ -56,7 +57,7 @@ over it and dismisses with `q` or `Esc`, preserving your selection.
 
 > Note: v0.1 lands the Overview home and the health model. The Detail /
 > Controller / Topology / Heatmap / Log overlays fill in over the v0.2–v0.3
-> releases (see the repository README roadmap).
+> releases.
 
 ## Keybindings
 
@@ -94,7 +95,7 @@ and interview completeness — with hard gates:
 - **Long-Range** nodes (node id ≥ 256) are scored with route weight
   redistributed into signal + reliability (they are direct-to-controller).
 
-Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 40, **F** < 40.
+Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 55, **F** < 55.
 
 **Flag legend** (single-char, shown in the Overview table):
 

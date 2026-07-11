@@ -156,6 +156,9 @@ export class TuiSession {
     this.loginStage = 'user';
     this.loginUser = '';
     this.loginPass = '';
+    // Drop any in-progress `/` filter capture so keys typed right after an idle
+    // re-lock aren't silently swallowed into the node filter once back in the TUI.
+    this.filtering = false;
   }
 
   /**

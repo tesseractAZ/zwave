@@ -108,13 +108,22 @@ function parseInput(buf: Buffer): { events: SessionEvent[]; rest: Buffer } {
       if (i + 1 >= n) break; // wait — could be the start of a sequence
       const b1 = buf[i + 1];
       if (b1 === 0x5b || b1 === 0x4f) {
-        // CSI / SS3
-        if (i + 2 >= n) break; // incomplete
-        const f = buf[i + 2];
+        // CSI (ESC [) / SS3 (ESC O). Consume the WHOLE sequence: parameter
+        // bytes (0x30-0x3F) then intermediate bytes (0x20-0x2F), terminated by
+        // a final byte (0x40-0x7E). Emit an arrow only for a BARE CSI/SS3
+        // A/B/C/D — anything longer (modified arrows, bracketed paste, mouse
+        // reports) is consumed and ignored, not leaked byte-by-byte.
+        let j = i + 2;
+        while (j < n && buf[j] >= 0x30 && buf[j] <= 0x3f) j++;
+        while (j < n && buf[j] >= 0x20 && buf[j] <= 0x2f) j++;
+        if (j >= n) break; // incomplete — wait for the final byte
+        const f = buf[j];
         const dir =
-          f === 0x41 ? 'up' : f === 0x42 ? 'down' : f === 0x43 ? 'right' : f === 0x44 ? 'left' : null;
+          j === i + 2
+            ? f === 0x41 ? 'up' : f === 0x42 ? 'down' : f === 0x43 ? 'right' : f === 0x44 ? 'left' : null
+            : null;
         if (dir) events.push({ type: 'arrow', dir });
-        i += 3;
+        i = j + 1; // consume through the final byte
         continue;
       }
       events.push({ type: 'escape' });

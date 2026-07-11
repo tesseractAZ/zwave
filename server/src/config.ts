@@ -39,7 +39,10 @@ export const config = {
    * SUPERVISOR_TOKEN. Override to `ws://core-zwave-js:3000` to talk to the
    * zwave-js driver server directly (phase 2).
    */
-  haWsUrl: process.env.HA_WS_URL ?? 'ws://supervisor/core/websocket',
+  haWsUrl:
+    process.env.HA_WS_URL ??
+    (process.env.NODE_ENV !== 'production' ? process.env.DEV_HA_WS_URL : undefined) ??
+    'ws://supervisor/core/websocket',
   /**
    * Auto-injected by the Supervisor for add-ons with `homeassistant_api: true`.
    * `undefined` in bare dev — the WS client no-ops rather than crashing.

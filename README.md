@@ -81,6 +81,9 @@ dismisses with `q` / `Esc`.
 | **Heatmap** | Nodes by HA area, cells graded by SNR-margin bucket. |
 | **Log** | Driver events + command outcomes, severity-colored, red-latch-until-ack. |
 
+> v0.1 ships the **Overview** home + the health model. The Detail / Controller /
+> Topology / Heatmap / Log overlays fill in over the v0.2–v0.3 releases.
+
 Overview keys: `j`/`k` move, `Enter` detail, `/` filter, `f` status filter,
 `s` sort, `t` margin↔dBm, `1`–`6` jump screens, `p` ping (gated), `q` quit.
 
@@ -96,7 +99,7 @@ capped low, a node **asleep within its wake interval is not penalized**, and
 **battery is a separate advisory lane** that never drags down the RF score.
 Long-Range nodes (id ≥ 256) redistribute route weight into signal + reliability.
 
-Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 40, **F** < 40.
+Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 55, **F** < 55.
 
 Flags: `D` dead · `S` asleep · `W` weak signal · `F` failing TX · `R` route
 problem · `I` incomplete interview · `B` battery low (advisory).

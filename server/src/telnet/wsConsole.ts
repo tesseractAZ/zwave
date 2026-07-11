@@ -104,12 +104,21 @@ export function parseXtermData(s: string): InputEvent[] {
       }
       const b1 = s.charCodeAt(i + 1);
       if (b1 === 0x5b || b1 === 0x4f) {
-        if (i + 2 >= n) break; // incomplete — wait for the rest
-        const f = s.charCodeAt(i + 2);
+        // Consume the WHOLE CSI/SS3 sequence (params 0x30-0x3F, intermediates
+        // 0x20-0x2F, final 0x40-0x7E). Only a bare A/B/C/D is an arrow; longer
+        // sequences (modified arrows, bracketed paste, mouse) are swallowed
+        // rather than leaked as stray keystrokes.
+        let j = i + 2;
+        while (j < n && s.charCodeAt(j) >= 0x30 && s.charCodeAt(j) <= 0x3f) j++;
+        while (j < n && s.charCodeAt(j) >= 0x20 && s.charCodeAt(j) <= 0x2f) j++;
+        if (j >= n) break; // incomplete — wait for the rest
+        const f = s.charCodeAt(j);
         const dir =
-          f === 0x41 ? 'up' : f === 0x42 ? 'down' : f === 0x43 ? 'right' : f === 0x44 ? 'left' : null;
+          j === i + 2
+            ? f === 0x41 ? 'up' : f === 0x42 ? 'down' : f === 0x43 ? 'right' : f === 0x44 ? 'left' : null
+            : null;
         if (dir) events.push({ type: 'arrow', dir });
-        i += 3;
+        i = j + 1;
         continue;
       }
       events.push({ type: 'escape' });

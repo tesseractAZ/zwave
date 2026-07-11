@@ -52,6 +52,12 @@ jobs:
 
       - name: Compute next version
         id: ver
+        # Pass the dispatch inputs through the environment (never interpolate
+        # ${{ inputs.* }} directly into the shell — that is a script-injection
+        # sink). Bash then treats them as plain data.
+        env:
+          IN_VERSION: ${{ inputs.version }}
+          IN_BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
           current=$(grep -E '^version:' zwave_tui/config.yaml \
@@ -62,15 +68,15 @@ jobs:
             exit 1
           fi
 
-          if [[ -n "${{ inputs.version }}" ]]; then
-            next="${{ inputs.version }}"
+          if [[ -n "$IN_VERSION" ]]; then
+            next="$IN_VERSION"
           else
             IFS='.' read -r maj min pat <<< "$current"
-            case "${{ inputs.bump }}" in
+            case "$IN_BUMP" in
               major) next="$((maj + 1)).0.0" ;;
               minor) next="${maj}.$((min + 1)).0" ;;
               patch) next="${maj}.${min}.$((pat + 1))" ;;
-              *) echo "::error::Unknown bump '${{ inputs.bump }}'"; exit 1 ;;
+              *) echo "::error::Unknown bump '$IN_BUMP'"; exit 1 ;;
             esac
           fi
 
@@ -159,6 +165,16 @@ jobs:
       # (signature-verified), which satisfies the `required_signatures` rule.
       # Tagging + the image build happen post-merge in `tag-release.yml`.
       - name: Open release PR (auto-merge)
+        # NOTE — auto-merge + required checks caveat: this PR is opened with the
+        # default GITHUB_TOKEN. GitHub deliberately does NOT run workflows for
+        # events raised by GITHUB_TOKEN (recursion guard), so if `main` is later
+        # given a branch-protection rule that REQUIRES ci.yml / codeql.yml, those
+        # checks never attach to this PR and `--auto` can never satisfy them.
+        # Two ways to make the one-click release fully autonomous when that day
+        # comes: (a) create a fine-grained PAT `RELEASE_PAT` and use it here AND
+        # on the actions/checkout that pushes the branch, so the checks run; or
+        # (b) accept that the owner admin-merges the release PR. Today `main` is
+        # unprotected, so `--auto` merges immediately and this is moot.
         env:
           NEXT: ${{ steps.ver.outputs.next }}
           NOTES_FILE: ${{ steps.notes.outputs.notes_file }}

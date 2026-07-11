@@ -176,6 +176,15 @@ class HaWebSocketClient implements HaWsClient {
 
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Guards a socket that opens but never completes the auth handshake. */
+  private authTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private clearAuthTimer(): void {
+    if (this.authTimer) {
+      clearTimeout(this.authTimer);
+      this.authTimer = null;
+    }
+  }
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pongReceived = true;
 
@@ -272,6 +281,7 @@ class HaWebSocketClient implements HaWsClient {
     this.stopped = true;
     this.started = false;
     this.authenticated = false;
+    this.clearAuthTimer();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -311,6 +321,16 @@ class HaWebSocketClient implements HaWsClient {
       return;
     }
     this.ws = ws;
+    // If the socket opens but auth_ok never arrives (or it never opens at all),
+    // don't wedge forever — force it closed so the normal reconnect kicks in.
+    this.clearAuthTimer();
+    this.authTimer = setTimeout(() => {
+      if (!this.authenticated && this.ws === ws) {
+        this.lastErr = 'auth handshake timeout';
+        this.log('auth handshake timeout — terminating socket');
+        try { ws.terminate(); } catch { /* ignore */ }
+      }
+    }, 15_000);
     ws.on('open', () => {
       this.log(`connected to ${this.url}; awaiting auth`);
     });
@@ -368,6 +388,7 @@ class HaWebSocketClient implements HaWsClient {
   }
 
   private handleAuthOk(): void {
+    this.clearAuthTimer();
     this.authenticated = true;
     this.reconnectAttempts = 0;
     this.lastErr = null;
@@ -426,6 +447,7 @@ class HaWebSocketClient implements HaWsClient {
   }
 
   private handleClose(code?: number): void {
+    this.clearAuthTimer();
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws = null;

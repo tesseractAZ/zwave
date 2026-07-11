@@ -100,7 +100,10 @@ async function main(): Promise<void> {
   const app = Fastify({ trustProxy: false });
   await app.register(fastifyCompress);
   await app.register(fastifyCors, { origin: auth.corsOriginCallback });
-  await app.register(fastifyWebsocket);
+  // Cap inbound ws frames: the console only carries keystrokes + tiny resize
+  // JSON, so 64 KiB is generous. Without this the default is 100 MiB, which a
+  // single frame could weaponize into an OOM/stall.
+  await app.register(fastifyWebsocket, { options: { maxPayload: 64 * 1024 } });
 
   registerWsConsole({
     app,

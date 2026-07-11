@@ -167,6 +167,17 @@ function rfRegionLabel(n: number | null | undefined): string | null {
   return RF_REGION_LABEL[n] ?? `region ${n}`;
 }
 
+/**
+ * Sanitize an externally-sourced label (Z-Wave node/entity names come from the
+ * device database and user renames — untrusted). Strips C0 control bytes + DEL
+ * (which includes ESC 0x1b, so a crafted name can't inject ANSI escapes into a
+ * TUI frame) and caps the length so one long name can't blow the layout.
+ */
+function sanitizeLabel(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x1f\x7f]/g, '').slice(0, 48);
+}
+
 /** All-null stats — v0.1 has no live statistics subscription yet. */
 function emptyStats(): NodeStats {
   return {
@@ -209,6 +220,9 @@ class ZwaveDataImpl implements ZwaveData {
 
   private entryId: string | null;
   private registriesLoaded = false;
+  /** True when the entry_id was explicitly configured (not auto-discovered) —
+   *  a seeded id is never cleared by the self-heal path. */
+  private entrySeeded = false;
   private deviceByNodeId = new Map<number, DeviceRec>();
   private entitiesByDeviceId = new Map<string, NodeEntity[]>();
   private entityCount = 0;
@@ -229,13 +243,18 @@ class ZwaveDataImpl implements ZwaveData {
     this.routePollMs = opts.routePollMs ?? Number(process.env.ROUTE_POLL_INTERVAL_MS ?? 10_000);
     this.log = opts.log ?? (() => {});
     const seed = opts.entryId ?? process.env.ZWAVE_ENTRY_ID ?? '';
-    this.entryId = seed !== '' ? seed : null;
+    this.entrySeeded = seed !== '';
+    this.entryId = this.entrySeeded ? seed : null;
   }
 
   start(): void {
     if (this.started) return;
     this.started = true;
     this.stopped = false;
+    // Every (re)authentication reloads the registry join — an HA Core restart
+    // can rename/re-area devices, and the join would otherwise stay stale for
+    // the process lifetime.
+    this.client.onReady(() => { this.registriesLoaded = false; });
     this.startLiveStatistics(); // v0.2 hook — currently a no-op
     void this.tick();
   }
@@ -296,6 +315,15 @@ class ZwaveDataImpl implements ZwaveData {
       // Back off on repeated failure (e.g. dev without token, HA restarting) so
       // we don't spin the socket; capped so recovery stays timely.
       this.errStreak++;
+      // Self-heal: after a few consecutive failures on an AUTO-DISCOVERED entry,
+      // the id may be stale (the integration was removed + re-added, minting a
+      // new entry_id + device_ids). Force a fresh discovery + registry reload.
+      // A user-configured (seeded) entry is left alone.
+      if (this.errStreak >= 3 && !this.entrySeeded && this.entryId) {
+        this.log('repeated failures — re-discovering zwave_js entry + reloading registries');
+        this.entryId = null;
+        this.registriesLoaded = false;
+      }
       const backoff = this.refreshMs * 2 ** Math.min(this.errStreak, 5);
       this.scheduleNext(Math.max(this.refreshMs, Math.min(30_000, backoff)));
     }
@@ -354,7 +382,7 @@ class ZwaveDataImpl implements ZwaveData {
       if (nodeId == null) continue;
       deviceByNodeId.set(nodeId, {
         id: d.id,
-        name: d.name_by_user || d.name || `Node ${nodeId}`,
+        name: sanitizeLabel(d.name_by_user || d.name || `Node ${nodeId}`),
         area: d.area_id ?? null,
         manufacturer: d.manufacturer ?? null,
         model: d.model ?? null,
@@ -372,7 +400,7 @@ class ZwaveDataImpl implements ZwaveData {
       list.push({
         entityId: e.entity_id,
         domain: e.entity_id.split('.')[0],
-        name: e.original_name ?? e.name ?? undefined,
+        name: sanitizeLabel(e.original_name ?? e.name ?? '') || undefined,
       });
       entitiesByDeviceId.set(e.device_id, list);
       count++;
