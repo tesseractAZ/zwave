@@ -38,6 +38,8 @@ import {
   type NodeStats,
   type NodeEntity,
   type ControllerSnapshot,
+  type RouteStat,
+  type LogEvent,
 } from '../types';
 
 /* ─── raw HA response shapes (only the fields we read) ──────────────────── */
@@ -128,6 +130,8 @@ export interface ZwaveData {
   lastError(): string | null;
   /** Epoch ms of the last successful roster refresh (null before the first). */
   lastUpdated(): number | null;
+  /** Event + command log ring (newest first). */
+  events(): LogEvent[];
   /** The resolved config-entry id (null until discovered). */
   getEntryId(): string | null;
   /** Stop polling and clear timers. */
@@ -235,8 +239,19 @@ class ZwaveDataImpl implements ZwaveData {
   private entrySeeded = false;
   private lastOkAt: number | null = null;
   private deviceByNodeId = new Map<number, DeviceRec>();
+  private deviceIdToNodeId = new Map<string, number>();
   private entitiesByDeviceId = new Map<string, NodeEntity[]>();
   private entityCount = 0;
+
+  // v0.2 live statistics, merged into each NodeSnapshot / ControllerSnapshot.
+  private statsByNode = new Map<number, NodeStats>();
+  private ctrlStats: ControllerSnapshot['statistics'] = null;
+  /** Node status from the previous poll — diffed to log alive/dead/wake events. */
+  private prevStatus = new Map<number, NodeStatus>();
+  /** Event + command log ring (newest first), consumed by the Log screen. */
+  private logRing: LogEvent[] = [];
+  /** True once statistics subscriptions are live on the CURRENT connection. */
+  private statsSubscribed = false;
 
   private lastNodes: NodeSnapshot[] = [];
   private lastController: ControllerSnapshot | null = null;
@@ -262,11 +277,14 @@ class ZwaveDataImpl implements ZwaveData {
     if (this.started) return;
     this.started = true;
     this.stopped = false;
-    // Every (re)authentication reloads the registry join — an HA Core restart
-    // can rename/re-area devices, and the join would otherwise stay stale for
-    // the process lifetime.
-    this.client.onReady(() => { this.registriesLoaded = false; });
-    this.startLiveStatistics(); // v0.2 hook — currently a no-op
+    // Every (re)authentication reloads the registry join (an HA Core restart
+    // can rename/re-area devices) and re-establishes the statistics
+    // subscriptions (they are per-connection and die when the socket closes).
+    this.client.onReady(() => {
+      this.registriesLoaded = false;
+      this.statsSubscribed = false;
+      void this.subscribeStatistics();
+    });
     void this.tick();
   }
 
@@ -367,7 +385,17 @@ class ZwaveDataImpl implements ZwaveData {
       this.lastErr = 'network_status returned an empty node list';
       return false;
     }
-    this.lastNodes = ctrl.nodes.map((n) => this.buildNode(n)).sort((a, b) => a.nodeId - b.nodeId);
+    const nodes = ctrl.nodes.map((n) => this.buildNode(n)).sort((a, b) => a.nodeId - b.nodeId);
+    // Diff status vs the previous poll → log alive/dead/asleep transitions.
+    for (const n of nodes) {
+      const prev = this.prevStatus.get(n.nodeId);
+      if (prev !== undefined && prev !== n.status) {
+        const sev = n.status === NodeStatus.Dead ? 'error' : 'info';
+        this.pushLog('net', sev, n.nodeId, `${n.name} → ${n.statusLabel}`);
+      }
+      this.prevStatus.set(n.nodeId, n.status);
+    }
+    this.lastNodes = nodes;
     this.lastController = this.buildController(ctrl);
     this.lastErr = null;
     this.isReady = true;
@@ -429,6 +457,7 @@ class ZwaveDataImpl implements ZwaveData {
     }
 
     this.deviceByNodeId = deviceByNodeId;
+    this.deviceIdToNodeId = deviceIdToNodeId;
     this.entitiesByDeviceId = entitiesByDeviceId;
     this.entityCount = count;
   }
@@ -458,7 +487,7 @@ class ZwaveDataImpl implements ZwaveData {
       model: dev?.model ?? null,
       // v0.2 hook: read sensor.<slug>_battery_level via get_states for battery nodes.
       battery: null,
-      stats: emptyStats(),
+      stats: this.statsByNode.get(nodeId) ?? emptyStats(),
       entities: dev ? this.entitiesByDeviceId.get(dev.id) ?? [] : [],
     };
   }
@@ -477,31 +506,133 @@ class ZwaveDataImpl implements ZwaveData {
       manufacturer: dev?.manufacturer ?? null,
       model: dev?.model ?? null,
       isRebuildingRoutes: raw.is_rebuilding_routes === true,
-      // v0.2 hook: subscribe_controller_statistics.background_rssi (per-channel noise floor).
+      // HA's subscribe_controller_statistics event carries no background RSSI,
+      // so the per-channel noise floor stays empty (summary shows "noise —").
       backgroundRSSI: [],
-      // v0.2 hook: subscribe_controller_statistics counters. Map the raw
-      // misspelled 'timout_response' key → statistics.timeoutResponse then.
-      statistics: null,
+      statistics: this.ctrlStats,
     };
   }
 
-  /**
-   * v0.2 HOOK — live statistics + push status.
-   *
-   * When enabled this will, after each (re)auth (`client.onReady`):
-   *   • `client.subscribe({type:'zwave_js/subscribe_controller_statistics', entry_id}, …)`
-   *     → controller counters + per-channel background RSSI.
-   *   • per node `client.subscribe({type:'zwave_js/subscribe_node_statistics', device_id}, …)`
-   *     → live rtt / rssi / lwr / nlwr / TX-RX counters, throttled to `routePollMs`
-   *     for the expensive route recompute.
-   *   • `client.subscribe({type:'subscribe_events', event_type:'state_changed'}, …)`
-   *     filtered to `*_node_status` → push alive/dead/asleep transitions.
-   *
-   * v0.1 leaves it a no-op so the roster poll alone is the source of truth.
-   */
-  private startLiveStatistics(): void {
-    this.log(`live statistics deferred to v0.2 (route poll cadence ${this.routePollMs}ms)`);
+  /** Rolling event/command log (newest first) for the Log screen. */
+  events(): LogEvent[] {
+    return this.logRing;
   }
+
+  private pushLog(source: LogEvent['source'], severity: LogEvent['severity'], nodeId: number | null, text: string): void {
+    this.logRing.unshift({ ts: Date.now(), source, severity, nodeId, text });
+    if (this.logRing.length > 300) this.logRing.length = 300;
+  }
+
+  /**
+   * Establish the live statistics subscriptions on the current connection.
+   * Idempotent per connection; re-run on every (re)auth via `onReady`.
+   * Subscribing delivers each node's CURRENT statistics immediately, so the
+   * roster fully populates within seconds with no pinging.
+   */
+  private async subscribeStatistics(): Promise<void> {
+    if (this.statsSubscribed) return;
+    this.statsSubscribed = true;
+    try {
+      const entryId = await this.ensureEntryId();
+      if (!entryId) { this.statsSubscribed = false; return; }
+      await this.ensureRegistries();
+
+      await this.client.subscribe(
+        { type: 'zwave_js/subscribe_controller_statistics', entry_id: entryId },
+        (msg) => this.onControllerStats(msg.event),
+      );
+
+      // One subscription per end node (node 1 = controller, covered above).
+      const nodeDevices = [...this.deviceByNodeId.entries()].filter(([nodeId]) => nodeId !== 1);
+      await Promise.all(
+        nodeDevices.map(([, dev]) =>
+          this.client
+            .subscribe({ type: 'zwave_js/subscribe_node_statistics', device_id: dev.id }, (msg) => this.onNodeStats(msg.event))
+            .catch((e) => this.log(`node-stats subscribe failed (${dev.id}): ${errMsg(e)}`)),
+        ),
+      );
+      this.log(`live statistics: subscribed controller + ${nodeDevices.length} nodes`);
+    } catch (e) {
+      this.statsSubscribed = false;
+      this.log(`subscribeStatistics failed: ${errMsg(e)}`);
+    }
+  }
+
+  /** Map a raw node-statistics event (snake_case) → cached NodeStats. */
+  private onNodeStats(ev: unknown): void {
+    const e = ev as Record<string, unknown> | null;
+    if (!e || e.source !== 'node' || typeof e.nodeId !== 'number') return;
+    const nodeId = e.nodeId;
+    const prev = this.statsByNode.get(nodeId);
+    const stats: NodeStats = {
+      rtt: num(e.rtt),
+      rssi: num(e.rssi),
+      lwr: this.mapRoute(e.lwr),
+      nlwr: this.mapRoute(e.nlwr),
+      commandsTX: int(e.commands_tx),
+      commandsRX: int(e.commands_rx),
+      commandsDroppedTX: int(e.commands_dropped_tx),
+      commandsDroppedRX: int(e.commands_dropped_rx),
+      timeoutResponse: int(e.timeout_response),
+      lastSeen: Date.now(),
+    };
+    this.statsByNode.set(nodeId, stats);
+    // Log a route change (repeater chain differs) so the mesh's re-routing is visible.
+    if (prev && routeKey(prev.lwr) !== routeKey(stats.lwr)) {
+      this.pushLog('net', 'info', nodeId, `route → ${fmtRoute(stats.lwr)}`);
+    }
+  }
+
+  /** Map the raw controller-statistics event (note the misspelled key). */
+  private onControllerStats(ev: unknown): void {
+    const e = ev as Record<string, unknown> | null;
+    if (!e || e.source !== 'controller') return;
+    this.ctrlStats = {
+      messagesTX: int(e.messages_tx),
+      messagesRX: int(e.messages_rx),
+      messagesDroppedTX: int(e.messages_dropped_tx),
+      messagesDroppedRX: int(e.messages_dropped_rx),
+      NAK: int(e.nak),
+      CAN: int(e.can),
+      timeoutACK: int(e.timeout_ack),
+      timeoutResponse: int(e.timout_response), // driver misspells 'timeout'
+    };
+  }
+
+  /** Convert a raw route (repeaters as HA device_ids) → RouteStat (node ids). */
+  private mapRoute(r: unknown): RouteStat | null {
+    const raw = r as Record<string, unknown> | null;
+    if (!raw) return null;
+    const resolve = (devId: unknown): number => this.deviceIdToNodeId.get(String(devId)) ?? 0;
+    const repeaters = Array.isArray(raw.repeaters) ? raw.repeaters.map(resolve).filter((n) => n > 0) : [];
+    const rfb = raw.route_failed_between;
+    return {
+      repeaters,
+      protocolDataRate: num(raw.protocol_data_rate),
+      rssi: num(raw.rssi),
+      repeaterRSSI: Array.isArray(raw.repeater_rssi) ? raw.repeater_rssi.map(num).filter((x): x is number => x != null) : [],
+      routeFailedBetween:
+        Array.isArray(rfb) && rfb.length === 2 ? [resolve(rfb[0]), resolve(rfb[1])] : null,
+    };
+  }
+}
+
+/** Coerce to a finite number or null. */
+function num(x: unknown): number | null {
+  return typeof x === 'number' && Number.isFinite(x) ? x : null;
+}
+/** Coerce to a finite integer, defaulting to 0. */
+function int(x: unknown): number {
+  return typeof x === 'number' && Number.isFinite(x) ? Math.trunc(x) : 0;
+}
+/** Stable key of a route's repeater chain, for change detection. */
+function routeKey(r: RouteStat | null): string {
+  return r ? r.repeaters.join('>') : '';
+}
+/** Human route summary for the log ("direct" or "3→7→…"). */
+function fmtRoute(r: RouteStat | null): string {
+  if (!r) return 'unknown';
+  return r.repeaters.length ? r.repeaters.join('→') : 'direct';
 }
 
 /** Construct and start the Z-Wave data layer. The caller owns `stop()`. */
