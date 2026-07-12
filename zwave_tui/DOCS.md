@@ -71,11 +71,24 @@ over it and dismisses with `q` or `Esc`, preserving your selection.
 | `t` | Toggle signal display (margin ↔ dBm) |
 | `1`–`6` | Jump to Overview / Detail / Controller / Topology / Heatmap / Log |
 | `c` / `e` | Jump to Controller / Log |
-| `p` | Ping the selected node (safe; gated) |
 | `q` | Quit the session |
 
-**Overlays** — `q` / `Esc` close and return to Overview. `j` / `k` scroll,
-`Enter` drills into the focused node where applicable.
+**Actions** (only when **Enable Write Actions** is on) — operate on the selected
+node unless noted:
+
+| Key | Action |
+| --- | --- |
+| `p` | **Ping** (safe, idempotent — runs immediately) |
+| `i` | **Re-interview** the node (heavy) |
+| `h` | **Heal** — rebuild the node's routes |
+| `x` | **Remove** a failed node (always confirms) |
+| `R` | **Rebuild ALL** routes — disrupts the whole mesh (always confirms) |
+
+Mutating actions prompt `y` to confirm / any other key to cancel; each outcome
+is written to the **Log** screen. `Enter` opens Detail (whose footer lists the
+per-node actions when write actions are on).
+
+**Overlays** — `q` / `Esc` close and return to Overview.
 
 ## Health score
 
@@ -110,15 +123,22 @@ Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 55, **F** < 55.
 
 ## Write actions & safety
 
-v0.1 ships **read-only**. The **Enable Write Actions** option is off, so the
-add-on only observes the mesh (ping is the sole safe/idempotent probe and is
-still gated behind the same switch).
+The add-on is **read-only by default** — **Enable Write Actions** is off, so it
+only observes the mesh and the `p`/`i`/`h`/`x`/`R` keys do nothing.
 
-When you later enable write actions, network-disruptive operations
-(rebuild-all-routes, remove-failed-node) additionally require the
-**Confirm Destructive Actions** prompt. If you expose the mesh controls on an
-untrusted LAN, turn on the **login gate** (below) so actuating the mesh requires
-a credential.
+Turn **Enable Write Actions** on to unlock the remediation actions (ping,
+re-interview, heal/rebuild a node's routes, rebuild all routes, remove a failed
+node). Then:
+
+- **Ping** runs immediately (safe, idempotent).
+- Every other action prompts a `y`-to-confirm step when **Confirm Destructive
+  Actions** is on (the default). **Rebuild ALL routes** and **Remove failed
+  node** always confirm regardless — they disrupt the mesh / delete a node.
+- Every action's outcome is logged to the **Log** screen.
+
+Because the telnet transport and `/console` are unauthenticated on the LAN,
+turn on the **login gate** (below) if you expose the mesh controls off-host, so
+actuating the mesh requires a credential.
 
 ## Authentication
 

@@ -19,7 +19,7 @@
 
 import { createServer } from 'node:net';
 import type { Socket } from 'node:net';
-import type { DataProvider } from '../types';
+import type { DataProvider, ActionRunner } from '../types';
 import type { AuthPolicy } from '../auth/loginPolicy';
 import { TuiSession } from './session';
 import type { SessionEvent } from './session';
@@ -181,6 +181,8 @@ export interface TelnetServerOptions {
   /** Login policy. Telnet is always direct LAN — never trusted — so an enabled
    *  policy always gates it. */
   auth?: AuthPolicy;
+  /** Mutating-action runner (v0.3), present only when write_actions_enabled. */
+  actions?: ActionRunner;
 }
 
 /** Concurrent telnet connection cap — bounds resource use (and, with the login
@@ -188,7 +190,7 @@ export interface TelnetServerOptions {
 const MAX_TELNET_CONNS = 16;
 
 export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void } {
-  const { data, host, port, log, signalDisplay, auth } = opts;
+  const { data, host, port, log, signalDisplay, auth, actions } = opts;
   const conns = new Set<TelnetConn>();
 
   const safeWrite = (socket: Socket, payload: string | Buffer) => {
@@ -272,6 +274,7 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       signalDisplay,
       log,
       auth,
+      actions,
       trusted: false, // telnet is direct LAN — never HA-authenticated
       peer: socket.remoteAddress ?? '?',
       onClose: () => { try { socket.end(); } catch { /* already gone */ } },

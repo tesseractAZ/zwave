@@ -191,7 +191,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   }
 
   /* ── frame + fit to exactly H rows ───────────────────────────────────────── */
-  return frameToHeight(body, footer(health, inner), inner, W, H);
+  return frameToHeight(body, footer(health, inner, ctx.actionsEnabled ?? false), inner, W, H);
 }
 
 /* ── route rendering ─────────────────────────────────────────────────────── */
@@ -327,13 +327,19 @@ function topBorder(inner: number, title: string): string {
 }
 
 /** Footer: this node's flag meanings on the left, dismiss hint on the right. */
-function footer(health: { flags: string[] }, inner: number): string {
-  const left = health.flags.length
-    ? c.grey('flags: ') +
-      health.flags
-        .map((f) => flagColor([f])(f) + c.grey(' ' + (FLAG_MEANING[f] ?? '?')))
-        .join(c.grey(' · '))
-    : c.grey('RF health nominal');
+function footer(health: { flags: string[] }, inner: number, actionsEnabled: boolean): string {
+  // When write actions are on, the footer advertises the per-node actions;
+  // otherwise it shows the node's flag meanings.
+  const key = (k: string, label: string) => c.cyanB(k) + c.grey(' ' + label);
+  const left = actionsEnabled
+    ? c.grey('actions: ') +
+      [key('p', 'ping'), key('i', 're-interview'), key('h', 'heal'), key('x', 'remove')].join(c.grey(' · '))
+    : health.flags.length
+      ? c.grey('flags: ') +
+        health.flags
+          .map((f) => flagColor([f])(f) + c.grey(' ' + (FLAG_MEANING[f] ?? '?')))
+          .join(c.grey(' · '))
+      : c.grey('RF health nominal');
   const right = c.cyanB('q') + c.grey('/') + c.cyanB('Esc') + c.grey(' back');
   return ' ' + lr(left, right, inner - 1);
 }
