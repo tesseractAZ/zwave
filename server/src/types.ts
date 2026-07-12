@@ -185,6 +185,42 @@ export type InputEvent =
   | { type: 'escape' }
   | { type: 'ctrlc' };
 
+/** Outcome of a remediation action. */
+export interface ActionResult {
+  ok: boolean;
+  message: string;
+}
+
+/** The kinds of mutating action the TUI can request. */
+export type ActionKind =
+  | 'ping'
+  | 'refreshValues'
+  | 'reInterview'
+  | 'healNode'
+  | 'rebuildAll'
+  | 'stopRebuild'
+  | 'removeFailed';
+
+/**
+ * Mutating-action surface (v0.3). Implemented by the data layer, passed to the
+ * session ONLY when `write_actions_enabled`. Every method logs its outcome into
+ * the event ring so the Log screen closes the loop. Node-scoped actions take a
+ * node id; network-wide ones take none.
+ */
+export interface ActionRunner {
+  /** Master gate — false = read-only, the session must not offer actions. */
+  readonly enabled: boolean;
+  /** Require a confirm step for mutating (non-ping) actions. */
+  readonly confirmDestructive: boolean;
+  ping(nodeId: number): Promise<ActionResult>;
+  refreshValues(nodeId: number): Promise<ActionResult>;
+  reInterview(nodeId: number): Promise<ActionResult>;
+  healNode(nodeId: number): Promise<ActionResult>;
+  rebuildAll(): Promise<ActionResult>;
+  stopRebuild(): Promise<ActionResult>;
+  removeFailed(nodeId: number): Promise<ActionResult>;
+}
+
 /** Context handed to each screen renderer. */
 export interface ScreenCtx {
   view: ViewState;
@@ -193,4 +229,6 @@ export interface ScreenCtx {
   visibleNodes: NodeSnapshot[];
   /** true while the `/` filter-capture mode is active (shows the live prompt) */
   filtering?: boolean;
+  /** true when mutating actions (ping/heal/…) are available (write_actions on) */
+  actionsEnabled?: boolean;
 }

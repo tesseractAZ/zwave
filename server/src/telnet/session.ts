@@ -19,11 +19,13 @@
  * own: byte parsing, connection lifecycle, and any protocol negotiation.
  */
 
-import type { DataProvider, ScreenCtx, ViewState } from '../types';
+import type { DataProvider, ScreenCtx, ViewState, ActionRunner, ActionKind } from '../types';
 import { applyKey, clampSelection, visibleNodes } from './input';
 import type { InputEvent } from './input';
 import { renderScreen } from './screens/index';
 import { renderLogin } from './screens/login';
+import { centeredNotice } from './screens/overview';
+import { c } from './ansi';
 import type { AuthPolicy } from '../auth/loginPolicy';
 import {
   HIDE_CURSOR, CURSOR_HOME, CLEAR_EOL, CLEAR_BELOW,
@@ -63,10 +65,20 @@ export interface TuiSessionOptions {
   peer?: string;
   /** Transport callback to drop the connection (used on login lockout). */
   onClose?: () => void;
+  /** Mutating-action runner (v0.3). Present only when write_actions_enabled. */
+  actions?: ActionRunner;
 }
 
 /** Session lifecycle mode: the login gate, the live TUI, or a terminal deny. */
 type SessionMode = 'login' | 'tui' | 'denied';
+
+/** A mutating action awaiting confirmation / in flight. */
+interface PendingAction {
+  kind: ActionKind;
+  nodeId: number | null;
+  label: string;
+  destructive: boolean;
+}
 
 /**
  * One TUI session: the render/input state machine. Construct one per
@@ -111,6 +123,17 @@ export class TuiSession {
   private verifying = false;
   /** Transport callback to drop the connection (e.g. on login lockout). */
   private readonly onClose?: () => void;
+
+  /* ── action state (v0.3) ────────────────────────────────────────────────── */
+  private readonly actions?: ActionRunner;
+  /** A mutating action awaiting a y/n confirmation (null = not confirming). */
+  private pendingAction: PendingAction | null = null;
+  /** True while an action's WS call is in flight. */
+  private actionInFlight = false;
+  /** Transient outcome card ("✓/✗ …"), dismissed by the next keypress. */
+  private actionNotice: string | null = null;
+  /** Label of the action currently in flight (for the "working" card). */
+  private actionRunningLabel = '';
   /** Epoch ms of the last keystroke — drives the idle re-lock. */
   private lastActivity = Date.now();
 
@@ -121,6 +144,7 @@ export class TuiSession {
     this.auth = opts.auth;
     this.peer = opts.peer ?? '?';
     this.onClose = opts.onClose;
+    this.actions = opts.actions;
     this.view = {
       screen: 'overview',
       cols: clamp(opts.width ?? 80, 60, 200),
@@ -310,6 +334,29 @@ export class TuiSession {
         continue;
       }
 
+      // An action is in flight — swallow keys until it resolves.
+      if (this.actionInFlight) continue;
+
+      // A pending action awaits y/n confirmation.
+      if (this.pendingAction != null) {
+        this.handleConfirmKey(ev);
+        dirty = true;
+        continue;
+      }
+
+      // A finished-action outcome card is up — any key dismisses it.
+      if (this.actionNotice != null) {
+        this.actionNotice = null;
+        dirty = true;
+        continue;
+      }
+
+      // Mutating-action keys (only when write actions are enabled).
+      if (this.actions?.enabled && ev.type === 'char' && this.handleActionKey(ev.ch)) {
+        dirty = true;
+        continue;
+      }
+
       const r = applyKey(this.view, ev, this.data, this.log);
       if (r.quit) return { quit: true }; // 'q' from the Overview home disconnects
       if (r.filter === 'start') {
@@ -358,6 +405,94 @@ export class TuiSession {
     return false;
   }
 
+  /* ── mutating actions (v0.3) ────────────────────────────────────────────── */
+
+  /** Route an action key to a request. Returns true if it was an action key. */
+  private handleActionKey(ch: string): boolean {
+    const sel = visibleNodes(this.data, this.view)[this.view.selected];
+    const nodeId = sel?.nodeId ?? null;
+    const on = sel ? ` (${sel.name})` : '';
+    switch (ch) {
+      case 'p':
+        if (nodeId == null) return false;
+        this.startAction({ kind: 'ping', nodeId, label: `Ping node ${nodeId}${on}`, destructive: false });
+        return true;
+      case 'i':
+        if (nodeId == null) return false;
+        this.startAction({ kind: 'reInterview', nodeId, label: `Re-interview node ${nodeId}${on}`, destructive: true });
+        return true;
+      case 'h':
+        if (nodeId == null) return false;
+        this.startAction({ kind: 'healNode', nodeId, label: `Rebuild routes for node ${nodeId}${on}`, destructive: true });
+        return true;
+      case 'x':
+        if (nodeId == null) return false;
+        // Destructive — always confirm regardless of the confirm_destructive flag.
+        this.startAction({ kind: 'removeFailed', nodeId, label: `REMOVE failed node ${nodeId}${on}`, destructive: true }, true);
+        return true;
+      case 'R':
+        // Network-wide + disruptive — always confirm.
+        this.startAction({ kind: 'rebuildAll', nodeId: null, label: 'Rebuild ALL routes — disrupts the whole mesh', destructive: true }, true);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /** Either confirm (destructive + gated/forced) or execute immediately (ping). */
+  private startAction(action: PendingAction, forceConfirm = false): void {
+    const needConfirm = action.destructive && (this.actions!.confirmDestructive || forceConfirm);
+    if (needConfirm) this.pendingAction = action;
+    else void this.executeAction(action);
+  }
+
+  private handleConfirmKey(ev: InputEvent): void {
+    const a = this.pendingAction!;
+    this.pendingAction = null;
+    // Confirm executes; anything else cancels SILENTLY (return straight to the
+    // screen — cancelling must not cost an extra keypress to dismiss a notice).
+    if (ev.type === 'char' && (ev.ch === 'y' || ev.ch === 'Y')) void this.executeAction(a);
+  }
+
+  private async executeAction(action: PendingAction): Promise<void> {
+    if (!this.actions) return;
+    this.actionInFlight = true;
+    this.actionRunningLabel = action.label;
+    this.lastFrameHash = '';
+    this.draw();
+    const a = this.actions;
+    let res: { ok: boolean; message: string };
+    try {
+      switch (action.kind) {
+        case 'ping': res = await a.ping(action.nodeId!); break;
+        case 'refreshValues': res = await a.refreshValues(action.nodeId!); break;
+        case 'reInterview': res = await a.reInterview(action.nodeId!); break;
+        case 'healNode': res = await a.healNode(action.nodeId!); break;
+        case 'rebuildAll': res = await a.rebuildAll(); break;
+        case 'stopRebuild': res = await a.stopRebuild(); break;
+        case 'removeFailed': res = await a.removeFailed(action.nodeId!); break;
+        default: res = { ok: false, message: 'unknown action' };
+      }
+    } catch (e) {
+      res = { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+    this.actionInFlight = false;
+    this.actionNotice = res.ok ? `✓  ${action.label}` : `✗  ${res.message}`;
+    this.lastFrameHash = '';
+    this.draw();
+  }
+
+  private renderConfirm(): string[] {
+    const a = this.pendingAction!;
+    return centeredNotice(this.view, a.destructive ? '⚠  CONFIRM ACTION' : 'CONFIRM', [
+      (a.destructive ? c.redB : c.whiteB)(a.label),
+      '',
+      c.grey('This actuates your live Z-Wave mesh.'),
+      '',
+      c.greenB('y') + c.grey(' = confirm      ') + c.grey('n / Esc / any = cancel'),
+    ]);
+  }
+
   /** Build the array of frame lines for the current state. */
   private renderLines(): string[] {
     if (this.mode === 'login' || this.mode === 'denied') {
@@ -374,6 +509,15 @@ export class TuiSession {
         checking: this.verifying,
       });
     }
+    // Action modals (v0.3): confirm → working → outcome.
+    if (this.pendingAction != null) return this.renderConfirm();
+    if (this.actionInFlight) {
+      return centeredNotice(this.view, 'WORKING', [c.yellow(this.actionRunningLabel || 'running…'), '', c.grey('sending command to the mesh…')]);
+    }
+    if (this.actionNotice != null) {
+      const ok = this.actionNotice.startsWith('✓');
+      return centeredNotice(this.view, 'RESULT', [(ok ? c.green : c.red)(this.actionNotice), '', c.grey('press any key to continue · see the Log screen for history')]);
+    }
     const vis = visibleNodes(this.data, this.view);
     // Defensive clamp — the roster can shrink between frames (a node drops out
     // of the filter, or leaves the mesh) and leave `selected` past the end.
@@ -382,7 +526,13 @@ export class TuiSession {
     } else if (this.view.selected > vis.length - 1) {
       this.view.selected = vis.length - 1;
     }
-    const ctx: ScreenCtx = { view: this.view, data: this.data, visibleNodes: vis, filtering: this.filtering };
+    const ctx: ScreenCtx = {
+      view: this.view,
+      data: this.data,
+      visibleNodes: vis,
+      filtering: this.filtering,
+      actionsEnabled: this.actions?.enabled ?? false,
+    };
     return renderScreen(ctx);
   }
 

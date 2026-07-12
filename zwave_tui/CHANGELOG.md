@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0 — 2026-07-11
+
+Safe remediation actions — the TUI can now *act* on the mesh, not just report.
+
+- **Mutating actions** behind **Enable Write Actions** (default off, so nothing
+  changes until you opt in): **ping** (safe/idempotent, runs immediately),
+  **re-interview** (`refresh_node_info`), **refresh values**, **heal** a node's
+  routes (`rebuild_node_routes`), **rebuild ALL routes**
+  (`begin_rebuilding_routes` / `stop`), and **remove a failed node**.
+- **Confirmation gate**: non-ping actions prompt `y` to confirm when **Confirm
+  Destructive Actions** is on; **rebuild-all** and **remove-failed** always
+  confirm regardless (mesh-wide / destructive). Cancelling returns to the screen
+  with no side effect.
+- **Closed-loop logging**: every action's start + outcome is written to the
+  **Log** screen (`ping node 3 → ok`, `rebuild routes node 5 → failed: …`).
+- The **Detail** footer lists the per-node actions when write actions are on.
+- Command shapes were probed against the live driver (`rebuild_node_routes`,
+  not the removed `heal_node`; ping via the `button.*_ping` entity). New tests
+  cover the runner (gating + exact command construction) and the session
+  confirm/cancel safety gates (41 total).
+
 ## 0.2.1 — 2026-07-11
 
 Fixes from an aggressive live verification (14 confirmed findings).

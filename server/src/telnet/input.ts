@@ -224,13 +224,15 @@ export function applyKey(
     case 'o':
       view.errorsOnly = !view.errorsOnly;
       return REDRAW;
-    // ── mutating actions — READ-ONLY in v0.1: recognized, but no-op ──────────
+    // ── mutating actions — handled by the session ONLY when write_actions is
+    //    enabled (it intercepts these before applyKey). If we reach here, write
+    //    actions are off, so they are recognized but no-op with a hint. ────────
     case 'p':
     case 'i':
     case 'h':
     case 'R':
     case 'x':
-      log(`read-only in v0.1: '${ch}' action disabled (enable write_actions to unlock)`);
+      log(`'${ch}' is a mutating action — enable "write_actions_enabled" in the add-on config to unlock`);
       return NOOP;
     default:
       return NOOP;

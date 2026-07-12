@@ -23,6 +23,7 @@ import { createAuth, isAllowedOrigin, isSupervisorSource } from './auth';
 import { createAuthPolicy } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
+import { createActionRunner } from './zwave/zwaveActions';
 import { createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
 import { registerWsConsole } from './telnet/wsConsole';
 import { startTelnetServer } from './telnet/server';
@@ -76,6 +77,24 @@ async function main(): Promise<void> {
     log,
   });
 
+  // 4b) Mutating-action runner (v0.3), gated by write_actions_enabled. Outcomes
+  //     are logged into the event ring (Log screen). Passed to the transports
+  //     only so the session can offer actions when enabled.
+  const actions = createActionRunner({
+    client,
+    entryId: () => zwaveData.getEntryId(),
+    deviceIdOf: (n) => zwaveData.deviceIdOf(n),
+    pingEntityOf: (n) => zwaveData.pingEntityOf(n),
+    log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
+    enabled: config.writeActions,
+    confirmDestructive: config.confirmDestructive,
+  });
+  log(
+    config.writeActions
+      ? `write actions ENABLED (confirm=${config.confirmDestructive}) — ping/refresh/re-interview/heal/rebuild/remove`
+      : 'write actions disabled (read-only) — set write_actions_enabled to unlock',
+  );
+
   // 5) Auth (origin allow-list + write-token bootstrap). v0.1 exposes no
   //    mutating routes, but the CORS + ws-origin policy still applies.
   const auth = createAuth({ host: config.host, port: config.port });
@@ -114,6 +133,7 @@ async function main(): Promise<void> {
     signalDisplay: config.signalDisplay,
     auth: loginPolicy,
     isTrusted: isIngressTrusted,
+    actions,
   });
 
   // Ingress landing → the terminal console.
@@ -142,6 +162,7 @@ async function main(): Promise<void> {
       log,
       signalDisplay: config.signalDisplay,
       auth: loginPolicy,
+      actions,
     });
     log(`telnet TUI on ${config.telnet.host}:${config.telnet.port} (no auth — trusted LAN only)`);
   } else {
