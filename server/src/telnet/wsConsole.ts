@@ -28,7 +28,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { WebSocket } from '@fastify/websocket';
-import type { DataProvider } from '../types';
+import type { DataProvider, ActionRunner } from '../types';
 import type { AuthPolicy } from '../auth/loginPolicy';
 import { TuiSession } from './session';
 import type { InputEvent } from './input';
@@ -75,6 +75,8 @@ export interface WsConsoleOptions {
    * sets `requireOnIngress`. Direct LAN upgrades return false → gated.
    */
   isTrusted?: (req: FastifyRequest) => boolean;
+  /** Mutating-action runner (v0.3), present only when write_actions_enabled. */
+  actions?: ActionRunner;
 }
 
 /**
@@ -304,7 +306,7 @@ const CONSOLE_HTML = `<!doctype html>
  * call once after `@fastify/websocket` is registered.
  */
 export function registerWsConsole(opts: WsConsoleOptions): void {
-  const { app, data, log, isOriginAllowed, signalDisplay, auth, isTrusted } = opts;
+  const { app, data, log, isOriginAllowed, signalDisplay, auth, isTrusted, actions } = opts;
   const maxSessions = opts.maxSessions ?? MAX_WS_SESSIONS;
   const idleTimeoutMs = opts.idleTimeoutMs ?? WS_IDLE_TIMEOUT_MS;
 
@@ -376,6 +378,7 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
       signalDisplay,
       log,
       auth,
+      actions,
       trusted,
       peer: req.ip,
       onClose: () => { try { socket.close(); } catch { /* already closing */ } },

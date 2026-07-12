@@ -108,12 +108,12 @@ problem · `L` high latency · `I` incomplete interview · `B` battery low.
 
 ## Write actions & safety
 
-v0.1 ships **read-only**. **Enable Write Actions** defaults off — the add-on
-only observes the mesh (ping is the sole safe/idempotent probe and is still
-gated). When enabled, network-disruptive operations (rebuild-all-routes,
-remove-failed-node) additionally require **Confirm Destructive Actions**. If you
-expose mesh controls on an untrusted LAN, enable the login gate so actuating the
-mesh requires a credential.
+**Read-only by default.** **Enable Write Actions** is off, so the add-on only
+observes the mesh. Turn it on to unlock the remediation actions on the selected
+node — `p` ping (immediate), `i` re-interview, `h` heal (rebuild routes), `x`
+remove-failed, `R` rebuild-all. Mutating actions prompt `y` to confirm (rebuild-
+all and remove-failed always confirm); every outcome is logged to the Log
+screen. If you expose mesh controls on an untrusted LAN, enable the login gate.
 
 ## Releasing a new version
 

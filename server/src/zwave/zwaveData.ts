@@ -132,6 +132,12 @@ export interface ZwaveData {
   lastUpdated(): number | null;
   /** Epoch ms of the last statistics event (node or controller), or null. */
   lastStatsUpdated(): number | null;
+  /** node id → HA device_id (for mutating actions). */
+  deviceIdOf(nodeId: number): string | null;
+  /** node id → its ping button entity_id. */
+  pingEntityOf(nodeId: number): string | null;
+  /** Append an operator-action outcome to the event ring. */
+  logAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void;
   /** Event + command log ring (newest first). */
   events(): LogEvent[];
   /** The resolved config-entry id (null until discovered). */
@@ -252,6 +258,8 @@ class ZwaveDataImpl implements ZwaveData {
   private batteryByNode = new Map<number, number>();
   /** Battery-level sensor entity_id → node id (built with the registry join). */
   private batteryEntityToNode = new Map<string, number>();
+  /** node id → its `button.*_ping` entity_id (for the ping action). */
+  private pingEntityByNode = new Map<number, string>();
   /** Epoch ms of the last statistics event (node or controller) — freeze/health probe. */
   private lastStatsAt: number | null = null;
   /** Node status from the previous poll — diffed to log alive/dead/wake events. */
@@ -318,6 +326,18 @@ class ZwaveDataImpl implements ZwaveData {
 
   lastUpdated(): number | null {
     return this.lastOkAt;
+  }
+
+  /* ── action-runner resolvers (v0.3) ─────────────────────────────────────── */
+  deviceIdOf(nodeId: number): string | null {
+    return this.deviceByNodeId.get(nodeId)?.id ?? null;
+  }
+  pingEntityOf(nodeId: number): string | null {
+    return this.pingEntityByNode.get(nodeId) ?? null;
+  }
+  /** Append an operator-action outcome to the event ring (source 'you'). */
+  logAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void {
+    this.pushLog('you', severity, nodeId, text);
   }
 
   stop(): void {
@@ -476,6 +496,10 @@ class ZwaveDataImpl implements ZwaveData {
       // Remember the battery-level sensor so we can read its % from get_states.
       if (e.entity_id.startsWith('sensor.') && /battery/i.test(e.entity_id)) {
         this.batteryEntityToNode.set(e.entity_id, deviceIdToNodeId.get(e.device_id)!);
+      }
+      // Remember the ping button for the v0.3 ping action.
+      if (e.entity_id.startsWith('button.') && /ping/i.test(e.entity_id)) {
+        this.pingEntityByNode.set(deviceIdToNodeId.get(e.device_id)!, e.entity_id);
       }
     }
 
