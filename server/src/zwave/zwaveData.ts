@@ -37,6 +37,7 @@ import {
   type NodeSnapshot,
   type NodeStats,
   type NodeEntity,
+  type FirmwareInfo,
   type ControllerSnapshot,
   type RouteStat,
   type LogEvent,
@@ -286,6 +287,12 @@ class ZwaveDataImpl implements ZwaveData {
   private batteryEntityToNode = new Map<string, number>();
   /** node id → its `button.*_ping` entity_id (for the ping action). */
   private pingEntityByNode = new Map<number, string>();
+  /** node id → its `update.*` firmware entity_ids (a node may have >1 target). */
+  private updateEntitiesByNode = new Map<number, string[]>();
+  /** `update.*` firmware entity_id → node id (for the get_states join). */
+  private updateEntityToNode = new Map<string, number>();
+  /** Firmware-update status per node, from get_states of the update entities. */
+  private firmwareByNode = new Map<number, FirmwareInfo>();
   /** Epoch ms of the last statistics event (node or controller) — freeze/health probe. */
   private lastStatsAt: number | null = null;
   /** Node status from the previous poll — diffed to log alive/dead/wake events. */
@@ -446,6 +453,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.statsSubscribed = false;
         this.statsByNode.clear();
         this.batteryByNode.clear();
+        this.firmwareByNode.clear();
         // NOTE: histByNode is intentionally NOT cleared. It is keyed by Z-Wave
         // node id (stable across a config-entry re-discovery) and is display-only,
         // so preserving it keeps the sparkline trend continuous through a wedge —
@@ -508,6 +516,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.statsByNode.clear();
         this.batteryByNode.clear();
         this.histByNode.clear();
+        this.firmwareByNode.clear();
       }
       this.lastHomeId = homeId;
     }
@@ -557,6 +566,9 @@ class ZwaveDataImpl implements ZwaveData {
     }
 
     const entitiesByDeviceId = new Map<string, NodeEntity[]>();
+    // Rebuilt fresh on every (re)join so a removed node leaves no stale mapping.
+    this.updateEntitiesByNode.clear();
+    this.updateEntityToNode.clear();
     let count = 0;
     for (const e of entities) {
       if (e.platform !== 'zwave_js') continue;
@@ -577,6 +589,17 @@ class ZwaveDataImpl implements ZwaveData {
       // Remember the ping button for the v0.3 ping action.
       if (e.entity_id.startsWith('button.') && /ping/i.test(e.entity_id)) {
         this.pingEntityByNode.set(deviceIdToNodeId.get(e.device_id)!, e.entity_id);
+      }
+      // Remember the firmware update entity/-ies (device_class 'firmware', read
+      // from get_states). These are `zwave_js`-platform update.* entities on a
+      // node device — the add-on/integration `update.*` entities are a different
+      // platform and aren't on a node device, so they never land here.
+      if (e.entity_id.startsWith('update.')) {
+        const nid = deviceIdToNodeId.get(e.device_id)!;
+        const arr = this.updateEntitiesByNode.get(nid) ?? [];
+        arr.push(e.entity_id);
+        this.updateEntitiesByNode.set(nid, arr);
+        this.updateEntityToNode.set(e.entity_id, nid);
       }
     }
 
@@ -612,6 +635,7 @@ class ZwaveDataImpl implements ZwaveData {
       battery: this.batteryByNode.has(nodeId)
         ? { level: this.batteryByNode.get(nodeId)!, isLow: this.batteryByNode.get(nodeId)! <= 25 }
         : null,
+      firmware: this.firmwareByNode.get(nodeId) ?? null,
       stats: this.statsByNode.get(nodeId) ?? emptyStats(),
       entities: dev ? this.entitiesByDeviceId.get(dev.id) ?? [] : [],
     };
@@ -631,6 +655,7 @@ class ZwaveDataImpl implements ZwaveData {
       manufacturer: dev?.manufacturer ?? null,
       model: dev?.model ?? null,
       isRebuildingRoutes: raw.is_rebuilding_routes === true,
+      firmwareUpdatesAvailable: [...this.firmwareByNode.values()].filter((f) => f.updateAvailable).length,
       // HA's subscribe_controller_statistics event carries no background RSSI,
       // so the per-channel noise floor stays empty (summary shows "noise —").
       backgroundRSSI: [],
@@ -677,26 +702,33 @@ class ZwaveDataImpl implements ZwaveData {
         ),
       );
       this.log(`live statistics: subscribed controller + ${nodeDevices.length} nodes`);
-      void this.fetchBatteryLevels();
+      void this.fetchEntityStates();
     } catch (e) {
       this.statsSubscribed = false;
       this.log(`subscribeStatistics failed: ${errMsg(e)}`);
     }
   }
 
-  /** Read battery-level sensor states once (levels move slowly; re-read on reconnect). */
-  private async fetchBatteryLevels(): Promise<void> {
-    if (this.batteryEntityToNode.size === 0) return;
+  /**
+   * Read slow-moving entity states in one get_states pass: battery levels AND
+   * firmware-update status. Both change rarely, so this rides the same cadence
+   * as the battery poll (called after each registry (re)load / on reconnect).
+   */
+  private async fetchEntityStates(): Promise<void> {
+    if (this.batteryEntityToNode.size === 0 && this.updateEntityToNode.size === 0) return;
     try {
-      const states = await this.client.send<Array<{ entity_id: string; state: string }>>({ type: 'get_states' });
+      const states = await this.client.send<RawEntityState[]>({ type: 'get_states' });
       for (const s of states) {
-        const nodeId = this.batteryEntityToNode.get(s.entity_id);
-        if (nodeId == null) continue;
-        const lvl = Number(s.state);
-        if (Number.isFinite(lvl)) this.batteryByNode.set(nodeId, Math.round(lvl));
+        const bNode = this.batteryEntityToNode.get(s.entity_id);
+        if (bNode != null) {
+          const lvl = Number(s.state);
+          if (Number.isFinite(lvl)) this.batteryByNode.set(bNode, Math.round(lvl));
+        }
       }
+      // Rebuilt fresh each pass (a node may have >1 firmware target — aggregated).
+      this.firmwareByNode = aggregateFirmware(states, this.updateEntityToNode);
     } catch (e) {
-      this.log(`battery levels fetch failed: ${errMsg(e)}`);
+      this.log(`entity states fetch failed: ${errMsg(e)}`);
     }
   }
 
@@ -819,6 +851,59 @@ function num(x: unknown): number | null {
 /** Coerce to a finite integer, defaulting to 0. */
 function int(x: unknown): number {
   return typeof x === 'number' && Number.isFinite(x) ? Math.trunc(x) : 0;
+}
+/** A non-empty version string (numbers coerced), else null. */
+function strOrNull(x: unknown): string | null {
+  if (typeof x === 'string') return x.length ? x : null;
+  if (typeof x === 'number' && Number.isFinite(x)) return String(x);
+  return null;
+}
+
+/** Minimal shape of a get_states entry we read (battery level, firmware update). */
+export interface RawEntityState {
+  entity_id: string;
+  state: string;
+  attributes?: Record<string, unknown>;
+}
+
+/**
+ * Aggregate firmware update entities → per-node {@link FirmwareInfo}. Pure, so
+ * the multi-target logic is unit-testable (a node can expose several `update.*`
+ * firmware entities, e.g. `_firmware` + `_firmware_2`):
+ *   - `updateAvailable` if ANY target is `on`; `inProgress` if ANY is applying.
+ *   - displayed versions come from a target that has an update / is applying,
+ *     else the first target (targets carry identical versions when all current).
+ * Entities absent from `updateEntityToNode` are ignored.
+ */
+export function aggregateFirmware(
+  states: RawEntityState[],
+  updateEntityToNode: Map<string, number>,
+): Map<number, FirmwareInfo> {
+  const fw = new Map<number, FirmwareInfo>();
+  for (const s of states) {
+    const nodeId = updateEntityToNode.get(s.entity_id);
+    if (nodeId == null) continue;
+    const a = s.attributes ?? {};
+    const on = s.state === 'on';
+    const inProg = a.in_progress === true;
+    const pct = typeof a.update_percentage === 'number' ? a.update_percentage : null;
+    const cur = strOrNull(a.installed_version);
+    const lat = strOrNull(a.latest_version);
+    const acc: FirmwareInfo =
+      fw.get(nodeId) ?? { current: null, latest: null, updateAvailable: false, inProgress: false, progressPct: null, targets: 0 };
+    acc.targets += 1;
+    if (on) acc.updateAvailable = true;
+    if (inProg) {
+      acc.inProgress = true;
+      if (pct != null) acc.progressPct = Math.max(acc.progressPct ?? 0, pct);
+    }
+    if (on || inProg || acc.current == null) {
+      acc.current = cur;
+      acc.latest = lat;
+    }
+    fw.set(nodeId, acc);
+  }
+  return fw;
 }
 /** Stable key of a route's repeater chain, for change detection. */
 function routeKey(r: RouteStat | null): string {

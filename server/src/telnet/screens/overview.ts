@@ -497,7 +497,15 @@ function flagsCell(flags: string[]): Cell {
   if (!t) return { t: '', color: c.grey };
   const has = (f: string) => flags.includes(f);
   const color =
-    has('D') || has('F') || has('R') ? c.red : has('W') || has('B') || has('L') ? c.yellow : has('S') ? c.cyan : c.grey;
+    has('D') || has('F') || has('R')
+      ? c.red
+      : has('W') || has('B') || has('L')
+        ? c.yellow
+        : has('S')
+          ? c.cyan
+          : has('U')
+            ? c.blue
+            : c.grey;
   return { t, color };
 }
 

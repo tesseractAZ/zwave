@@ -59,6 +59,16 @@ export interface NodeStats {
   lastSeen: number | null; // epoch ms
 }
 
+/** Firmware-update status for a node, from its `update.*` firmware entity/-ies. */
+export interface FirmwareInfo {
+  current: string | null; // installed_version
+  latest: string | null; // latest_version
+  updateAvailable: boolean; // any firmware target reports an update (state 'on')
+  inProgress: boolean; // a firmware update is currently applying
+  progressPct: number | null; // update_percentage while inProgress (0..100)
+  targets: number; // number of firmware update entities on this node (≥1)
+}
+
 /** A single Z-Wave node as the TUI sees it (controller = node 1). */
 export interface NodeSnapshot {
   nodeId: number;
@@ -77,6 +87,7 @@ export interface NodeSnapshot {
   manufacturer: string | null;
   model: string | null;
   battery: { level: number; isLow: boolean } | null; // null = mains-powered
+  firmware: FirmwareInfo | null; // null = no firmware update entity / unknown
   stats: NodeStats;
   entities: NodeEntity[];
 }
@@ -94,6 +105,7 @@ export interface ControllerSnapshot {
   manufacturer: string | null;
   model: string | null;
   isRebuildingRoutes: boolean;
+  firmwareUpdatesAvailable: number; // fleet count: nodes with a firmware update available
   backgroundRSSI: number[]; // per-channel noise floor (dBm), ch0..n
   statistics: {
     messagesTX: number;
