@@ -139,6 +139,7 @@ export interface DataProvider {
   scoreFor(nodeId: number): HealthResult;
   noiseFloor(): number; // representative background RSSI (dBm) for SNR-margin math
   hasRealNoise(): boolean; // true when noiseFloor() is a real reading, not the fallback
+  history(nodeId: number): { rssi: number[]; rtt: number[] }; // rolling trend for sparklines
   lastUpdated(): number | null; // epoch ms of the last successful roster refresh
   ready(): boolean; // has the first roster load completed?
   lastError(): string | null;

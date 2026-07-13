@@ -7,10 +7,21 @@
  * nodes in their own groups. Each row shows the repeater chain, the negotiated
  * data rate, and the route signal (margin or dBm, following the session toggle).
  *
+ *   hops   0 ████ 12   1 ██ 5   2 █ 3   3+ ░ 0
  *   ── Direct to controller (12) ───────────────────────────────────────
- *     n8  Kitchen Lamp    →  direct              100k   -61dBm
+ *     n8  Kitchen Lamp    →  direct           100k  ▇▅▃▁ -61dBm
  *   ── 2 hops (3) ──────────────────────────────────────────────────────
- *     n4  Back Bedroom    →  n3→n8               100k   -74dBm
+ *     n4  Back Bedroom    →  n3→n8            100k  ▇▃▃▁ -74dBm
+ *
+ * Terminal graphics layered on top of the (unchanged) route data:
+ *   • a hop-distribution mini-histogram under the title — Direct/1/2/3+ as
+ *     meter() bars scaled to the busiest bucket, coloured by mesh depth;
+ *   • a per-node signalBars(4) glyph drawn from the LWR route margin, right
+ *     before the numeric signal reading;
+ *   • the "Repeater load" bars are meter()s scaled to the heaviest repeater,
+ *     coloured red as the load climbs (single-point-of-failure warning).
+ * The histogram + per-node bars only appear when the window is wide/tall
+ * enough; they degrade off before any value is lost.
  *
  * A pinned "Repeater load" panel at the bottom tallies how many nodes lean on
  * each repeater — a repeater carrying many nodes is a single point of failure,
@@ -21,7 +32,8 @@
  * clamped to `view.cols`; the array is exactly `view.rows` long.
  */
 
-import { BOX, bar, c, lr, truncate } from '../ansi';
+import { BOX, c, lr, truncate } from '../ansi';
+import { meter, signalBars } from '../gauges';
 import {
   NodeStatus,
   type NodeSnapshot,
@@ -30,6 +42,9 @@ import {
   type ViewState,
 } from '../../types';
 import { centeredNotice } from './overview';
+
+/** A colour wrapper (matches the ansi `c.*` span helpers / gauges ColorFn). */
+type ColorFn = (s: string) => string;
 
 /** Driver "no reading" RSSI sentinels — shown as an em-dash, never as a level. */
 const RSSI_SENTINELS = new Set([127, 126, 125]);
@@ -90,39 +105,51 @@ export function renderTopology(ctx: ScreenCtx): string[] {
   let repeatedCount = 0;
   for (const [hops, list] of byHop) if (hops > 0) repeatedCount += list.length;
 
+  // Per-node route signal bars are worth the columns only when the row has room
+  // to spare — below this they'd crowd out the chain, so we drop them first.
+  const showBars = W >= 72;
+
   /* ── flat route-tree lines (title-less; group headers separate) ──────── */
   const tree: string[] = [];
   const hopKeys = [...byHop.keys()].sort((a, b) => a - b);
   for (const hops of hopKeys) {
     const list = byHop.get(hops)!.sort((a, b) => a.nodeId - b.nodeId);
     tree.push(groupHeader(view, hopLabel(hops), list.length));
-    for (const n of list) tree.push(nodeLine(view, n, n.stats.lwr, noise, nameBudget));
+    for (const n of list) tree.push(nodeLine(view, n, n.stats.lwr, noise, nameBudget, showBars));
   }
   if (lrNodes.length) {
     lrNodes.sort((a, b) => a.nodeId - b.nodeId);
     tree.push(groupHeader(view, 'Long-Range (direct to controller)', lrNodes.length));
-    for (const n of lrNodes) tree.push(nodeLine(view, n, n.stats.lwr, noise, nameBudget));
+    for (const n of lrNodes) tree.push(nodeLine(view, n, n.stats.lwr, noise, nameBudget, showBars));
   }
   if (pending.length) {
     pending.sort((a, b) => a.nodeId - b.nodeId);
     tree.push(groupHeader(view, 'Route pending', pending.length));
-    for (const n of pending) tree.push(nodeLine(view, n, null, noise, nameBudget));
+    for (const n of pending) tree.push(nodeLine(view, n, null, noise, nameBudget, showBars));
   }
+
+  /* ── hop-distribution mini-histogram (a row under the title) ─────────── */
+  // Only when there's real vertical room AND at least one routed node — an
+  // all-LR/all-pending mesh has nothing to distribute, so we skip it.
+  const showHist = H >= 18 && W >= 64 && directCount + repeatedCount > 0;
+  const histLines = showHist ? [hopHistogram(view, byHop, directCount)] : [];
 
   /* ── repeater-load panel (pinned to the bottom, kept in a small budget) ─ */
   const panel = repeaterLoadPanel(view, ctx, endNodes, nameBudget).slice(
     0,
-    Math.max(1, H - 3),
+    Math.max(1, H - 3 - histLines.length),
   );
 
-  /* ── assemble: title row + windowed tree + pinned panel = exactly H ───── */
+  /* ── assemble: title + optional histogram + windowed tree + panel = H ── */
   const out: string[] = [];
   out.push(truncate(titleBar(view, endNodes.length, directCount, repeatedCount, lrNodes.length, pending.length), W));
+  for (const line of histLines) out.push(truncate(line, W));
 
-  const bodyCap = Math.max(1, H - 1 - panel.length);
+  const headerRows = out.length; // title (+ histogram)
+  const bodyCap = Math.max(1, H - headerRows - panel.length);
   if (tree.length <= bodyCap) {
     for (const line of tree) out.push(truncate(line, W));
-    while (out.length < 1 + bodyCap) out.push('');
+    while (out.length < headerRows + bodyCap) out.push('');
   } else {
     const shown = bodyCap - 1; // reserve the last body row for the overflow note
     for (let i = 0; i < shown; i++) out.push(truncate(tree[i], W));
@@ -131,6 +158,46 @@ export function renderTopology(ctx: ScreenCtx): string[] {
   for (const line of panel) out.push(truncate(line, W));
 
   return out.slice(0, H);
+}
+
+/* ── hop-distribution histogram ──────────────────────────────────────────── */
+
+/**
+ * A one-line distribution of nodes by hop depth: Direct / 1 / 2 / 3+ rendered
+ * as meter() bars scaled to the busiest bucket, coloured by depth (deeper = a
+ * longer, more fragile path). Purely a visual summary of the counts already in
+ * the title bar — the numbers stay authoritative.
+ */
+function hopHistogram(
+  view: ViewState,
+  byHop: Map<number, NodeSnapshot[]>,
+  directCount: number,
+): string {
+  const W = view.cols;
+  const h1 = byHop.get(1)?.length ?? 0;
+  const h2 = byHop.get(2)?.length ?? 0;
+  let h3 = 0;
+  for (const [hops, list] of byHop) if (hops >= 3) h3 += list.length;
+
+  const buckets: { label: string; count: number; color: ColorFn }[] = [
+    { label: '0', count: directCount, color: c.green },
+    { label: '1', count: h1, color: c.green },
+    { label: '2', count: h2, color: c.yellow },
+    { label: '3+', count: h3, color: c.red },
+  ];
+  const max = Math.max(1, ...buckets.map((b) => b.count));
+  const barW = W >= 100 ? 8 : W >= 80 ? 6 : 4;
+
+  const cells = buckets.map(
+    (b) =>
+      c.grey(b.label) +
+      ' ' +
+      meter(b.count / max, barW, { color: b.color }) +
+      ' ' +
+      c.white(String(b.count)),
+  );
+  const line = '  ' + c.grey('hops') + '  ' + cells.join(c.grey('   '));
+  return truncate(line, W);
 }
 
 /* ── title / summary bar ─────────────────────────────────────────────────── */
@@ -186,6 +253,7 @@ function nodeLine(
   lwr: RouteStat | null,
   noise: number,
   nameBudget: number,
+  showBars: boolean,
 ): string {
   const dead = n.status === NodeStatus.Dead;
   const idColor = dead ? c.grey : n.isLongRange ? c.blue : c.white;
@@ -200,8 +268,29 @@ function nodeLine(
     c.grey('→') +
     '  ' +
     chainStr(n, lwr);
-  const right = rateCell(lwr) + '  ' + signalCell(view, lwr, noise);
+  // signalBars(4) drawn from the same LWR margin the numeric cell reports, so
+  // the glyph and the number always agree; dropped on narrow terminals.
+  const bars = showBars ? routeSignalBars(lwr, noise) + ' ' : '';
+  const right = rateCell(lwr) + '  ' + bars + signalCell(view, lwr, noise);
   return lr(left, right, view.cols);
+}
+
+/**
+ * A 4-cell WiFi-style strength glyph for the route, driven by the LWR margin
+ * (rssi − noise floor). The fill fraction is bucketed to line the bars' colour
+ * up with the numeric margin thresholds (≥17dB green · 5-16 yellow · <5 red).
+ * No usable reading → dim placeholder bars (keeps the column aligned).
+ */
+function routeSignalBars(lwr: RouteStat | null, noise: number): string {
+  const rssi = lwr?.rssi ?? null;
+  if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('▁▃▅▇');
+  const margin = rssi - noise;
+  let frac: number;
+  if (margin >= 17) frac = 1; // 4 bars, green
+  else if (margin >= 5) frac = 0.5; // 2 bars, yellow
+  else if (margin >= -3) frac = 0.25; // 1 bar, red
+  else frac = 0.1; // ~0 bars, red
+  return signalBars(frac, 4);
 }
 
 /** The repeater chain: "direct", "n3→n8", plus a red ⚠ if the route failed. */
@@ -279,11 +368,12 @@ function repeaterLoadPanel(
   for (const [id, k] of top) {
     const node = ctx.data.nodeById(id);
     const name = node ? node.name : '(unknown)';
-    const barColor = k >= 5 ? 'red' : k >= 3 ? 'yellow' : 'green';
+    // SPOF colouring: unlike a health meter, a FULL bar here is BAD — many nodes
+    // leaning on one repeater — so the colour is driven by load, not fill.
     const textColor = k >= 5 ? c.red : k >= 3 ? c.yellow : c.green;
     const left = '  ' + c.white(`n${id}`) + ' ' + c.white(truncate(name, nameBudget));
     const right =
-      bar(k / max, 8, barColor) +
+      meter(k / max, 8, { color: textColor }) +
       ' ' +
       textColor(`carries ${k} ${k === 1 ? 'node' : 'nodes'}`);
     lines.push(lr(left, right, view.cols));

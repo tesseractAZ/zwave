@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0 — 2026-07-11
+
+Terminal graphics — the TUI is now a control-room display.
+
+- New `gauges.ts` graphics library (unit-tested width contracts): block
+  **sparklines** + denser braille sparklines, **WiFi-style signal bars**,
+  zone-colored **meters**, labeled **gauges**, gradient **heat cells**.
+- **Per-node RSSI/RTT history** (rolling rings) drives the sparklines.
+- **Overview**: WiFi signal bars in the Signal column, a health micro-gauge by
+  each score, a mesh-health meter in the summary, and a right-hand RSSI trend
+  sparkline column (wide terminals).
+- **Detail**: a health gauge, RSSI + latency sparklines (min…max), an SNR-margin
+  meter, a drop% meter, a battery gauge, and per-hop signal bars in the routes.
+- **Controller**: a network-health gauge, a reliability meter, and the A–F grade
+  histogram as meter bars.
+- **Topology**: a hop-distribution histogram, per-node route signal bars, and
+  repeater-load meter bars flagging single-points-of-failure.
+- **Heatmap**: a real gradient heat-cell grid per area + per-area mean-margin
+  meters + a gradient legend.
+- All graphics are additive — every measured value is preserved; every screen
+  still returns exactly `rows` lines with zero width overflow (agent harnesses:
+  300+ geometry checks per screen). 50 tests.
+
 ## 0.3.0 — 2026-07-11
 
 Safe remediation actions — the TUI can now *act* on the mesh, not just report.

@@ -132,6 +132,8 @@ export interface ZwaveData {
   lastUpdated(): number | null;
   /** Epoch ms of the last statistics event (node or controller), or null. */
   lastStatsUpdated(): number | null;
+  /** Rolling RSSI/RTT history for a node (for sparklines). */
+  history(nodeId: number): { rssi: number[]; rtt: number[] };
   /** node id → HA device_id (for mutating actions). */
   deviceIdOf(nodeId: number): string | null;
   /** node id → its ping button entity_id. */
@@ -253,6 +255,8 @@ class ZwaveDataImpl implements ZwaveData {
 
   // v0.2 live statistics, merged into each NodeSnapshot / ControllerSnapshot.
   private statsByNode = new Map<number, NodeStats>();
+  /** v0.4 rolling per-node RSSI/RTT history for sparklines (bounded ring). */
+  private histByNode = new Map<number, { rssi: number[]; rtt: number[] }>();
   private ctrlStats: ControllerSnapshot['statistics'] = null;
   /** Battery level (%) per node, from get_states of the *_battery entities. */
   private batteryByNode = new Map<number, number>();
@@ -628,6 +632,12 @@ class ZwaveDataImpl implements ZwaveData {
     return this.lastStatsAt;
   }
 
+  /** Rolling RSSI/RTT history for a node (for sparklines). Empty when unknown. */
+  history(nodeId: number): { rssi: number[]; rtt: number[] } {
+    const h = this.histByNode.get(nodeId);
+    return h ? { rssi: [...h.rssi], rtt: [...h.rtt] } : { rssi: [], rtt: [] };
+  }
+
   /** Map a raw node-statistics event → cached NodeStats. */
   private onNodeStats(ev: unknown): void {
     const e = ev as Record<string, unknown> | null;
@@ -649,6 +659,19 @@ class ZwaveDataImpl implements ZwaveData {
       lastSeen: Date.now(),
     };
     this.statsByNode.set(nodeId, stats);
+
+    // Append to the rolling history (skip RSSI sentinels 125/126/127).
+    const HIST_MAX = 60;
+    const h = this.histByNode.get(nodeId) ?? { rssi: [], rtt: [] };
+    if (stats.rssi != null && stats.rssi < 0 && stats.rssi > -128) {
+      h.rssi.push(stats.rssi);
+      if (h.rssi.length > HIST_MAX) h.rssi.shift();
+    }
+    if (stats.rtt != null && stats.rtt >= 0) {
+      h.rtt.push(stats.rtt);
+      if (h.rtt.length > HIST_MAX) h.rtt.shift();
+    }
+    this.histByNode.set(nodeId, h);
     // Log a route change (repeater chain differs) so the mesh's re-routing is visible.
     if (prev && routeKey(prev.lwr) !== routeKey(stats.lwr)) {
       this.pushLog('net', 'info', nodeId, `route → ${fmtRoute(stats.lwr)}`);
