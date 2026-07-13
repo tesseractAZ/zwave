@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0 — 2026-07-13
+
+Persistent sparkline history — the RSSI/RTT trends now survive a restart.
+
+- **Trends persist across restarts.** The per-node RSSI/RTT sample rings that
+  feed the Overview/Detail sparklines were in-memory only, so every add-on
+  restart / HA-Core reconnect / power blip wiped them and the graphs came back
+  empty for minutes. They now flush to `/data/history.json` every 30s (and on
+  shutdown) and reload at boot, so a deploy or restart is visually seamless.
+  Dependency-free atomic JSON (temp-file + `rename`) — no `node:sqlite`, no
+  native build, portable to any Node.
+- **Two staleness guards** so a restored trend is never misleading: a 1h
+  wall-clock age cap, plus a host-boot guard that distrusts the snapshot when
+  the host has been up < 3min (on a no-RTC Pi the wall clock is pre-NTP right
+  after a power loss, so a "fresh"-looking timestamp can be hours stale — the
+  monotonic `os.uptime()` is immune). Future-dated snapshots are also dropped.
+- **Network-identity guard.** Per-node stats + history are now cleared only when
+  the controller `home_id` changes (a stick swap / different NVM backup), not on
+  every reconnect — so history survives an HA-Core restart but never aliases one
+  physical node's trend onto another after a controller change. (Supersedes the
+  0.4.1 "self-heal clears the history ring" behaviour, which wiped trends on
+  routine reconnects.)
+- 13 new tests (67 total). Reviewed by an adversarial pass; all findings
+  addressed or documented.
+
 ## 0.4.1 — 2026-07-11
 
 Graphics polish from an adversarial verification (12 confirmed + 3 plausible; no
