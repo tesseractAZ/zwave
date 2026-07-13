@@ -105,6 +105,7 @@ export interface ControllerSnapshot {
   manufacturer: string | null;
   model: string | null;
   isRebuildingRoutes: boolean;
+  rebuildStartedAt: number | null; // epoch ms the current rebuild-routes began (null = idle)
   firmwareUpdatesAvailable: number; // fleet count: nodes with a firmware update available
   backgroundRSSI: number[]; // per-channel noise floor (dBm), ch0..n
   statistics: {
@@ -151,7 +152,8 @@ export interface DataProvider {
   scoreFor(nodeId: number): HealthResult;
   noiseFloor(): number; // representative background RSSI (dBm) for SNR-margin math
   hasRealNoise(): boolean; // true when noiseFloor() is a real reading, not the fallback
-  history(nodeId: number): { rssi: number[]; rtt: number[] }; // rolling trend for sparklines
+  history(nodeId: number): { rssi: number[]; rtt: number[] }; // rolling fine trend for sparklines
+  historyLong(nodeId: number): { rssi: number[]; rtt: number[] }; // coarse long-horizon (~2h) trend
   lastUpdated(): number | null; // epoch ms of the last successful roster refresh
   ready(): boolean; // has the first roster load completed?
   lastError(): string | null;

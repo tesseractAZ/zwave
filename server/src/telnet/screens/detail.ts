@@ -169,6 +169,10 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     const rttHist = hist.rtt.filter((v) => Number.isFinite(v) && v >= 0);
     pushG(PRIO.rssiTrend, trendRow('Signal', rssiHist, 'dBm', lastColor(rssiHist, rssiColor), inner));
     pushG(PRIO.rttTrend, trendRow('Latency', rttHist, 'ms', lastColor(rttHist, rttColor), inner));
+    // Long-horizon coarse RSSI trend (~2h, 1 pt/min). Shed first when space is
+    // tight; needs a few points before it says anything, and seeds from disk.
+    const longRssi = data.historyLong(n.nodeId).rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
+    if (longRssi.length >= 3) pushG(PRIO.rssiLong, trendRow('Sig 2h', longRssi, 'dBm', lastColor(longRssi, rssiColor), inner));
 
     // Drop% = (droppedTX + response timeouts) / TX, clamped so the headline and
     // the "N of M" text stay sane even if the driver's counters briefly disagree.
@@ -249,7 +253,8 @@ const PRIO = {
   battery: 2,
   snr: 3,
   rssiTrend: 4,
-  rttTrend: 5, // shed first
+  rttTrend: 5,
+  rssiLong: 6, // long-horizon bonus — shed first
 } as const;
 
 /** Strip the GMARK+priority prefix so the row frames as ordinary content. */

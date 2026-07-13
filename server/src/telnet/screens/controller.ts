@@ -26,7 +26,7 @@ import {
   truncate,
   visLen,
 } from '../ansi';
-import { gauge, meter } from '../gauges';
+import { gauge, meter, fmtElapsed, spinner } from '../gauges';
 import {
   NodeStatus,
   type ControllerSnapshot,
@@ -54,6 +54,9 @@ export function renderController(ctx: ScreenCtx): string[] {
   // spacing inserts a blank between blocks only while there's vertical room.
   const blocks: string[][] = [
     identityBlock(ctrl, W),
+    // Only present while a rebuild is running — keeps the frame hash static
+    // (anti-flicker) when idle, and animates once per 1 Hz redraw otherwise.
+    ...(ctrl.isRebuildingRoutes ? [rebuildBlock(ctrl, W)] : []),
     trafficBlock(ctrl, W),
     backgroundBlock(ctrl, data, W),
     healthBlock(ctx, W),
@@ -139,6 +142,32 @@ function identityBlock(ctrl: ControllerSnapshot, W: number): string[] {
 
 function val(s: string | null): string {
   return s ? c.white(s) : c.grey('—');
+}
+
+/* ── rebuild-routes banner (present only while rebuilding) ─────────────────
+ * HA exposes only the is_rebuilding_routes boolean — no per-node progress — so
+ * this shows honest ELAPSED time + an indeterminate sweep, never a fake %. */
+
+function rebuildBlock(ctrl: ControllerSnapshot, W: number): string[] {
+  const elapsed = ctrl.rebuildStartedAt != null ? fmtElapsed(Date.now() - ctrl.rebuildStartedAt) : '—';
+  return [
+    head('REBUILD ROUTES', W),
+    '  ' + c.yellowB(`${spinner(Date.now())} rebuilding`) + c.grey(' · elapsed ') + c.white(elapsed),
+    '  ' + indeterminateBar(Math.max(8, Math.min(W - 4, 48))),
+    c.grey('  network reoptimizing — some nodes may be briefly unresponsive'),
+  ];
+}
+
+/** A sweeping indeterminate bar (fixed visible width = `width` cells). */
+function indeterminateBar(width: number): string {
+  const w = Math.max(4, width);
+  const win = Math.max(2, Math.round(w / 5));
+  const pos = Math.floor(Date.now() / 400) % w; // ~2.5 cells/sec at the 1 Hz redraw
+  let s = '';
+  for (let i = 0; i < w; i++) {
+    s += (i - pos + w) % w < win ? c.cyanB('▓') : c.grey('░');
+  }
+  return s;
 }
 
 /* ── TRAFFIC (controller.statistics) ───────────────────────────────────── */
