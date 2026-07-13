@@ -18,7 +18,9 @@ type ColorFn = (s: string) => string;
 const BLOCKS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'] as const;
 const SHADES = ['░', '▒', '▓', '█'] as const;
 
-const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
+// Non-finite → 0, else clamped to [0,1]. Guarding NaN here keeps every gauge's
+// width contract (a NaN frac must not render "undefined" or collapse to width 0).
+const clamp01 = (x: number): number => (Number.isFinite(x) ? (x < 0 ? 0 : x > 1 ? 1 : x) : 0);
 
 /** Traffic-light color by fraction (0 = bad/red, 1 = good/green). */
 export function zoneColor(frac: number): ColorFn {
@@ -50,8 +52,13 @@ export function sparkline(values: number[], width: number, opts: { min?: number;
 
   // Most recent `width` samples; older ones scroll off the left.
   const recent = vals.slice(-width);
-  const blocks = recent.map((v) => BLOCKS[Math.min(7, Math.max(0, Math.round(((v - lo) / span) * 7)))]).join('');
-  const color = opts.color ?? zoneColor((recent[recent.length - 1] - lo) / span);
+  // A flat (all-equal) series reads as "steady" — a mid-height grey line rather
+  // than a red row of lowest blocks (which the relative-scale default would give).
+  const flat = hi === lo;
+  const blocks = recent
+    .map((v) => (flat ? BLOCKS[3] : BLOCKS[Math.min(7, Math.max(0, Math.round(((v - lo) / span) * 7)))]))
+    .join('');
+  const color = opts.color ?? (flat ? c.grey : zoneColor((recent[recent.length - 1] - lo) / span));
 
   const pad = width - recent.length; // leading dim dots while history fills
   return (pad > 0 ? c.grey('·'.repeat(pad)) : '') + color(blocks);
@@ -61,11 +68,14 @@ export function sparkline(values: number[], width: number, opts: { min?: number;
  * WiFi-style signal strength — `bars` ascending glyphs; the lit fraction is
  * colored (by strength), the rest dim. Fixed width = `bars`.
  */
-export function signalBars(frac: number, bars = 4): string {
+export function signalBars(frac: number, bars = 4, colorOverride?: ColorFn): string {
   const f = clamp01(frac);
   const lit = Math.round(f * bars);
-  const glyphs = bars === 4 ? ['▁', '▃', '▅', '▇'] : Array.from({ length: bars }, (_, i) => BLOCKS[Math.min(7, Math.floor((i / (bars - 1)) * 7))]);
-  const color = zoneColor(f);
+  // Divisor guarded so bars<=1 can't produce a NaN glyph index ("undefined").
+  const glyphs = bars === 4
+    ? ['▁', '▃', '▅', '▇']
+    : Array.from({ length: bars }, (_, i) => BLOCKS[Math.min(7, Math.floor((i / Math.max(1, bars - 1)) * 7))]);
+  const color = colorOverride ?? zoneColor(f);
   let out = '';
   for (let i = 0; i < bars; i++) out += i < lit ? color(glyphs[i]) : c.grey(glyphs[i]);
   return out;
@@ -92,12 +102,13 @@ export function gauge(frac: number, barWidth: number, label: string, opts: { col
   return c.grey('[') + meter(frac, barWidth, opts) + c.grey(']') + ' ' + label;
 }
 
-/** A single heat cell — a shade block colored by fraction (heatmap grids). */
-export function heatCell(frac: number, opts: { none?: boolean } = {}): string {
+/** A single heat cell — a shade block whose DENSITY tracks the fraction and whose
+ *  COLOR is `opts.color` (so callers can align it to their own band) or zoneColor. */
+export function heatCell(frac: number, opts: { none?: boolean; color?: ColorFn } = {}): string {
   if (opts.none) return c.grey('·');
   const f = clamp01(frac);
   const shade = SHADES[Math.min(3, Math.floor(f * 4))];
-  return zoneColor(f)(shade);
+  return (opts.color ?? zoneColor(f))(shade);
 }
 
 /**
@@ -115,16 +126,19 @@ export function brailleSparkline(values: number[], width: number, opts: { min?: 
   const level = (v: number): number => Math.min(3, Math.max(0, Math.round(((v - lo) / span) * 3))); // 0..3 (4 dot rows)
   // Braille dot bits: left column = dots 1,2,3,7 (0x01,0x02,0x04,0x40),
   // right column = dots 4,5,6,8 (0x08,0x10,0x20,0x80). Fill bottom-up to level.
+  // LEFT/RIGHT are ordered bottom→top (index 0 = the bottom dot), so filling
+  // indices 0..level lights the column BOTTOM-UP (a low value = a short mark at
+  // the cell bottom, matching the block sparkline — not vertically inverted).
   const LEFT = [0x40, 0x04, 0x02, 0x01];
   const RIGHT = [0x80, 0x20, 0x10, 0x08];
   const cells: string[] = [];
   for (let i = 0; i < recent.length; i += 2) {
     let bits = 0;
     const lv = level(recent[i]);
-    for (let r = 3; r >= 3 - lv; r--) bits |= LEFT[r];
+    for (let r = 0; r <= lv; r++) bits |= LEFT[r];
     if (i + 1 < recent.length) {
       const rv = level(recent[i + 1]);
-      for (let r = 3; r >= 3 - rv; r--) bits |= RIGHT[r];
+      for (let r = 0; r <= rv; r++) bits |= RIGHT[r];
     }
     cells.push(String.fromCharCode(0x2800 + bits));
   }

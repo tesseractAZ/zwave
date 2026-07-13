@@ -425,8 +425,12 @@ function marginColor(margin: number): (s: string) => string {
  * inverse-video bar with no embedded RESET.
  */
 function sparkCell(data: DataProvider, nodeId: number): GraphicCell {
-  const hist = data.history(nodeId).rssi;
-  const colored = sparkline(hist, 8);
+  // Drop RSSI sentinels (125/126/127) from the trend, and color the sparkline by
+  // the LAST sample's ABSOLUTE band (rssiColor) — not the relative-window default,
+  // which would paint a healthy-but-flat node red and contradict every other column.
+  const hist = data.history(nodeId).rssi.filter((v) => !RSSI_SENTINELS.has(v));
+  const color = hist.length ? rssiColor(hist[hist.length - 1]) : undefined;
+  const colored = sparkline(hist, 8, color ? { color } : {});
   return { colored, plain: stripAnsi(colored) }; // exactly 8 visible cells
 }
 

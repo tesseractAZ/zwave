@@ -242,7 +242,9 @@ function renderCells(cells: AreaCell[], avail: number): string {
 
 function cellGlyph(cell: AreaCell): string {
   if (cell.margin == null) return heatCell(0, { none: true });
-  return heatCell(marginFrac(cell.margin));
+  // Density from the margin fraction, but COLOR from the same heatColor() bands
+  // (17/10/5 dB) the numeric worst-margin text uses, so cell and text agree.
+  return heatCell(marginFrac(cell.margin), { color: heatColor(cell.margin) });
 }
 
 /* ── colour / format helpers ───────────────────────────────────────────── */

@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.4.0"
+version: "0.4.1"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
