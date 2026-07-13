@@ -270,7 +270,7 @@ function nodeLine(
     chainStr(n, lwr);
   // signalBars(4) drawn from the same LWR margin the numeric cell reports, so
   // the glyph and the number always agree; dropped on narrow terminals.
-  const bars = showBars ? routeSignalBars(lwr, noise) + ' ' : '';
+  const bars = showBars ? routeSignalBars(view, lwr, noise) + ' ' : '';
   const right = rateCell(lwr) + '  ' + bars + signalCell(view, lwr, noise);
   return lr(left, right, view.cols);
 }
@@ -281,16 +281,19 @@ function nodeLine(
  * up with the numeric margin thresholds (≥17dB green · 5-16 yellow · <5 red).
  * No usable reading → dim placeholder bars (keeps the column aligned).
  */
-function routeSignalBars(lwr: RouteStat | null, noise: number): string {
+function routeSignalBars(view: ViewState, lwr: RouteStat | null, noise: number): string {
   const rssi = lwr?.rssi ?? null;
   if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('▁▃▅▇');
   const margin = rssi - noise;
   let frac: number;
-  if (margin >= 17) frac = 1; // 4 bars, green
-  else if (margin >= 5) frac = 0.5; // 2 bars, yellow
-  else if (margin >= -3) frac = 0.25; // 1 bar, red
-  else frac = 0.1; // ~0 bars, red
-  return signalBars(frac, 4);
+  if (margin >= 17) frac = 1; // 4 bars
+  else if (margin >= 5) frac = 0.5; // 2 bars
+  else if (margin >= -3) frac = 0.25; // 1 bar
+  else frac = 0.1; // ~0 bars
+  // Color the bars with the SAME band the numeric cell uses, so glyph and number
+  // agree in BOTH margin and dBm display modes.
+  const color = view.signalDisplay === 'dbm' ? rssiColor(rssi) : marginColor(margin);
+  return signalBars(frac, 4, color);
 }
 
 /** The repeater chain: "direct", "n3→n8", plus a red ⚠ if the route failed. */

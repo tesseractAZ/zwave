@@ -105,9 +105,9 @@ function identityBlock(ctrl: ControllerSnapshot, W: number): string[] {
 
   const homeId =
     ctrl.homeId != null
-      ? c.whiteB(
-          '0x' + (ctrl.homeId >>> 0).toString(16).toUpperCase().padStart(8, '0'),
-        ) + c.grey(` (${ctrl.homeId >>> 0})`)
+      ? c.whiteB('0x' + (ctrl.homeId >>> 0).toString(16).toUpperCase().padStart(8, '0')) +
+        // The redundant decimal is dropped on narrow terminals so grid2 can't clip it.
+        (W >= 72 ? c.grey(` (${ctrl.homeId >>> 0})`) : '')
       : c.grey('—');
 
   const roles = [

@@ -63,6 +63,42 @@ test('heatCell and vblock are single cells', () => {
   assert.equal(W(heatCell(0, { none: true })), 1);
 });
 
+test('non-finite inputs never break the width contract (NaN/Infinity)', () => {
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    assert.equal(W(meter(bad, 10)), 10, `meter(${bad})`);
+    assert.equal(W(gauge(bad, 8, 'x')), 8 + 3 + 1, `gauge(${bad})`);
+    assert.equal(W(heatCell(bad)), 1, `heatCell(${bad})`);
+    assert.equal(W(vblock(bad)), 1, `vblock(${bad})`);
+    assert.equal(W(signalBars(bad)), 4, `signalBars(${bad})`);
+    assert.equal(W(sparkline([bad, bad], 6)), 6, `sparkline(${bad})`);
+  }
+  // no literal "undefined" must leak into any gauge
+  for (const s of [meter(NaN, 8), heatCell(NaN), signalBars(NaN), signalBars(0.5, 1)]) {
+    assert.ok(!s.includes('undefined'), `"${s}" leaked "undefined"`);
+  }
+});
+
+test('signalBars with degenerate bar counts (0/1) still has the right width', () => {
+  assert.equal(W(signalBars(0.5, 1)), 1);
+  assert.equal(W(signalBars(1, 1)), 1);
+  assert.equal(W(signalBars(0.5, 3)), 3);
+});
+
+test('a flat (all-equal) sparkline reads steady (grey), not alarming red', () => {
+  const s = sparkline([-50, -50, -50, -50], 4);
+  assert.equal(W(s), 4);
+  assert.ok(s.includes('90'), 'flat series should be grey (SGR 90), not red'); // c.grey = 90
+  assert.ok(!/\x1b\[91m/.test(s), 'flat series must not be red');
+});
+
+test('brailleSparkline fills BOTTOM-up (min value lights the bottom dot, not the top)', () => {
+  // A single low sample: the lowest level should light dot 7 (bottom, 0x40), not dot 1 (top, 0x01).
+  const s = brailleSparkline([0], 1, { min: 0, max: 100 }).replace(/\x1b\[[0-9;]*m/g, '');
+  const code = s.codePointAt(0)! - 0x2800;
+  assert.ok((code & 0x40) !== 0, 'low value must light the BOTTOM-left dot (0x40)');
+  assert.ok((code & 0x01) === 0, 'low value must NOT light the TOP-left dot (0x01)');
+});
+
 test('zoneColor is red low / yellow mid / green high (by wrapping color code)', () => {
   const red = zoneColor(0.1)('x');
   const yellow = zoneColor(0.5)('x');

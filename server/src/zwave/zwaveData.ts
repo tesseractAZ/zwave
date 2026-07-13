@@ -393,6 +393,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.statsSubscribed = false;
         this.statsByNode.clear();
         this.batteryByNode.clear();
+        this.histByNode.clear();
       }
       const backoff = this.refreshMs * 2 ** Math.min(this.errStreak, 5);
       this.scheduleNext(Math.max(this.refreshMs, Math.min(30_000, backoff)));
