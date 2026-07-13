@@ -45,6 +45,8 @@ export interface ZwaveDataSource {
   lastError?(): string | null;
   /** Epoch ms of the last SUCCESSFUL roster refresh (null before the first). */
   lastUpdated?(): number | null;
+  /** Rolling RSSI/RTT history for a node (for sparklines). */
+  history?(nodeId: number): { rssi: number[]; rtt: number[] };
   /**
    * Optional: trigger an expensive route/controller-statistics refresh. When
    * present it is driven on the `routePollMs` cadence; when absent the data
@@ -184,6 +186,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,
     hasRealNoise: () => cachedHasNoise,
+    history: (n) => zwaveData.history?.(n) ?? { rssi: [], rtt: [] },
     lastUpdated: () => cachedLastUpdated,
     ready: () => cachedReady,
     lastError: () => cachedError,

@@ -19,19 +19,24 @@
  */
 
 import {
-  bar,
   c,
   lr,
   padEnd,
   padStart,
   truncate,
+  visLen,
 } from '../ansi';
+import { gauge, meter } from '../gauges';
 import {
   NodeStatus,
   type ControllerSnapshot,
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
+
+type ColorFn = (s: string) => string;
+
+const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
 
 export function renderController(ctx: ScreenCtx): string[] {
   const { view, data } = ctx;
@@ -150,7 +155,40 @@ function trafficBlock(ctrl: ControllerSnapshot, W: number): string[] {
   ].join('');
 
   const label = st ? 'TRAFFIC' : 'TRAFFIC (not reported)';
-  return [head(label, W), row1, row2];
+  const lines = [head(label, W), row1, row2];
+
+  // Small reliability indicator: fraction of all frames that errored
+  // (dropped + NAK/CAN + timeouts) vs total messages. Low is good.
+  if (st) lines.push(trafficHealthLine(st, W));
+  return lines;
+}
+
+/** Error-rate meter derived from the counter grid; the counters stay authoritative. */
+function trafficHealthLine(
+  st: NonNullable<ControllerSnapshot['statistics']>,
+  W: number,
+): string {
+  const messages = st.messagesTX + st.messagesRX;
+  const errors =
+    st.messagesDroppedTX +
+    st.messagesDroppedRX +
+    st.NAK +
+    st.CAN +
+    st.timeoutACK +
+    st.timeoutResponse;
+  const denom = messages + errors;
+  const frac = denom > 0 ? errors / denom : 0;
+  const pct = frac * 100;
+  const pctStr = pct > 0 && pct < 1 ? pct.toFixed(2) : pct.toFixed(1);
+  const label = errColor(frac)(`${pctStr}% errors`);
+  const barW = Math.max(6, Math.min(20, W - 34));
+  return c.grey('reliability ') + gauge(frac, barW, label, { dir: 'lowGood' });
+}
+
+function errColor(frac: number): ColorFn {
+  if (frac < 0.02) return c.green;
+  if (frac < 0.1) return c.yellow;
+  return c.red;
 }
 
 /** One counter cell: grey label on the left, value right-aligned, 1-col gutter. */
@@ -175,22 +213,62 @@ function backgroundBlock(
   const lines = [head('BACKGROUND RSSI', W)];
 
   if (ctrl.backgroundRSSI.length > 0) {
-    // Future-proof: if HA ever reports per-channel noise, show it.
-    const chans = ctrl.backgroundRSSI
-      .map((r, i) => c.grey(`ch${i} `) + noiseColor(r)(`${r}dBm`))
-      .join(c.grey('  '));
-    lines.push(chans);
+    // Future-proof: if HA ever reports per-channel noise, show each channel as
+    // a quiet-is-good gauge (full/green = quiet floor), wrapped to fit W.
+    const chBarW = W >= 100 ? 8 : 6;
+    const tokens = ctrl.backgroundRSSI.map(
+      (r, i) =>
+        c.grey(`ch${i} `) +
+        gauge(noiseQuietFrac(r), chBarW, noiseColor(r)(`${r}dBm`)),
+    );
+    lines.push(...packTokens(tokens, W, 2));
   } else {
     lines.push(
       c.grey('per-channel noise floor: ') + c.yellow('not reported by HA'),
     );
   }
 
-  // The representative floor the SNR-margin math actually uses (data.noiseFloor).
+  // The representative floor the SNR-margin math actually uses (data.noiseFloor),
+  // shown with a quiet-is-good reference meter so the margin baseline is visible
+  // even when HA reports no per-channel noise.
   const noise = data.noiseFloor();
   const tag = data.hasRealNoise() ? c.grey(' (measured)') : c.grey(' (assumed fallback)');
-  lines.push(c.grey('margin reference: ') + noiseColor(noise)(`${noise}dBm`) + tag);
+  const refBarW = Math.max(6, Math.min(14, W - 40));
+  lines.push(
+    c.grey('margin ref ') +
+      gauge(noiseQuietFrac(noise), refBarW, noiseColor(noise)(`${noise}dBm`)) +
+      tag,
+  );
 
+  return lines;
+}
+
+/** Quiet floor is good: −100 dBm → 1.0 (full), −40 dBm → 0.0 (empty). */
+function noiseQuietFrac(dbm: number): number {
+  return clamp01((-40 - dbm) / 60);
+}
+
+/** Greedy-wrap already-styled tokens into lines whose visible width stays ≤ W. */
+function packTokens(tokens: string[], W: number, gapN: number): string[] {
+  const gap = ' '.repeat(gapN);
+  const lines: string[] = [];
+  let cur = '';
+  let curW = 0;
+  for (const t of tokens) {
+    const tW = visLen(t);
+    if (cur === '') {
+      cur = t;
+      curW = tW;
+    } else if (curW + gapN + tW <= W) {
+      cur += gap + t;
+      curW += gapN + tW;
+    } else {
+      lines.push(cur);
+      cur = t;
+      curW = tW;
+    }
+  }
+  if (cur !== '') lines.push(cur);
   return lines;
 }
 
@@ -221,10 +299,13 @@ function healthBlock(ctx: ScreenCtx, W: number): string[] {
   let direct = 0;
   let routed = 0;
   let longRange = 0;
+  let scoreSum = 0;
 
   for (const n of members) {
-    const g = data.scoreFor(n.nodeId).grade as Grade;
+    const h = data.scoreFor(n.nodeId);
+    const g = h.grade as Grade;
     if (g in counts) counts[g]++;
+    scoreSum += h.score;
 
     if (n.status === NodeStatus.Alive || n.status === NodeStatus.Awake) alive++;
     else if (n.status === NodeStatus.Dead) dead++;
@@ -238,8 +319,19 @@ function healthBlock(ctx: ScreenCtx, W: number): string[] {
   }
 
   const total = members.length;
+  const meanScore = total > 0 ? Math.round(scoreSum / total) : 0;
   const maxCount = Math.max(1, ...GRADES.map((g) => counts[g]));
   const barW = Math.max(8, Math.min(40, W - 30));
+
+  // Big network-health gauge — the mesh's mean member score, coloured by the
+  // same health thresholds the Overview uses (≥80 green, ≥40 yellow, else red).
+  const gaugeBarW = Math.max(8, Math.min(24, W - 22));
+  const meanColor = colorForScore(meanScore);
+  const meanLine =
+    c.grey('mean score ') +
+    gauge(meanScore / 100, gaugeBarW, meanColor(`${meanScore} avg`), {
+      color: meanColor,
+    });
 
   const rows = GRADES.map((g) => {
     const n = counts[g];
@@ -247,7 +339,7 @@ function healthBlock(ctx: ScreenCtx, W: number): string[] {
     return (
       gradeLetter(g) +
       ' ' +
-      bar(n / maxCount, barW, gradeBarColor(g)) +
+      meter(n / maxCount, barW, { color: gradeMeterColor(g) }) +
       '  ' +
       c.white(padStart(String(n), 3)) +
       '  ' +
@@ -273,7 +365,20 @@ function healthBlock(ctx: ScreenCtx, W: number): string[] {
     c.grey(' · ') +
     (longRange > 0 ? c.blue(`${longRange} LR`) : c.grey('0 LR'));
 
-  return [head(`NETWORK HEALTH (${total})`, W), ...rows, statusLine, linkLine];
+  return [
+    head(`NETWORK HEALTH (${total})`, W),
+    meanLine,
+    ...rows,
+    statusLine,
+    linkLine,
+  ];
+}
+
+/** Score → colour, matching the Overview's health thresholds. */
+function colorForScore(score: number): ColorFn {
+  if (score >= 80) return c.green;
+  if (score >= 40) return c.yellow;
+  return c.red;
 }
 
 function gradeLetter(g: Grade): string {
@@ -291,16 +396,19 @@ function gradeLetter(g: Grade): string {
   }
 }
 
-function gradeBarColor(g: Grade): keyof typeof c {
+/** Per-grade meter fill colour (distinct shade per band). */
+function gradeMeterColor(g: Grade): ColorFn {
   switch (g) {
     case 'A':
+      return c.greenB;
     case 'B':
-      return 'green';
+      return c.green;
     case 'C':
+      return c.yellow;
     case 'D':
-      return 'yellow';
+      return c.yellowB;
     default:
-      return 'red';
+      return c.redB;
   }
 }
 

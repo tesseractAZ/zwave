@@ -6,11 +6,19 @@
  * an 80x24 terminal and stay readable: single-cell glyphs, ANSI-aware column
  * padding, one row per node.
  *
- *   summary  39 nodes · 35 alive · 1 DEAD · 3 asleep · 2 flaky · noise -92dBm
- *   header   ID St Name             Sc  Signal  Hop  Rate  Seen  Bat  Flags
- *   rows     ▶  12 ● Kitchen Lamp   94   +21dB    0   100k    3s   AC
- *              7 ✕ Garage Sensor     0     —      —    —      4d  12%  D B
+ *   summary  39 nodes · 35 alive · 1 DEAD · 3 asleep · 2 flaky · noise -92dBm · mesh ████░░
+ *   header   ID St Name             Sc      Signal  Hop  Rate  Seen  Bat  Flags   Trend
+ *   rows     ▶  12 ● Kitchen Lamp  █94  ▁▃▅▇  +21dB    0   100k    3s   AC          ▁▂▄▆█
+ *              7 ✕ Garage Sensor    —          —      —    —      4d  12%  D B
  *   legend   j/k move · / filter · s sort · ⏎ detail · 1-6 screens · q quit
+ *
+ * Graphics (from ../gauges) sit ON TOP of the already-correct data: a WiFi
+ * signalBars strength cluster in the Signal column, a 1-cell vblock health mark
+ * beside the Score, a right-hand RSSI micro-sparkline that only appears on wide
+ * terminals (cols ≥ 110), and a mesh-health meter in the summary bar. The
+ * selected (inverse-video) row renders every glyph PLAIN — no embedded SGR/RESET
+ * would survive inside the invert cleanly — mirroring the existing plain-slice
+ * pattern for the name/score cells.
  *
  * Colour discipline follows the health model: green = healthy, yellow = weak,
  * red = dead/failing, cyan = asleep (expected), grey = no-data / mains.
@@ -26,8 +34,10 @@ import {
   truncate,
   visLen,
 } from '../ansi';
+import { meter, signalBars, sparkline, vblock } from '../gauges';
 import {
   NodeStatus,
+  type DataProvider,
   type HealthResult,
   type NodeSnapshot,
   type ScreenCtx,
@@ -41,21 +51,36 @@ interface ColSpec {
   align: 'l' | 'r';
 }
 
-const COLS: readonly ColSpec[] = [
-  { w: 1, align: 'l' }, // cursor
-  { w: 4, align: 'r' }, // id
-  { w: 2, align: 'l' }, // status glyph
-  { w: 16, align: 'l' }, // name
-  { w: 3, align: 'r' }, // score
-  { w: 7, align: 'r' }, // signal (margin / dbm)
-  { w: 4, align: 'r' }, // hop
-  { w: 5, align: 'r' }, // rate
-  { w: 5, align: 'r' }, // seen
-  { w: 4, align: 'r' }, // battery
-  { w: 7, align: 'l' }, // flags
-];
+/** cols ≥ this get the right-hand RSSI micro-sparkline column. */
+const WIDE_COLS = 110;
 
-const CONTENT_W = COLS.reduce((s, col) => s + col.w, 0) + (COLS.length - 1);
+/**
+ * The base 11 columns (widths chosen so CONTENT_W = 74 ≤ 80). The Signal column
+ * is deliberately wide enough for signalBars(4) + a space + a 7-char dB label,
+ * and Score carries a leading 1-cell vblock. On WIDE terminals a 12th column
+ * (an 8-cell RSSI sparkline) is appended.
+ */
+function columns(wide: boolean): ColSpec[] {
+  const base: ColSpec[] = [
+    { w: 1, align: 'l' }, // cursor
+    { w: 4, align: 'r' }, // id
+    { w: 2, align: 'l' }, // status glyph
+    { w: 16, align: 'l' }, // name
+    { w: 4, align: 'r' }, // score (vblock + number)
+    { w: 12, align: 'r' }, // signal (bars + margin/dbm)
+    { w: 4, align: 'r' }, // hop
+    { w: 5, align: 'r' }, // rate
+    { w: 5, align: 'r' }, // seen
+    { w: 4, align: 'r' }, // battery
+    { w: 7, align: 'l' }, // flags
+  ];
+  if (wide) base.push({ w: 8, align: 'l' }); // rssi sparkline
+  return base;
+}
+
+function contentW(cols: readonly ColSpec[]): number {
+  return cols.reduce((s, col) => s + col.w, 0) + (cols.length - 1);
+}
 
 export function renderOverview(ctx: ScreenCtx): string[] {
   const { view, data, visibleNodes } = ctx;
@@ -77,9 +102,12 @@ export function renderOverview(ctx: ScreenCtx): string[] {
     return centeredNotice(view, 'NO NODES', [c.grey(msg)]);
   }
 
+  const wide = W >= WIDE_COLS;
+  const cols = columns(wide);
+
   const out: string[] = [];
   out.push(truncate(summaryBar(ctx), W));
-  out.push(truncate(headerRow(view), W));
+  out.push(truncate(headerRow(view, cols), W));
 
   // Body window: everything between header and legend.
   const cap = Math.max(1, H - 3); // summary + header + legend
@@ -89,7 +117,12 @@ export function renderOverview(ctx: ScreenCtx): string[] {
 
   for (let i = start; i < end; i++) {
     const n = visibleNodes[i];
-    out.push(truncate(nodeRow(n, data.scoreFor(n.nodeId), i === view.selected, noise, view), W));
+    out.push(
+      truncate(
+        nodeRow(n, data.scoreFor(n.nodeId), i === view.selected, noise, view, data, cols, wide),
+        W,
+      ),
+    );
   }
   // Pad the body so the legend lands on the last row.
   while (out.length < H - 1) out.push('');
@@ -116,7 +149,7 @@ function summaryBar(ctx: ScreenCtx): string {
   }
   const noise = data.noiseFloor();
 
-  const left =
+  let left =
     c.whiteB(`${all.length} nodes`) +
     c.grey(' · ') +
     c.green(`${alive} alive`) +
@@ -153,6 +186,16 @@ function summaryBar(ctx: ScreenCtx): string {
     right = range;
   }
 
+  // Small mesh-health meter — fraction of the roster that is neither DEAD nor
+  // flaky (asleep/alive both count as healthy). Only appended when it fits
+  // WITHOUT forcing lr() to truncate a real value, so the pristine 80-col
+  // layout is never crowded out.
+  const meshFrac = all.length > 0 ? Math.max(0, all.length - dead - flaky) / all.length : 0;
+  const mesh = c.grey(' · ') + c.grey('mesh ') + meter(meshFrac, 6);
+  if (view.cols - visLen(left) - visLen(mesh) - visLen(right) >= 1) {
+    left = left + mesh;
+  }
+
   return lr(left, right, view.cols);
 }
 
@@ -164,10 +207,11 @@ function noiseColor(noise: number): (s: string) => string {
 
 /* ── header ────────────────────────────────────────────────────────────── */
 
-function headerRow(view: ViewState): string {
+function headerRow(view: ViewState, cols: readonly ColSpec[]): string {
   const sig = view.signalDisplay === 'dbm' ? 'RSSI' : 'Margin';
   const cells = ['', 'ID', 'St', 'Name', 'Sc', sig, 'Hop', 'Rate', 'Seen', 'Bat', 'Flags'];
-  return c.grey(joinCells(cells));
+  if (cols.length > 11) cells.push('Trend');
+  return c.grey(joinCells(cells, cols));
 }
 
 /* ── one node row ──────────────────────────────────────────────────────── */
@@ -178,36 +222,41 @@ function nodeRow(
   selected: boolean,
   noise: number,
   view: ViewState,
+  data: DataProvider,
+  cols: readonly ColSpec[],
+  wide: boolean,
 ): string {
   const glyph = statusGlyph(n.status);
-  const sig = signalCell(n, noise, view.signalDisplay);
+  const isDead = dead(n);
+  const score = scoreDisplay(health.score, isDead);
+  const sig = signalDisplay(n, noise, view.signalDisplay);
   const hop = hopCell(n);
   const rate = rateCell(n);
   const seen = seenCell(n);
   const bat = batteryCell(n);
   const flags = flagsCell(health.flags);
-
-  const plain = [
-    selected ? '▶' : ' ',
-    String(n.nodeId),
-    glyph.ch,
-    // Plain slice (no ANSI): the selected row is wrapped in c.invert, and an
-    // embedded RESET from truncate() would end the highlight bar early.
-    n.name.slice(0, 16),
-    dead(n) ? '—' : String(health.score),
-    sig.t,
-    hop.t,
-    rate.t,
-    seen.t,
-    bat.t,
-    flags.t,
-  ];
+  const spark = wide ? sparkCell(data, n.nodeId) : null;
 
   if (selected) {
     // Render plain + invert the whole row so the highlight bar is clean (no
-    // nested SGR fights the invert). Health colours are dropped on the
-    // selected row by design — the inverse video carries the emphasis.
-    return c.invert(padEnd(joinCells(plain), CONTENT_W));
+    // nested SGR fights the invert). Health colours AND graphic colours are
+    // dropped on the selected row by design — the inverse video carries the
+    // emphasis, and every glyph here is a plain BMP cell with no embedded RESET.
+    const plain = [
+      '▶',
+      String(n.nodeId),
+      glyph.ch,
+      n.name.slice(0, 16),
+      score.plain,
+      sig.plain,
+      hop.t,
+      rate.t,
+      seen.t,
+      bat.t,
+      flags.t,
+    ];
+    if (spark) plain.push(spark.plain);
+    return c.invert(padEnd(joinCells(plain, cols), contentW(cols)));
   }
 
   const colored = [
@@ -215,15 +264,16 @@ function nodeRow(
     idColor(n)(String(n.nodeId)),
     glyph.color(glyph.ch),
     n.status === NodeStatus.Dead ? c.grey(truncate(n.name, 16)) : truncate(n.name, 16),
-    dead(n) ? c.grey('—') : scoreColor(health.score)(String(health.score)),
-    sig.color(sig.t),
+    score.colored,
+    sig.colored,
     hop.color(hop.t),
     rate.color(rate.t),
     seen.color(seen.t),
     bat.color(bat.t),
     flags.color(flags.t),
   ];
-  return joinCells(colored);
+  if (spark) colored.push(spark.colored);
+  return joinCells(colored, cols);
 }
 
 /* ── cell formatters ───────────────────────────────────────────────────── */
@@ -232,6 +282,16 @@ interface Cell {
   t: string;
   color: (s: string) => string;
 }
+
+/** A graphic cell that has a coloured form (normal rows) and a plain form
+ *  (the inverse-video selected row — no embedded SGR/RESET). Both forms are
+ *  the SAME fixed visible width so column layout never shifts. */
+interface GraphicCell {
+  colored: string;
+  plain: string;
+}
+
+const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 function statusGlyph(status: NodeStatus): { ch: string; color: (s: string) => string } {
   switch (status) {
@@ -260,15 +320,88 @@ function scoreColor(score: number): (s: string) => string {
   return c.red;
 }
 
-function signalCell(n: NodeSnapshot, noise: number, mode: ViewState['signalDisplay']): Cell {
-  const rssi = n.stats.rssi;
-  if (rssi == null || RSSI_SENTINELS.has(rssi)) return { t: '—', color: c.grey };
-  if (mode === 'dbm') {
-    return { t: `${rssi}dBm`, color: rssiColor(rssi) };
+/**
+ * Score cell = a 1-cell vblock health mark + the 0..100 number, exactly 4 wide.
+ * The number stays authoritative; the vblock is a redundant at-a-glance level.
+ * Dead/unknown nodes show a right-aligned '—' (no fabricated level).
+ */
+function scoreDisplay(score: number, isDead: boolean): GraphicCell {
+  if (isDead) {
+    const cell = padStart('—', 4);
+    return { colored: c.grey(cell), plain: cell };
   }
-  const margin = rssi - noise;
-  const t = `${margin >= 0 ? '+' : ''}${margin}dB`;
-  return { t, color: marginColor(margin) };
+  // Math.round guards the width contract: a fractional score must never spill
+  // past 3 digits (which would force a truncate() → embedded RESET in the plain
+  // selected row). Documented scores are already integers, so this is a no-op.
+  const glyph = vblock(score / 100); // plain single-cell block (' ' at 0)
+  const num = padStart(String(Math.round(score)), 3);
+  const cell = glyph + num; // 4 visible cells, no ANSI
+  return { colored: scoreColor(score)(cell), plain: cell };
+}
+
+/* ── signal (bars + margin/dbm) ────────────────────────────────────────── */
+
+const BAR_GLYPHS = ['▁', '▃', '▅', '▇'] as const;
+const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
+
+/**
+ * Map a signal metric to a 0..1 strength fraction whose zoneColor thresholds
+ * (0.66 green / 0.33 yellow) land exactly on the existing health thresholds:
+ * value ≥ green → [0.66,1]; value in [yellow,green) → [0.33,0.66); below → <0.33.
+ * `yellow < green` (higher value = better).
+ */
+function bandFrac(v: number, yellow: number, green: number): number {
+  const span = Math.max(1, green - yellow);
+  const f =
+    v >= green
+      ? 0.66 + ((v - green) / span) * 0.34
+      : 0.33 + ((v - yellow) / span) * 0.33;
+  return clamp01(f);
+}
+
+/** Plain (uncoloured) ascending bars — lit glyphs then spaces — for the
+ *  inverse-video selected row, so level still reads without any SGR. */
+function barsPlain(frac: number, bars = 4): string {
+  const lit = Math.round(clamp01(frac) * bars);
+  let out = '';
+  for (let i = 0; i < bars; i++) out += i < lit ? BAR_GLYPHS[i] : ' ';
+  return out; // width = bars
+}
+
+/**
+ * Signal cell = signalBars(4) + ' ' + a right-aligned dB label, exactly 12 wide.
+ * Bars reflect the SAME quantity coloured by the label (SNR margin in 'margin'
+ * mode, RSSI in 'dbm' mode) so glyph and text always agree. No reading → blank
+ * bars + '—' (same convention as the deferred columns).
+ */
+function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDisplay']): GraphicCell {
+  const rssi = n.stats.rssi;
+  if (rssi == null || RSSI_SENTINELS.has(rssi)) {
+    const label = padStart('—', 7);
+    return { colored: '    ' + ' ' + c.grey(label), plain: '    ' + ' ' + label };
+  }
+
+  let text: string;
+  let colorFn: (s: string) => string;
+  let frac: number;
+  if (mode === 'dbm') {
+    text = `${rssi}dBm`;
+    colorFn = rssiColor(rssi);
+    frac = bandFrac(rssi, -88, -70);
+  } else {
+    const margin = rssi - noise;
+    text = `${margin >= 0 ? '+' : ''}${margin}dB`;
+    colorFn = marginColor(margin);
+    frac = bandFrac(margin, 5, 17);
+  }
+  // Defensive cap: keep the label ≤ 7 so padStart never has to truncate() (that
+  // would append a RESET into the plain selected-row string). Realistic ranges
+  // are already ≤ 7 ("-128dBm" / "+110dB").
+  if (text.length > 7) text = text.slice(0, 7);
+
+  const colored = signalBars(frac, 4) + ' ' + padStart(colorFn(text), 7);
+  const plain = barsPlain(frac, 4) + ' ' + padStart(text, 7);
+  return { colored, plain }; // 4 + 1 + 7 = 12 visible
 }
 
 function rssiColor(rssi: number): (s: string) => string {
@@ -281,6 +414,20 @@ function marginColor(margin: number): (s: string) => string {
   if (margin >= 17) return c.green;
   if (margin >= 5) return c.yellow;
   return c.red;
+}
+
+/* ── rssi micro-sparkline (wide terminals only) ────────────────────────── */
+
+/**
+ * 8-cell RSSI trend sparkline. Auto-scales to the node's own history window and
+ * degrades to dim dots when empty/short (sparkline() handles that). The plain
+ * form (selected row) strips ANSI so the block SHAPE still reads inside the
+ * inverse-video bar with no embedded RESET.
+ */
+function sparkCell(data: DataProvider, nodeId: number): GraphicCell {
+  const hist = data.history(nodeId).rssi;
+  const colored = sparkline(hist, 8);
+  return { colored, plain: stripAnsi(colored) }; // exactly 8 visible cells
 }
 
 function hopCell(n: NodeSnapshot): Cell {
@@ -414,11 +561,12 @@ function dead(n: NodeSnapshot): boolean {
 /**
  * Pad each cell to its column width (ANSI-aware) and join with single spaces.
  * Works for both styled cells and plain text — padStart/padEnd measure visible
- * width, so colour codes don't skew the layout.
+ * width, so colour codes don't skew the layout. Graphic cells are pre-sized to
+ * their column width, so the pad is a no-op for them.
  */
-function joinCells(cells: string[]): string {
+function joinCells(cells: string[], cols: readonly ColSpec[]): string {
   return cells
-    .map((cell, i) => (COLS[i].align === 'r' ? padStart(cell, COLS[i].w) : padEnd(cell, COLS[i].w)))
+    .map((cell, i) => (cols[i].align === 'r' ? padStart(cell, cols[i].w) : padEnd(cell, cols[i].w)))
     .join(' ');
 }
 
