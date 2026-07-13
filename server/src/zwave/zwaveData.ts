@@ -42,7 +42,7 @@ import {
   type RouteStat,
   type LogEvent,
 } from '../types';
-import { createHistoryStore, type HistoryStore } from './historyStore';
+import { createHistoryStore, type HistoryStore, type HistoryMap } from './historyStore';
 
 /**
  * Rolling per-node RSSI/RTT sample-ring depth. Shared by the live ring in
@@ -50,6 +50,10 @@ import { createHistoryStore, type HistoryStore } from './historyStore';
  * and the in-memory cap can never drift apart.
  */
 const HIST_MAX = 60;
+/** Coarse (long-horizon) ring depth + cadence: 1 downsampled point per minute
+ *  × 120 ≈ a 2-hour trend. Shared with the store's `coarseMax`. */
+const COARSE_MAX = 120;
+const COARSE_INTERVAL_MS = 60_000;
 
 /* ─── raw HA response shapes (only the fields we read) ──────────────────── */
 
@@ -150,6 +154,8 @@ export interface ZwaveData {
   lastStatsUpdated(): number | null;
   /** Rolling RSSI/RTT history for a node (for sparklines). */
   history(nodeId: number): { rssi: number[]; rtt: number[] };
+  /** Coarse long-horizon RSSI/RTT trend for a node (~2h). */
+  historyLong(nodeId: number): { rssi: number[]; rtt: number[] };
   /** node id → HA device_id (for mutating actions). */
   deviceIdOf(nodeId: number): string | null;
   /** node id → its ping button entity_id. */
@@ -277,9 +283,17 @@ class ZwaveDataImpl implements ZwaveData {
   private readonly historyStore: HistoryStore | null;
   private readonly historyFlushMs: number;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  /** v0.7 coarse long-horizon ring (1 downsampled pt/min) + its interval mean
+   *  accumulator (per node, since the last coarse tick). */
+  private histLongByNode = new Map<number, { rssi: number[]; rtt: number[] }>();
+  private coarseAccum = new Map<number, { rssiSum: number; rssiN: number; rttSum: number; rttN: number }>();
+  private coarseTimer: ReturnType<typeof setInterval> | null = null;
   /** Controller home_id from the last poll — a change means a different Z-Wave
    *  network (stick swap / different NVM backup), so node-keyed caches alias. */
   private lastHomeId: number | null = null;
+  /** Epoch ms the current rebuild-routes began (null = idle) — set on the
+   *  is_rebuilding_routes false→true edge so the UI can show elapsed time. */
+  private rebuildStartedAt: number | null = null;
   private ctrlStats: ControllerSnapshot['statistics'] = null;
   /** Battery level (%) per node, from get_states of the *_battery entities. */
   private batteryByNode = new Map<number, number>();
@@ -333,8 +347,23 @@ class ZwaveDataImpl implements ZwaveData {
       ? createHistoryStore({ path: histPath, maxSamples: HIST_MAX, log: this.log })
       : null;
     if (this.historyStore) {
-      for (const [id, h] of this.historyStore.load()) this.histByNode.set(id, h);
+      for (const [id, h] of this.historyStore.load()) {
+        this.histByNode.set(id, { rssi: h.rssi, rtt: h.rtt });
+        if (h.crssi.length || h.crtt.length) this.histLongByNode.set(id, { rssi: h.crssi, rtt: h.crtt });
+      }
     }
+  }
+
+  /** Combine the fine + coarse rings into the store's two-tier shape. */
+  private buildHistoryMap(): HistoryMap {
+    const m: HistoryMap = new Map();
+    const ids = new Set<number>([...this.histByNode.keys(), ...this.histLongByNode.keys()]);
+    for (const id of ids) {
+      const fine = this.histByNode.get(id) ?? { rssi: [], rtt: [] };
+      const coarse = this.histLongByNode.get(id) ?? { rssi: [], rtt: [] };
+      m.set(id, { rssi: fine.rssi, rtt: fine.rtt, crssi: coarse.rssi, crtt: coarse.rtt });
+    }
+    return m;
   }
 
   start(): void {
@@ -355,10 +384,35 @@ class ZwaveDataImpl implements ZwaveData {
     // `.unref()` keeps this timer from holding the event loop open at shutdown.
     if (this.historyStore && !this.flushTimer && this.historyFlushMs > 0) {
       this.flushTimer = setInterval(() => {
-        this.historyStore!.save(this.histByNode);
+        this.historyStore!.save(this.buildHistoryMap());
       }, this.historyFlushMs);
       this.flushTimer.unref?.();
     }
+
+    // Coarse downsampler: once a minute, fold each node's interval mean into its
+    // long-horizon ring. Always runs (in-memory even without a store) so the
+    // Detail long-trend sparkline works regardless of persistence.
+    if (!this.coarseTimer) {
+      this.coarseTimer = setInterval(() => this.rollCoarse(), COARSE_INTERVAL_MS);
+      this.coarseTimer.unref?.();
+    }
+  }
+
+  /** Fold each node's since-last-tick interval mean into its coarse ring. */
+  private rollCoarse(): void {
+    for (const [id, a] of this.coarseAccum) {
+      const coarse = this.histLongByNode.get(id) ?? { rssi: [], rtt: [] };
+      if (a.rssiN > 0) {
+        coarse.rssi.push(Math.round(a.rssiSum / a.rssiN));
+        if (coarse.rssi.length > COARSE_MAX) coarse.rssi.shift();
+      }
+      if (a.rttN > 0) {
+        coarse.rtt.push(Math.round(a.rttSum / a.rttN));
+        if (coarse.rtt.length > COARSE_MAX) coarse.rtt.shift();
+      }
+      this.histLongByNode.set(id, coarse);
+    }
+    this.coarseAccum.clear();
   }
 
   snapshot(): NodeSnapshot[] {
@@ -408,9 +462,14 @@ class ZwaveDataImpl implements ZwaveData {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
     }
-    // Persist the latest rings on the way down (SIGTERM from a deploy/restart)
-    // so the sparklines resume with the freshest data, not the last flush tick.
-    this.historyStore?.save(this.histByNode);
+    if (this.coarseTimer) {
+      clearInterval(this.coarseTimer);
+      this.coarseTimer = null;
+    }
+    // Fold any pending interval into the coarse ring, then persist BOTH tiers on
+    // the way down (SIGTERM from a deploy/restart) so trends resume seamlessly.
+    this.rollCoarse();
+    this.historyStore?.save(this.buildHistoryMap());
   }
 
   /* ─── polling ──────────────────────────────────────────────────────── */
@@ -454,7 +513,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.statsByNode.clear();
         this.batteryByNode.clear();
         this.firmwareByNode.clear();
-        // NOTE: histByNode is intentionally NOT cleared. It is keyed by Z-Wave
+        // NOTE: histByNode + histLongByNode are intentionally NOT cleared. They are keyed by Z-Wave
         // node id (stable across a config-entry re-discovery) and is display-only,
         // so preserving it keeps the sparkline trend continuous through a wedge —
         // the whole point of the v0.5 persistence. New samples push out old ones.
@@ -516,6 +575,8 @@ class ZwaveDataImpl implements ZwaveData {
         this.statsByNode.clear();
         this.batteryByNode.clear();
         this.histByNode.clear();
+        this.histLongByNode.clear();
+        this.coarseAccum.clear();
         this.firmwareByNode.clear();
       }
       this.lastHomeId = homeId;
@@ -643,6 +704,15 @@ class ZwaveDataImpl implements ZwaveData {
 
   private buildController(raw: RawController): ControllerSnapshot {
     const dev = this.deviceByNodeId.get(raw.own_node_id ?? 1) ?? this.deviceByNodeId.get(1);
+    // Track the rebuild-routes start on the false→true edge; clear when it ends.
+    // HA exposes only the boolean (no per-node progress), so the UI shows honest
+    // elapsed time, never a fabricated percentage.
+    const rebuilding = raw.is_rebuilding_routes === true;
+    if (rebuilding) {
+      this.rebuildStartedAt ??= Date.now();
+    } else {
+      this.rebuildStartedAt = null;
+    }
     return {
       homeId: raw.home_id ?? null,
       nodeId: raw.own_node_id ?? 1,
@@ -654,7 +724,8 @@ class ZwaveDataImpl implements ZwaveData {
       isSISPresent: raw.is_sis_present === true,
       manufacturer: dev?.manufacturer ?? null,
       model: dev?.model ?? null,
-      isRebuildingRoutes: raw.is_rebuilding_routes === true,
+      isRebuildingRoutes: rebuilding,
+      rebuildStartedAt: this.rebuildStartedAt,
       firmwareUpdatesAvailable: [...this.firmwareByNode.values()].filter((f) => f.updateAvailable).length,
       // HA's subscribe_controller_statistics event carries no background RSSI,
       // so the per-channel noise floor stays empty (summary shows "noise —").
@@ -743,6 +814,12 @@ class ZwaveDataImpl implements ZwaveData {
     return h ? { rssi: [...h.rssi], rtt: [...h.rtt] } : { rssi: [], rtt: [] };
   }
 
+  /** Coarse long-horizon RSSI/RTT trend (1 pt/min ≈ 2h). Empty when unknown. */
+  historyLong(nodeId: number): { rssi: number[]; rtt: number[] } {
+    const h = this.histLongByNode.get(nodeId);
+    return h ? { rssi: [...h.rssi], rtt: [...h.rtt] } : { rssi: [], rtt: [] };
+  }
+
   /** Map a raw node-statistics event → cached NodeStats. */
   private onNodeStats(ev: unknown): void {
     const e = ev as Record<string, unknown> | null;
@@ -765,17 +842,25 @@ class ZwaveDataImpl implements ZwaveData {
     };
     this.statsByNode.set(nodeId, stats);
 
-    // Append to the rolling history (skip RSSI sentinels 125/126/127).
+    // Append to the rolling history (skip RSSI sentinels 125/126/127), and
+    // accumulate the same samples into the coarse interval mean (rollCoarse
+    // folds them into the long-horizon ring once a minute).
     const h = this.histByNode.get(nodeId) ?? { rssi: [], rtt: [] };
+    const acc = this.coarseAccum.get(nodeId) ?? { rssiSum: 0, rssiN: 0, rttSum: 0, rttN: 0 };
     if (stats.rssi != null && stats.rssi < 0 && stats.rssi > -128) {
       h.rssi.push(stats.rssi);
       if (h.rssi.length > HIST_MAX) h.rssi.shift();
+      acc.rssiSum += stats.rssi;
+      acc.rssiN += 1;
     }
     if (stats.rtt != null && stats.rtt >= 0) {
       h.rtt.push(stats.rtt);
       if (h.rtt.length > HIST_MAX) h.rtt.shift();
+      acc.rttSum += stats.rtt;
+      acc.rttN += 1;
     }
     this.histByNode.set(nodeId, h);
+    this.coarseAccum.set(nodeId, acc);
     // Log a route change (repeater chain differs) so the mesh's re-routing is visible.
     if (prev && routeKey(prev.lwr) !== routeKey(stats.lwr)) {
       this.pushLog('net', 'info', nodeId, `route → ${fmtRoute(stats.lwr)}`);

@@ -47,6 +47,8 @@ export interface ZwaveDataSource {
   lastUpdated?(): number | null;
   /** Rolling RSSI/RTT history for a node (for sparklines). */
   history?(nodeId: number): { rssi: number[]; rtt: number[] };
+  /** Coarse long-horizon RSSI/RTT trend for a node (~2h). */
+  historyLong?(nodeId: number): { rssi: number[]; rtt: number[] };
   /**
    * Optional: trigger an expensive route/controller-statistics refresh. When
    * present it is driven on the `routePollMs` cadence; when absent the data
@@ -187,6 +189,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     noiseFloor: () => cachedNoiseFloor,
     hasRealNoise: () => cachedHasNoise,
     history: (n) => zwaveData.history?.(n) ?? { rssi: [], rtt: [] },
+    historyLong: (n) => zwaveData.historyLong?.(n) ?? { rssi: [], rtt: [] },
     lastUpdated: () => cachedLastUpdated,
     ready: () => cachedReady,
     lastError: () => cachedError,

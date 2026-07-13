@@ -14,32 +14,38 @@ function freshPath(): string {
 const FIXED = 1_000_000_000_000; // fixed wall clock so save/load ages are deterministic
 const UP = 3600_000; // "host up 1h" — well past the boot-grace, so guard (b) won't fire
 
-/**
- * Build a store with deterministic test defaults (fixed clock, large host
- * uptime). Per-test overrides via `extra` exercise the individual guards.
- */
 function mkStore(path: string, extra: Partial<HistoryStoreOptions> = {}) {
   return createHistoryStore({ path, now: () => FIXED, uptimeMs: () => UP, ...extra });
 }
 
-/** Build a HistoryMap from a plain object literal. */
-function mapOf(o: Record<number, { rssi: number[]; rtt: number[] }>): HistoryMap {
-  return new Map(Object.entries(o).map(([k, v]) => [Number(k), v]));
+/** Build a HistoryMap; coarse tiers default to []. */
+function mapOf(o: Record<number, { rssi: number[]; rtt: number[]; crssi?: number[]; crtt?: number[] }>): HistoryMap {
+  return new Map(
+    Object.entries(o).map(([k, v]) => [Number(k), { rssi: v.rssi, rtt: v.rtt, crssi: v.crssi ?? [], crtt: v.crtt ?? [] }]),
+  );
 }
 
-test('round-trips node rings byte-for-byte (values + keys preserved)', () => {
+test('round-trips both fine and coarse tiers', () => {
   const path = freshPath();
-  mkStore(path).save(mapOf({ 12: { rssi: [-60, -58, -55], rtt: [30, 28, 33] }, 7: { rssi: [-70], rtt: [] } }));
-
+  mkStore(path).save(mapOf({ 12: { rssi: [-60, -58], rtt: [30, 28], crssi: [-59, -57, -55], crtt: [29, 27, 25] } }));
   const back = mkStore(path).load();
-  assert.deepEqual([...back.keys()].sort((a, b) => a - b), [7, 12]);
-  assert.deepEqual(back.get(12), { rssi: [-60, -58, -55], rtt: [30, 28, 33] });
-  assert.deepEqual(back.get(7), { rssi: [-70], rtt: [] });
+  assert.deepEqual(back.get(12), { rssi: [-60, -58], rtt: [30, 28], crssi: [-59, -57, -55], crtt: [29, 27, 25] });
+});
+
+test('a coarse-only node (no fine samples) still persists', () => {
+  const path = freshPath();
+  mkStore(path).save(mapOf({ 7: { rssi: [], rtt: [], crssi: [-70, -68], crtt: [] } }));
+  assert.deepEqual(mkStore(path).load().get(7), { rssi: [], rtt: [], crssi: [-70, -68], crtt: [] });
+});
+
+test('v1 (fine-only) file still loads — coarse tier starts empty (back-compat)', () => {
+  const path = freshPath();
+  writeFileSync(path, JSON.stringify({ v: 1, savedAt: FIXED, nodes: { 3: { rssi: [-50, -52], rtt: [10, 12] } } }));
+  assert.deepEqual(mkStore(path).load().get(3), { rssi: [-50, -52], rtt: [10, 12], crssi: [], crtt: [] });
 });
 
 test('missing file → empty map (no throw)', () => {
-  const store = mkStore(join(tmpdir(), 'zwave-hist-does-not-exist', 'nope.json'));
-  assert.equal(store.load().size, 0);
+  assert.equal(mkStore(join(tmpdir(), 'zwave-hist-does-not-exist', 'nope.json')).load().size, 0);
 });
 
 test('corrupt JSON → empty map (never throws)', () => {
@@ -48,7 +54,7 @@ test('corrupt JSON → empty map (never throws)', () => {
   assert.equal(mkStore(path).load().size, 0);
 });
 
-test('wrong schema version → empty map', () => {
+test('unsupported schema version → empty map', () => {
   const path = freshPath();
   writeFileSync(path, JSON.stringify({ v: 999, savedAt: FIXED, nodes: { 3: { rssi: [-50], rtt: [10] } } }));
   assert.equal(mkStore(path).load().size, 0);
@@ -57,90 +63,81 @@ test('wrong schema version → empty map', () => {
 test('stale snapshot (older than maxAgeMs) is discarded; within-window is restored', () => {
   const path = freshPath();
   mkStore(path).save(mapOf({ 5: { rssi: [-40], rtt: [5] } }));
-  // Load 2h later with a 1h max age → discarded.
   assert.equal(mkStore(path, { now: () => FIXED + 2 * 3600_000, maxAgeMs: 3600_000 }).load().size, 0);
-  // Same file, but within the age window → restored.
   assert.equal(mkStore(path, { now: () => FIXED + 30 * 60_000, maxAgeMs: 3600_000 }).load().size, 1);
 });
 
 test('future-dated snapshot (clock stepped back since save) is discarded', () => {
   const path = freshPath();
-  mkStore(path).save(mapOf({ 6: { rssi: [-45], rtt: [7] } })); // savedAt = FIXED
-  // Load with an EARLIER wall clock → ageMs < 0 → discard.
+  mkStore(path).save(mapOf({ 6: { rssi: [-45], rtt: [7] } }));
   assert.equal(mkStore(path, { now: () => FIXED - 10 * 60_000 }).load().size, 0);
 });
 
-test('host-boot guard: fresh snapshot is discarded while host uptime < bootGraceMs', () => {
+test('host-boot guard: fresh snapshot discarded while host uptime < bootGraceMs', () => {
   const path = freshPath();
-  mkStore(path).save(mapOf({ 8: { rssi: [-50], rtt: [9] } })); // savedAt = FIXED, "fresh"
-  // Host up only 30s (< 180s default) → pre-NTP clock suspect → discard even
-  // though the wall-clock age (0) looks fresh.
+  mkStore(path).save(mapOf({ 8: { rssi: [-50], rtt: [9] } }));
   assert.equal(mkStore(path, { uptimeMs: () => 30_000 }).load().size, 0);
-  // Once the host has been up past the grace, the same fresh snapshot restores.
   assert.equal(mkStore(path, { uptimeMs: () => 200_000 }).load().size, 1);
-  // bootGraceMs=0 disables the guard entirely.
   assert.equal(mkStore(path, { uptimeMs: () => 1, bootGraceMs: 0 }).load().size, 1);
 });
 
-test('maxAgeMs=0 disables the wall-clock guard (loads regardless of age)', () => {
+test('maxAgeMs=0 disables the wall-clock guard', () => {
   const path = freshPath();
   mkStore(path).save(mapOf({ 9: { rssi: [-33], rtt: [] } }));
   assert.equal(mkStore(path, { now: () => FIXED + 10 * 24 * 3600_000, maxAgeMs: 0 }).load().size, 1);
 });
 
-test('load caps each series to maxSamples (guards a bloated file)', () => {
+test('load caps fine to maxSamples and coarse to coarseMax (bloat guard)', () => {
   const path = freshPath();
   const big = Array.from({ length: 500 }, (_, i) => -40 - (i % 20));
-  writeFileSync(path, JSON.stringify({ v: 1, savedAt: FIXED, nodes: { 4: { rssi: big, rtt: big } } }));
-  const back = mkStore(path, { maxSamples: 60 }).load();
-  const h = back.get(4)!;
+  writeFileSync(path, JSON.stringify({ v: 2, savedAt: FIXED, nodes: { 4: { rssi: big, rtt: big, crssi: big, crtt: big } } }));
+  const h = mkStore(path, { maxSamples: 60, coarseMax: 120 }).load().get(4)!;
   assert.equal(h.rssi.length, 60);
-  assert.equal(h.rtt.length, 60);
-  // Keeps the MOST RECENT samples (tail), not the head.
+  assert.equal(h.crssi.length, 120);
   assert.deepEqual(h.rssi, big.slice(-60));
+  assert.deepEqual(h.crssi, big.slice(-120));
 });
 
-test('drops malformed entries: bad ids, non-arrays, NaN/non-finite, empty rings', () => {
+test('drops malformed entries: bad ids, non-arrays, NaN, all-empty', () => {
   const path = freshPath();
   writeFileSync(
     path,
     JSON.stringify({
-      v: 1,
+      v: 2,
       savedAt: FIXED,
       nodes: {
-        '0': { rssi: [-50], rtt: [] },          // id 0 → dropped (must be > 0)
-        '-3': { rssi: [-50], rtt: [] },          // negative id → dropped
-        'abc': { rssi: [-50], rtt: [] },         // non-numeric key → dropped
-        '8': { rssi: 'oops', rtt: null },        // non-array series → both empty → dropped
-        '9': { rssi: [-40, 'x', null, NaN, -42], rtt: [] }, // non-finite filtered out
-        '10': { rssi: [], rtt: [] },             // empty rings → dropped
-        '11': 42,                                // non-object → dropped
+        '0': { rssi: [-50], rtt: [] },
+        '-3': { rssi: [-50], rtt: [] },
+        'abc': { rssi: [-50], rtt: [] },
+        '8': { rssi: 'oops', rtt: null, crssi: 'x' },
+        '9': { rssi: [-40, 'x', null, NaN, -42], rtt: [] },
+        '10': { rssi: [], rtt: [], crssi: [], crtt: [] },
+        '11': 42,
       },
     }),
   );
   const back = mkStore(path).load();
   assert.deepEqual([...back.keys()], [9]);
-  assert.deepEqual(back.get(9), { rssi: [-40, -42], rtt: [] });
+  assert.deepEqual(back.get(9), { rssi: [-40, -42], rtt: [], crssi: [], crtt: [] });
 });
 
-test('save is atomic: no .tmp left behind and the target is valid JSON', () => {
+test('save is atomic: no .tmp left behind and the target is valid JSON (schema 2)', () => {
   const path = freshPath();
-  mkStore(path).save(mapOf({ 2: { rssi: [-51, -52], rtt: [12] } }));
-  assert.equal(existsSync(`${path}.tmp`), false, 'temp file must be renamed away');
+  mkStore(path).save(mapOf({ 2: { rssi: [-51], rtt: [12], crssi: [-50], crtt: [11] } }));
+  assert.equal(existsSync(`${path}.tmp`), false);
   const parsed = JSON.parse(readFileSync(path, 'utf8'));
-  assert.equal(parsed.v, 1);
+  assert.equal(parsed.v, 2);
   assert.equal(parsed.savedAt, FIXED);
-  assert.deepEqual(parsed.nodes['2'], { rssi: [-51, -52], rtt: [12] });
+  assert.deepEqual(parsed.nodes['2'], { rssi: [-51], rtt: [12], crssi: [-50], crtt: [11] });
 });
 
-test('save omits empty-ring nodes from disk', () => {
+test('save omits all-empty nodes from disk', () => {
   const path = freshPath();
-  mkStore(path).save(mapOf({ 1: { rssi: [], rtt: [] }, 2: { rssi: [-50], rtt: [] } }));
+  mkStore(path).save(mapOf({ 1: { rssi: [], rtt: [], crssi: [], crtt: [] }, 2: { rssi: [-50], rtt: [] } }));
   const parsed = JSON.parse(readFileSync(path, 'utf8'));
   assert.deepEqual(Object.keys(parsed.nodes), ['2']);
 });
 
 test('save never throws on an unwritable path', () => {
-  const store = mkStore('/proc/zwave-cannot-write/history.json');
-  assert.doesNotThrow(() => store.save(mapOf({ 1: { rssi: [-50], rtt: [1] } })));
+  assert.doesNotThrow(() => mkStore('/proc/zwave-cannot-write/history.json').save(mapOf({ 1: { rssi: [-50], rtt: [1] } })));
 });
