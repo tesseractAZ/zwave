@@ -14,7 +14,7 @@ const makeNode = (over: Partial<NodeSnapshot> = {}): NodeSnapshot => ({
   status: NodeStatus.Alive, statusLabel: 'alive', ready: true,
   isRouting: true, isListening: true, isLongRange: false, isController: false,
   isSecure: true, securityClass: 'S2', manufacturer: 'ACME', model: 'X',
-  battery: null, stats: emptyStats(), entities: [], ...over,
+  battery: null, firmware: null, stats: emptyStats(), entities: [], ...over,
 });
 
 const NOISE = -95;
@@ -46,6 +46,23 @@ test('battery is a separate lane: low battery flags B but does not change the RF
   const lowBat = scoreNode(makeNode({ battery: { level: 10, isLow: true } }), NOISE);
   assert.ok(lowBat.flags.includes('B'), 'low battery raises B flag');
   assert.equal(lowBat.score, mains.score, 'battery must not drag the RF score');
+});
+
+const fw = (over = {}) => ({ current: '1.0', latest: '1.0', updateAvailable: false, inProgress: false, progressPct: null, targets: 1, ...over });
+
+test('firmware update is advisory: flags U without changing the RF score', () => {
+  const base = scoreNode(makeNode({ firmware: fw() }), NOISE);
+  const upd = scoreNode(makeNode({ firmware: fw({ updateAvailable: true, latest: '1.2' }) }), NOISE);
+  assert.ok(!base.flags.includes('U'), 'no U when firmware is current');
+  assert.ok(upd.flags.includes('U'), 'update available raises U flag');
+  assert.equal(upd.score, base.score, 'firmware must not drag the RF score');
+});
+
+test('U flag appears across states (dead / unknown / controller / healthy)', () => {
+  const up = { firmware: fw({ updateAvailable: true }) };
+  assert.ok(scoreNode(makeNode({ status: NodeStatus.Dead, statusLabel: 'dead', ...up }), NOISE).flags.includes('U'));
+  assert.ok(scoreNode(makeNode({ isController: true, nodeId: 1, ...up }), NOISE).flags.includes('U'));
+  assert.ok(scoreNode(makeNode({ stats: emptyStats(), ready: false, ...up }), NOISE).flags.includes('U'));
 });
 
 test('Long-Range node scores without error', () => {

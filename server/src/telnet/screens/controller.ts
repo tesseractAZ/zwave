@@ -120,12 +120,20 @@ function identityBlock(ctrl: ControllerSnapshot, W: number): string[] {
     ? c.yellowB('rebuilding…')
     : c.grey('idle');
 
+  // Fleet firmware: count of nodes reporting an available update. Phrased so a
+  // pre-poll 0 reads "none pending" (honest) rather than claiming "all current".
+  const fwUpd =
+    ctrl.firmwareUpdatesAvailable > 0
+      ? c.blue(`${ctrl.firmwareUpdatesAvailable} node(s) — update available`)
+      : c.grey('none pending');
+
   return [
     head('IDENTITY', W),
     grid2(kv('Manufacturer', val(ctrl.manufacturer), KL), kv('Home ID', homeId, KR), W),
     grid2(kv('Model', val(ctrl.model), KL), kv('RF Region', val(ctrl.rfRegion), KR), W),
     grid2(kv('Firmware', val(ctrl.firmwareVersion), KL), kv('SDK', val(ctrl.sdkVersion), KR), W),
     grid2(kv('Roles', roles, KL), kv('Rebuild', rebuild, KR), W),
+    grid2(kv('Node FW', fwUpd, KL), kv('', '', KR), W),
   ];
 }
 

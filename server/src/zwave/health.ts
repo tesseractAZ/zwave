@@ -85,7 +85,7 @@ const UNKNOWN_SCORE_CAP = 15;
 const LR_NODE_ID = 256;
 
 /** Documented render order for the flag column. */
-const FLAG_ORDER = ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B'] as const;
+const FLAG_ORDER = ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B', 'U'] as const;
 
 // ── Small numeric helpers ────────────────────────────────────────────────────
 
@@ -143,11 +143,15 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   const batteryLow =
     node.battery != null &&
     (node.battery.level <= BATTERY_LOW_PCT || node.battery.isLow === true);
+  // Firmware-update-available is likewise advisory: it flags maintenance, never
+  // a fault, so like 'B' it appends to any state WITHOUT changing the score.
+  const updateAvail = node.firmware?.updateAvailable === true;
 
   // ── Gate 1: DEAD → 0. Nothing else is meaningful once the node is unreachable.
   if (node.status === NodeStatus.Dead) {
     const flags = new Set<string>(['D']);
     if (batteryLow) flags.add('B');
+    if (updateAvail) flags.add('U');
     return { score: 0, rating: 0, grade: 'F', state: 'dead', flags: orderFlags(flags) };
   }
 
@@ -156,6 +160,7 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
     const flags = new Set<string>();
     if (!node.ready) flags.add('I');
     if (batteryLow) flags.add('B');
+    if (updateAvail) flags.add('U');
     const score = 10; // ≤ UNKNOWN_SCORE_CAP by construction
     return {
       score,
@@ -171,6 +176,7 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   if (node.isController && (node.status === NodeStatus.Alive || node.status === NodeStatus.Awake)) {
     const flags = new Set<string>();
     if (batteryLow) flags.add('B'); // controllers are mains-powered, but stay honest
+    if (updateAvail) flags.add('U');
     return { score: 100, rating: 10, grade: 'A', state: 'ok', flags: orderFlags(flags) };
   }
 
@@ -262,8 +268,9 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   const interviewFrac = node.ready ? 1 : 0;
   if (!node.ready) flags.add('I');
 
-  // ── Battery (advisory) — never folded into the RF score.
+  // ── Battery + firmware (advisory) — never folded into the RF score.
   if (batteryLow) flags.add('B');
+  if (updateAvail) flags.add('U');
 
   // ── Weighted composite. LR redistributes the Route weight into Signal + TX.
   const w = isLR
