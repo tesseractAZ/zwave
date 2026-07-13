@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.1 — 2026-07-11
+
+Graphics polish from an adversarial verification (12 confirmed + 3 plausible; no
+data or behavior regressions — all color/edge-case fixes).
+
+- **Colors now match their numbers.** The Overview trend sparkline, the Detail
+  drop% meter, the Topology route bars (dBm mode), and the Heatmap cells were
+  colored by a different band than the value beside them — a healthy node could
+  show a red trend, a 20%-drop a green bar. Each now uses the same color band as
+  its number, so a green bar always means a healthy number.
+- **Gauge robustness.** NaN/Infinity and degenerate inputs could render the
+  literal "undefined" (blowing a fixed column to 9 cells) or collapse a bar to
+  width 0 — `clamp01` now sanitizes non-finite input and `signalBars` guards
+  `bars<=1`. A flat (steady) sparkline reads grey-steady instead of alarming red.
+- `brailleSparkline` was vertically inverted (filled top-down); now bottom-up so
+  a rising trend rises. Overview trend excludes RSSI sentinels; self-heal clears
+  the history ring; Controller drops the redundant Home-ID decimal at 60 cols.
+- 4 new edge-case tests (54 total).
+
 ## 0.4.0 — 2026-07-11
 
 Terminal graphics — the TUI is now a control-room display.

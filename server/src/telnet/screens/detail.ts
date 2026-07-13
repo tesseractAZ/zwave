@@ -180,7 +180,9 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     // fits WITHOUT crowding the real value text (lr would otherwise truncate it).
     if (s.commandsTX > 0) {
       const va = inner - 11;
-      const dm = meter(pct / 100, 8, { dir: 'lowGood' });
+      // Force the fill color to the SAME dropColor() band as the % text so the
+      // bar can never read healthier (green) than the number it sits beside.
+      const dm = meter(pct / 100, 8, { dir: 'lowGood', color: dropColor(pct) });
       if (va - visLen(dropVal) >= 10) dropVal = lr(dropVal, dm, va);
     }
     body.push(kv('Drop', dropVal, inner));
