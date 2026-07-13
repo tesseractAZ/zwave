@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0 — 2026-07-13
+
+Firmware-update surfacing — see at a glance which nodes have a Z-Wave firmware
+update available (read-only; no update is ever triggered from the TUI).
+
+- **Per-node firmware** on the Detail screen: installed version, and when an
+  update is available `5.54 → 5.60 ⬆ update` (or `updating 42%…` while applying).
+- **Overview** gains an advisory **`U`** flag (blue) on nodes with an update —
+  it never affects the health score (a pending update is maintenance, not a
+  fault), exactly like the battery `B` flag.
+- **Controller** screen shows a fleet roll-up: `Node FW — N node(s) update
+  available` (or `none pending`).
+- Reads the `update.*` firmware entities via `get_states` on the same slow
+  cadence as battery. A node may expose multiple firmware targets
+  (`_firmware` + `_firmware_2`) — they're aggregated (update available if any
+  target has one). The add-on/integration `update.*` entities are correctly
+  excluded (they aren't on a node device).
+- 11 new tests (78 total): firmware aggregation (multi-target, in-progress,
+  missing attrs, version coercion) + the advisory `U` flag across node states.
+
 ## 0.5.0 — 2026-07-13
 
 Persistent sparkline history — the RSSI/RTT trends now survive a restart.

@@ -20,6 +20,7 @@ import { BOX, c, lr, padEnd, truncate, visLen } from '../ansi';
 import { gauge, meter, signalBars, sparkline } from '../gauges';
 import {
   NodeStatus,
+  type FirmwareInfo,
   type NodeSnapshot,
   type RouteStat,
   type ScreenCtx,
@@ -42,6 +43,7 @@ const FLAG_MEANING: Record<string, string> = {
   L: 'high latency',
   I: 'interview incomplete',
   B: 'battery low',
+  U: 'firmware update',
 };
 
 export function renderDetail(ctx: ScreenCtx): string[] {
@@ -98,6 +100,8 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   {
     const dev = [n.manufacturer, n.model].filter(Boolean).join(' ').trim();
     body.push(kv('Device', dev || c.grey('unknown device'), inner));
+    const fwRow = firmwareRow(n.firmware, inner);
+    if (fwRow) body.push(fwRow);
 
     let sec: string;
     if (n.isSecure === true) {
@@ -418,6 +422,21 @@ function twoCol(k1: string, v1: string, k2: string, v2: string, inner: number): 
   return truncate('  ' + lr(left, right, inner - 2), inner);
 }
 
+/** Firmware row: version + update/in-progress advisory (null → row omitted). */
+function firmwareRow(fw: FirmwareInfo | null, inner: number): string | null {
+  if (!fw) return null;
+  const cur = fw.current ?? '?';
+  if (fw.inProgress) {
+    const pct = fw.progressPct != null ? ` ${Math.round(fw.progressPct)}%` : '';
+    return kv('Firmware', c.blue(`updating${pct}…`) + c.grey(` (installed ${cur})`), inner);
+  }
+  if (fw.updateAvailable) {
+    return kv('Firmware', c.white(cur) + c.blue(` → ${fw.latest ?? '?'} ⬆ update`), inner);
+  }
+  const tgt = fw.targets > 1 ? c.grey(` · ${fw.targets} targets`) : '';
+  return kv('Firmware', c.white(cur) + c.grey(' · up to date') + tgt, inner);
+}
+
 /** Power lane: a battery entity (or a reported level) ⇒ battery, else mains. */
 function powerLabel(n: NodeSnapshot): string {
   if (n.battery != null) {
@@ -565,6 +584,7 @@ function flagColor(flags: string[]): (s: string) => string {
   if (has('D') || has('F') || has('R')) return c.red;
   if (has('W') || has('B') || has('L')) return c.yellow;
   if (has('S')) return c.cyan;
+  if (has('U')) return c.blue; // firmware update available — advisory, not a fault
   return c.grey;
 }
 
