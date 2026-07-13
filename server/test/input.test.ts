@@ -16,7 +16,7 @@ const node: NodeSnapshot = {
 const score: HealthResult = { score: 79, rating: 8, grade: 'C', state: 'ok', flags: [] };
 const data: DataProvider = {
   nodes: () => [node], nodeById: () => node, controller: () => null, events: () => [],
-  scoreFor: () => score, noiseFloor: () => -95, hasRealNoise: () => false,
+  scoreFor: () => score, noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }),
   lastUpdated: () => 0, ready: () => true, lastError: () => null,
 };
 const mkView = (screen: ViewState['screen'] = 'overview'): ViewState => ({

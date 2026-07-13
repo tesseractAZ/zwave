@@ -17,6 +17,7 @@
  */
 
 import { BOX, c, lr, padEnd, truncate, visLen } from '../ansi';
+import { gauge, meter, signalBars, sparkline } from '../gauges';
 import {
   NodeStatus,
   type NodeSnapshot,
@@ -65,6 +66,14 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   /* ── build the interior content rows (each a plain/coloured string) ──────── */
   const body: string[] = [];
   const sep = () => body.push(SEP); // marker, framed later
+  // A "graphic" row is an augment (gauge/sparkline/meter) that carries NO
+  // dossier value the operator can't already read from the text rows. It is
+  // tagged with GMARK + a priority byte so that, when the frame is too short,
+  // the least-important graphic is dropped BEFORE any real data (see the drop
+  // pass below). `s === null` means the graphic didn't fit its columns → skip.
+  const pushG = (prio: number, s: string | null): void => {
+    if (s != null) body.push(GMARK + String.fromCharCode(prio) + s);
+  };
 
   // Header: identity line + flags pushed to the right edge.
   {
@@ -79,6 +88,8 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       ? flagColor(health.flags)(health.flags.join(' '))
       : '';
     body.push(' ' + lr(left, flags, inner - 1));
+    // Flagship graphic: a wide health gauge echoing the header score/grade.
+    if (!dead(n)) pushG(PRIO.health, healthGauge(health.score, health.grade, inner));
   }
   sep();
 
@@ -106,6 +117,10 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     body.push(kv('Radio', caps.join(c.grey(' · ')), inner));
 
     body.push(kv('Power', powerLabel(n), inner));
+    // Battery gauge for battery-powered nodes (level% also shown in Power text).
+    if (n.battery != null) {
+      pushG(PRIO.battery, batteryGauge(n.battery.level, n.battery.isLow, inner));
+    }
 
     const loc =
       (n.area ? c.white(n.area) : c.grey('no area')) +
@@ -142,16 +157,32 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     }
     body.push(twoCol('RSSI', rssiVal, 'Margin', marginVal, inner));
 
+    // Graphics: SNR-margin quality meter + RSSI/RTT trend sparklines. Each is a
+    // droppable augment; the underlying numbers already live in the rows above.
+    if (rssi != null) pushG(PRIO.snr, snrRow(rssi - noise, data.hasRealNoise(), inner));
+    const hist = data.history(n.nodeId);
+    const rssiHist = hist.rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
+    const rttHist = hist.rtt.filter((v) => Number.isFinite(v) && v >= 0);
+    pushG(PRIO.rssiTrend, trendRow('Signal', rssiHist, 'dBm', lastColor(rssiHist, rssiColor), inner));
+    pushG(PRIO.rttTrend, trendRow('Latency', rttHist, 'ms', lastColor(rttHist, rttColor), inner));
+
     // Drop% = (droppedTX + response timeouts) / TX, clamped so the headline and
     // the "N of M" text stay sane even if the driver's counters briefly disagree.
     const denom = Math.max(1, s.commandsTX);
     const drops = Math.min(s.commandsDroppedTX + s.timeoutResponse, s.commandsTX);
     const pct = Math.min(100, (drops / denom) * 100);
-    const dropVal =
+    let dropVal =
       s.commandsTX <= 0
         ? c.grey('— (no TX yet)')
         : dropColor(pct)(`${pct.toFixed(1)}%`) +
           c.grey(` (${drops} of ${s.commandsTX} tx)`);
+    // Augment the Drop row with a low-good meter, right-aligned, but only when it
+    // fits WITHOUT crowding the real value text (lr would otherwise truncate it).
+    if (s.commandsTX > 0) {
+      const va = inner - 11;
+      const dm = meter(pct / 100, 8, { dir: 'lowGood' });
+      if (va - visLen(dropVal) >= 10) dropVal = lr(dropVal, dm, va);
+    }
     body.push(kv('Drop', dropVal, inner));
   }
   sep();
@@ -191,7 +222,124 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   }
 
   /* ── frame + fit to exactly H rows ───────────────────────────────────────── */
-  return frameToHeight(body, footer(health, inner, ctx.actionsEnabled ?? false), inner, W, H);
+  // Height degradation: shed the least-important GRAPHIC rows (never dossier
+  // data) until the body fits the interior. If the base dossier still overflows,
+  // frameToHeight falls back to its "…N more rows" marker. contentCap mirrors
+  // the reservation frameToHeight makes for the footer.
+  const contentCap = Math.max(0, H - 2 - 1);
+  dropGraphicsToFit(body, contentCap);
+  const cleaned = body.map(stripGMark);
+  return frameToHeight(cleaned, footer(health, inner, ctx.actionsEnabled ?? false), inner, W, H);
+}
+
+/* ── graphic-row priority + height degradation ───────────────────────────── */
+
+/** Marker byte prefixing an augment (graphic) body row: GMARK + priorityByte. */
+const GMARK = '\x01';
+
+/** Higher number = shed sooner when the frame is too short. */
+const PRIO = {
+  health: 1, // flagship — kept longest
+  battery: 2,
+  snr: 3,
+  rssiTrend: 4,
+  rttTrend: 5, // shed first
+} as const;
+
+/** Strip the GMARK+priority prefix so the row frames as ordinary content. */
+function stripGMark(l: string): string {
+  return l.charCodeAt(0) === 1 ? l.slice(2) : l;
+}
+
+/** Remove the lowest-importance graphic rows until `body.length <= cap`. */
+function dropGraphicsToFit(body: string[], cap: number): void {
+  while (body.length > cap) {
+    let worstIdx = -1;
+    let worstPrio = -1;
+    for (let i = 0; i < body.length; i++) {
+      if (body[i].charCodeAt(0) === 1) {
+        const p = body[i].charCodeAt(1);
+        if (p > worstPrio) {
+          worstPrio = p;
+          worstIdx = i;
+        }
+      }
+    }
+    if (worstIdx < 0) break; // only dossier rows left — frameToHeight marker handles it
+    body.splice(worstIdx, 1);
+  }
+}
+
+/* ── graphic builders (each returns an inner-width string, or null if it can't
+      fit its columns and should be skipped) ───────────────────────────────── */
+
+/** Wide health gauge echoing the header score/grade, coloured by score. */
+function healthGauge(score: number, grade: string, inner: number): string | null {
+  const plain = `${score} ${grade}`;
+  const barW = Math.min(16, inner - 1 - 3 - plain.length); // 1 indent + '[' ']' + ' '
+  if (barW < 6) return null;
+  return ' ' + gauge(score / 100, barW, scoreColor(score)(plain), { color: scoreColor(score) });
+}
+
+/** Battery charge gauge (level% also shown in the Power text row). */
+function batteryGauge(level: number, isLow: boolean, inner: number): string | null {
+  const plain = `${level}%`;
+  const barW = Math.min(16, inner - 11 - 3 - plain.length); // kv indent(11) + '[' ']' + ' '
+  if (barW < 6) return null;
+  const col = level <= 25 || isLow ? c.red : level <= 50 ? c.yellow : c.green;
+  return kv('Battery', gauge(level / 100, barW, col(plain), { color: col }), inner);
+}
+
+/** SNR-margin zone meter — margin (dBm above noise) mapped onto a 0..25 dB scale. */
+function snrRow(margin: number, realNoise: boolean, inner: number): string | null {
+  const label = `${margin >= 0 ? '+' : ''}${margin} dB` + (realNoise ? '' : ' est');
+  const barW = Math.min(16, inner - 11 - 1 - label.length);
+  if (barW < 6) return null;
+  const bar = meter(margin / 25, barW, { color: marginColor(margin) });
+  return kv('SNR', bar + ' ' + c.grey(label), inner);
+}
+
+/**
+ * Trend sparkline row: auto-scaled sparkline + a "min…max unit" range caption.
+ * Drops the caption, then the whole row, as the columns shrink. Colour tracks
+ * the latest sample's health (so a rising RTT never reads falsely green).
+ */
+function trendRow(
+  label: string,
+  values: number[],
+  unit: string,
+  color: ((s: string) => string) | undefined,
+  inner: number,
+): string | null {
+  const va = inner - 11; // value columns after the kv label cell
+  if (va < 10) return null;
+  let ann = '';
+  if (values.length) {
+    const mn = Math.round(Math.min(...values));
+    const mx = Math.round(Math.max(...values));
+    ann = mn === mx ? `${mn} ${unit}` : `${mn}…${mx} ${unit}`;
+  }
+  let sparkW = Math.min(56, va - (ann ? ann.length + 1 : 0));
+  if (sparkW < 8) {
+    ann = '';
+    sparkW = Math.min(56, va);
+  }
+  if (sparkW < 8) return null;
+  const val = sparkline(values, sparkW, { color }) + (ann ? ' ' + c.grey(ann) : '');
+  return kv(label, val, inner);
+}
+
+/** Colour a graphic by the newest sample's health band (undefined if no data). */
+function lastColor(
+  values: number[],
+  band: (v: number) => (s: string) => string,
+): ((s: string) => string) | undefined {
+  return values.length ? band(values[values.length - 1]) : undefined;
+}
+
+/** Map a hop RSSI (dBm) to a 0..1 signal strength for the route signal bars. */
+function rssiStrength(dbm: number): number {
+  return Math.max(0, Math.min(1, (dbm + 100) / 60)); // -100 dBm → 0, -40 dBm → 1
 }
 
 /* ── route rendering ─────────────────────────────────────────────────────── */
@@ -216,24 +364,29 @@ function pushRoute(body: string[], label: string, route: RouteStat, inner: numbe
   if (rssi != null) bits.push(rssiColor(rssi)(`${rssi} dBm`));
 
   const tail = bits.length ? c.grey('  ·  ') + bits.join(c.grey(' · ')) : '';
-  body.push(kv(label, routeChain(route) + tail, inner));
+  // Per-hop signal bars augment the chain, but must never crowd out the tail
+  // (rate/route-rssi/⚠failed marker): if the barred chain + tail would overflow
+  // the value columns, fall back to the number-only chain first.
+  let chain = routeChain(route, true);
+  if (visLen(chain) + visLen(tail) > inner - 11) chain = routeChain(route, false);
+  body.push(kv(label, chain + tail, inner));
 }
 
 /**
  * Build "controller ← n3 ← n8 ← node", each repeater annotated with its
- * repeaterRSSI[] hop reading. Empty repeaters ⇒ a direct link.
+ * repeaterRSSI[] hop reading and (when `bars`) a WiFi-style signal-strength
+ * glyph derived from that reading. Empty repeaters ⇒ a direct link.
  */
-function routeChain(route: RouteStat): string {
+function routeChain(route: RouteStat, bars: boolean): string {
   const reps = Array.isArray(route.repeaters) ? route.repeaters : [];
   const arrow = c.grey(' ← ');
   const parts: string[] = [c.grey('controller')];
   reps.forEach((r, i) => {
     const hop = route.repeaterRSSI?.[i];
-    const ann =
-      hop != null && Number.isFinite(hop) && !RSSI_SENTINELS.has(hop)
-        ? c.grey('(') + rssiColor(hop)(`${hop}`) + c.grey(')')
-        : '';
-    parts.push(c.white('n' + r) + ann);
+    const valid = hop != null && Number.isFinite(hop) && !RSSI_SENTINELS.has(hop);
+    const ann = valid ? c.grey('(') + rssiColor(hop!)(`${hop}`) + c.grey(')') : '';
+    const sig = bars && valid ? signalBars(rssiStrength(hop!), 3) : '';
+    parts.push(c.white('n' + r) + ann + sig);
   });
   parts.push(c.whiteB('node'));
   const chain = parts.join(arrow);

@@ -13,7 +13,7 @@ const node: NodeSnapshot = {
 const score: HealthResult = { score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] };
 const data: DataProvider = {
   nodes: () => [node], nodeById: () => node, controller: () => null, events: () => [], scoreFor: () => score,
-  noiseFloor: () => -95, hasRealNoise: () => false, lastUpdated: () => 0, lastStatsUpdated: () => 0,
+  noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0, lastStatsUpdated: () => 0,
   ready: () => true, lastError: () => null,
 };
 
