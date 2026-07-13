@@ -41,6 +41,14 @@ import {
   type RouteStat,
   type LogEvent,
 } from '../types';
+import { createHistoryStore, type HistoryStore } from './historyStore';
+
+/**
+ * Rolling per-node RSSI/RTT sample-ring depth. Shared by the live ring in
+ * `onNodeStats` AND the persistence store's `maxSamples`, so the on-disk cap
+ * and the in-memory cap can never drift apart.
+ */
+const HIST_MAX = 60;
 
 /* ─── raw HA response shapes (only the fields we read) ──────────────────── */
 
@@ -114,6 +122,13 @@ export interface ZwaveDataOptions {
   refreshMs?: number;
   /** Expensive route/controller-stats cadence (ms) — v0.2 subscriptions. */
   routePollMs?: number;
+  /**
+   * Path for the persistent RSSI/RTT sparkline history (JSON ring on /data).
+   * Empty/null → in-memory only (dev/test). Falls back to `HISTORY_PATH` env.
+   */
+  historyPath?: string | null;
+  /** How often to flush history to disk (ms). Falls back to env; default 30s. */
+  historyFlushMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -257,6 +272,13 @@ class ZwaveDataImpl implements ZwaveData {
   private statsByNode = new Map<number, NodeStats>();
   /** v0.4 rolling per-node RSSI/RTT history for sparklines (bounded ring). */
   private histByNode = new Map<number, { rssi: number[]; rtt: number[] }>();
+  /** v0.5 disk persistence for `histByNode` (null → in-memory only). */
+  private readonly historyStore: HistoryStore | null;
+  private readonly historyFlushMs: number;
+  private flushTimer: ReturnType<typeof setInterval> | null = null;
+  /** Controller home_id from the last poll — a change means a different Z-Wave
+   *  network (stick swap / different NVM backup), so node-keyed caches alias. */
+  private lastHomeId: number | null = null;
   private ctrlStats: ControllerSnapshot['statistics'] = null;
   /** Battery level (%) per node, from get_states of the *_battery entities. */
   private batteryByNode = new Map<number, number>();
@@ -291,6 +313,21 @@ class ZwaveDataImpl implements ZwaveData {
     const seed = opts.entryId ?? process.env.ZWAVE_ENTRY_ID ?? '';
     this.entrySeeded = seed !== '';
     this.entryId = this.entrySeeded ? seed : null;
+
+    // Persistent sparkline history: seed the in-memory rings from the last
+    // on-disk snapshot so a restart isn't visually empty. Disabled (null) in
+    // dev/test where no path is configured.
+    const histPath = (opts.historyPath ?? process.env.HISTORY_PATH) || null;
+    // A garbage HISTORY_FLUSH_MS must fall back to the default, not NaN (which
+    // would silently disable the periodic flush via the `> 0` guard in start()).
+    const flushMs = opts.historyFlushMs ?? Number(process.env.HISTORY_FLUSH_MS ?? 30_000);
+    this.historyFlushMs = Number.isFinite(flushMs) ? flushMs : 30_000;
+    this.historyStore = histPath
+      ? createHistoryStore({ path: histPath, maxSamples: HIST_MAX, log: this.log })
+      : null;
+    if (this.historyStore) {
+      for (const [id, h] of this.historyStore.load()) this.histByNode.set(id, h);
+    }
   }
 
   start(): void {
@@ -306,6 +343,15 @@ class ZwaveDataImpl implements ZwaveData {
       void this.subscribeStatistics();
     });
     void this.tick();
+
+    // Periodically flush the sparkline rings to /data so a restart is seamless.
+    // `.unref()` keeps this timer from holding the event loop open at shutdown.
+    if (this.historyStore && !this.flushTimer && this.historyFlushMs > 0) {
+      this.flushTimer = setInterval(() => {
+        this.historyStore!.save(this.histByNode);
+      }, this.historyFlushMs);
+      this.flushTimer.unref?.();
+    }
   }
 
   snapshot(): NodeSnapshot[] {
@@ -351,6 +397,13 @@ class ZwaveDataImpl implements ZwaveData {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+    // Persist the latest rings on the way down (SIGTERM from a deploy/restart)
+    // so the sparklines resume with the freshest data, not the last flush tick.
+    this.historyStore?.save(this.histByNode);
   }
 
   /* ─── polling ──────────────────────────────────────────────────────── */
@@ -393,7 +446,10 @@ class ZwaveDataImpl implements ZwaveData {
         this.statsSubscribed = false;
         this.statsByNode.clear();
         this.batteryByNode.clear();
-        this.histByNode.clear();
+        // NOTE: histByNode is intentionally NOT cleared. It is keyed by Z-Wave
+        // node id (stable across a config-entry re-discovery) and is display-only,
+        // so preserving it keeps the sparkline trend continuous through a wedge —
+        // the whole point of the v0.5 persistence. New samples push out old ones.
       }
       const backoff = this.refreshMs * 2 ** Math.min(this.errStreak, 5);
       this.scheduleNext(Math.max(this.refreshMs, Math.min(30_000, backoff)));
@@ -439,6 +495,22 @@ class ZwaveDataImpl implements ZwaveData {
     }
     this.lastNodes = nodes;
     this.lastController = this.buildController(ctrl);
+    // Network-identity guard: the per-node stats + sparkline history are keyed
+    // by numeric node id. If the controller's home_id changes, those ids now
+    // refer to a DIFFERENT physical network (stick swap / different NVM backup
+    // restore), so the caches would alias one node's data onto another. Drop
+    // them on an identity change only — NOT on a plain reconnect, where home_id
+    // is stable (that's what lets v0.5 persistence survive an HA-Core restart).
+    const homeId = this.lastController.homeId;
+    if (homeId != null) {
+      if (this.lastHomeId != null && homeId !== this.lastHomeId) {
+        this.log(`controller home_id ${this.lastHomeId} → ${homeId} (network changed) — clearing per-node stats + history`);
+        this.statsByNode.clear();
+        this.batteryByNode.clear();
+        this.histByNode.clear();
+      }
+      this.lastHomeId = homeId;
+    }
     this.lastErr = null;
     this.isReady = true;
     this.lastOkAt = Date.now();
@@ -662,7 +734,6 @@ class ZwaveDataImpl implements ZwaveData {
     this.statsByNode.set(nodeId, stats);
 
     // Append to the rolling history (skip RSSI sentinels 125/126/127).
-    const HIST_MAX = 60;
     const h = this.histByNode.get(nodeId) ?? { rssi: [], rtt: [] };
     if (stats.rssi != null && stats.rssi < 0 && stats.rssi > -128) {
       h.rssi.push(stats.rssi);

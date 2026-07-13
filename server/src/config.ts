@@ -65,8 +65,16 @@ export const config = {
 
   /** Add-on log verbosity, surfaced from bashio to the server logger. */
   logLevel: process.env.LOG_LEVEL ?? 'info',
-  /** Persistent SQLite path on the /data volume (phase 4 history). */
+  /** Persistent SQLite path on the /data volume (reserved; unused). */
   dbPath: process.env.DB_PATH ?? '/data/zwave.db',
+  /**
+   * Persistent RSSI/RTT sparkline history (atomic JSON ring on /data). The run
+   * script exports `HISTORY_PATH=/data/history.json`; absent (bare dev) → null,
+   * i.e. in-memory only. `historyFlushMs` is the flush cadence (also flushed on
+   * shutdown).
+   */
+  historyPath: process.env.HISTORY_PATH || null,
+  historyFlushMs: Number(process.env.HISTORY_FLUSH_MS ?? 30_000),
   /** Build stamp promoted from the Docker ARG (reported by /api/version). */
   version: process.env.BUILD_VERSION ?? '0.1.0',
 

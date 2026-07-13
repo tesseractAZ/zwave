@@ -53,6 +53,8 @@ async function main(): Promise<void> {
     entryId: config.entryId,
     refreshMs: config.refreshMs,
     routePollMs: config.routePollMs,
+    historyPath: config.historyPath,
+    historyFlushMs: config.historyFlushMs,
     log,
   });
   zwaveData.start();
