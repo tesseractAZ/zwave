@@ -146,3 +146,19 @@ export function brailleSparkline(values: number[], width: number, opts: { min?: 
   const color = opts.color ?? zoneColor((recent[recent.length - 1] - lo) / span);
   return (pad > 0 ? c.grey('·'.repeat(pad)) : '') + color(cells.slice(-width).join(''));
 }
+
+/** ms → compact elapsed: "45s" / "3m12s" / "1h05m". */
+export function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${String(s % 60).padStart(2, '0')}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h${String(m % 60).padStart(2, '0')}m`;
+}
+
+const SPIN_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
+/** A braille spinner glyph for the given epoch-ms (advances at the redraw rate). */
+export function spinner(nowMs: number): string {
+  return SPIN_FRAMES[Math.floor(nowMs / 120) % SPIN_FRAMES.length];
+}

@@ -42,10 +42,17 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { uptime as osUptime } from 'node:os';
 
-/** One node's rolling RSSI + RTT sample rings (oldest → newest). */
+/**
+ * One node's rolling sample rings (oldest → newest). Two tiers:
+ *   - `rssi`/`rtt`   — fine ring (per stats-event), for the recent sparklines.
+ *   - `crssi`/`crtt` — coarse ring (1 downsampled point per minute), for the
+ *                      long-horizon (~hours) trend.
+ */
 export interface HistorySample {
   rssi: number[];
   rtt: number[];
+  crssi: number[];
+  crtt: number[];
 }
 
 /** node id → its sample rings. */
@@ -54,8 +61,10 @@ export type HistoryMap = Map<number, HistorySample>;
 export interface HistoryStoreOptions {
   /** Absolute path on the /data volume, e.g. `/data/history.json`. */
   path: string;
-  /** Cap per array (defensive; should match the in-memory ring size). */
+  /** Cap per FINE array (defensive; should match the in-memory ring size). */
   maxSamples?: number;
+  /** Cap per COARSE array (long-horizon downsampled ring size). */
+  coarseMax?: number;
   /** Discard snapshots whose `savedAt` is older than this (ms). 0 = never. */
   maxAgeMs?: number;
   /**
@@ -80,15 +89,16 @@ export interface HistoryStore {
   save(map: HistoryMap): void;
 }
 
-/** On-disk shape. `v` gates forward/backward-incompatible format changes. */
+/** On-disk shape. `v` gates format changes; v1 (fine-only) still loads. */
 interface Persisted {
   v: number;
   savedAt: number;
-  nodes: Record<string, { rssi: number[]; rtt: number[] }>;
+  nodes: Record<string, { rssi: number[]; rtt: number[]; crssi?: number[]; crtt?: number[] }>;
 }
 
-const SCHEMA_V = 1;
+const SCHEMA_V = 2; // 2 adds the coarse tier; v1 (fine-only) still loads.
 const DEFAULT_MAX_SAMPLES = 60;
+const DEFAULT_COARSE_MAX = 120;
 const DEFAULT_MAX_AGE_MS = 60 * 60 * 1000; // 1h — covers any normal restart.
 const DEFAULT_BOOT_GRACE_MS = 180 * 1000; // 3min — covers boot→addon-start→NTP.
 
@@ -96,6 +106,7 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
   const path = opts.path;
   const tmp = `${path}.tmp`;
   const maxSamples = opts.maxSamples ?? DEFAULT_MAX_SAMPLES;
+  const coarseMax = opts.coarseMax ?? DEFAULT_COARSE_MAX;
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
   const bootGraceMs = opts.bootGraceMs ?? DEFAULT_BOOT_GRACE_MS;
   const now = opts.now ?? Date.now;
@@ -103,14 +114,14 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
   const log = opts.log ?? (() => {});
 
   /** Coerce an arbitrary value into a bounded array of finite numbers. */
-  const cleanSeries = (a: unknown): number[] => {
+  const cleanSeries = (a: unknown, cap: number): number[] => {
     if (!Array.isArray(a)) return [];
     const out: number[] = [];
     for (const x of a) {
       if (typeof x === 'number' && Number.isFinite(x)) out.push(x);
     }
-    // Keep only the most-recent maxSamples (guards against a bloated file).
-    return out.length > maxSamples ? out.slice(out.length - maxSamples) : out;
+    // Keep only the most-recent `cap` (guards against a bloated file).
+    return out.length > cap ? out.slice(out.length - cap) : out;
   };
 
   return {
@@ -123,8 +134,10 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
         const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
         if (!parsed || typeof parsed !== 'object') return map;
         const obj = parsed as Partial<Persisted>;
-        if (obj.v !== SCHEMA_V) {
-          log(`history: schema ${String(obj.v)} ≠ ${SCHEMA_V} — starting fresh`);
+        // v1 (fine-only) still loads — its coarse tier just starts empty and
+        // fills over time. Anything else is an unknown format → start fresh.
+        if (obj.v !== 1 && obj.v !== 2) {
+          log(`history: schema ${String(obj.v)} unsupported — starting fresh`);
           return map;
         }
         // Guard (b): host just booted → wall clock may be pre-NTP (no RTC), so
@@ -148,10 +161,13 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
           const id = Number(k);
           if (!Number.isInteger(id) || id <= 0) continue;
           if (!v || typeof v !== 'object') continue;
-          const rssi = cleanSeries((v as { rssi?: unknown }).rssi);
-          const rtt = cleanSeries((v as { rtt?: unknown }).rtt);
-          if (rssi.length === 0 && rtt.length === 0) continue;
-          map.set(id, { rssi, rtt });
+          const s = v as { rssi?: unknown; rtt?: unknown; crssi?: unknown; crtt?: unknown };
+          const rssi = cleanSeries(s.rssi, maxSamples);
+          const rtt = cleanSeries(s.rtt, maxSamples);
+          const crssi = cleanSeries(s.crssi, coarseMax); // absent in v1 → []
+          const crtt = cleanSeries(s.crtt, coarseMax);
+          if (rssi.length === 0 && rtt.length === 0 && crssi.length === 0 && crtt.length === 0) continue;
+          map.set(id, { rssi, rtt, crssi, crtt });
         }
         log(`history: restored ${map.size} node(s) from ${path}`);
       } catch (e) {
@@ -168,8 +184,10 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
           if (!Number.isInteger(id) || id <= 0) continue;
           const rssi = h.rssi.slice(-maxSamples);
           const rtt = h.rtt.slice(-maxSamples);
-          if (rssi.length === 0 && rtt.length === 0) continue;
-          nodes[String(id)] = { rssi, rtt };
+          const crssi = h.crssi.slice(-coarseMax);
+          const crtt = h.crtt.slice(-coarseMax);
+          if (rssi.length === 0 && rtt.length === 0 && crssi.length === 0 && crtt.length === 0) continue;
+          nodes[String(id)] = { rssi, rtt, crssi, crtt };
         }
         const payload: Persisted = { v: SCHEMA_V, savedAt: now(), nodes };
         // Atomic: write temp on the SAME dir/fs, then rename onto the target.

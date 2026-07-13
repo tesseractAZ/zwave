@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.7.0 — 2026-07-13
+
+Two additions: a rebuild-routes progress indicator and a long-horizon trend.
+
+- **Rebuild-routes indicator.** While a network rebuild is running, the
+  Controller screen shows a live banner — a spinner, an indeterminate sweeping
+  bar, and **elapsed time** — and the Overview summary bar shows `⟳ rebuilding
+  routes 3m12s`. Home Assistant exposes only the `is_rebuilding_routes` boolean
+  (no per-node progress), so this reports honest elapsed time, never a
+  fabricated percentage. The animation is present only while rebuilding, so the
+  idle screen keeps its anti-flicker.
+- **Long-horizon RSSI trend.** Alongside the recent RSSI/latency sparklines, the
+  Detail screen now shows a coarse **~2 h** signal trend (`Sig 2h`), downsampled
+  to one point per minute (120 points). It persists to `/data/history.json`
+  next to the fine ring and reloads at boot, so the long trend survives a
+  restart too. History file schema is now v2; existing v1 files load unchanged
+  (their coarse tier just fills in over time).
+- 4 new tests (82 total): two-tier persistence round-trip, v1 back-compat,
+  coarse bloat-cap, and the elapsed/spinner helpers. `tsc --noEmit` clean.
+
 ## 0.6.0 — 2026-07-13
 
 Firmware-update surfacing — see at a glance which nodes have a Z-Wave firmware

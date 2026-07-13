@@ -34,7 +34,7 @@ import {
   truncate,
   visLen,
 } from '../ansi';
-import { meter, signalBars, sparkline, vblock } from '../gauges';
+import { meter, signalBars, sparkline, vblock, fmtElapsed, spinner } from '../gauges';
 import {
   NodeStatus,
   type DataProvider,
@@ -174,10 +174,17 @@ function summaryBar(ctx: ScreenCtx): string {
   const ageMs = lu != null ? Math.max(0, Date.now() - lu) : null;
   const stale = err != null || (ageMs != null && ageMs > 30_000);
 
+  const ctrl = data.controller();
+  const rebuilding = ctrl?.isRebuildingRoutes === true;
   const range = c.grey(`${visibleNodes.length}`);
   let right: string;
   if (stale) {
     right = c.redB(`⚠ ${err ? 'HA OFFLINE' : 'STALE'}${ageMs != null ? ' ' + fmtAge(ageMs) : ''}`);
+  } else if (rebuilding) {
+    // A rebuild is network-wide and worth surfacing on the main screen. Honest
+    // elapsed time (no %), animated so it never reads as frozen. See Controller.
+    const el = ctrl?.rebuildStartedAt != null ? ' ' + fmtElapsed(Date.now() - ctrl.rebuildStartedAt) : '';
+    right = c.cyanB(`${spinner(Date.now())} rebuilding routes${el}`);
   } else if (ctx.filtering || view.filter) {
     // Live filter prompt — visible even with an empty buffer so the mode is
     // never invisible and the next keystroke isn't silently swallowed.

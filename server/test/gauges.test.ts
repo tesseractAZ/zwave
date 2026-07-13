@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sparkline, brailleSparkline, signalBars, meter, gauge, heatCell, vblock, zoneColor } from '../src/telnet/gauges';
+import { sparkline, brailleSparkline, signalBars, meter, gauge, heatCell, vblock, zoneColor, fmtElapsed, spinner } from '../src/telnet/gauges';
 import { visLen } from '../src/telnet/ansi';
 
 const W = (s: string) => visLen(s); // visible width, ANSI-stripped
@@ -97,6 +97,23 @@ test('brailleSparkline fills BOTTOM-up (min value lights the bottom dot, not the
   const code = s.codePointAt(0)! - 0x2800;
   assert.ok((code & 0x40) !== 0, 'low value must light the BOTTOM-left dot (0x40)');
   assert.ok((code & 0x01) === 0, 'low value must NOT light the TOP-left dot (0x01)');
+});
+
+test('fmtElapsed formats seconds / minutes / hours compactly and clamps negatives', () => {
+  assert.equal(fmtElapsed(0), '0s');
+  assert.equal(fmtElapsed(-500), '0s'); // never negative
+  assert.equal(fmtElapsed(45_000), '45s');
+  assert.equal(fmtElapsed(192_000), '3m12s'); // zero-padded seconds
+  assert.equal(fmtElapsed(600_000), '10m00s');
+  assert.equal(fmtElapsed(3_930_000), '1h05m'); // zero-padded minutes
+});
+
+test('spinner returns a single braille frame and advances over time', () => {
+  const a = spinner(0);
+  const b = spinner(1000); // ~8 frames later at 120ms/frame
+  assert.equal([...a].length, 1, 'one glyph');
+  assert.ok(a.codePointAt(0)! >= 0x2800 && a.codePointAt(0)! <= 0x28ff, 'braille block');
+  assert.notEqual(a, b, 'frame advances with time');
 });
 
 test('zoneColor is red low / yellow mid / green high (by wrapping color code)', () => {

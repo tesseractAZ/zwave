@@ -70,6 +70,7 @@ async function main(): Promise<void> {
     lastError: () => zwaveData.lastError(),
     lastUpdated: () => zwaveData.lastUpdated(),
     history: (n) => zwaveData.history(n),
+    historyLong: (n) => zwaveData.historyLong(n),
   };
 
   // 4) Shared, timer-refreshed render cache both transports read.
