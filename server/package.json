@@ -1,12 +1,12 @@
 {
   "name": "zwave-tui-server",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {

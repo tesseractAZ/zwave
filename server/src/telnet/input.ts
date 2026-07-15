@@ -16,8 +16,8 @@
  * actuating the mesh. `write_actions_enabled` unlocks them in a later phase.
  */
 
-import type { DataProvider, NodeSnapshot, ViewState } from '../types';
-import { SCREENS } from '../types';
+import type { DataProvider, LogEvent, LogRange, NodeSnapshot, ViewState } from '../types';
+import { LOG_RANGE_ORDER, SCREENS } from '../types';
 
 // The InputEvent contract is owned by the shared type module; re-export it so
 // the transports + session import their event shape from one navigation home.
@@ -120,6 +120,177 @@ export function clampSelection(view: ViewState, data: DataProvider): void {
 const NOOP: KeyResult = { redraw: false };
 const REDRAW: KeyResult = { redraw: true };
 
+/* ─── Activity-log navigation (screen === 'log') ─────────────────────────────
+ * The log has its OWN cursor (view.logCursor) over the date/severity-filtered
+ * event list, independent of the node-selection cursor. The layout math lives
+ * here (not the renderer) so paging and the visible window agree exactly. */
+
+/** Detail-pane height, and the terminal-height floor below which it is hidden. */
+export const LOG_DETAIL_ROWS = 9;
+const LOG_MIN_ROWS_FOR_DETAIL = 22;
+
+/** Split the log screen's rows into {list, detail}. header(1)+legend(1) always;
+ *  a separator(1)+detail block only when the terminal is tall enough. */
+export function logLayout(rows: number): { listRows: number; detailRows: number; showDetail: boolean } {
+  const showDetail = rows >= LOG_MIN_ROWS_FOR_DETAIL;
+  const detailRows = showDetail ? LOG_DETAIL_ROWS : 0;
+  const chrome = 2 + (showDetail ? 1 + detailRows : 0);
+  return { listRows: Math.max(1, rows - chrome), detailRows, showDetail };
+}
+
+/** Lower/upper epoch-ms bounds for a date range (local-time day boundaries). */
+function rangeBounds(range: LogRange, now: number): { lo: number | null; hi: number | null } {
+  const d = new Date(now);
+  const startOfDay = (dt: Date) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime();
+  const today = startOfDay(d);
+  switch (range) {
+    case 'all':
+      return { lo: null, hi: null };
+    case 'hour':
+      return { lo: now - 3600_000, hi: null };
+    case '24h':
+      return { lo: now - 24 * 3600_000, hi: null };
+    case 'today':
+      return { lo: today, hi: null };
+    case 'yesterday':
+      return { lo: startOfDay(new Date(today - 1)), hi: today };
+    case '7d':
+      return { lo: now - 7 * 24 * 3600_000, hi: null };
+  }
+}
+
+/**
+ * The events the Log screen shows: the newest-first ring narrowed by the active
+ * severity (`errorsOnly`) and date (`logRange`) filters. Pure — the renderer and
+ * the input clamp both call it so the cursor and the window never disagree.
+ */
+export function filteredEvents(data: DataProvider, view: ViewState, now: number = Date.now()): LogEvent[] {
+  let list = data.events(); // newest-first
+  if (view.errorsOnly) list = list.filter((e) => e.severity === 'error');
+  const { lo, hi } = rangeBounds(view.logRange, now);
+  if (lo != null) list = list.filter((e) => e.ts >= lo);
+  if (hi != null) list = list.filter((e) => e.ts < hi);
+  return list;
+}
+
+/** Clamp the log cursor into the current filtered list (0 when empty). */
+export function clampLogCursor(view: ViewState, count: number): void {
+  if (count <= 0) {
+    view.logCursor = 0;
+    view.logScroll = 0;
+    return;
+  }
+  if (view.logCursor < 0) view.logCursor = 0;
+  if (view.logCursor > count - 1) view.logCursor = count - 1;
+}
+
+/**
+ * Re-derive `logCursor` from the anchored event's `seq` so the highlighted event
+ * stays put as new events prepend the (newest-first) ring. `logAnchorSeq === null`
+ * follows the newest (cursor pinned to the top). If the anchored event has
+ * scrolled out of the filtered list (evicted / filtered away), hold the index
+ * and re-anchor to whatever is there now. Call before reading `logCursor`.
+ */
+export function syncLogCursor(view: ViewState, list: LogEvent[]): void {
+  const len = list.length;
+  if (len === 0) {
+    view.logCursor = 0;
+    view.logScroll = 0;
+    view.logAnchorSeq = null;
+    return;
+  }
+  if (view.logAnchorSeq == null) {
+    view.logCursor = 0; // follow the newest
+    return;
+  }
+  const idx = list.findIndex((e) => e.seq === view.logAnchorSeq);
+  if (idx >= 0) {
+    view.logCursor = idx;
+    return;
+  }
+  view.logCursor = Math.min(Math.max(0, view.logCursor), len - 1);
+  view.logAnchorSeq = view.logCursor === 0 ? null : list[view.logCursor].seq;
+}
+
+/** Move the cursor to an absolute index and re-anchor (index 0 = follow newest). */
+function setLogCursor(view: ViewState, list: LogEvent[], idx: number): KeyResult {
+  const len = list.length;
+  if (len === 0) return NOOP;
+  const next = Math.max(0, Math.min(len - 1, idx));
+  const changed = next !== view.logCursor;
+  view.logCursor = next;
+  view.logAnchorSeq = next === 0 ? null : list[next].seq;
+  return changed ? REDRAW : NOOP;
+}
+
+/** Point the node-selection cursor at a specific node (clearing the filter so
+ *  it is guaranteed visible) — used to jump from a log event to its device. */
+function selectNodeById(view: ViewState, data: DataProvider, nodeId: number): void {
+  view.filter = '';
+  const idx = visibleNodes(data, view).findIndex((n) => n.nodeId === nodeId);
+  view.selected = idx >= 0 ? idx : 0;
+}
+
+/**
+ * Handle a key while the Log screen is active. Returns a KeyResult when it owns
+ * the key, or `null` to let the generic handler run (screen switch, q, Esc…).
+ */
+function applyLogKey(view: ViewState, ev: InputEvent, data: DataProvider): KeyResult | null {
+  const list = filteredEvents(data, view);
+  syncLogCursor(view, list); // resolve the anchor → a valid cursor first
+
+  if (ev.type === 'arrow') {
+    if (ev.dir === 'down') return setLogCursor(view, list, view.logCursor + 1);
+    if (ev.dir === 'up') return setLogCursor(view, list, view.logCursor - 1);
+    return NOOP; // left/right reserved on the log
+  }
+  if (ev.type === 'enter') {
+    // Jump to the selected event's associated device (its Node Detail screen).
+    const sel = list[view.logCursor];
+    if (sel && sel.nodeId != null && data.nodeById(sel.nodeId)) {
+      selectNodeById(view, data, sel.nodeId);
+      view.screen = 'detail';
+      return REDRAW;
+    }
+    return NOOP;
+  }
+  if (ev.type !== 'char') return null; // escape/tab/ctrlc → generic
+
+  const page = Math.max(1, logLayout(view.rows).listRows - 1);
+  switch (ev.ch) {
+    case 'j':
+      return setLogCursor(view, list, view.logCursor + 1);
+    case 'k':
+      return setLogCursor(view, list, view.logCursor - 1);
+    case ' ': // space — page toward older
+      return setLogCursor(view, list, view.logCursor + page);
+    case 'b': // page toward newer
+      return setLogCursor(view, list, view.logCursor - page);
+    case 'g': // jump to newest + resume follow-tail
+      return setLogCursor(view, list, 0);
+    case 'G': // jump to oldest
+      return setLogCursor(view, list, list.length - 1);
+    case 'o': // severity filter (errors only) — reset to newest + follow
+      view.errorsOnly = !view.errorsOnly;
+      view.logCursor = 0;
+      view.logScroll = 0;
+      view.logAnchorSeq = null;
+      return REDRAW;
+    case 'd': { // cycle the date-range filter — reset to newest + follow
+      const i = LOG_RANGE_ORDER.indexOf(view.logRange);
+      view.logRange = LOG_RANGE_ORDER[(i + 1) % LOG_RANGE_ORDER.length];
+      view.logCursor = 0;
+      view.logScroll = 0;
+      view.logAnchorSeq = null;
+      return REDRAW;
+    }
+    case '/': // node-substring filter is meaningless here — swallow it
+      return NOOP;
+    default:
+      return null; // 1-6 / q / c / e / t … → generic handler
+  }
+}
+
 /**
  * Apply one input event to the session view-state.
  *
@@ -134,6 +305,14 @@ export function applyKey(
   data: DataProvider,
   log: (msg: string) => void = (m) => console.log(m),
 ): KeyResult {
+  // The Log screen owns navigation (its own cursor/filters). It only handles the
+  // keys that mean something there; anything else falls through to the generic
+  // handler below (screen switch 1-6, q/Esc back, c/t, ctrl-c…).
+  if (view.screen === 'log') {
+    const r = applyLogKey(view, ev, data);
+    if (r) return r;
+  }
+
   // Escape → dismiss any overlay back to the Overview home.
   if (ev.type === 'escape') {
     if (view.screen !== 'overview') {

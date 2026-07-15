@@ -6,14 +6,14 @@ import { NodeStatus, type DataProvider, type NodeSnapshot, type HealthResult, ty
 const node: NodeSnapshot = {
   nodeId: 5, deviceId: 'd5', name: 'Test Node', area: null, status: NodeStatus.Alive, statusLabel: 'alive',
   ready: true, isRouting: true, isListening: true, isLongRange: false, isController: false, isSecure: true,
-  securityClass: 'S2', manufacturer: null, model: null, battery: null,
+  securityClass: 'S2', manufacturer: null, model: null, battery: null, firmware: null,
   stats: { rtt: null, rssi: null, lwr: null, nlwr: null, commandsTX: 0, commandsRX: 0, commandsDroppedTX: 0, commandsDroppedRX: 0, timeoutResponse: 0, lastSeen: null },
   entities: [],
 };
 const score: HealthResult = { score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] };
 const data: DataProvider = {
   nodes: () => [node], nodeById: () => node, controller: () => null, events: () => [], scoreFor: () => score,
-  noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0, lastStatsUpdated: () => 0,
+  noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0,
   ready: () => true, lastError: () => null,
 };
 

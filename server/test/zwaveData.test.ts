@@ -20,7 +20,7 @@ test('statsNodeId prefers nodeId when both present, and rejects when absent', ()
 });
 
 // ── mapRouteRaw: snake_case fields, device_id→node_id, index alignment ──────
-const resolve = (dev) => ({ dev3: 3, dev8: 8 }[String(dev)] ?? 0);
+const resolve = (dev: unknown) => ({ dev3: 3, dev8: 8 })[String(dev)] ?? 0;
 
 test('mapRouteRaw maps a direct route', () => {
   const r = mapRouteRaw({ repeaters: [], protocol_data_rate: 3, rssi: -84, repeater_rssi: [], route_failed_between: null }, resolve);
@@ -29,6 +29,7 @@ test('mapRouteRaw maps a direct route', () => {
 
 test('mapRouteRaw resolves repeater device_ids to node ids and keeps per-hop RSSI aligned', () => {
   const r = mapRouteRaw({ repeaters: ['dev3', 'dev8'], protocol_data_rate: 3, rssi: -73, repeater_rssi: [-68, -83], route_failed_between: null }, resolve);
+  assert.ok(r);
   assert.deepEqual(r.repeaters, [3, 8]);
   assert.deepEqual(r.repeaterRSSI, [-68, -83]);
   assert.equal(r.repeaters.length, r.repeaterRSSI.length);
@@ -36,14 +37,17 @@ test('mapRouteRaw resolves repeater device_ids to node ids and keeps per-hop RSS
 
 test('mapRouteRaw keeps alignment (127 sentinel) when a repeater_rssi entry is missing', () => {
   const r = mapRouteRaw({ repeaters: ['dev3', 'dev8'], repeater_rssi: [-68], protocol_data_rate: 2, rssi: -80, route_failed_between: null }, resolve);
+  assert.ok(r);
   assert.deepEqual(r.repeaters, [3, 8]);
   assert.deepEqual(r.repeaterRSSI, [-68, 127]); // second hop → no-reading sentinel, still aligned
 });
 
 test('mapRouteRaw resolves route_failed_between device_ids and null-guards', () => {
   const r = mapRouteRaw({ repeaters: [], repeater_rssi: [], protocol_data_rate: 3, rssi: -70, route_failed_between: ['dev3', 'dev8'] }, resolve);
+  assert.ok(r);
   assert.deepEqual(r.routeFailedBetween, [3, 8]);
   const r2 = mapRouteRaw({ repeaters: [], repeater_rssi: [], protocol_data_rate: 3, rssi: -70, route_failed_between: null }, resolve);
+  assert.ok(r2);
   assert.equal(r2.routeFailedBetween, null);
 });
 

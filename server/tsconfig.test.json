@@ -1,0 +1,11 @@
+// Type-checks the tests alongside src so mock drift against the shared type
+// contract (DataProvider / NodeSnapshot / LogEvent …) can't ship green.
+// The runtime uses tsx and never emits, so this config is noEmit-only.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

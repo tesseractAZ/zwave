@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.0 — 2026-07-14
+
+A real-time **Activity Log** — see everything the mesh does, as it happens.
+
+- **Live activity feed.** The Log screen (press `6` or `e`) now streams *device*
+  activity in real time — a light toggles, a sensor reads, a lock changes — on
+  top of the existing node status/route changes and operator-action outcomes.
+  Device changes come from Home Assistant `state_changed` events, filtered to
+  this mesh's entities; `zwave_js` notifications are surfaced too. Each line is
+  category-tagged (`val`/`sts`/`rte`/`ntf`/`act`/`sys`).
+- **Scroll + detail pane.** Move the cursor with `j`/`k` (or arrows), page with
+  `space`/`b`, jump with `g`/`G`. A detail pane shows the selected event in full:
+  timestamp, category, severity, the **associated device** (node + area + status),
+  the entity, and the old → new value. Press `⏎` to jump straight to that
+  device's Node Detail screen.
+- **Date filter.** `d` cycles the window: all time · last hour · last 24h ·
+  today · yesterday · last 7 days. Combine with `o` (errors only). The active
+  filters show in the header. (The log is an in-memory, session-scoped ring of
+  the last 2000 events — it isn't persisted across restarts.)
+- Chatty numeric telemetry sensors are throttled so one meter can't flood the
+  feed; discrete events (motion/lock/switch/…) are never throttled. All
+  HA-sourced strings are sanitized before they reach the frame.
+- 33 new tests (115 total). Multi-agent adversarial review.
+
 ## 0.7.0 — 2026-07-13
 
 Two additions: a rebuild-routes progress indicator and a long-horizon trend.

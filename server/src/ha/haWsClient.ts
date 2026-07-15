@@ -100,6 +100,9 @@ export interface HaWsClient {
   isConfigured(): boolean;
   /** Last connection/auth error, or null. */
   lastError(): string | null;
+  /** Force a fresh connection (drops the current socket → clears its handlers +
+   *  pending, then the normal backoff reconnect + onReady re-subscribe run). */
+  reconnect(): void;
   /** Tear down: stop reconnecting, reject everything in flight, close the socket. */
   stop(): void;
 }
@@ -275,6 +278,22 @@ class HaWebSocketClient implements HaWsClient {
 
   lastError(): string | null {
     return this.lastErr;
+  }
+
+  reconnect(): void {
+    // Terminate (not close) so 'close' fires promptly → handleClose clears the
+    // eventHandlers + pending map, then scheduleReconnect + onReady re-subscribe.
+    // This is how the data layer sheds stale subscriptions on a wedge or a
+    // network-identity change without leaking handlers on a still-open socket.
+    if (this.stopped) return;
+    const ws = this.ws;
+    if (!ws) return;
+    this.log('forcing WS reconnect');
+    try {
+      ws.terminate();
+    } catch {
+      /* ignore */
+    }
   }
 
   stop(): void {

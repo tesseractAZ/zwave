@@ -589,7 +589,7 @@ function joinCells(cells: string[], cols: readonly ColSpec[]): string {
     .join(' ');
 }
 
-function windowStart(selected: number, scroll: number, total: number, cap: number): number {
+export function windowStart(selected: number, scroll: number, total: number, cap: number): number {
   let start = Number.isFinite(scroll) ? scroll : 0;
   if (selected < start) start = selected;
   if (selected >= start + cap) start = selected - cap + 1;
