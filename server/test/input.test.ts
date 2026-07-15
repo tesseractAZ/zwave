@@ -8,7 +8,7 @@ const node: NodeSnapshot = {
   status: NodeStatus.Alive, statusLabel: 'alive', ready: true,
   isRouting: true, isListening: true, isLongRange: false, isController: false,
   isSecure: true, securityClass: 'S2', manufacturer: null, model: null,
-  battery: null, stats: {
+  battery: null, firmware: null, stats: {
     rtt: null, rssi: null, lwr: null, nlwr: null, commandsTX: 0, commandsRX: 0,
     commandsDroppedTX: 0, commandsDroppedRX: 0, timeoutResponse: 0, lastSeen: null,
   }, entities: [],
@@ -17,11 +17,12 @@ const score: HealthResult = { score: 79, rating: 8, grade: 'C', state: 'ok', fla
 const data: DataProvider = {
   nodes: () => [node], nodeById: () => node, controller: () => null, events: () => [],
   scoreFor: () => score, noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }),
-  lastUpdated: () => 0, ready: () => true, lastError: () => null,
+  historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0, ready: () => true, lastError: () => null,
 };
 const mkView = (screen: ViewState['screen'] = 'overview'): ViewState => ({
   screen, cols: 100, rows: 30, selected: 0, scroll: 0, filter: '',
   sortKey: 'health', signalDisplay: 'margin', followTail: true, errorsOnly: false,
+  logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null,
 });
 const char = (ch: string) => ({ type: 'char' as const, ch });
 

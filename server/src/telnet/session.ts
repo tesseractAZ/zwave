@@ -19,8 +19,8 @@
  * own: byte parsing, connection lifecycle, and any protocol negotiation.
  */
 
-import type { DataProvider, ScreenCtx, ViewState, ActionRunner, ActionKind } from '../types';
-import { applyKey, clampSelection, visibleNodes } from './input';
+import type { DataProvider, NodeSnapshot, ScreenCtx, ViewState, ActionRunner, ActionKind } from '../types';
+import { applyKey, clampSelection, filteredEvents, syncLogCursor, visibleNodes } from './input';
 import type { InputEvent } from './input';
 import { renderScreen } from './screens/index';
 import { renderLogin } from './screens/login';
@@ -156,6 +156,10 @@ export class TuiSession {
       signalDisplay: opts.signalDisplay ?? 'margin',
       followTail: true,
       errorsOnly: false,
+      logCursor: 0,
+      logScroll: 0,
+      logRange: 'all',
+      logAnchorSeq: null,
     };
 
     // Decide whether this connection faces the login gate. Trusted (ingress)
@@ -407,9 +411,22 @@ export class TuiSession {
 
   /* ── mutating actions (v0.3) ────────────────────────────────────────────── */
 
+  /** The node an action key targets: the highlighted LOG event's node on the Log
+   *  screen (matching Enter), else the Overview selection cursor. Prevents a key
+   *  pressed on the Log from silently actuating the invisible node cursor. */
+  private actionTargetNode(): NodeSnapshot | undefined {
+    if (this.view.screen === 'log') {
+      const list = filteredEvents(this.data, this.view);
+      syncLogCursor(this.view, list);
+      const ev = list[this.view.logCursor];
+      return ev?.nodeId != null ? this.data.nodeById(ev.nodeId) : undefined;
+    }
+    return visibleNodes(this.data, this.view)[this.view.selected];
+  }
+
   /** Route an action key to a request. Returns true if it was an action key. */
   private handleActionKey(ch: string): boolean {
-    const sel = visibleNodes(this.data, this.view)[this.view.selected];
+    const sel = this.actionTargetNode();
     const nodeId = sel?.nodeId ?? null;
     const on = sel ? ` (${sel.name})` : '';
     switch (ch) {

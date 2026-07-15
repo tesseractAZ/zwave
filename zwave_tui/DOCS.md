@@ -53,7 +53,7 @@ over it and dismisses with `q` or `Esc`, preserving your selection.
 | **Controller** | Node 1 radio health: home id, RF region, firmware/SDK, primary/SUC/SIS roles, per-channel background-RSSI noise floor, and the controller traffic/timeout counters. |
 | **Topology** | Hop-grouped ASCII route tree from each node's last-working route, repeater-load view, and a Long-Range star panel. |
 | **Heatmap** | Nodes grouped by HA area, cells graded by SNR-margin bucket against the live noise floor. |
-| **Log** | Scrolling stream of driver events (dead / alive / wake / route-change) and operator command outcomes, with severity coloring and a red-latch-until-ack. |
+| **Activity Log** | Real-time, scrollable stream of everything the mesh does — device value changes (a light toggles, a sensor reads, a lock changes), node status & route changes, `zwave_js` notifications, and operator-action outcomes. Each event is category-tagged; a detail pane shows the selected event's full context and associated device; a date-range filter narrows the window. |
 
 > As of **v0.2** all six screens are live and the stat columns (Margin / Hop /
 > Rate / Seen) carry real data from live node + controller statistics.
@@ -87,6 +87,18 @@ node unless noted:
 Mutating actions prompt `y` to confirm / any other key to cancel; each outcome
 is written to the **Log** screen. `Enter` opens Detail (whose footer lists the
 per-node actions when write actions are on).
+
+**Activity Log** (screen `6` / `e`)
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` or ↓ / ↑ | Move the event cursor |
+| `space` / `b` | Page down / up |
+| `g` / `G` | Jump to newest / oldest |
+| `Enter` | Open the selected event's associated device in Detail |
+| `d` | Cycle the date filter (all · hour · 24h · today · yesterday · 7 days) |
+| `o` | Toggle errors-only |
+| `q` / `Esc` | Back to Overview |
 
 **Overlays** — `q` / `Esc` close and return to Overview.
 

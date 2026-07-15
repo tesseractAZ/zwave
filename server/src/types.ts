@@ -129,14 +129,31 @@ export interface HealthResult {
   flags: string[]; // e.g. ['W','F'] — single-char flags rendered in the table
 }
 
+/** The category of a log event — drives the glyph, colour, and detail pane. */
+export type LogKind =
+  | 'status' // node alive/dead/asleep/awake transition
+  | 'route' // last-working-route (repeater chain) change
+  | 'value' // a device entity's state changed (light on, sensor read, lock…)
+  | 'notification' // a zwave_js_notification (entry control, keypad, tamper…)
+  | 'action' // operator command outcome (ping/heal/rebuild/…)
+  | 'system'; // add-on/connection lifecycle
+
 /** An event/log line (driver event or operator command outcome). */
 export interface LogEvent {
+  seq: number; // monotonic id (newest = highest) — a STABLE selection anchor as the ring grows
   ts: number; // epoch ms
   source: 'net' | 'you'; // driver event vs operator action
   severity: 'info' | 'warn' | 'error';
+  kind: LogKind;
   nodeId: number | null;
   text: string;
   acked?: boolean; // RED latch: an error stays until acknowledged
+  // ── optional enrichment (the detail pane + device association read these) ──
+  entityId?: string; // the HA entity that changed (value events)
+  entityName?: string; // its friendly name
+  domain?: string; // light | switch | sensor | binary_sensor | lock | climate…
+  oldState?: string; // previous entity state (value events)
+  newState?: string; // new entity state (value events)
 }
 
 /**
@@ -177,6 +194,22 @@ export const SCREENS: ScreenView[] = [
   'log',
 ];
 
+/** Log-screen date window. `all` = the whole in-memory ring. */
+export type LogRange = 'all' | 'hour' | '24h' | 'today' | 'yesterday' | '7d';
+
+/** Human labels for the log date ranges (header chip + tests). */
+export const LOG_RANGE_LABEL: Record<LogRange, string> = {
+  all: 'all time',
+  hour: 'last hour',
+  '24h': 'last 24h',
+  today: 'today',
+  yesterday: 'yesterday',
+  '7d': 'last 7 days',
+};
+
+/** Order the `d` key cycles the log date ranges. */
+export const LOG_RANGE_ORDER: LogRange[] = ['all', 'hour', '24h', 'today', 'yesterday', '7d'];
+
 /** Per-session view state passed to screen renderers. */
 export interface ViewState {
   screen: ScreenView;
@@ -189,6 +222,14 @@ export interface ViewState {
   signalDisplay: 'margin' | 'dbm';
   followTail: boolean; // log screen
   errorsOnly: boolean; // log screen
+  // ── Log screen navigation (independent of the node cursor) ──
+  logCursor: number; // DERIVED index into the FILTERED event list (0 = newest)
+  logScroll: number; // index of the first visible event row (sticky window)
+  logRange: LogRange; // active date-window filter
+  /** The `seq` of the highlighted event — the STABLE selection anchor, re-derived
+   *  into logCursor each frame so new events prepending don't drift the cursor.
+   *  `null` = follow the newest (cursor pinned to the top). */
+  logAnchorSeq: number | null;
 }
 
 /** Transport-agnostic input event (telnet & xterm feed the same shapes). */

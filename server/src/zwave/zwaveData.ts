@@ -41,6 +41,7 @@ import {
   type ControllerSnapshot,
   type RouteStat,
   type LogEvent,
+  type LogKind,
 } from '../types';
 import { createHistoryStore, type HistoryStore, type HistoryMap } from './historyStore';
 
@@ -50,6 +51,86 @@ import { createHistoryStore, type HistoryStore, type HistoryMap } from './histor
  * and the in-memory cap can never drift apart.
  */
 const HIST_MAX = 60;
+
+/**
+ * Activity-log ring depth (in-memory, session-scoped — not persisted). Larger
+ * than the v0.2 value so the date filter has real material to work with; 2000
+ * events at ~120 B each is ~240 KB, trivial. Oldest fall off the tail.
+ */
+const LOG_MAX = 2000;
+
+/** Min gap between logged updates of the SAME numeric `sensor` entity (ms). */
+const VALUE_SENSOR_MIN_GAP_MS = 10_000;
+
+/** True when a state string is a finite number (telemetry vs a discrete label). */
+export function isFiniteNumeric(s: string): boolean {
+  if (s === '') return false;
+  const n = Number(s);
+  return Number.isFinite(n);
+}
+
+/** One entry of the entity index: which node an entity belongs to + its label. */
+export interface EntityIndexEntry {
+  nodeId: number;
+  name: string;
+  domain: string;
+}
+
+/** The value-log payload a state_changed event maps to (null = skip). */
+export interface ValueEventPayload {
+  nodeId: number;
+  text: string;
+  entityId: string;
+  entityName: string;
+  domain: string;
+  oldState?: string;
+  newState: string;
+}
+
+/**
+ * Pure mapping: an HA `state_changed` event → a value-log payload, or `null` to
+ * skip it. Skips: unknown/untracked entities, entity removals (new_state null),
+ * no-op transitions (old===new), and rapid numeric-`sensor` telemetry (throttled
+ * to `minGapMs` per entity — discrete events are NEVER throttled). Mutates
+ * `lastValueAt` only when it accepts a throttled numeric update. Exported so the
+ * mapping + throttle are unit-tested without standing up the whole data layer.
+ */
+export function mapStateChanged(
+  ev: unknown,
+  entityIndex: Map<string, EntityIndexEntry>,
+  now: number,
+  lastValueAt: Map<string, number>,
+  minGapMs: number = VALUE_SENSOR_MIN_GAP_MS,
+): ValueEventPayload | null {
+  const data = (ev as { data?: { entity_id?: string; old_state?: { state?: string } | null; new_state?: { state?: string } | null } } | null)?.data;
+  const eid = data?.entity_id;
+  if (!eid) return null;
+  const idx = entityIndex.get(eid);
+  if (!idx) return null; // not a tracked device entity of this mesh
+  const oldS = data.old_state?.state ?? undefined;
+  const newS = data.new_state?.state ?? undefined;
+  if (newS == null) return null; // entity removed — not activity
+  if (oldS === newS) return null; // attribute-only change, no state transition
+  if (idx.domain === 'sensor' && isFiniteNumeric(newS)) {
+    // First-ever update always passes; only rapid REPEAT updates are throttled.
+    const last = lastValueAt.get(eid);
+    if (last != null && now - last < minGapMs) return null;
+    lastValueAt.set(eid, now);
+  }
+  // The state strings come straight from HA — sanitize before they reach a TUI
+  // frame (strip control/ANSI, fold wide chars), same boundary as device names.
+  const oldC = oldS != null ? sanitizeLabel(oldS) : undefined;
+  const newC = sanitizeLabel(newS);
+  return {
+    nodeId: idx.nodeId,
+    text: `${idx.name}: ${oldC ?? '—'} → ${newC}`,
+    entityId: eid,
+    entityName: idx.name,
+    domain: idx.domain,
+    oldState: oldC,
+    newState: newC,
+  };
+}
 /** Coarse (long-horizon) ring depth + cadence: 1 downsampled point per minute
  *  × 120 ≈ a 2-hour trend. Shared with the store's `coarseMax`. */
 const COARSE_MAX = 120;
@@ -274,6 +355,14 @@ class ZwaveDataImpl implements ZwaveData {
   private deviceIdToNodeId = new Map<string, number>();
   private entitiesByDeviceId = new Map<string, NodeEntity[]>();
   private entityCount = 0;
+  /** v0.8 entity_id → {node, friendly name, domain} for the activity log's
+   *  state_changed → value-event mapping. Only ENABLED zwave entities land here
+   *  (disabled ones emit no state), so this covers exactly what can fire. */
+  private entityIndex = new Map<string, { nodeId: number; name: string; domain: string }>();
+  /** Last time a chatty numeric `sensor` entity was logged — throttles telemetry
+   *  streams so one power/energy sensor can't flood the activity ring. Discrete
+   *  events (binary_sensor/lock/light/…) are NEVER throttled. */
+  private lastValueAt = new Map<string, number>();
 
   // v0.2 live statistics, merged into each NodeSnapshot / ControllerSnapshot.
   private statsByNode = new Map<number, NodeStats>();
@@ -313,6 +402,8 @@ class ZwaveDataImpl implements ZwaveData {
   private prevStatus = new Map<number, NodeStatus>();
   /** Event + command log ring (newest first), consumed by the Log screen. */
   private logRing: LogEvent[] = [];
+  /** Monotonic event-id source (see pushEvent). Session-scoped; resets on boot. */
+  private logSeq = 0;
   /** True once statistics subscriptions are live on the CURRENT connection. */
   private statsSubscribed = false;
 
@@ -448,7 +539,7 @@ class ZwaveDataImpl implements ZwaveData {
   }
   /** Append an operator-action outcome to the event ring (source 'you'). */
   logAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void {
-    this.pushLog('you', severity, nodeId, text);
+    this.pushEvent('you', severity, 'action', nodeId, text);
   }
 
   stop(): void {
@@ -513,6 +604,12 @@ class ZwaveDataImpl implements ZwaveData {
         this.statsByNode.clear();
         this.batteryByNode.clear();
         this.firmwareByNode.clear();
+        // Force a clean reconnect so the old (still-open-socket) subscriptions —
+        // controller/node stats, state_changed, notifications — are RELEASED
+        // (handleClose clears the event handlers) before onReady re-subscribes.
+        // Without this, re-subscribing on the same socket double-delivers every
+        // activity event. It also short-circuits a wedged session's 30s heartbeat.
+        this.client.reconnect();
         // NOTE: histByNode + histLongByNode are intentionally NOT cleared. They are keyed by Z-Wave
         // node id (stable across a config-entry re-discovery) and is display-only,
         // so preserving it keeps the sparkline trend continuous through a wedge —
@@ -556,7 +653,7 @@ class ZwaveDataImpl implements ZwaveData {
       const prev = this.prevStatus.get(n.nodeId);
       if (prev !== undefined && prev !== n.status) {
         const sev = n.status === NodeStatus.Dead ? 'error' : 'info';
-        this.pushLog('net', sev, n.nodeId, `${n.name} → ${n.statusLabel}`);
+        this.pushEvent('net', sev, 'status', n.nodeId, `${n.name} → ${n.statusLabel}`);
       }
       this.prevStatus.set(n.nodeId, n.status);
     }
@@ -571,13 +668,22 @@ class ZwaveDataImpl implements ZwaveData {
     const homeId = this.lastController.homeId;
     if (homeId != null) {
       if (this.lastHomeId != null && homeId !== this.lastHomeId) {
-        this.log(`controller home_id ${this.lastHomeId} → ${homeId} (network changed) — clearing per-node stats + history`);
+        this.log(`controller home_id ${this.lastHomeId} → ${homeId} (network changed) — resetting caches + registries`);
         this.statsByNode.clear();
         this.batteryByNode.clear();
         this.histByNode.clear();
         this.histLongByNode.clear();
         this.coarseAccum.clear();
         this.firmwareByNode.clear();
+        this.prevStatus.clear(); // else the first poll logs spurious status transitions
+        // The registry-derived maps (entityIndex/deviceByNodeId/…) are now stale:
+        // the new network's entity_ids won't be in entityIndex, so the activity
+        // log's value capture would go DARK. Force a full re-discovery + a clean
+        // re-subscribe against the new device_ids via a reconnect (onReady resets
+        // registriesLoaded + statsSubscribed and rebuilds everything — and, as in
+        // the self-heal path, this releases the old subscriptions cleanly).
+        this.registriesLoaded = false;
+        this.client.reconnect();
       }
       this.lastHomeId = homeId;
     }
@@ -630,18 +736,23 @@ class ZwaveDataImpl implements ZwaveData {
     // Rebuilt fresh on every (re)join so a removed node leaves no stale mapping.
     this.updateEntitiesByNode.clear();
     this.updateEntityToNode.clear();
+    this.entityIndex.clear();
     let count = 0;
     for (const e of entities) {
       if (e.platform !== 'zwave_js') continue;
       if (e.disabled_by != null) continue; // skip disabled diagnostics — keep the list meaningful
       if (!e.device_id || !deviceIdToNodeId.has(e.device_id)) continue;
+      const domain = e.entity_id.split('.')[0];
+      const friendly = sanitizeLabel(e.original_name ?? e.name ?? '') || undefined;
       const list = entitiesByDeviceId.get(e.device_id) ?? [];
-      list.push({
-        entityId: e.entity_id,
-        domain: e.entity_id.split('.')[0],
-        name: sanitizeLabel(e.original_name ?? e.name ?? '') || undefined,
-      });
+      list.push({ entityId: e.entity_id, domain, name: friendly });
       entitiesByDeviceId.set(e.device_id, list);
+      // Index for the activity log's state_changed → value-event mapping.
+      this.entityIndex.set(e.entity_id, {
+        nodeId: deviceIdToNodeId.get(e.device_id)!,
+        name: friendly ?? e.entity_id,
+        domain,
+      });
       count++;
       // Remember the battery-level sensor so we can read its % from get_states.
       if (e.entity_id.startsWith('sensor.') && /battery/i.test(e.entity_id)) {
@@ -739,9 +850,18 @@ class ZwaveDataImpl implements ZwaveData {
     return this.logRing;
   }
 
-  private pushLog(source: LogEvent['source'], severity: LogEvent['severity'], nodeId: number | null, text: string): void {
-    this.logRing.unshift({ ts: Date.now(), source, severity, nodeId, text });
-    if (this.logRing.length > 300) this.logRing.length = 300;
+  private pushEvent(
+    source: LogEvent['source'],
+    severity: LogEvent['severity'],
+    kind: LogKind,
+    nodeId: number | null,
+    text: string,
+    extra?: Partial<Pick<LogEvent, 'entityId' | 'entityName' | 'domain' | 'oldState' | 'newState'>>,
+  ): void {
+    // `seq` is a monotonic id (newest = highest) so the Log screen can anchor its
+    // selection to an event identity that survives new events prepending.
+    this.logRing.unshift({ seq: this.logSeq++, ts: Date.now(), source, severity, kind, nodeId, text, ...extra });
+    if (this.logRing.length > LOG_MAX) this.logRing.length = LOG_MAX;
   }
 
   /**
@@ -773,11 +893,68 @@ class ZwaveDataImpl implements ZwaveData {
         ),
       );
       this.log(`live statistics: subscribed controller + ${nodeDevices.length} nodes`);
+      await this.subscribeActivityEvents();
       void this.fetchEntityStates();
     } catch (e) {
       this.statsSubscribed = false;
       this.log(`subscribeStatistics failed: ${errMsg(e)}`);
     }
+  }
+
+  /**
+   * v0.8 activity log: subscribe to device value changes (`state_changed`,
+   * filtered to this mesh's entities) + `zwave_js_notification`. Re-established
+   * on every (re)auth via the same `subscribeStatistics` path, so a reconnect
+   * resumes the live feed. Notifications are best-effort (the event type may
+   * never fire on a given mesh); the state feed is the primary source.
+   */
+  private async subscribeActivityEvents(): Promise<void> {
+    try {
+      await this.client.subscribe(
+        { type: 'subscribe_events', event_type: 'state_changed' },
+        (msg) => this.onStateChanged(msg.event),
+      );
+      await this.client
+        .subscribe(
+          { type: 'subscribe_events', event_type: 'zwave_js_notification' },
+          (msg) => this.onZwaveNotification(msg.event),
+        )
+        .catch(() => {
+          /* best-effort — some meshes never emit notifications */
+        });
+      // A visible marker in the activity log itself so a (re)connect is legible
+      // right where the user is watching — useful given the WS can wedge.
+      this.pushEvent('net', 'info', 'system', null, `activity feed live — watching ${this.entityIndex.size} device entities`);
+      this.log(`activity log: subscribed state_changed + notifications (${this.entityIndex.size} entities)`);
+    } catch (e) {
+      this.log(`activity subscribe failed: ${errMsg(e)}`);
+    }
+  }
+
+  /** Map an HA `state_changed` event → a `value` activity-log entry (tracked
+   *  zwave entities only). Ignores no-op churn and throttles numeric telemetry. */
+  private onStateChanged(ev: unknown): void {
+    const m = mapStateChanged(ev, this.entityIndex, Date.now(), this.lastValueAt);
+    if (!m) return;
+    this.pushEvent('net', 'info', 'value', m.nodeId, m.text, {
+      entityId: m.entityId,
+      entityName: m.entityName,
+      domain: m.domain,
+      oldState: m.oldState,
+      newState: m.newState,
+    });
+  }
+
+  /** Map a `zwave_js_notification` event → a `notification` log entry (defensive:
+   *  the payload shape varies by notification type/CC). */
+  private onZwaveNotification(ev: unknown): void {
+    const d = (ev as { data?: Record<string, unknown> } | null)?.data;
+    if (!d) return;
+    const nodeId = typeof d.node_id === 'number' ? d.node_id : null;
+    const label = String(d.label ?? d.event_label ?? d.command_class_name ?? 'notification');
+    const val = d.event_label ?? d.event ?? d.value ?? d.parameters;
+    const raw = val != null && String(val) !== label ? `${label}: ${String(val).slice(0, 48)}` : label;
+    this.pushEvent('net', 'info', 'notification', nodeId, sanitizeLabel(raw));
   }
 
   /**
@@ -863,7 +1040,7 @@ class ZwaveDataImpl implements ZwaveData {
     this.coarseAccum.set(nodeId, acc);
     // Log a route change (repeater chain differs) so the mesh's re-routing is visible.
     if (prev && routeKey(prev.lwr) !== routeKey(stats.lwr)) {
-      this.pushLog('net', 'info', nodeId, `route → ${fmtRoute(stats.lwr)}`);
+      this.pushEvent('net', 'info', 'route', nodeId, `route → ${fmtRoute(stats.lwr)}`);
     }
   }
 
