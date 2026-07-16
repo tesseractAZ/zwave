@@ -49,7 +49,7 @@ over it and dismisses with `q` or `Esc`, preserving your selection.
 | Screen | What it shows |
 | --- | --- |
 | **Overview** | Dense live node-list table sorted worst-health-first, with a summary bar (node counts, flaky count, noise floor) and a per-node flags column. |
-| **Detail** | Full per-node dossier: identity, capability, security, live link (status / RTT / RSSI margin / drop %), the LWR and NLWR routes with per-hop RSSI, TX/RX reliability, and the battery lane. |
+| **Detail** | Full per-node dossier: identity, capability, security, live link (status / RTT / RSSI margin / response-timeout %), the LWR and NLWR routes with per-hop RSSI, TX/RX traffic counters, and the battery lane. |
 | **Controller** | Node 1 radio health: home id, RF region, firmware/SDK, primary/SUC/SIS roles, per-channel background-RSSI noise floor, and the controller traffic/timeout counters. |
 | **Topology** | Hop-grouped ASCII route tree from each node's last-working route, repeater-load view, and a Long-Range star panel. |
 | **Heatmap** | Nodes grouped by HA area, cells graded by SNR-margin bucket against the live noise floor. |
@@ -106,10 +106,19 @@ per-node actions when write actions are on).
 
 Each node gets a composite **0–100 score**, a letter **grade**, and a discrete
 **state**. The score blends weighted lanes — reachability, signal
-(RSSI margin over the live noise floor + SNR), route quality, TX reliability,
-and interview completeness — with hard gates:
+(RSSI margin over the live noise floor + SNR), route quality, response
+reliability, and interview completeness — with hard gates:
 
 - A **dead** node scores 0.
+
+> **Response reliability, not "drops".** The reliability lane and the Overview
+> **TMO** column measure `timeoutResponse / commandsTX` — the fraction of
+> commands whose expected reply never arrived while the node stayed reachable.
+> They deliberately do **not** use `commandsDroppedTX`: on the Z-Wave JS driver
+> that counter does not track RF acknowledgement failures (those mark the node
+> *dead* instead) and is noisy otherwise, so it would both miss real trouble and
+> false-alarm. The raw drop counters are still shown on the Detail *Traffic* row
+> as context.
 - An **unknown** node is capped low until it is interviewed.
 - A **sleeping** (FLiRS/battery) node is **not** penalized for being asleep
   within its wake interval.
@@ -127,7 +136,7 @@ Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 55, **F** < 55.
 | `D` | Dead / unreachable |
 | `S` | Asleep |
 | `W` | Weak signal (margin under ~7 dB) |
-| `F` | Failing TX (dropped + timeouts over ~15%) |
+| `F` | Response timeouts (ACKed Gets with no reply, over ~15%) |
 | `R` | Route problem (failed-between / poor route) |
 | `L` | High latency (round-trip over ~1 s) — advisory |
 | `I` | Incomplete interview |

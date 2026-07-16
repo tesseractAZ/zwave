@@ -6,7 +6,7 @@
  *
  *   header   [8] Kitchen Lamp — alive — 100 (A)          W F
  *   IDENTITY manufacturer/model · security · radio caps · power · area
- *   LIVE LINK status glyph + lastSeen · RTT · RSSI + SNR margin · drop%
+ *   LIVE LINK status glyph + lastSeen · RTT · RSSI + SNR margin · response-timeout %
  *   ROUTES   LWR (and NLWR) repeater chains, per-hop RSSI, data rate, fails
  *   TRAFFIC  commands TX/RX, dropped TX/RX, response timeouts
  *
@@ -27,7 +27,7 @@ import {
 } from '../../types';
 import { centeredNotice } from './overview';
 import { frame } from '../chrome';
-import { txDropPct } from '../../zwave/health';
+import { responseTimeoutPct } from '../../zwave/health';
 
 /** Driver RSSI sentinels (not-available / saturated / no-signal) — never real dBm. */
 const RSSI_SENTINELS = new Set([127, 126, 125]);
@@ -40,7 +40,7 @@ const FLAG_MEANING: Record<string, string> = {
   D: 'dead',
   S: 'stale',
   W: 'weak signal',
-  F: 'flaky TX',
+  F: 'response timeouts',
   R: 'route failed',
   L: 'high latency',
   I: 'interview incomplete',
@@ -163,16 +163,18 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     const longRssi = data.historyLong(n.nodeId).rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
     if (longRssi.length >= 3) pushG(PRIO.rssiLong, trendRow('Sig 2h', longRssi, 'dBm', lastColor(longRssi, rssiColor), inner));
 
-    // Drop% via the SHARED txDropPct — the same figure the Overview DROP column
-    // shows for this node. `drops` is kept only for the "N of M tx" caption.
-    const pct = txDropPct(s);
-    const drops = Math.min(s.commandsDroppedTX + s.timeoutResponse, s.commandsTX);
+    // Response-timeout % via the SHARED responseTimeoutPct — the same figure the
+    // Overview TMO column shows. Numerator is timeoutResponse (ACKed Get whose
+    // reply was lost), NOT commandsDroppedTX (RESEARCH.md §0); the raw drop
+    // counters live honestly in the TRAFFIC section below.
+    const pct = responseTimeoutPct(s);
+    const timeouts = Math.min(s.timeoutResponse, s.commandsTX);
     let dropVal =
       pct == null
         ? c.grey('— (no TX yet)')
         : dropColor(pct)(`${pct.toFixed(1)}%`) +
-          c.grey(` (${drops} of ${s.commandsTX} tx)`);
-    // Augment the Drop row with a low-good meter, right-aligned, but only when it
+          c.grey(` (${timeouts} of ${s.commandsTX} tx)`);
+    // Augment the row with a low-good meter, right-aligned, but only when it
     // fits WITHOUT crowding the real value text (lr would otherwise truncate it).
     if (pct != null) {
       const va = inner - 11;
@@ -181,7 +183,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       const dm = meter(pct / 100, 8, { dir: 'lowGood', color: dropColor(pct) });
       if (va - visLen(dropVal) >= 10) dropVal = lr(dropVal, dm, va);
     }
-    body.push(kv('Drop', dropVal, inner));
+    body.push(kv('Timeouts', dropVal, inner));
   }
   sep();
 

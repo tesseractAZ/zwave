@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderOverview } from '../src/telnet/screens/overview';
-import { txDropPct } from '../src/zwave/health';
+import { responseTimeoutPct } from '../src/zwave/health';
 import { visLen } from '../src/telnet/ansi';
 import { NodeStatus } from '../src/types';
 import type { DataProvider, NodeSnapshot, HealthResult, ControllerSnapshot, ScreenCtx, ViewState, NodeStats } from '../src/types';
@@ -40,7 +40,7 @@ test('Overview holds EXACTLY view.rows lines within view.cols at every size (inc
 });
 
 test('the selected inverse-video row embeds NO ANSI RESET (9 flags + fractional RTT — the exact hazards)', () => {
-  // Select node 6 (all 9 flags) on a wide terminal that shows RTT/DROP/ROUTE.
+  // Select node 6 (all 9 flags) on a wide terminal that shows RTT/TMO/ROUTE.
   const idx6 = nodes.findIndex((n) => n.nodeId === 6);
   const lines = renderOverview(ctx(160, 46, idx6));
   const sel = lines.find((l) => l.startsWith('\x1b[7m'));
@@ -56,9 +56,19 @@ test('rttCell rounds fractional RTT so it fits its column (234.5 → "235ms")', 
   assert.ok(!lines.some((l) => /234\.5/.test(l)), 'no fractional ms leaks through');
 });
 
-test('txDropPct: (droppedTX + timeouts) / TX, null when no traffic, clamped ≤100', () => {
-  assert.equal(txDropPct(stats({ commandsTX: 0, commandsDroppedTX: 0, timeoutResponse: 0 })), null);
-  assert.equal(txDropPct(stats({ commandsTX: 100, commandsDroppedTX: 2, timeoutResponse: 8 })), 10);
-  assert.equal(txDropPct(stats({ commandsTX: 100, commandsDroppedTX: 0, timeoutResponse: 0 })), 0);
-  assert.equal(txDropPct(stats({ commandsTX: 10, commandsDroppedTX: 50, timeoutResponse: 50 })), 100); // clamped
+test('responseTimeoutPct: timeoutResponse / TX, null when no traffic, clamped ≤100', () => {
+  assert.equal(responseTimeoutPct(stats({ commandsTX: 0, timeoutResponse: 0 })), null);
+  assert.equal(responseTimeoutPct(stats({ commandsTX: 100, timeoutResponse: 8 })), 8);
+  assert.equal(responseTimeoutPct(stats({ commandsTX: 100, timeoutResponse: 0 })), 0);
+  assert.equal(responseTimeoutPct(stats({ commandsTX: 10, timeoutResponse: 50 })), 100); // clamped
+});
+
+test('responseTimeoutPct IGNORES commandsDroppedTX (RESEARCH.md §0 regression guard)', () => {
+  // The whole point of v0.11: commandsDroppedTX is near-silent for RF loss and
+  // noisy otherwise, so a node with a huge drop count but ZERO response timeouts
+  // must read a healthy 0% — it must NOT inflate the metric the way the old
+  // (droppedTX + timeouts)/TX definition did.
+  assert.equal(responseTimeoutPct(stats({ commandsTX: 100, commandsDroppedTX: 40, timeoutResponse: 0 })), 0);
+  // And droppedTX must not change a timeout-driven reading either.
+  assert.equal(responseTimeoutPct(stats({ commandsTX: 100, commandsDroppedTX: 40, timeoutResponse: 8 })), 8);
 });
