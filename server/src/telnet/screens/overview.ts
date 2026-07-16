@@ -35,7 +35,7 @@ import {
   visLen,
 } from '../ansi';
 import { masthead, titleRule, fieldStrip, field, commandBar, linkState } from '../chrome';
-import { txDropPct } from '../../zwave/health';
+import { responseTimeoutPct } from '../../zwave/health';
 import { meter, signalBars, sparkline, vblock, fmtElapsed, spinner } from '../gauges';
 import {
   NodeStatus,
@@ -50,7 +50,7 @@ import {
 
 type ColKey =
   | 'cursor' | 'id' | 'status' | 'name' | 'score' | 'signal'
-  | 'rtt' | 'drop' | 'hop' | 'route' | 'rate' | 'seen' | 'batt' | 'flags' | 'trend';
+  | 'rtt' | 'tmo' | 'hop' | 'route' | 'rate' | 'seen' | 'batt' | 'flags' | 'trend';
 
 interface ColSpec {
   key: ColKey;
@@ -60,7 +60,7 @@ interface ColSpec {
 }
 
 /** Extra diagnostic columns unlock as the terminal gets wider. */
-const MID_COLS = 104; // + RTT · DROP · TREND
+const MID_COLS = 104; // + RTT · TMO · TREND
 const WIDE_COLS = 140; // + ROUTE, wider name + trend
 
 /**
@@ -83,7 +83,7 @@ function layout(W: number, mode: ViewState['signalDisplay']): ColSpec[] {
   add('signal', 12, 'r', mode === 'dbm' ? 'RSSI' : 'MARGIN');
   if (mid) {
     add('rtt', 6, 'r', 'RTT');
-    add('drop', 5, 'r', 'DROP');
+    add('tmo', 5, 'r', 'TMO');
   }
   add('hop', 4, 'r', 'HOP');
   if (wide) add('route', 16, 'l', 'ROUTE');
@@ -244,7 +244,7 @@ function nodeRow(
   const score = scoreDisplay(health.score, isDead);
   const sig = signalDisplay(n, noise, view.signalDisplay);
   const rtt = rttCell(n);
-  const drop = dropCell(n);
+  const tmo = timeoutCell(n);
   const hop = hopCell(n);
   const route = routeCell(n);
   const rate = rateCell(n);
@@ -264,7 +264,7 @@ function nodeRow(
     score: score.colored,
     signal: sig.colored,
     rtt: rtt.color(rtt.t),
-    drop: drop.color(drop.t),
+    tmo: tmo.color(tmo.t),
     hop: hop.color(hop.t),
     route: route.color(route.t),
     rate: rate.color(rate.t),
@@ -276,7 +276,7 @@ function nodeRow(
   if (selected) {
     const plain: Record<ColKey, string> = {
       cursor: '▶', id: String(n.nodeId), status: g.ch, name: n.name.slice(0, nameW),
-      score: score.plain, signal: sig.plain, rtt: rtt.t, drop: drop.t, hop: hop.t,
+      score: score.plain, signal: sig.plain, rtt: rtt.t, tmo: tmo.t, hop: hop.t,
       route: route.t, rate: rate.t, seen: seen.t, batt: bat.t, flags: flags.t, trend: trend.plain,
     };
     // DEFENSE: every plain cell is hard-sliced to its column width BEFORE joinCells,
@@ -460,9 +460,11 @@ function rttCell(n: NodeSnapshot): Cell {
   return { t, color };
 }
 
-/** TX drop rate (shared with Detail via txDropPct). No traffic → '—'. */
-function dropCell(n: NodeSnapshot): Cell {
-  const pct = txDropPct(n.stats);
+/** Response-timeout rate (shared with Detail via responseTimeoutPct). This is
+ *  timeoutResponse/commandsTX — NOT commandsDroppedTX, which is near-silent for
+ *  RF loss (RESEARCH.md §0). No traffic → '—'. */
+function timeoutCell(n: NodeSnapshot): Cell {
+  const pct = responseTimeoutPct(n.stats);
   if (pct == null) return { t: '—', color: c.grey };
   const t = `${pct >= 10 ? Math.round(pct) : Number(pct.toFixed(1))}%`;
   const color = pct < 1 ? c.green : pct < 3 ? c.white : pct < 8 ? c.yellow : c.red;

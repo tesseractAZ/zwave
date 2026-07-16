@@ -65,6 +65,28 @@ test('U flag appears across states (dead / unknown / controller / healthy)', () 
   assert.ok(scoreNode(makeNode({ stats: emptyStats(), ready: false, ...up }), NOISE).flags.includes('U'));
 });
 
+test('response-reliability lane: high timeoutResponse raises F and drags the score', () => {
+  // 30 timeouts over 100 sends = 30% → at/above the lane floor: F flag, flaky state.
+  const flaky = scoreNode(makeNode({ stats: emptyStats({ commandsTX: 100, timeoutResponse: 30 }) }), NOISE);
+  const clean = scoreNode(makeNode({ stats: emptyStats({ commandsTX: 100, timeoutResponse: 0 }) }), NOISE);
+  assert.ok(flaky.flags.includes('F'), 'high response-timeout rate raises F');
+  assert.equal(flaky.state, 'flaky');
+  assert.ok(flaky.score < clean.score, 'timeouts drag the RF score down');
+});
+
+test('response-reliability lane IGNORES commandsDroppedTX (RESEARCH.md §0 regression guard)', () => {
+  // A node with a large drop count but ZERO response timeouts must NOT be flagged
+  // F or scored down — commandsDroppedTX is near-silent for RF loss and noisy
+  // otherwise, so the old (droppedTX+timeouts) lane would have false-alarmed here.
+  const clean = scoreNode(makeNode({ stats: emptyStats({ commandsTX: 100, timeoutResponse: 0 }) }), NOISE);
+  const dropsButNoTimeouts = scoreNode(
+    makeNode({ stats: emptyStats({ commandsTX: 100, commandsDroppedTX: 40, timeoutResponse: 0 }) }),
+    NOISE,
+  );
+  assert.ok(!dropsButNoTimeouts.flags.includes('F'), 'droppedTX alone must not raise F');
+  assert.equal(dropsButNoTimeouts.score, clean.score, 'droppedTX must not drag the RF score');
+});
+
 test('Long-Range node scores without error', () => {
   const r = scoreNode(makeNode({ nodeId: 300, isLongRange: true }), NOISE);
   assert.ok(Number.isFinite(r.score));

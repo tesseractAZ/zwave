@@ -20,8 +20,26 @@
  *     • Reachability 30%  — lastSeen staleness vs an expected freshness window.
  *     • Signal       25%  — (RSSI − noiseFloor) SNR margin. W flag < 7 dB.
  *     • Route        20%  — hop count / data rate / rtt / routeFailedBetween.
- *     • TX Reliability 20% — (droppedTX + timeoutResponse) / commandsTX. F flag > 15%.
+ *     • Response Reliability 20% — timeoutResponse / commandsTX. F flag > 15%.
  *     • Interview     5%  — node fully interviewed (`ready`). I flag if not.
+ *
+ *   ★ Why `timeoutResponse`, not `commandsDroppedTX` (RESEARCH.md §0): the drop
+ *     counter does NOT track RF ACK failures — when a listening node stops
+ *     acknowledging, the driver retries then marks it DEAD (handled by the DEAD
+ *     gate), and `commandsDroppedTX` stays 0. That near-silence was reproduced
+ *     against zwave-js@15.25.3 (NoAck, controller-cannot-send, and Get-timeout
+ *     each incremented it in none of the cases). It only ticks on a NOK transmit
+ *     report fed back through the message generator, and — on documented but
+ *     not-reproduced behavior — can false-positive on premature-response aborts
+ *     that actually succeeded (real-world rate uncertain; any nonzero value is
+ *     weak evidence at most). So it is near-silent for the failure it appears to
+ *     name and noisy otherwise. The real, node-stays-Alive degradation signal is
+ *     `timeoutResponse`: the node MAC-ACKed a Get (the RF link up to the ACK
+ *     works) but the expected report never arrived — a return-path / responsiveness
+ *     problem. The raw `commandsDroppedTX`/`commandsDroppedRX` counts are still
+ *     shown on the Detail TRAFFIC row as honest context, just never folded into
+ *     the score. (The hard RF-failure event — Alive↔Dead flapping — is a future
+ *     symptom-engine detector; here a currently-DEAD node is the D gate.)
  *
  *   Long-Range (nodeId ≥ 256) nodes talk *directly* to the controller in a
  *   star — mesh routing is meaningless — so the 20% Route weight is
@@ -35,7 +53,7 @@
  *   healthy radio, and conflating the two hides both problems.
  *
  * Flags are single chars, rendered in the Overview table:
- *   D dead · S stale (reachability) · W weak signal · F flaky/failed TX ·
+ *   D dead · S stale (reachability) · W weak signal · F flaky (response timeouts) ·
  *   R route failed · I interview incomplete · B battery low.
  */
 
@@ -59,10 +77,10 @@ const WEAK_MARGIN_DB = 7;
 const SIGNAL_MARGIN_LO = 0;
 const SIGNAL_MARGIN_HI = 14;
 
-/** TX error fraction above which the F (flaky/failed) flag fires. */
+/** Response-timeout fraction above which the F (flaky) flag fires. */
 const TX_ERR_THRESHOLD = 0.15;
 
-/** TX error fraction that scores the reliability lane to zero. */
+/** Response-timeout fraction that scores the reliability lane to zero. */
 const TX_ERR_FLOOR = 0.3;
 
 /** Battery percent at/under which the advisory B flag fires. */
@@ -88,16 +106,24 @@ const LR_NODE_ID = 256;
 const FLAG_ORDER = ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B', 'U'] as const;
 
 /**
- * TX drop rate (%) — the ONE definition shared by the Overview DROP column and
- * the Detail 'Drop' row so the same node never shows two figures. Failures =
- * dropped transmits + response timeouts, over attempted commands; null when the
- * node has sent nothing yet.
+ * Response-timeout rate (%) — the ONE definition shared by the Overview TMO
+ * column and the Detail 'Timeouts' row so the same node never shows two figures.
+ * It is `timeoutResponse / commandsTX`: the fraction of successfully-sent
+ * commands that were response-expecting Gets whose reply never came back while
+ * the node stayed reachable. `commandsDroppedTX` is deliberately EXCLUDED — it
+ * does not measure RF loss and is noisy (RESEARCH.md §0). null when the node has
+ * sent nothing yet.
+ *
+ * Denominator caveat: `timeoutResponse` accrues only for Get-type traffic while
+ * `commandsTX` counts all successful sends, so for a SET-heavy node this rate is
+ * a conservative under-estimate of its true Get-failure rate — an honest floor,
+ * never an over-statement.
  */
-export function txDropPct(stats: NodeStats): number | null {
+export function responseTimeoutPct(stats: NodeStats): number | null {
   const tx = stats.commandsTX;
   if (tx <= 0) return null;
-  const drops = Math.min(stats.commandsDroppedTX + stats.timeoutResponse, tx);
-  return Math.min(100, (drops / tx) * 100);
+  const timeouts = Math.min(stats.timeoutResponse, tx);
+  return Math.min(100, (timeouts / tx) * 100);
 }
 
 // ── Small numeric helpers ────────────────────────────────────────────────────
@@ -262,14 +288,17 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   // even when the weighted route lane alone can't drop the grade.
   if (stats.rtt != null && stats.rtt > RTT_HI_MS) flags.add('L');
 
-  // ── Lane: TX Reliability (20%, 30% for LR) — dropped + timed-out over sent.
+  // ── Lane: Response Reliability (20%, 30% for LR) — response timeouts over sent.
+  // Uses timeoutResponse ONLY, not commandsDroppedTX (RESEARCH.md §0): the drop
+  // counter is near-silent for RF failures (they mark the node DEAD → handled by
+  // the DEAD gate) and noisy otherwise, so folding it in would both miss real
+  // trouble and false-alarm on premature-response aborts that actually succeeded.
   let txFrac: number;
   let flaky = false;
   if (stats.commandsTX <= 0) {
     txFrac = 0.85; // nothing sent yet: give the benefit of the doubt, no flag
   } else {
-    const errRate =
-      (stats.commandsDroppedTX + stats.timeoutResponse) / stats.commandsTX;
+    const errRate = stats.timeoutResponse / stats.commandsTX;
     txFrac = 1 - linstep(errRate, 0, TX_ERR_FLOOR);
     if (errRate > TX_ERR_THRESHOLD) {
       flags.add('F');
