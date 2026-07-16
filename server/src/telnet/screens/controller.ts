@@ -33,6 +33,7 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
+import { frame } from '../chrome';
 
 type ColorFn = (s: string) => string;
 
@@ -62,34 +63,27 @@ export function renderController(ctx: ScreenCtx): string[] {
     healthBlock(ctx, W),
   ];
 
-  const out: string[] = [titleLine(ctrl, W)];
-  let spare = H - 1 - blocks.reduce((s, b) => s + b.length, 0);
+  // A blank line between each section; frame() pads the remainder.
+  const body: string[] = [];
   for (const b of blocks) {
-    if (spare > 0) {
-      out.push('');
-      spare--;
-    }
-    out.push(...b);
+    if (body.length > 0) body.push('');
+    body.push(...b);
+  }
+  // If the roll-up is taller than the frame body, mark the overflow instead of
+  // letting frame() silently drop the trailing NETWORK HEALTH tallies.
+  const bodyCap = Math.max(1, H - 3); // masthead + rule + command bar
+  if (body.length > bodyCap) {
+    body.length = Math.max(0, bodyCap - 1);
+    body.push(c.grey('  …more (taller terminal shows the full roll-up)'));
   }
 
-  // If the sections don't fit, replace the last visible row with a marker
-  // rather than silently dropping the network-health roll-up.
-  if (out.length > H) {
-    const kept = out.slice(0, H - 1);
-    kept.push(c.grey(`  …${out.length - (H - 1)} more rows (taller terminal shows the full roll-up)`));
-    return kept.map((l) => truncate(l, W));
-  }
-  while (out.length < H) out.push('');
-  return out.slice(0, H).map((l) => truncate(l, W));
-}
-
-/* ── title ─────────────────────────────────────────────────────────────── */
-
-function titleLine(ctrl: ControllerSnapshot, W: number): string {
-  const left = c.cyanB('CONTROLLER & NETWORK');
   const model = ctrl.model ?? ctrl.manufacturer ?? '—';
-  const right = c.grey(`node ${ctrl.nodeId} · `) + c.white(model);
-  return lr(left, right, W);
+  return frame(view, data, {
+    title: 'CONTROLLER & NETWORK',
+    rightStatus: c.grey(`NODE ${ctrl.nodeId} · `) + c.white(model),
+    body,
+    keys: [['1-6', 'SCREENS'], ['Q', 'BACK']],
+  });
 }
 
 /* ── section rule (grey ─── fill after a cyan label) ───────────────────── */

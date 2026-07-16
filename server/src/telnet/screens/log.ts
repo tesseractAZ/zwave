@@ -18,10 +18,11 @@
  * two can never disagree.
  */
 
-import { c, center, lr, padEnd, truncate, visLen } from '../ansi';
+import { c, center, padEnd, truncate, visLen } from '../ansi';
 import type { DataProvider, LogEvent, ScreenCtx } from '../../types';
 import { LOG_RANGE_LABEL } from '../../types';
 import { filteredEvents, logLayout, syncLogCursor } from '../input';
+import { frame } from '../chrome';
 import { windowStart } from './overview';
 
 /** Width of the node-reference column ("#7 Garage Sensor"). */
@@ -36,57 +37,55 @@ export function renderLog(ctx: ScreenCtx): string[] {
   syncLogCursor(view, events);
   const { listRows, detailRows, showDetail } = logLayout(H);
 
-  const out: string[] = [];
-  out.push(truncate(headerLine(view, events.length), W));
-
   // ── list body (exactly listRows lines) ──────────────────────────────────
+  const body: string[] = [];
   if (events.length === 0) {
     const msg =
       view.errorsOnly || view.logRange !== 'all'
         ? [
             c.grey('No events match the current filters.'),
-            c.grey(filterSummary(view) + ' — press ') + c.cyanB('d') + c.grey('/') + c.cyanB('o') + c.grey(' to widen'),
+            c.grey(filterSummary(view) + ' — press ') + c.cyanB('D') + c.grey('/') + c.cyanB('O') + c.grey(' to widen'),
           ]
-        : [c.grey('Waiting for activity — device, status & route changes appear here live.')];
+        : [c.grey('Waiting for activity — device, status and route changes appear here live.')];
     const top = Math.max(0, Math.floor((listRows - msg.length) / 2));
     for (let i = 0; i < listRows; i++) {
       const m = i - top;
-      out.push(m >= 0 && m < msg.length ? truncate(center(msg[m], W), W) : '');
+      body.push(m >= 0 && m < msg.length ? center(msg[m], W) : '');
     }
   } else {
     const start = windowStart(view.logCursor, view.logScroll, events.length, listRows);
     view.logScroll = start; // persist for a proper sticky window next frame
     for (let i = 0; i < listRows; i++) {
       const idx = start + i;
-      out.push(idx < events.length ? truncate(eventRow(events[idx], data, W, idx === view.logCursor), W) : '');
+      body.push(idx < events.length ? eventRow(events[idx], data, W, idx === view.logCursor) : '');
     }
   }
 
   // ── detail pane ──────────────────────────────────────────────────────────
   if (showDetail) {
-    out.push(truncate(c.grey('─'.repeat(W)), W));
-    const sel = events[view.logCursor];
-    for (const line of detailLines(sel, data, W, detailRows)) out.push(truncate(line, W));
+    body.push(c.grey('─'.repeat(W)));
+    for (const line of detailLines(events[view.logCursor], data, W, detailRows)) body.push(line);
   }
 
-  out.push(truncate(legend(view, events.length), W));
-
-  while (out.length < H) out.push('');
-  return out.slice(0, H);
+  return frame(view, data, {
+    title: 'ACTIVITY LOG',
+    rightStatus: rightStatus(view, events.length),
+    body,
+    keys: [
+      ['↑↓', 'MOVE'], ['␣/b', 'PAGE'], ['⏎', 'DEVICE'], ['D', 'DATE'],
+      ['O', 'ERRORS'], ['1-6', 'SCREENS'], ['Q', 'CLOSE'],
+    ],
+  });
 }
 
-/* ── header ────────────────────────────────────────────────────────────── */
+/* ── title-rule status ─────────────────────────────────────────────────── */
 
-function headerLine(view: ScreenCtx['view'], total: number): string {
-  const left =
-    c.cyanB('ACTIVITY LOG') + c.grey(' · ') + c.white(String(total)) + c.grey(total === 1 ? ' event' : ' events');
-
-  const chips: string[] = [];
-  chips.push(c.blue(`◷ ${LOG_RANGE_LABEL[view.logRange]}`));
-  if (view.errorsOnly) chips.push(c.yellowB('▲ errors only'));
-  const right = chips.join(c.grey(' · '));
-
-  return lr(left, right, view.cols);
+function rightStatus(view: ScreenCtx['view'], total: number): string {
+  const chips: string[] = [c.white(String(total)) + c.grey(total === 1 ? ' EVENT' : ' EVENTS')];
+  chips.push(c.blue(`◷ ${LOG_RANGE_LABEL[view.logRange].toUpperCase()}`));
+  if (view.errorsOnly) chips.push(c.yellowB('▲ ERRORS'));
+  chips.push(c.grey(total > 0 ? `${view.logCursor + 1}/${total}` : '0/0'));
+  return chips.join(c.grey(' · '));
 }
 
 function filterSummary(view: ScreenCtx['view']): string {
@@ -199,24 +198,6 @@ function sevWord(sev: LogEvent['severity']): string {
   if (sev === 'error') return c.red('error');
   if (sev === 'warn') return c.yellow('warning');
   return c.grey('info');
-}
-
-/* ── legend ────────────────────────────────────────────────────────────── */
-
-function legend(view: ScreenCtx['view'], total: number): string {
-  const key = (k: string, label: string) => c.cyanB(k) + ' ' + c.grey(label);
-  const left = [
-    key('j/k', 'move'),
-    key('␣/b', 'page'),
-    key('⏎', 'device'),
-    key('d', 'date'),
-    key('o', 'errors'),
-    key('q', 'close'),
-  ].join(c.grey(' · '));
-
-  // Cursor position within the filtered stream.
-  const right = total > 0 ? c.grey(`${view.logCursor + 1}/${total}`) : c.grey('0/0');
-  return lr(left, right, view.cols);
 }
 
 /* ── time helpers (app-runtime clock — allowed) ────────────────────────── */

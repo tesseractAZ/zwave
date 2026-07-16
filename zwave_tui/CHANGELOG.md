@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.10.0 — 2026-07-16
+
+A full visual redesign into a formal **diagnostic-console** aesthetic — one
+cohesive instrument across every screen.
+
+- **Shared console frame** (`chrome.ts`) on every screen:
+  - a **system masthead** — product ident · live link state (`● ONLINE` /
+    `STALE` / `OFFLINE`) · home id · timestamp;
+  - a **titled section rule** naming the active screen with a right-hand status
+    token (counts / filter / rebuild);
+  - **labelled telemetry** with units and semantic color; and
+  - a **keycap command bar** (`[A] ACTIONS  [/] FILTER  [Q] EXIT`).
+- **Overview now fills the width.** The node table is width-responsive: on wider
+  terminals the NODE column expands to full device names and new **RTT · DROP% ·
+  ROUTE** columns (plus a wider signal-trend sparkline) appear — more diagnostic
+  telemetry per row instead of a stranded right half.
+- **Every screen reskinned** — Overview, Detail, Controller, Topology, Heatmap,
+  and the Activity Log all wear the same frame, with uppercase section labels,
+  aligned columns, and disciplined color (green ok · amber weak · red fault ·
+  cyan asleep · blue long-range · grey chrome). Detail's identity/status/score
+  moved into the title rule; its dossier is unchanged.
+- No data was dropped or altered — this is presentation only.
+- **Configuration tab** reordered and clarified: leads with the settings you
+  actually touch (display unit, the write-actions gate), groups the login gate,
+  and flags the advanced options; every field keeps its help text and a tailored
+  input (dropdown / toggle / validated number / masked password / repeatable
+  users list).
+- A 4-dimension adversarial review confirmed 10 findings, all fixed: the Overview
+  command bar could overrun the width when the roster scrolled; RTT rendered
+  unrounded (overflowing its column); the Overview DROP% and Detail Drop% used
+  different formulas (now one shared `txDropPct`); the FLAGS column was one cell
+  short of the 9 possible flags; and Detail/Controller could silently clip
+  content on very short terminals (now show a "…more" marker). `tsc` clean;
+  147 tests (incl. Overview width + inverse-video-safety and `chrome.ts`
+  width/height contracts at 40→200 cols).
+
 ## 0.9.0 — 2026-07-14
 
 An **Actions Menu** with a deliberate type-`CONFIRM` gate for every command.

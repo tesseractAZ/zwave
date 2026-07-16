@@ -26,6 +26,8 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
+import { frame } from '../chrome';
+import { txDropPct } from '../../zwave/health';
 
 /** Driver RSSI sentinels (not-available / saturated / no-signal) — never real dBm. */
 const RSSI_SENTINELS = new Set([127, 126, 125]);
@@ -77,22 +79,9 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     if (s != null) body.push(GMARK + String.fromCharCode(prio) + s);
   };
 
-  // Header: identity line + flags pushed to the right edge.
-  {
-    const st = statusColor(n.status)(n.statusLabel);
-    const sc = dead(n)
-      ? c.grey('—')
-      : scoreColor(health.score)(`${health.score} (${health.grade})`);
-    const left =
-      c.cyanB(`[${n.nodeId}]`) + ' ' + c.whiteB(n.name) +
-      c.grey('  —  ') + st + c.grey('  —  ') + sc;
-    const flags = health.flags.length
-      ? flagColor(health.flags)(health.flags.join(' '))
-      : '';
-    body.push(' ' + lr(left, flags, inner - 1));
-    // Flagship graphic: a wide health gauge echoing the header score/grade.
-    if (!dead(n)) pushG(PRIO.health, healthGauge(health.score, health.grade, inner));
-  }
+  // Flagship graphic — a wide health gauge. The node's identity, status, and
+  // score now live in the title rule (chrome), so they aren't repeated here.
+  if (!dead(n)) pushG(PRIO.health, healthGauge(health.score, health.grade, inner));
   sep();
 
   // IDENTITY — device, security, radio capabilities, power, location.
@@ -174,19 +163,18 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     const longRssi = data.historyLong(n.nodeId).rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
     if (longRssi.length >= 3) pushG(PRIO.rssiLong, trendRow('Sig 2h', longRssi, 'dBm', lastColor(longRssi, rssiColor), inner));
 
-    // Drop% = (droppedTX + response timeouts) / TX, clamped so the headline and
-    // the "N of M" text stay sane even if the driver's counters briefly disagree.
-    const denom = Math.max(1, s.commandsTX);
+    // Drop% via the SHARED txDropPct — the same figure the Overview DROP column
+    // shows for this node. `drops` is kept only for the "N of M tx" caption.
+    const pct = txDropPct(s);
     const drops = Math.min(s.commandsDroppedTX + s.timeoutResponse, s.commandsTX);
-    const pct = Math.min(100, (drops / denom) * 100);
     let dropVal =
-      s.commandsTX <= 0
+      pct == null
         ? c.grey('— (no TX yet)')
         : dropColor(pct)(`${pct.toFixed(1)}%`) +
           c.grey(` (${drops} of ${s.commandsTX} tx)`);
     // Augment the Drop row with a low-good meter, right-aligned, but only when it
     // fits WITHOUT crowding the real value text (lr would otherwise truncate it).
-    if (s.commandsTX > 0) {
+    if (pct != null) {
       const va = inner - 11;
       // Force the fill color to the SAME dropColor() band as the % text so the
       // bar can never read healthier (green) than the number it sits beside.
@@ -231,15 +219,41 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     body.push(truncate('  ' + line, inner));
   }
 
-  /* ── frame + fit to exactly H rows ───────────────────────────────────────── */
+  /* ── fit the body into the shared diagnostic-console frame ──────────────── */
   // Height degradation: shed the least-important GRAPHIC rows (never dossier
-  // data) until the body fits the interior. If the base dossier still overflows,
-  // frameToHeight falls back to its "…N more rows" marker. contentCap mirrors
-  // the reservation frameToHeight makes for the footer.
-  const contentCap = Math.max(0, H - 2 - 1);
-  dropGraphicsToFit(body, contentCap);
-  const cleaned = body.map(stripGMark);
-  return frameToHeight(cleaned, footer(health, inner, ctx.actionsEnabled ?? false), inner, W, H);
+  // data) until the body fits. frame() reserves masthead + rule + command bar
+  // (3 rows); we reserve one more for the flag legend pinned at the bottom.
+  const bodyCap = Math.max(1, H - 3);
+  dropGraphicsToFit(body, Math.max(1, bodyCap - 1));
+  let cleaned = body.map(stripGMark).map((row) => (row === SEP ? c.grey('─'.repeat(W)) : row));
+  // The flag legend is the LAST body row. If the dossier still overflows after
+  // shedding graphics (a very short terminal), clip it with a "…more" marker so
+  // the legend survives instead of being the first casualty of frame()'s clamp.
+  if (cleaned.length > bodyCap - 1) {
+    cleaned = cleaned.slice(0, Math.max(0, bodyCap - 2));
+    cleaned.push(c.grey('  …more (taller terminal shows the full dossier)'));
+  }
+  while (cleaned.length < bodyCap - 1) cleaned.push('');
+  cleaned.push(flagLegend(health.flags, W));
+
+  const st = statusColor(n.status)(n.statusLabel.toUpperCase());
+  const sc = dead(n) ? c.grey('—') : scoreColor(health.score)(`${health.score} (${health.grade})`);
+  const keys: Array<readonly [string, string]> = ctx.actionsEnabled
+    ? [['A', 'ACTIONS'], ['⏎', 'LIST'], ['1-6', 'SCREENS'], ['Q', 'BACK']]
+    : [['A', 'ACTIONS'], ['1-6', 'SCREENS'], ['Q', 'BACK']];
+  return frame(view, data, {
+    title: `NODE #${n.nodeId} · ${n.name}`,
+    rightStatus: st + c.grey(' · ') + c.grey('SCORE ') + sc,
+    body: cleaned,
+    keys,
+  });
+}
+
+/** Per-node flag legend, pinned at the bottom of the Detail body. */
+function flagLegend(flags: string[], W: number): string {
+  if (!flags.length) return c.grey(' RF health nominal');
+  const meanings = flags.map((f) => flagColor([f])(f) + c.grey(' ' + (FLAG_MEANING[f] ?? '?'))).join(c.grey(' · '));
+  return truncate(' ' + c.grey('FLAGS: ') + meanings, W);
 }
 
 /* ── graphic-row priority + height degradation ───────────────────────────── */
@@ -453,75 +467,6 @@ function powerLabel(n: NodeSnapshot): string {
   return isBattery ? c.cyan('battery-powered') : c.grey('mains (AC)');
 }
 
-/* ── framing: wrap content in the double border, fit to H rows ───────────── */
-
-function frameToHeight(
-  body: string[],
-  footerContent: string,
-  inner: number,
-  W: number,
-  H: number,
-): string[] {
-  const vL = c.cyan(BOX.v);
-  const frame = (content: string) =>
-    content === SEP
-      ? c.cyan(BOX.lJoint + BOX.lh.repeat(inner) + BOX.rJoint)
-      : vL + padEnd(content, inner) + vL;
-  const emptyRow = vL + ' '.repeat(inner) + vL;
-
-  const capacity = H - 2; // interior rows between top & bottom borders
-  const footerRow = frame(footerContent);
-
-  // Reserve the last interior row for the footer; fit/pad the rest. If the body
-  // doesn't fit, show a "…N more" marker instead of silently dropping sections.
-  const contentCap = Math.max(0, capacity - 1);
-  let interior: string[];
-  if (body.length > contentCap && contentCap >= 1) {
-    interior = body.slice(0, contentCap - 1).map(frame);
-    interior.push(frame(c.grey(`  …${body.length - (contentCap - 1)} more rows (widen the terminal)`)));
-  } else {
-    interior = body.slice(0, contentCap).map(frame);
-    while (interior.length < contentCap) interior.push(emptyRow);
-  }
-  if (capacity >= 1) interior.push(footerRow);
-
-  const out: string[] = [];
-  out.push(topBorder(inner, 'NODE DETAIL'));
-  out.push(...interior);
-  out.push(c.cyan(BOX.bl + BOX.h.repeat(inner) + BOX.br));
-
-  // Defensive: guarantee exactly H rows, each ≤ W visible columns.
-  const clamped = out.slice(0, H).map((l) => truncate(l, W));
-  while (clamped.length < H) clamped.push('');
-  return clamped;
-}
-
-/** Top border with the title inlaid: ╔═ NODE DETAIL ═══…═╗ */
-function topBorder(inner: number, title: string): string {
-  const fill = Math.max(0, inner - 3 - title.length); // ═ + ' ' + title + ' ' + fill
-  return (
-    c.cyan(BOX.tl + BOX.h) + ' ' + c.cyanB(title) + ' ' +
-    c.cyan(BOX.h.repeat(fill) + BOX.tr)
-  );
-}
-
-/** Footer: this node's flag meanings on the left, dismiss hint on the right. */
-function footer(health: { flags: string[] }, inner: number, actionsEnabled: boolean): string {
-  // When write actions are on, the footer advertises the per-node actions;
-  // otherwise it shows the node's flag meanings.
-  const key = (k: string, label: string) => c.cyanB(k) + c.grey(' ' + label);
-  const left = actionsEnabled
-    ? c.grey('actions: ') +
-      [key('p', 'ping'), key('i', 're-interview'), key('h', 'heal'), key('x', 'remove')].join(c.grey(' · '))
-    : health.flags.length
-      ? c.grey('flags: ') +
-        health.flags
-          .map((f) => flagColor([f])(f) + c.grey(' ' + (FLAG_MEANING[f] ?? '?')))
-          .join(c.grey(' · '))
-      : c.grey('RF health nominal');
-  const right = c.cyanB('q') + c.grey('/') + c.cyanB('Esc') + c.grey(' back');
-  return ' ' + lr(left, right, inner - 1);
-}
 
 /* ── colour helpers (mirror the Overview health discipline) ──────────────── */
 

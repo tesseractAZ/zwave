@@ -29,6 +29,7 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
+import { frame, fieldStrip, field } from '../chrome';
 
 /* ── layout constants ──────────────────────────────────────────────────── */
 
@@ -76,28 +77,29 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
 
   const totalNodes = areas.reduce((s, a) => s + a.nodeCount, 0);
 
-  const out: string[] = [];
-  out.push(truncate(headerLine(data, noise, areas.length, totalNodes, W), W));
-  out.push(truncate(legendLine(W), W));
-
-  // Body window: everything between header/legend and the footer.
-  const cap = Math.max(1, H - 3); // header + legend + footer
-  if (areas.length > cap) {
-    // Reserve the last body row for the "…N more areas" overflow note.
-    const shown = cap - 1;
-    for (let i = 0; i < shown; i++) out.push(truncate(areaRow(areas[i], W), W));
+  const body: string[] = [legendLine(W)];
+  // masthead + rule + telemetry + legend + command bar = 5 chrome rows.
+  const areaCap = Math.max(1, H - 5);
+  if (areas.length > areaCap) {
+    const shown = areaCap - 1; // reserve the last row for the overflow note
+    for (let i = 0; i < shown; i++) body.push(areaRow(areas[i], W));
     const more = areas.length - shown;
-    out.push(truncate(c.grey(`…${more} more area${more === 1 ? '' : 's'}`), W));
+    body.push(c.grey(`…${more} more area${more === 1 ? '' : 's'} (taller terminal shows all)`));
   } else {
-    for (const a of areas) out.push(truncate(areaRow(a, W), W));
+    for (const a of areas) body.push(areaRow(a, W));
   }
 
-  // Pad the body so the footer lands on the last row.
-  while (out.length < H - 1) out.push('');
-  out.push(truncate(footerLine(W), W));
-
-  // Defensive clamp — never overrun the row budget.
-  return out.slice(0, H);
+  return frame(view, data, {
+    title: 'SIGNAL HEATMAP',
+    telemetry: fieldStrip(view, [
+      field('AREAS', String(areas.length)),
+      field('NODES', String(totalNodes)),
+      field('NOISE', data.hasRealNoise() ? `${noise} dBm` : '—'),
+      c.grey('sorted worst-first'),
+    ]),
+    body,
+    keys: [['1-6', 'SCREENS'], ['T', 'UNITS'], ['Q', 'BACK']],
+  });
 }
 
 /* ── grouping / per-area stats ─────────────────────────────────────────── */
@@ -267,25 +269,7 @@ function noiseColor(noise: number): (s: string) => string {
   return c.grey;
 }
 
-/* ── header / legend / footer ──────────────────────────────────────────── */
-
-function headerLine(
-  data: ScreenCtx['data'],
-  noise: number,
-  areaCount: number,
-  nodeCount: number,
-  W: number,
-): string {
-  const left = c.cyanB('SIGNAL HEATMAP') + c.grey(' by area');
-  // Only present a dBm figure when the noise floor is a real reading — HA does
-  // not report background RSSI, so it's usually the fallback (shown as "—").
-  const noiseStr =
-    c.grey('noise ') + (data.hasRealNoise() ? noiseColor(noise)(`${noise}dBm`) : c.grey('—'));
-  const right =
-    noiseStr +
-    c.grey(` · ${areaCount} area${areaCount === 1 ? '' : 's'} · ${nodeCount} nodes`);
-  return lr(left, right, W);
-}
+/* ── legend ─────────────────────────────────────────────────────────────── */
 
 /**
  * Gradient legend: a strip of heat cells ramped 0→1 (weak→strong margin) with
@@ -307,12 +291,3 @@ function legendLine(W: number): string {
   );
 }
 
-function footerLine(W: number): string {
-  const key = (k: string, label: string) => c.cyanB(k) + ' ' + c.grey(label);
-  const left = [
-    c.grey('sorted worst-first'),
-    key('q/Esc', 'back'),
-    key('1-6', 'screens'),
-  ].join(c.grey(' · '));
-  return lr(left, '', W);
-}
