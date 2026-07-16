@@ -34,6 +34,8 @@ import {
   truncate,
   visLen,
 } from '../ansi';
+import { masthead, titleRule, fieldStrip, field, commandBar, linkState } from '../chrome';
+import { txDropPct } from '../../zwave/health';
 import { meter, signalBars, sparkline, vblock, fmtElapsed, spinner } from '../gauges';
 import {
   NodeStatus,
@@ -44,38 +46,58 @@ import {
   type ViewState,
 } from '../../types';
 
-/* ── column layout (single-space separators) ───────────────────────────── */
+/* ── responsive column layout (single-space separators) ─────────────────── */
+
+type ColKey =
+  | 'cursor' | 'id' | 'status' | 'name' | 'score' | 'signal'
+  | 'rtt' | 'drop' | 'hop' | 'route' | 'rate' | 'seen' | 'batt' | 'flags' | 'trend';
 
 interface ColSpec {
+  key: ColKey;
   w: number;
   align: 'l' | 'r';
+  header: string;
 }
 
-/** cols ≥ this get the right-hand RSSI micro-sparkline column. */
-const WIDE_COLS = 110;
+/** Extra diagnostic columns unlock as the terminal gets wider. */
+const MID_COLS = 104; // + RTT · DROP · TREND
+const WIDE_COLS = 140; // + ROUTE, wider name + trend
 
 /**
- * The base 11 columns (widths chosen so CONTENT_W = 74 ≤ 80). The Signal column
- * is deliberately wide enough for signalBars(4) + a space + a 7-char dB label,
- * and Score carries a leading 1-cell vblock. On WIDE terminals a 12th column
- * (an 8-cell RSSI sparkline) is appended.
+ * Build the active columns for this width. The fixed columns are sized to their
+ * content; the NODE name column then FLEXES to absorb all remaining width, so
+ * the table always fills the terminal instead of stranding the right half.
  */
-function columns(wide: boolean): ColSpec[] {
-  const base: ColSpec[] = [
-    { w: 1, align: 'l' }, // cursor
-    { w: 4, align: 'r' }, // id
-    { w: 2, align: 'l' }, // status glyph
-    { w: 16, align: 'l' }, // name
-    { w: 4, align: 'r' }, // score (vblock + number)
-    { w: 12, align: 'r' }, // signal (bars + margin/dbm)
-    { w: 4, align: 'r' }, // hop
-    { w: 5, align: 'r' }, // rate
-    { w: 5, align: 'r' }, // seen
-    { w: 4, align: 'r' }, // battery
-    { w: 7, align: 'l' }, // flags
-  ];
-  if (wide) base.push({ w: 8, align: 'l' }); // rssi sparkline
-  return base;
+function layout(W: number, mode: ViewState['signalDisplay']): ColSpec[] {
+  const mid = W >= MID_COLS;
+  const wide = W >= WIDE_COLS;
+  const cols: ColSpec[] = [];
+  const add = (key: ColKey, w: number, align: 'l' | 'r', header: string): void => {
+    cols.push({ key, w, align, header });
+  };
+  add('cursor', 1, 'l', '');
+  add('id', 4, 'r', 'ID');
+  add('status', 2, 'l', 'ST');
+  add('name', 16, 'l', 'NODE'); // flexed below
+  add('score', 4, 'r', 'SCR');
+  add('signal', 12, 'r', mode === 'dbm' ? 'RSSI' : 'MARGIN');
+  if (mid) {
+    add('rtt', 6, 'r', 'RTT');
+    add('drop', 5, 'r', 'DROP');
+  }
+  add('hop', 4, 'r', 'HOP');
+  if (wide) add('route', 16, 'l', 'ROUTE');
+  add('rate', 5, 'r', 'RATE');
+  add('seen', 5, 'r', 'SEEN');
+  add('batt', 4, 'r', 'BATT');
+  add('flags', 9, 'l', 'FLAGS'); // FLAG_ORDER length — never clip a flag
+  if (mid) add('trend', wide ? 16 : 8, 'l', 'TREND');
+
+  // Flex NODE: give it every column left over after the fixed ones + separators.
+  const name = cols.find((col) => col.key === 'name')!;
+  const fixed = cols.reduce((s, col) => s + col.w, 0) - name.w + (cols.length - 1);
+  name.w = Math.max(14, Math.min(40, W - fixed));
+  return cols;
 }
 
 function contentW(cols: readonly ColSpec[]): number {
@@ -102,15 +124,18 @@ export function renderOverview(ctx: ScreenCtx): string[] {
     return centeredNotice(view, 'NO NODES', [c.grey(msg)]);
   }
 
-  const wide = W >= WIDE_COLS;
-  const cols = columns(wide);
+  const cols = layout(W, view.signalDisplay);
 
   const out: string[] = [];
-  out.push(truncate(summaryBar(ctx), W));
+  // Chrome: masthead · titled rule · telemetry strip · column header.
+  out.push(masthead(view, { link: linkState(data), homeId: data.controller()?.homeId ?? null, now: Date.now() }));
+  out.push(titleRule(view, 'OVERVIEW', rightStatus(ctx)));
+  out.push(telemetryStrip(ctx));
   out.push(truncate(headerRow(view, cols), W));
 
-  // Body window: everything between header and legend.
-  const cap = Math.max(1, H - 3); // summary + header + legend
+  // Body window: between the column header and the command bar (4 chrome rows
+  // above + 1 command bar below).
+  const cap = Math.max(1, H - 5);
   const start = windowStart(view.selected, view.scroll, visibleNodes.length, cap);
   const end = Math.min(visibleNodes.length, start + cap);
   const noise = data.noiseFloor();
@@ -119,91 +144,74 @@ export function renderOverview(ctx: ScreenCtx): string[] {
     const n = visibleNodes[i];
     out.push(
       truncate(
-        nodeRow(n, data.scoreFor(n.nodeId), i === view.selected, noise, view, data, cols, wide),
+        nodeRow(n, data.scoreFor(n.nodeId), i === view.selected, noise, view, data, cols),
         W,
       ),
     );
   }
-  // Pad the body so the legend lands on the last row.
+  // Pad the body so the command bar lands on the last row.
   while (out.length < H - 1) out.push('');
 
-  out.push(truncate(legend(visibleNodes.length, start, end), W));
+  const more = end < visibleNodes.length || start > 0 ? ` (${end - start}/${visibleNodes.length})` : '';
+  // The scroll counter is concatenated AFTER commandBar()'s own truncate, so the
+  // combined line must be re-clipped to W or it overruns the primary screen.
+  out.push(truncate(commandBar(view, [
+    ['1-6', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS'],
+    ['/', 'FILTER'], ['S', 'SORT'], ['T', 'UNITS'], ['Q', 'EXIT'],
+  ]) + (more ? c.grey(more) : ''), W));
   // Defensive clamp — the session guarantees rows >= 16, but never overrun.
   return out.slice(0, H);
 }
 
-/* ── summary bar ───────────────────────────────────────────────────────── */
+/** The far-right status token on the OVERVIEW rule: rebuild / filter / stale. */
+function rightStatus(ctx: ScreenCtx): string {
+  const { data, view } = ctx;
+  const err = data.lastError();
+  const lu = data.lastUpdated();
+  const ageMs = lu != null ? Math.max(0, Date.now() - lu) : null;
+  if (err != null || (ageMs != null && ageMs > 30_000)) {
+    return c.redB(`⚠ ${err ? 'LINK LOST' : 'ROSTER STALE'}${ageMs != null ? ' ' + fmtAge(ageMs) : ''}`);
+  }
+  const ctrl = data.controller();
+  if (ctrl?.isRebuildingRoutes === true) {
+    const el = ctrl.rebuildStartedAt != null ? ' ' + fmtElapsed(Date.now() - ctrl.rebuildStartedAt) : '';
+    return c.cyanB(`${spinner(Date.now())} REBUILDING ROUTES${el}`);
+  }
+  if (ctx.filtering || view.filter) {
+    return c.grey('FILTER ') + c.yellow(`“${view.filter}”`) + (ctx.filtering ? c.yellowB('▏') : '');
+  }
+  return '';
+}
 
-function summaryBar(ctx: ScreenCtx): string {
-  const { data, view, visibleNodes } = ctx;
+/* ── telemetry strip ───────────────────────────────────────────────────── */
+
+/** The labelled, unit-bearing status fields under the OVERVIEW rule. */
+function telemetryStrip(ctx: ScreenCtx): string {
+  const { data, view } = ctx;
   const all = data.nodes();
-  let alive = 0;
+  let online = 0;
   let dead = 0;
   let asleep = 0;
   let flaky = 0;
   for (const n of all) {
-    if (n.status === NodeStatus.Alive || n.status === NodeStatus.Awake) alive++;
+    if (n.status === NodeStatus.Alive || n.status === NodeStatus.Awake) online++;
     else if (n.status === NodeStatus.Dead) dead++;
     else if (n.status === NodeStatus.Asleep) asleep++;
     if (data.scoreFor(n.nodeId).state === 'flaky') flaky++;
   }
   const noise = data.noiseFloor();
-
-  let left =
-    c.whiteB(`${all.length} nodes`) +
-    c.grey(' · ') +
-    c.green(`${alive} alive`) +
-    c.grey(' · ') +
-    (dead > 0 ? c.redB(`${dead} DEAD`) : c.grey('0 dead')) +
-    c.grey(' · ') +
-    (asleep > 0 ? c.cyan(`${asleep} asleep`) : c.grey('0 asleep')) +
-    c.grey(' · ') +
-    (flaky > 0 ? c.yellow(`${flaky} flaky`) : c.grey('0 flaky')) +
-    c.grey(' · ') +
-    c.grey('noise ') +
-    // Only show a dBm figure when it's a real controller reading — otherwise a
-    // '—' (same convention as the deferred Margin/Hop/Rate/Seen columns) rather
-    // than presenting the fallback constant as if it were measured.
-    (data.hasRealNoise() ? noiseColor(noise)(`${noise}dBm`) : c.grey('—'));
-
-  // Staleness / disconnect band: if the data layer has an error or the last
-  // successful refresh is old, say so loudly instead of showing a stale roster
-  // as if it were live.
-  const err = data.lastError();
-  const lu = data.lastUpdated();
-  const ageMs = lu != null ? Math.max(0, Date.now() - lu) : null;
-  const stale = err != null || (ageMs != null && ageMs > 30_000);
-
-  const ctrl = data.controller();
-  const rebuilding = ctrl?.isRebuildingRoutes === true;
-  const range = c.grey(`${visibleNodes.length}`);
-  let right: string;
-  if (stale) {
-    right = c.redB(`⚠ ${err ? 'HA OFFLINE' : 'STALE'}${ageMs != null ? ' ' + fmtAge(ageMs) : ''}`);
-  } else if (rebuilding) {
-    // A rebuild is network-wide and worth surfacing on the main screen. Honest
-    // elapsed time (no %), animated so it never reads as frozen. See Controller.
-    const el = ctrl?.rebuildStartedAt != null ? ' ' + fmtElapsed(Date.now() - ctrl.rebuildStartedAt) : '';
-    right = c.cyanB(`${spinner(Date.now())} rebuilding routes${el}`);
-  } else if (ctx.filtering || view.filter) {
-    // Live filter prompt — visible even with an empty buffer so the mode is
-    // never invisible and the next keystroke isn't silently swallowed.
-    right = c.yellow(`/${view.filter}`) + (ctx.filtering ? c.yellowB('▏') : '') + ' ' + c.grey('· ') + range;
-  } else {
-    right = range;
-  }
-
-  // Small mesh-health meter — fraction of the roster that is neither DEAD nor
-  // flaky (asleep/alive both count as healthy). Only appended when it fits
-  // WITHOUT forcing lr() to truncate a real value, so the pristine 80-col
-  // layout is never crowded out.
   const meshFrac = all.length > 0 ? Math.max(0, all.length - dead - flaky) / all.length : 0;
-  const mesh = c.grey(' · ') + c.grey('mesh ') + meter(meshFrac, 6);
-  if (view.cols - visLen(left) - visLen(mesh) - visLen(right) >= 1) {
-    left = left + mesh;
-  }
 
-  return lr(left, right, view.cols);
+  const fields = [
+    field('NODES', String(all.length), c.whiteB),
+    field('ONLINE', String(online), c.green),
+    field('DEAD', String(dead), dead > 0 ? c.redB : c.grey),
+    field('ASLEEP', String(asleep), asleep > 0 ? c.cyan : c.grey),
+    field('FLAKY', String(flaky), flaky > 0 ? c.yellow : c.grey),
+    field('NOISE', data.hasRealNoise() ? `${noise} dBm` : '—', data.hasRealNoise() ? noiseColor(noise) : c.grey),
+    c.grey('MESH ') + meter(meshFrac, 8) + c.grey(` ${Math.round(meshFrac * 100)}%`),
+  ];
+  return fieldStrip(view, fields);
 }
 
 function noiseColor(noise: number): (s: string) => string {
@@ -214,11 +222,8 @@ function noiseColor(noise: number): (s: string) => string {
 
 /* ── header ────────────────────────────────────────────────────────────── */
 
-function headerRow(view: ViewState, cols: readonly ColSpec[]): string {
-  const sig = view.signalDisplay === 'dbm' ? 'RSSI' : 'Margin';
-  const cells = ['', 'ID', 'St', 'Name', 'Sc', sig, 'Hop', 'Rate', 'Seen', 'Bat', 'Flags'];
-  if (cols.length > 11) cells.push('Trend');
-  return c.grey(joinCells(cells, cols));
+function headerRow(_view: ViewState, cols: readonly ColSpec[]): string {
+  return c.grey(joinCells(cols.map((col) => col.header), cols));
 }
 
 /* ── one node row ──────────────────────────────────────────────────────── */
@@ -231,56 +236,56 @@ function nodeRow(
   view: ViewState,
   data: DataProvider,
   cols: readonly ColSpec[],
-  wide: boolean,
 ): string {
-  const glyph = statusGlyph(n.status);
+  const nameW = cols.find((col) => col.key === 'name')?.w ?? 16;
+  const trendW = cols.find((col) => col.key === 'trend')?.w ?? 8;
+  const g = statusGlyph(n.status);
   const isDead = dead(n);
   const score = scoreDisplay(health.score, isDead);
   const sig = signalDisplay(n, noise, view.signalDisplay);
+  const rtt = rttCell(n);
+  const drop = dropCell(n);
   const hop = hopCell(n);
+  const route = routeCell(n);
   const rate = rateCell(n);
   const seen = seenCell(n);
   const bat = batteryCell(n);
   const flags = flagsCell(health.flags);
-  const spark = wide ? sparkCell(data, n.nodeId) : null;
+  const trend = sparkCell(data, n.nodeId, trendW);
 
+  // Coloured form (normal rows) and plain form (the inverse-video selected row —
+  // no embedded SGR/RESET can survive the invert), keyed so the responsive
+  // column set drives both without positional drift.
+  const colored: Record<ColKey, string> = {
+    cursor: ' ',
+    id: idColor(n)(String(n.nodeId)),
+    status: g.color(g.ch),
+    name: n.status === NodeStatus.Dead ? c.grey(truncate(n.name, nameW)) : truncate(n.name, nameW),
+    score: score.colored,
+    signal: sig.colored,
+    rtt: rtt.color(rtt.t),
+    drop: drop.color(drop.t),
+    hop: hop.color(hop.t),
+    route: route.color(route.t),
+    rate: rate.color(rate.t),
+    seen: seen.color(seen.t),
+    batt: bat.color(bat.t),
+    flags: flags.color(flags.t),
+    trend: trend.colored,
+  };
   if (selected) {
-    // Render plain + invert the whole row so the highlight bar is clean (no
-    // nested SGR fights the invert). Health colours AND graphic colours are
-    // dropped on the selected row by design — the inverse video carries the
-    // emphasis, and every glyph here is a plain BMP cell with no embedded RESET.
-    const plain = [
-      '▶',
-      String(n.nodeId),
-      glyph.ch,
-      n.name.slice(0, 16),
-      score.plain,
-      sig.plain,
-      hop.t,
-      rate.t,
-      seen.t,
-      bat.t,
-      flags.t,
-    ];
-    if (spark) plain.push(spark.plain);
-    return c.invert(padEnd(joinCells(plain, cols), contentW(cols)));
+    const plain: Record<ColKey, string> = {
+      cursor: '▶', id: String(n.nodeId), status: g.ch, name: n.name.slice(0, nameW),
+      score: score.plain, signal: sig.plain, rtt: rtt.t, drop: drop.t, hop: hop.t,
+      route: route.t, rate: rate.t, seen: seen.t, batt: bat.t, flags: flags.t, trend: trend.plain,
+    };
+    // DEFENSE: every plain cell is hard-sliced to its column width BEFORE joinCells,
+    // so joinCells' padStart/padEnd can only ever PAD — never truncate() (which
+    // appends an ANSI RESET that would break the inverse-video bar mid-row).
+    const cells = cols.map((col) => plain[col.key].slice(0, col.w));
+    return c.invert(padEnd(joinCells(cells, cols), contentW(cols)));
   }
-
-  const colored = [
-    ' ',
-    idColor(n)(String(n.nodeId)),
-    glyph.color(glyph.ch),
-    n.status === NodeStatus.Dead ? c.grey(truncate(n.name, 16)) : truncate(n.name, 16),
-    score.colored,
-    sig.colored,
-    hop.color(hop.t),
-    rate.color(rate.t),
-    seen.color(seen.t),
-    bat.color(bat.t),
-    flags.color(flags.t),
-  ];
-  if (spark) colored.push(spark.colored);
-  return joinCells(colored, cols);
+  return joinCells(cols.map((col) => colored[col.key]), cols);
 }
 
 /* ── cell formatters ───────────────────────────────────────────────────── */
@@ -423,22 +428,57 @@ function marginColor(margin: number): (s: string) => string {
   return c.red;
 }
 
-/* ── rssi micro-sparkline (wide terminals only) ────────────────────────── */
+/* ── rssi micro-sparkline (mid+ terminals) ─────────────────────────────── */
 
 /**
- * 8-cell RSSI trend sparkline. Auto-scales to the node's own history window and
- * degrades to dim dots when empty/short (sparkline() handles that). The plain
+ * `width`-cell RSSI trend sparkline. Auto-scales to the node's own history window
+ * and degrades to dim dots when empty/short (sparkline() handles that). The plain
  * form (selected row) strips ANSI so the block SHAPE still reads inside the
  * inverse-video bar with no embedded RESET.
  */
-function sparkCell(data: DataProvider, nodeId: number): GraphicCell {
+function sparkCell(data: DataProvider, nodeId: number, width: number): GraphicCell {
   // Drop RSSI sentinels (125/126/127) from the trend, and color the sparkline by
   // the LAST sample's ABSOLUTE band (rssiColor) — not the relative-window default,
   // which would paint a healthy-but-flat node red and contradict every other column.
   const hist = data.history(nodeId).rssi.filter((v) => !RSSI_SENTINELS.has(v));
   const color = hist.length ? rssiColor(hist[hist.length - 1]) : undefined;
-  const colored = sparkline(hist, 8, color ? { color } : {});
-  return { colored, plain: stripAnsi(colored) }; // exactly 8 visible cells
+  const colored = sparkline(hist, width, color ? { color } : {});
+  return { colored, plain: stripAnsi(colored) }; // exactly `width` visible cells
+}
+
+/* ── link-quality columns (mid+ terminals) ─────────────────────────────── */
+
+/** Round-trip latency, ms → coloured band. No reading → '—'. The driver reports
+ *  FRACTIONAL ms, so ROUND before formatting or "123.4ms" (7 cells) overruns the
+ *  6-cell column and gets truncate()d (→ garbled value + a RESET in the selected row). */
+function rttCell(n: NodeSnapshot): Cell {
+  const rtt = n.stats.rtt;
+  if (rtt == null || rtt < 0) return { t: '—', color: c.grey };
+  const r = Math.round(rtt);
+  const t = r >= 1000 ? `${(r / 1000).toFixed(1)}s` : `${r}ms`;
+  const color = r < 100 ? c.green : r < 500 ? c.white : r < 1000 ? c.yellow : c.red;
+  return { t, color };
+}
+
+/** TX drop rate (shared with Detail via txDropPct). No traffic → '—'. */
+function dropCell(n: NodeSnapshot): Cell {
+  const pct = txDropPct(n.stats);
+  if (pct == null) return { t: '—', color: c.grey };
+  const t = `${pct >= 10 ? Math.round(pct) : Number(pct.toFixed(1))}%`;
+  const color = pct < 1 ? c.green : pct < 3 ? c.white : pct < 8 ? c.yellow : c.red;
+  return { t, color };
+}
+
+/** Last-working-route hop chain, compacted to fit. Direct → 'direct'. */
+function routeCell(n: NodeSnapshot): Cell {
+  if (n.isLongRange) return { t: 'direct·LR', color: c.blue };
+  const lwr = n.stats.lwr;
+  if (!lwr) return { t: '—', color: c.grey };
+  const reps = lwr.repeaters;
+  if (reps.length === 0) return { t: 'direct', color: c.green };
+  // ≤2 hops shown fully; more collapse to "n<first>→+N" so it always fits ≤16.
+  const t = reps.length <= 2 ? reps.map((r) => `n${r}`).join('→') : `n${reps[0]}→+${reps.length - 1}`;
+  return { t, color: reps.length >= 3 ? c.yellow : c.white };
 }
 
 function hopCell(n: NodeSnapshot): Cell {
@@ -514,25 +554,6 @@ function flagsCell(flags: string[]): Cell {
             ? c.blue
             : c.grey;
   return { t, color };
-}
-
-/* ── legend ────────────────────────────────────────────────────────────── */
-
-function legend(total: number, start: number, end: number): string {
-  const up = start > 0 ? c.cyan('↑') : c.grey('·');
-  const down = end < total ? c.cyan('↓') : c.grey('·');
-  const key = (k: string, label: string) => c.cyanB(k) + ' ' + c.grey(label);
-  const parts = [
-    key('j/k', 'move'),
-    key('/', 'filter'),
-    key('s', 'sort'),
-    key('⏎', 'detail'),
-    key('1-6', 'screens'),
-    key('a', 'actions'),
-    key('q', 'quit'),
-  ];
-  const left = `${up}${down} ` + parts.join(c.grey(' · '));
-  return left;
 }
 
 /* ── centred notice card (shared with the stub overlays) ───────────────── */

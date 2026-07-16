@@ -134,7 +134,8 @@ const LOG_MIN_ROWS_FOR_DETAIL = 22;
 export function logLayout(rows: number): { listRows: number; detailRows: number; showDetail: boolean } {
   const showDetail = rows >= LOG_MIN_ROWS_FOR_DETAIL;
   const detailRows = showDetail ? LOG_DETAIL_ROWS : 0;
-  const chrome = 2 + (showDetail ? 1 + detailRows : 0);
+  // 3 = masthead + title rule + command bar (the shared diagnostic-console frame).
+  const chrome = 3 + (showDetail ? 1 + detailRows : 0);
   return { listRows: Math.max(1, rows - chrome), detailRows, showDetail };
 }
 
