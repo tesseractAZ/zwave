@@ -25,6 +25,9 @@ import type { InputEvent } from './input';
 import { renderScreen } from './screens/index';
 import { renderLogin } from './screens/login';
 import { centeredNotice } from './screens/overview';
+import { buildMenu, clampMenuIndex, describeAction, CONFIRM_WORD } from './actionsCatalog';
+import type { MenuItem, ActionImpact } from './actionsCatalog';
+import { renderActionsMenu, renderTypeConfirm } from './screens/actionsMenu';
 import { c } from './ansi';
 import type { AuthPolicy } from '../auth/loginPolicy';
 import {
@@ -76,8 +79,11 @@ type SessionMode = 'login' | 'tui' | 'denied';
 interface PendingAction {
   kind: ActionKind;
   nodeId: number | null;
-  label: string;
-  destructive: boolean;
+  label: string; // human title, e.g. "Rebuild ALL routes" / "Ping node — #16 Kitchen"
+  target: string; // "whole mesh (39 nodes)" | "#16 Kitchen Lights"
+  impact: ActionImpact; // drives the confirm colour + wording
+  desc: string; // what it does (one line)
+  impactNote: string; // the consequence (shown in the confirm box)
 }
 
 /**
@@ -124,16 +130,30 @@ export class TuiSession {
   /** Transport callback to drop the connection (e.g. on login lockout). */
   private readonly onClose?: () => void;
 
-  /* ── action state (v0.3) ────────────────────────────────────────────────── */
+  /* ── action state (v0.3 / v0.9) ─────────────────────────────────────────── */
   private readonly actions?: ActionRunner;
-  /** A mutating action awaiting a y/n confirmation (null = not confirming). */
+  /** A mutating action awaiting the typed-CONFIRM (null = not confirming). */
   private pendingAction: PendingAction | null = null;
+  /** What the operator has typed so far toward CONFIRM (type-to-arm modal). */
+  private confirmBuffer = '';
+  /** The confirm was launched from the Actions Menu → reopen it on cancel. */
+  private confirmFromMenu = false;
   /** True while an action's WS call is in flight. */
   private actionInFlight = false;
   /** Transient outcome card ("✓/✗ …"), dismissed by the next keypress. */
   private actionNotice: string | null = null;
   /** Label of the action currently in flight (for the "working" card). */
   private actionRunningLabel = '';
+  /* ── actions menu (v0.9) ─────────────────────────────────────────────────── */
+  /** True while the Actions Menu overlay is open. */
+  private menuOpen = false;
+  /** Cursor index into the FROZEN menu snapshot. */
+  private menuIndex = 0;
+  /** The menu is a point-in-time snapshot taken when it opens, so streaming
+   *  events / a rebuild flipping mid-menu can't silently move rows or the target
+   *  under the cursor. Both are captured in openMenu() and cleared on close. */
+  private menuTarget: NodeSnapshot | null = null;
+  private menuSnapshot: MenuItem[] = [];
   /** Epoch ms of the last keystroke — drives the idle re-lock. */
   private lastActivity = Date.now();
 
@@ -187,6 +207,24 @@ export class TuiSession {
     // Drop any in-progress `/` filter capture so keys typed right after an idle
     // re-lock aren't silently swallowed into the node filter once back in the TUI.
     this.filtering = false;
+    // SECURITY: also abandon any open menu / armed type-CONFIRM. This runs on the
+    // idle re-lock AND on a fresh login, so a half-armed destructive action can
+    // NEVER survive the authentication boundary — a re-authenticated operator
+    // must re-open the menu and re-type CONFIRM from scratch.
+    this.resetActionState();
+  }
+
+  /** Abandon every action-overlay sub-state (menu, armed confirm, notice).
+   *  actionInFlight is left alone: an already-dispatched WS command can't be
+   *  recalled, and its outcome card is simply hidden behind the login screen. */
+  private resetActionState(): void {
+    this.pendingAction = null;
+    this.confirmBuffer = '';
+    this.confirmFromMenu = false;
+    this.menuOpen = false;
+    this.menuTarget = null;
+    this.menuSnapshot = [];
+    this.actionNotice = null;
   }
 
   /**
@@ -341,9 +379,9 @@ export class TuiSession {
       // An action is in flight — swallow keys until it resolves.
       if (this.actionInFlight) continue;
 
-      // A pending action awaits y/n confirmation.
+      // A pending action awaits the typed CONFIRM.
       if (this.pendingAction != null) {
-        this.handleConfirmKey(ev);
+        this.handleTypeConfirmKey(ev);
         dirty = true;
         continue;
       }
@@ -355,7 +393,22 @@ export class TuiSession {
         continue;
       }
 
-      // Mutating-action keys (only when write actions are enabled).
+      // The Actions Menu overlay owns navigation until it's closed.
+      if (this.menuOpen) {
+        if (this.handleMenuKey(ev)) dirty = true;
+        continue;
+      }
+
+      // Open the Actions Menu ('a') — available even in read-only mode, where it
+      // is purely informational (you can read every action's impact; execution
+      // stays locked behind write_actions_enabled).
+      if (this.actions && ev.type === 'char' && (ev.ch === 'a' || ev.ch === 'A')) {
+        this.openMenu();
+        dirty = true;
+        continue;
+      }
+
+      // Mutating-action shortcut keys (only when write actions are enabled).
       if (this.actions?.enabled && ev.type === 'char' && this.handleActionKey(ev.ch)) {
         dirty = true;
         continue;
@@ -424,51 +477,148 @@ export class TuiSession {
     return visibleNodes(this.data, this.view)[this.view.selected];
   }
 
-  /** Route an action key to a request. Returns true if it was an action key. */
+  /** Route a shortcut action key to a request. Returns true if consumed. */
   private handleActionKey(ch: string): boolean {
-    const sel = this.actionTargetNode();
-    const nodeId = sel?.nodeId ?? null;
-    const on = sel ? ` (${sel.name})` : '';
     switch (ch) {
-      case 'p':
-        if (nodeId == null) return false;
-        this.startAction({ kind: 'ping', nodeId, label: `Ping node ${nodeId}${on}`, destructive: false });
-        return true;
-      case 'i':
-        if (nodeId == null) return false;
-        this.startAction({ kind: 'reInterview', nodeId, label: `Re-interview node ${nodeId}${on}`, destructive: true });
-        return true;
-      case 'h':
-        if (nodeId == null) return false;
-        this.startAction({ kind: 'healNode', nodeId, label: `Rebuild routes for node ${nodeId}${on}`, destructive: true });
-        return true;
-      case 'x':
-        if (nodeId == null) return false;
-        // Destructive — always confirm regardless of the confirm_destructive flag.
-        this.startAction({ kind: 'removeFailed', nodeId, label: `REMOVE failed node ${nodeId}${on}`, destructive: true }, true);
-        return true;
-      case 'R':
-        // Network-wide + disruptive — always confirm.
-        this.startAction({ kind: 'rebuildAll', nodeId: null, label: 'Rebuild ALL routes — disrupts the whole mesh', destructive: true }, true);
-        return true;
-      default:
-        return false;
+      case 'p': return this.beginAction('ping', true); // safe → immediate
+      case 'i': return this.beginAction('reInterview', false);
+      case 'h': return this.beginAction('healNode', false);
+      case 'x': return this.beginAction('removeFailed', false);
+      case 'R': return this.beginAction('rebuildAll', false);
+      default: return false;
     }
   }
 
-  /** Either confirm (destructive + gated/forced) or execute immediately (ping). */
-  private startAction(action: PendingAction, forceConfirm = false): void {
-    const needConfirm = action.destructive && (this.actions!.confirmDestructive || forceConfirm);
-    if (needConfirm) this.pendingAction = action;
-    else void this.executeAction(action);
+  /**
+   * Begin an action by kind — the single entry point for BOTH the menu and the
+   * shortcut keys. A `safe` action fired from a shortcut (`immediate`) runs at
+   * once; everything else — and everything launched from the menu — arms the
+   * type-CONFIRM box. Returns false (a no-op) when a device action has no target.
+   */
+  private beginAction(kind: ActionKind, immediate: boolean, node?: NodeSnapshot): boolean {
+    const d = describeAction(kind);
+    if (!d || !this.actions) return false;
+    // Device actions use the EXPLICIT node when supplied (the menu passes its
+    // frozen target); shortcuts pass none and resolve the live selection.
+    const tgt = d.needsNode ? (node ?? this.actionTargetNode()) : undefined;
+    if (d.needsNode && !tgt) return false;
+    const nodeId = tgt?.nodeId ?? null;
+    const label = d.needsNode ? `${d.label} — #${nodeId} ${tgt!.name}` : d.label;
+    const target = d.needsNode ? `#${nodeId} ${tgt!.name}` : `whole mesh (${this.data.nodes().length} nodes)`;
+    const action: PendingAction = { kind, nodeId, label, target, impact: d.impact, desc: d.desc, impactNote: d.impactNote };
+    if (immediate && d.impact === 'safe') {
+      void this.executeAction(action);
+    } else {
+      this.pendingAction = action;
+      this.confirmBuffer = '';
+    }
+    return true;
   }
 
-  private handleConfirmKey(ev: InputEvent): void {
-    const a = this.pendingAction!;
+  /* ── actions menu (v0.9) ─────────────────────────────────────────────────── */
+
+  /** Open the menu, FREEZING the target node + item list at this instant so that
+   *  streaming Log events or a rebuild starting/stopping mid-menu can't move a
+   *  row (or the target) out from under the cursor before the operator selects. */
+  private openMenu(): void {
+    this.menuTarget = this.actionTargetNode() ?? null;
+    this.menuSnapshot = buildMenu({
+      hasNode: this.menuTarget != null,
+      rebuilding: this.data.controller()?.isRebuildingRoutes ?? false,
+    });
+    this.menuIndex = 0;
+    this.menuOpen = true;
+  }
+
+  private closeMenu(): void {
+    this.menuOpen = false;
+    this.menuTarget = null;
+    this.menuSnapshot = [];
+  }
+
+  /** Menu navigation over the FROZEN snapshot. Returns true when it changed. */
+  private handleMenuKey(ev: InputEvent): boolean {
+    const items = this.menuSnapshot;
+    this.menuIndex = clampMenuIndex(this.menuIndex, items.length);
+    if (ev.type === 'escape' || (ev.type === 'char' && (ev.ch === 'q' || ev.ch === 'Q' || ev.ch === 'a' || ev.ch === 'A'))) {
+      this.closeMenu();
+      return true;
+    }
+    const move = (delta: number): boolean => {
+      this.menuIndex = clampMenuIndex(this.menuIndex + delta, items.length);
+      return true;
+    };
+    if (ev.type === 'arrow' && ev.dir === 'down') return move(1);
+    if (ev.type === 'arrow' && ev.dir === 'up') return move(-1);
+    if (ev.type === 'char' && ev.ch === 'j') return move(1);
+    if (ev.type === 'char' && ev.ch === 'k') return move(-1);
+    if (ev.type === 'enter') {
+      this.selectMenuItem(items[this.menuIndex]);
+      return true;
+    }
+    return false;
+  }
+
+  /** Enter on a menu row: arm the type-CONFIRM (against the frozen target), or
+   *  explain why it's locked. */
+  private selectMenuItem(item: MenuItem | undefined): void {
+    if (!item) return;
+    if (!this.actions?.enabled) {
+      // Read-only: the menu already shows a READ-ONLY badge; make the block
+      // explicit so a keypress isn't silently ignored.
+      this.closeMenu();
+      this.actionNotice = '✗  Read-only — set write_actions_enabled in the add-on config to unlock actions.';
+      return;
+    }
+    if (item.disabled) return; // the reason is shown inline on the row
+    const node = this.menuTarget ?? undefined; // frozen at open time
+    this.closeMenu();
+    this.confirmFromMenu = true;
+    this.beginAction(item.desc.kind, false, node); // menu always requires the typed CONFIRM
+  }
+
+  /* ── type-CONFIRM modal (v0.9) ───────────────────────────────────────────── */
+
+  /** Capture keystrokes for the "type CONFIRM" arming box. */
+  private handleTypeConfirmKey(ev: InputEvent): void {
+    if (ev.type === 'escape') {
+      this.cancelConfirm();
+      return;
+    }
+    if (ev.type === 'enter') {
+      if (this.confirmBuffer === CONFIRM_WORD) {
+        const a = this.pendingAction!;
+        this.pendingAction = null;
+        this.confirmBuffer = '';
+        this.confirmFromMenu = false;
+        void this.executeAction(a);
+      } else {
+        this.confirmBuffer = ''; // wrong / incomplete — reset so it is retyped cleanly
+      }
+      return;
+    }
+    if (ev.type === 'char') {
+      const ch = ev.ch;
+      if (ch === '\x7f' || ch === '\b') {
+        this.confirmBuffer = this.confirmBuffer.slice(0, -1);
+        return;
+      }
+      // Accept only printable chars, and never grow past the target word length.
+      if (ch >= ' ' && ch < '\x7f' && this.confirmBuffer.length < CONFIRM_WORD.length) this.confirmBuffer += ch;
+      return;
+    }
+    // arrows / tab ignored — stay in the confirm box.
+  }
+
+  /** Cancel the pending confirm; reopen the menu (re-snapshotting a fresh target
+   *  + item list) if that is where it came from. */
+  private cancelConfirm(): void {
     this.pendingAction = null;
-    // Confirm executes; anything else cancels SILENTLY (return straight to the
-    // screen — cancelling must not cost an extra keypress to dismiss a notice).
-    if (ev.type === 'char' && (ev.ch === 'y' || ev.ch === 'Y')) void this.executeAction(a);
+    this.confirmBuffer = '';
+    if (this.confirmFromMenu) {
+      this.confirmFromMenu = false;
+      this.openMenu();
+    }
   }
 
   private async executeAction(action: PendingAction): Promise<void> {
@@ -499,17 +649,6 @@ export class TuiSession {
     this.draw();
   }
 
-  private renderConfirm(): string[] {
-    const a = this.pendingAction!;
-    return centeredNotice(this.view, a.destructive ? '⚠  CONFIRM ACTION' : 'CONFIRM', [
-      (a.destructive ? c.redB : c.whiteB)(a.label),
-      '',
-      c.grey('This actuates your live Z-Wave mesh.'),
-      '',
-      c.greenB('y') + c.grey(' = confirm      ') + c.grey('n / Esc / any = cancel'),
-    ]);
-  }
-
   /** Build the array of frame lines for the current state. */
   private renderLines(): string[] {
     if (this.mode === 'login' || this.mode === 'denied') {
@@ -526,14 +665,33 @@ export class TuiSession {
         checking: this.verifying,
       });
     }
-    // Action modals (v0.3): confirm → working → outcome.
-    if (this.pendingAction != null) return this.renderConfirm();
+    // Action modals: type-CONFIRM → working → outcome → menu (v0.3 / v0.9).
+    if (this.pendingAction != null) {
+      const a = this.pendingAction;
+      return renderTypeConfirm(this.view, {
+        label: a.label,
+        target: a.target,
+        impact: a.impact,
+        desc: a.desc,
+        impactNote: a.impactNote,
+        buffer: this.confirmBuffer,
+      });
+    }
     if (this.actionInFlight) {
       return centeredNotice(this.view, 'WORKING', [c.yellow(this.actionRunningLabel || 'running…'), '', c.grey('sending command to the mesh…')]);
     }
     if (this.actionNotice != null) {
       const ok = this.actionNotice.startsWith('✓');
       return centeredNotice(this.view, 'RESULT', [(ok ? c.green : c.red)(this.actionNotice), '', c.grey('press any key to continue · see the Log screen for history')]);
+    }
+    if (this.menuOpen) {
+      this.menuIndex = clampMenuIndex(this.menuIndex, this.menuSnapshot.length);
+      return renderActionsMenu(this.view, {
+        items: this.menuSnapshot,
+        index: this.menuIndex,
+        targetLabel: this.menuTarget ? `#${this.menuTarget.nodeId} ${this.menuTarget.name}` : null,
+        locked: !this.actions?.enabled,
+      });
     }
     const vis = visibleNodes(this.data, this.view);
     // Defensive clamp — the roster can shrink between frames (a node drops out

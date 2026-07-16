@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.8.0"
+version: "0.9.0"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
@@ -67,9 +67,9 @@ options:
   # Z-Wave JS connection (leave blank to auto-discover the entry id)
   zwave_entry_id: ""
   ha_ws_url: ws://supervisor/core/websocket
-  # Write-action safety gates (v0.1 ships read-only)
+  # Write-action safety gate (ships read-only; every action is then confirmed
+  # by typing CONFIRM in the Actions Menu).
   write_actions_enabled: false
-  confirm_destructive: true
 schema:
   # Logging + display
   log_level: list(trace|debug|info|notice|warning|error|fatal)
@@ -95,6 +95,5 @@ schema:
   # validates them. Do not "tidy" these to url?.
   zwave_entry_id: "str?"
   ha_ws_url: "str?"
-  # Write-action safety gates
+  # Write-action safety gate
   write_actions_enabled: bool
-  confirm_destructive: bool

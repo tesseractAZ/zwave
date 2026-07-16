@@ -266,8 +266,6 @@ export type ActionKind =
 export interface ActionRunner {
   /** Master gate — false = read-only, the session must not offer actions. */
   readonly enabled: boolean;
-  /** Require a confirm step for mutating (non-ping) actions. */
-  readonly confirmDestructive: boolean;
   ping(nodeId: number): Promise<ActionResult>;
   refreshValues(nodeId: number): Promise<ActionResult>;
   reInterview(nodeId: number): Promise<ActionResult>;

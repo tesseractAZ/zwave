@@ -93,11 +93,6 @@ export const config = {
    * Defaults OFF: v0.1 is a pure read-only monitor. Run script exports `1`/`0`.
    */
   writeActions: process.env.WRITE_ACTIONS_ENABLED === '1',
-  /**
-   * Require a second-key / typed confirmation for network-disruptive actions
-   * (rebuild-all-routes, remove-failed-node). Defaults ON.
-   */
-  confirmDestructive: process.env.CONFIRM_DESTRUCTIVE !== '0',
 
   /**
    * TUI login gate. Direct LAN access (telnet :2324, or :8788 hit directly)

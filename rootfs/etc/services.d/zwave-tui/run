@@ -39,11 +39,6 @@ if bashio::config.true 'write_actions_enabled'; then
 else
   export WRITE_ACTIONS_ENABLED=0
 fi
-if bashio::config.true 'confirm_destructive'; then
-  export CONFIRM_DESTRUCTIVE=1
-else
-  export CONFIRM_DESTRUCTIVE=0
-fi
 
 # ── TUI login gate ───────────────────────────────────────────────────────────
 # Username/password auth for DIRECT (non-ingress) telnet + console access.
