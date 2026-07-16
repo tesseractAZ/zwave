@@ -27,7 +27,6 @@ export interface ActionRunnerOptions {
   /** Append an outcome line to the event ring (source 'you'). */
   log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string) => void;
   enabled: boolean;
-  confirmDestructive: boolean;
 }
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -61,7 +60,6 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
 
   return {
     enabled: o.enabled,
-    confirmDestructive: o.confirmDestructive,
     ping: (n) =>
       run(n, `ping node ${n}`, async () => {
         const ent = o.pingEntityOf(n);

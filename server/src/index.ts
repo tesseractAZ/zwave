@@ -91,11 +91,10 @@ async function main(): Promise<void> {
     pingEntityOf: (n) => zwaveData.pingEntityOf(n),
     log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
     enabled: config.writeActions,
-    confirmDestructive: config.confirmDestructive,
   });
   log(
     config.writeActions
-      ? `write actions ENABLED (confirm=${config.confirmDestructive}) — ping/refresh/re-interview/heal/rebuild/remove`
+      ? 'write actions ENABLED (each requires a typed CONFIRM) — ping/refresh/re-interview/heal/rebuild/remove'
       : 'write actions disabled (read-only) — set write_actions_enabled to unlock',
   );
 
