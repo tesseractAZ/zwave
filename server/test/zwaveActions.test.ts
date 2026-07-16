@@ -4,7 +4,7 @@ import { createActionRunner } from '../src/zwave/zwaveActions';
 import type { HaWsClient } from '../src/ha/haWsClient';
 
 interface MkOpts { reject?: boolean; noDevice?: boolean; noPing?: boolean; entry?: string | null }
-function mk(enabled: boolean, confirmDestructive = true, opts: MkOpts = {}) {
+function mk(enabled: boolean, opts: MkOpts = {}) {
   const sent: any[] = [];
   const logs: Array<{ sev: string; nodeId: number | null; text: string }> = [];
   const client = {
@@ -17,7 +17,6 @@ function mk(enabled: boolean, confirmDestructive = true, opts: MkOpts = {}) {
     pingEntityOf: (n) => (opts.noPing ? null : `button.node${n}_ping`),
     log: (sev, nodeId, text) => logs.push({ sev, nodeId, text }),
     enabled,
-    confirmDestructive,
   });
   return { runner, sent, logs };
 }
@@ -66,7 +65,7 @@ test('network-wide commands use the entry_id', async () => {
 });
 
 test('a failed command is reported + logged as error, never thrown', async () => {
-  const { runner, logs } = mk(true, true, { reject: true });
+  const { runner, logs } = mk(true, { reject: true });
   const r = await runner.healNode(5);
   assert.equal(r.ok, false);
   assert.match(r.message, /boom/);
@@ -74,7 +73,7 @@ test('a failed command is reported + logged as error, never thrown', async () =>
 });
 
 test('missing device / ping entity / entry → clean error, no crash', async () => {
-  assert.equal((await mk(true, true, { noDevice: true }).runner.healNode(5)).ok, false);
-  assert.equal((await mk(true, true, { noPing: true }).runner.ping(3)).ok, false);
-  assert.equal((await mk(true, true, { entry: null }).runner.rebuildAll()).ok, false);
+  assert.equal((await mk(true, { noDevice: true }).runner.healNode(5)).ok, false);
+  assert.equal((await mk(true, { noPing: true }).runner.ping(3)).ok, false);
+  assert.equal((await mk(true, { entry: null }).runner.rebuildAll()).ok, false);
 });

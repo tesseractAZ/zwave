@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.9.0 — 2026-07-14
+
+An **Actions Menu** with a deliberate type-`CONFIRM` gate for every command.
+
+- **Press `a`** (from any screen) to open the Actions Menu — a clear, grouped
+  layout of every action the add-on can run, each with a colour-coded
+  **`SAFE` / `CAUTION` / `DESTRUCTIVE`** badge and a one-line description of
+  exactly what it does:
+  - **Device actions** (on the selected node): Ping · Refresh values ·
+    Re-interview · Rebuild node routes · Remove failed node.
+  - **System-wide**: Rebuild ALL routes (or Stop route rebuild while one runs).
+- **Type-`CONFIRM` modal** — selecting an action opens a box restating the
+  action, its target, and its impact, then requires typing the literal word
+  **CONFIRM** to arm it (Enter to execute). Esc cancels back to the menu; a
+  wrong or lowercase string won't arm.
+- **Read-only by default** — the menu still *opens* so you can read every
+  action's impact, but shows a `READ-ONLY` badge and won't execute until
+  `write_actions_enabled` is set. (The old `confirm_destructive` option is
+  removed — a typed CONFIRM is now always required.)
+- **Safety hardening** from a 6-dimension adversarial review: a half-armed
+  CONFIRM can no longer survive an idle re-lock / re-login (it's abandoned at
+  the auth boundary, so a different operator can't fire it); the menu freezes
+  its target node + item list at open, so streaming Log events or a rebuild
+  starting mid-menu can't redirect the action under the cursor.
+- 22 new tests (**139 total**); `tsc` clean.
+
 ## 0.8.0 — 2026-07-14
 
 A real-time **Activity Log** — see everything the mesh does, as it happens.

@@ -528,6 +528,7 @@ function legend(total: number, start: number, end: number): string {
     key('s', 'sort'),
     key('⏎', 'detail'),
     key('1-6', 'screens'),
+    key('a', 'actions'),
     key('q', 'quit'),
   ];
   const left = `${up}${down} ` + parts.join(c.grey(' · '));
