@@ -39,7 +39,7 @@
  *   R route failed · I interview incomplete · B battery low.
  */
 
-import { NodeStatus, type NodeSnapshot, type HealthResult } from '../types';
+import { NodeStatus, type NodeSnapshot, type NodeStats, type HealthResult } from '../types';
 
 // ── Tunables ────────────────────────────────────────────────────────────────
 
@@ -86,6 +86,19 @@ const LR_NODE_ID = 256;
 
 /** Documented render order for the flag column. */
 const FLAG_ORDER = ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B', 'U'] as const;
+
+/**
+ * TX drop rate (%) — the ONE definition shared by the Overview DROP column and
+ * the Detail 'Drop' row so the same node never shows two figures. Failures =
+ * dropped transmits + response timeouts, over attempted commands; null when the
+ * node has sent nothing yet.
+ */
+export function txDropPct(stats: NodeStats): number | null {
+  const tx = stats.commandsTX;
+  if (tx <= 0) return null;
+  const drops = Math.min(stats.commandsDroppedTX + stats.timeoutResponse, tx);
+  return Math.min(100, (drops / tx) * 100);
+}
 
 // ── Small numeric helpers ────────────────────────────────────────────────────
 

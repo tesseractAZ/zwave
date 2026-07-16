@@ -3,46 +3,97 @@
 # plain-text helper line beneath it. Keys MUST match config.yaml options exactly
 # (a typo silently falls back to the raw KEY with no warning). Port labels live in
 # config.yaml `ports_description:` — kept single-source, so no `network:` block here.
+# The order here mirrors config.yaml for readability; HA orders the FORM by the
+# `schema:` block, so keep the two in step there.
 configuration:
-  log_level:
-    name: Log Level
-    description: Verbosity of the add-on log. info is the default; pick debug or trace for more detail when troubleshooting, or notice/warning/error/fatal to quiet routine output.
+  # ── Display & safety ────────────────────────────────────────────────────────
   signal_display:
-    name: Signal Display Unit
-    description: "How link quality is shown by default: margin (SNR margin over the live background-noise floor — recommended) or dbm (raw RSSI in dBm). Toggle at runtime in the TUI with the 't' key."
-  refresh_interval:
-    name: Refresh Interval (seconds)
-    description: Seconds between live render refreshes and network_status roster polls. This poll is cheap and event-backed, so a low value (2s default) is fine. Range 1–30.
-  route_poll_interval:
-    name: Route Poll Interval (seconds)
-    description: Seconds between the EXPENSIVE route / controller-statistics polls. These move slowly and are deliberately kept off the fast render tick to avoid hammering the mesh. 10s default, range 5–120.
-  telnet_enabled:
-    name: Enable Telnet TUI
-    description: Serve the control-room TUI on the telnet port. Telnet traffic is unencrypted; on an untrusted LAN, enable the login gate below (or leave telnet off and use the browser console over the HA sidebar). Turn off to expose the ingress /console exclusively.
-  telnet_port:
-    name: Telnet Port
-    description: TCP port for the telnet TUI. Default 2324 (chosen not to collide with other control-room add-ons). Published on the LAN.
-  auth_enabled:
-    name: Require Login (direct access)
-    description: Require a username + password before the TUI on DIRECT access (telnet, or hitting the port directly). Access through the HA sidebar is already authenticated by Home Assistant and is not gated (unless you turn on the next option). Add users below before enabling — with none configured, direct access is denied.
-  auth_require_on_ingress:
-    name: Also Require Login via HA Sidebar
-    description: Also present the login gate when opening the console from the Home Assistant sidebar. Off by default because HA already authenticated you there; turn on only if you want a second factor in front of the mesh controls.
-  users:
-    name: Login Users
-    description: "Allowed logins for the TUI. Each entry has a username and password. The password may be plaintext (masked in this UI, stored in the add-on options) or a scrypt hash of the form scrypt:<salt>:<hash> to avoid storing plaintext — see the add-on Documentation tab for how to generate one."
-  auth_max_attempts:
-    name: Max Login Attempts
-    description: Failed password attempts allowed before the connection is dropped. Default 3, range 1–10.
-  auth_idle_lock_min:
-    name: Idle Re-lock (minutes)
-    description: Re-require login after this many minutes with no keystrokes on a logged-in session. 0 disables idle re-locking. Applies only to sessions that passed the login gate (not HA-sidebar sessions). Range 0–240.
-  zwave_entry_id:
-    name: Z-Wave JS Entry ID (optional)
-    description: Override for the zwave_js config-entry id. Leave blank to auto-discover it via config_entries/get (recommended — survives re-adds of the integration). Set only if you run multiple zwave_js entries.
-  ha_ws_url:
-    name: Home Assistant WebSocket URL
-    description: HA Core WebSocket URL the data layer connects to. Leave at the default ws://supervisor/core/websocket for a normal add-on install. Override only to talk to a driver server directly (advanced / phase 2).
+    name: Signal display unit
+    description: >-
+      Default unit for link quality in the TUI. "margin" shows the SNR margin
+      over the live background-noise floor (recommended); "dbm" shows raw RSSI.
+      You can switch any time inside the TUI — press T (shown as [T] UNITS on the
+      command bar).
   write_actions_enabled:
-    name: Enable Write Actions
-    description: Master gate for mutating actions (ping / refresh / re-interview / heal / rebuild routes / remove-failed). Off keeps the add-on a pure read-only monitor. Even when on, every action must be confirmed by typing the word CONFIRM in the Actions Menu before it runs.
+    name: Enable write actions
+    description: >-
+      Unlocks the Actions Menu (press A in the TUI) — ping, refresh values,
+      re-interview, rebuild routes, and remove a failed node. Off keeps the
+      add-on a pure read-only monitor. It is safe to leave on: every command must
+      still be armed by typing the word CONFIRM before it runs.
+  # ── Telnet access ──────────────────────────────────────────────────────────
+  telnet_enabled:
+    name: Enable telnet TUI
+    description: >-
+      Serve the full-screen TUI on the telnet port for terminals on your LAN.
+      Telnet is unencrypted — on an untrusted network turn on the login gate
+      below, or leave this off and use only the browser console in the HA
+      sidebar.
+  telnet_port:
+    name: Telnet port
+    description: >-
+      TCP port for the telnet TUI, published on your LAN. Default 2324 (chosen to
+      avoid clashing with other control-room add-ons).
+  # ── Login gate ─────────────────────────────────────────────────────────────
+  auth_enabled:
+    name: Require login (direct access)
+    description: >-
+      Require a username and password for DIRECT access — telnet, or hitting the
+      port directly. Access through the HA sidebar is already authenticated by
+      Home Assistant and is not gated (unless you also turn on the next option).
+      Add at least one user below first — with none configured, direct access is
+      denied.
+  auth_require_on_ingress:
+    name: Also require login in the HA sidebar
+    description: >-
+      Also show the login gate when opening the console from the Home Assistant
+      sidebar. Off by default (HA already authenticated you there); turn on only
+      if you want a second prompt in front of the mesh controls.
+  users:
+    name: Login users
+    description: >-
+      Allowed logins for the TUI — add one row per user. The password may be
+      plaintext (masked here, stored in the add-on options) or a
+      scrypt:<salt>:<hash> string so no plaintext is stored. See the
+      Documentation tab to generate a hash.
+  auth_max_attempts:
+    name: Max login attempts
+    description: >-
+      Failed password attempts allowed before the connection is dropped.
+      Default 3.
+  auth_idle_lock_min:
+    name: Idle re-lock (minutes)
+    description: >-
+      Re-require login after this many minutes with no keystrokes on a signed-in
+      session. 0 disables it. Applies only to sessions that passed the login gate
+      — not HA-sidebar sessions.
+  # ── Advanced ───────────────────────────────────────────────────────────────
+  refresh_interval:
+    name: Advanced — refresh interval (seconds)
+    description: >-
+      Seconds between live render refreshes and the cheap network_status roster
+      poll. The default 2s is a good balance; lower is snappier, higher is
+      lighter. Range 1–30.
+  route_poll_interval:
+    name: Advanced — route poll interval (seconds)
+    description: >-
+      Seconds between the heavier route- and controller-statistics polls, kept
+      off the fast render tick so they don't hammer the mesh. Default 10s.
+      Range 5–120.
+  log_level:
+    name: Advanced — log level
+    description: >-
+      Verbosity of the add-on log. "info" is the default; use debug or trace when
+      troubleshooting, or warning/error to quiet routine output.
+  zwave_entry_id:
+    name: Advanced — Z-Wave JS entry ID
+    description: >-
+      Leave blank to auto-discover the zwave_js integration (recommended — it
+      survives re-adds of the integration). Set an explicit config-entry id only
+      if you run more than one zwave_js entry.
+  ha_ws_url:
+    name: Advanced — Home Assistant WebSocket URL
+    description: >-
+      Leave at the default ws://supervisor/core/websocket for a normal install.
+      Override only to point the data layer at a different HA Core / driver
+      WebSocket.

@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.9.0"
+version: "0.10.0"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
@@ -49,51 +49,47 @@ hassio_api: false
 # Per-field labels + help render on the Configuration page from
 # translations/en.yaml. Order below = the order shown in the HA form.
 options:
-  # Logging + display
-  log_level: info
+  # Order here = the order shown on the Configuration page, grouped from the
+  # everyday settings at the top down to the advanced ones at the bottom.
+  # ── Display & safety ───────────────────────────────────────────────────────
   signal_display: margin
-  # Live refresh cadence
-  refresh_interval: 2
-  route_poll_interval: 10
-  # Telnet control-room TUI
+  write_actions_enabled: false
+  # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled: true
   telnet_port: 2324
-  # TUI login gate — direct (non-ingress) access requires a configured user.
+  # ── Login gate (guards DIRECT/telnet; HA-sidebar access is already authed) ──
   auth_enabled: false
   auth_require_on_ingress: false
   users: []
   auth_max_attempts: 3
   auth_idle_lock_min: 0
-  # Z-Wave JS connection (leave blank to auto-discover the entry id)
+  # ── Advanced (safe defaults — leave as-is unless you know you need them) ────
+  refresh_interval: 2
+  route_poll_interval: 10
+  log_level: info
   zwave_entry_id: ""
   ha_ws_url: ws://supervisor/core/websocket
-  # Write-action safety gate (ships read-only; every action is then confirmed
-  # by typing CONFIRM in the Actions Menu).
-  write_actions_enabled: false
 schema:
-  # Logging + display
-  log_level: list(trace|debug|info|notice|warning|error|fatal)
+  # KEEP THIS ORDER IN LOCK-STEP WITH options: above — HA renders the form in
+  # schema order, and matching the two keeps the file readable.
   signal_display: list(margin|dbm)
-  # Live refresh cadence
-  refresh_interval: int(1,30)
-  route_poll_interval: int(5,120)
-  # Telnet control-room TUI
+  write_actions_enabled: bool
   telnet_enabled: bool
   telnet_port: port
-  # TUI login gate. `users` is a list of {username, password}; password may be
-  # plaintext or a scrypt:<salt>:<hash> string (see DOCS.md).
   auth_enabled: bool
   auth_require_on_ingress: bool
+  # `users` is a repeatable {username, password} row; password renders masked.
+  # The value may be plaintext or a scrypt:<salt>:<hash> string (see DOCS.md).
   users:
     - username: str
       password: password
   auth_max_attempts: int(1,10)
   auth_idle_lock_min: int(0,240)
-  # Z-Wave JS connection
+  refresh_interval: int(1,30)
+  route_poll_interval: int(5,120)
+  log_level: list(trace|debug|info|notice|warning|error|fatal)
   # str? (not url?) on purpose: HA's voluptuous url? rejects an empty default on
-  # Save, and both of these ship empty / with a ws:// scheme. The runtime
-  # validates them. Do not "tidy" these to url?.
+  # Save, and both ship empty / with a ws:// scheme. The runtime validates them.
+  # Do not "tidy" these to url?.
   zwave_entry_id: "str?"
   ha_ws_url: "str?"
-  # Write-action safety gate
-  write_actions_enabled: bool

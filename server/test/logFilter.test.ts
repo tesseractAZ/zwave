@@ -73,12 +73,13 @@ test('logLayout splits rows into list+detail, shows detail only when tall enough
   const tall = logLayout(46);
   assert.equal(tall.showDetail, true);
   assert.equal(tall.detailRows, LOG_DETAIL_ROWS);
-  assert.equal(1 + tall.listRows + 1 + tall.detailRows + 1, 46); // header+list+sep+detail+legend
-  // Short terminal → no detail pane; list = rows - header - legend.
+  // 3 frame rows (masthead+rule+command bar) + list + sep + detail = rows.
+  assert.equal(3 + tall.listRows + 1 + tall.detailRows, 46);
+  // Short terminal → no detail pane; list = rows - the 3 frame rows.
   const short = logLayout(16);
   assert.equal(short.showDetail, false);
   assert.equal(short.detailRows, 0);
-  assert.equal(1 + short.listRows + 1, 16);
+  assert.equal(3 + short.listRows, 16);
   // Never returns a zero/negative list height even on a tiny terminal.
   assert.ok(logLayout(3).listRows >= 1);
   assert.ok(logLayout(1).listRows >= 1);

@@ -42,6 +42,7 @@ import {
   type ViewState,
 } from '../../types';
 import { centeredNotice } from './overview';
+import { frame } from '../chrome';
 
 /** A colour wrapper (matches the ansi `c.*` span helpers / gauges ColorFn). */
 type ColorFn = (s: string) => string;
@@ -128,36 +129,39 @@ export function renderTopology(ctx: ScreenCtx): string[] {
     for (const n of pending) tree.push(nodeLine(view, n, null, noise, nameBudget, showBars));
   }
 
-  /* ── hop-distribution mini-histogram (a row under the title) ─────────── */
-  // Only when there's real vertical room AND at least one routed node — an
-  // all-LR/all-pending mesh has nothing to distribute, so we skip it.
-  const showHist = H >= 18 && W >= 64 && directCount + repeatedCount > 0;
+  /* ── assemble the body: [histogram] + windowed tree + repeater panel ──── */
+  const bodyCap = Math.max(1, H - 3); // frame reserves masthead + rule + command bar
+  const showHist = bodyCap >= 15 && W >= 64 && directCount + repeatedCount > 0;
   const histLines = showHist ? [hopHistogram(view, byHop, directCount)] : [];
-
-  /* ── repeater-load panel (pinned to the bottom, kept in a small budget) ─ */
   const panel = repeaterLoadPanel(view, ctx, endNodes, nameBudget).slice(
     0,
-    Math.max(1, H - 3 - histLines.length),
+    Math.max(1, bodyCap - histLines.length - 2),
   );
+  const treeCap = Math.max(1, bodyCap - histLines.length - panel.length);
 
-  /* ── assemble: title + optional histogram + windowed tree + panel = H ── */
-  const out: string[] = [];
-  out.push(truncate(titleBar(view, endNodes.length, directCount, repeatedCount, lrNodes.length, pending.length), W));
-  for (const line of histLines) out.push(truncate(line, W));
-
-  const headerRows = out.length; // title (+ histogram)
-  const bodyCap = Math.max(1, H - headerRows - panel.length);
-  if (tree.length <= bodyCap) {
-    for (const line of tree) out.push(truncate(line, W));
-    while (out.length < headerRows + bodyCap) out.push('');
+  const body: string[] = [...histLines];
+  if (tree.length <= treeCap) {
+    body.push(...tree);
+    while (body.length < histLines.length + treeCap) body.push('');
   } else {
-    const shown = bodyCap - 1; // reserve the last body row for the overflow note
-    for (let i = 0; i < shown; i++) out.push(truncate(tree[i], W));
-    out.push(truncate(c.grey(`  …${tree.length - shown} more`), W));
+    const shown = treeCap - 1; // reserve the last row for the overflow note
+    for (let i = 0; i < shown; i++) body.push(tree[i]);
+    body.push(c.grey(`  …${tree.length - shown} more (taller terminal shows all)`));
   }
-  for (const line of panel) out.push(truncate(line, W));
+  body.push(...panel);
 
-  return out.slice(0, H);
+  const rs =
+    c.grey('END ') + c.white(String(endNodes.length)) + c.grey(' · ') +
+    c.green(`${directCount} DIRECT`) + c.grey(' · ') + c.white(`${repeatedCount} HOPS`) +
+    (lrNodes.length ? c.grey(' · ') + c.blue(`${lrNodes.length} LR`) : '') +
+    (pending.length ? c.grey(' · ') + c.yellow(`${pending.length} PEND`) : '');
+
+  return frame(view, data, {
+    title: 'TOPOLOGY / ROUTES',
+    rightStatus: rs,
+    body,
+    keys: [['1-6', 'SCREENS'], ['Q', 'BACK']],
+  });
 }
 
 /* ── hop-distribution histogram ──────────────────────────────────────────── */
@@ -198,28 +202,6 @@ function hopHistogram(
   );
   const line = '  ' + c.grey('hops') + '  ' + cells.join(c.grey('   '));
   return truncate(line, W);
-}
-
-/* ── title / summary bar ─────────────────────────────────────────────────── */
-
-function titleBar(
-  view: ViewState,
-  total: number,
-  direct: number,
-  repeated: number,
-  lr_: number,
-  pend: number,
-): string {
-  const parts = [
-    c.whiteB(`${total} nodes`),
-    c.green(`${direct} direct`),
-    c.white(`${repeated} repeated`),
-    ...(lr_ > 0 ? [c.blue(`${lr_} LR`)] : []),
-    ...(pend > 0 ? [c.yellow(`${pend} pending`)] : []),
-  ];
-  // Clarify that the per-node dB here is the ROUTE (LWR) margin — distinct from
-  // the Overview's direct node-RSSI margin (they differ for multi-hop nodes).
-  return lr(c.cyanB('TOPOLOGY / ROUTES') + c.grey('  dB = route margin'), parts.join(c.grey(' · ')), view.cols);
 }
 
 /* ── group section header (── Title (n) ─────────) ───────────────────────── */

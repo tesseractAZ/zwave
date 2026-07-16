@@ -44,8 +44,8 @@ test('the selected row carries the ▶ cursor and the header counts events + sho
   const lines = renderLog(ctx({ view: mkView({ cols: 120, rows: 30, logCursor: 1 }), events: sampleEvents, nodes: sampleNodes }));
   const joined = lines.map(strip).join('\n');
   assert.ok(joined.includes('▶'), 'a cursor marker is present');
-  assert.ok(/ACTIVITY LOG/.test(lines[0]) && /5 events/.test(strip(lines[0])), 'header shows the count');
-  assert.ok(/all time/.test(strip(lines[0])), 'header shows the active date range');
+  assert.ok(/ACTIVITY LOG/.test(joined) && /5 EVENTS/i.test(joined), 'title rule shows the count');
+  assert.ok(/ALL TIME/i.test(joined), 'title rule shows the active date range');
 });
 
 test('the detail pane reflects the selected event: device, entity, and value change', () => {
@@ -59,8 +59,8 @@ test('the detail pane reflects the selected event: device, entity, and value cha
 test('errorsOnly header chip + filtered detail (only the error event remains)', () => {
   const lines = renderLog(ctx({ view: mkView({ cols: 120, rows: 30, errorsOnly: true }), events: sampleEvents, nodes: sampleNodes }));
   const joined = lines.map(strip).join('\n');
-  assert.ok(/errors only/.test(lines[0]), 'header shows the errors chip');
-  assert.ok(/1 event/.test(strip(lines[0])), 'only the 1 error is counted');
+  assert.ok(/ERRORS/i.test(joined), 'title rule shows the errors chip');
+  assert.ok(/1 EVENT/i.test(joined), 'only the 1 error is counted');
   assert.ok(/Kitchen/.test(joined) && !/Garage Motion:/.test(joined), 'non-error rows are filtered out');
 });
 
