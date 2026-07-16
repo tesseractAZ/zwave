@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.11.0 — 2026-07-16
+
+Correct the TX-reliability metric so it measures the failure it names. Grounded
+in a deep, cited protocol study (`RESEARCH.md`); the counter's near-silence was
+reproduced against zwave-js 15.25.3.
+
+- **Overview `DROP` → `TMO` (response-timeout %), reframed onto the right
+  signal.** The metric was `(commandsDroppedTX + timeoutResponse) / commandsTX`.
+  But `commandsDroppedTX` does **not** track RF acknowledgement failures — when a
+  listening node stops acknowledging, the driver retries and marks it **dead**
+  (the `D` gate), and the drop counter stays 0; it can also false-positive on fast
+  nodes whose report beats the MAC ACK. So the old figure was near-silent for the
+  loss it appeared to show and noisy otherwise. The column, the Detail row, and
+  the health lane now use **`timeoutResponse / commandsTX`** only: the fraction of
+  commands whose expected reply never came back while the node stayed reachable —
+  a genuine return-path / responsiveness signal.
+- **Detail:** the `Drop` row is now **`Timeouts`** (timeout count of TX); the raw
+  `dropped tx/rx` counters remain on the *Traffic* row as honest context.
+- **`F` flag** re-labelled *response timeouts* (was *flaky/failed TX*); its
+  trigger is unchanged (>~15%), now driven purely by `timeoutResponse`.
+- **Tests:** regression guards in `health.test.ts` and `overviewScreen.test.ts`
+  lock in that a node with a high `commandsDroppedTX` but zero response timeouts
+  reads **healthy** — the metric can never again be inflated by the wrong counter.
+- No behavior change to any mesh action; display + scoring semantics only.
+
 ## 0.10.0 — 2026-07-16
 
 A full visual redesign into a formal **diagnostic-console** aesthetic — one
