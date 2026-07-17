@@ -75,6 +75,14 @@ export const config = {
    */
   historyPath: process.env.HISTORY_PATH || null,
   historyFlushMs: Number(process.env.HISTORY_FLUSH_MS ?? 30_000),
+  /**
+   * Persistent per-node EVIDENCE store (M2 — the symptom engine's time series;
+   * atomic JSON ring on /data). The run script exports
+   * `EVIDENCE_PATH=/data/evidence.json`; absent (bare dev) → null (in-memory).
+   * Flush is dirty-flagged; 5 min bounds crash loss without grinding SD cards.
+   */
+  evidencePath: process.env.EVIDENCE_PATH || null,
+  evidenceFlushMs: Number(process.env.EVIDENCE_FLUSH_MS ?? 300_000),
   /** Build stamp promoted from the Docker ARG (reported by /api/version). */
   version: process.env.BUILD_VERSION ?? '0.1.0',
 

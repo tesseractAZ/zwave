@@ -70,6 +70,11 @@ export DB_PATH=/data/zwave.db
 # volume so the graphs survive a restart / reconnect / power blip. Flush cadence
 # is fixed in code (30s + on shutdown); no user knob.
 export HISTORY_PATH=/data/history.json
+# M2 per-node evidence store — the symptom engine's persistent time series
+# (atomic JSON, fine ring + 14-day coarse tier, on /data). Sampled on the
+# route-poll cadence; flush is dirty-flagged in code (5 min + on shutdown).
+# No user knob.
+export EVIDENCE_PATH=/data/evidence.json
 
 # SUPERVISOR_TOKEN is injected automatically by the HA Supervisor (unlocked by
 # homeassistant_api: true) — the Node process inherits it. Do NOT export it.

@@ -87,6 +87,18 @@ test('response-reliability lane IGNORES commandsDroppedTX (RESEARCH.md §0 regre
   assert.equal(dropsButNoTimeouts.score, clean.score, 'droppedTX must not drag the RF score');
 });
 
+test('ROUTED node: rssi is the LAST HOP, not the device — Signal scores neutral, never W (RESEARCH §1.3)', () => {
+  // Same terrible RSSI, two topologies: direct ⇒ it describes the device's link
+  // (W fires); routed ⇒ it describes repeater→controller (neutral, no W).
+  const lwrRouted = { repeaters: [7], protocolDataRate: 3, rssi: -93, repeaterRSSI: [], routeFailedBetween: null };
+  const lwrDirect = { repeaters: [], protocolDataRate: 3, rssi: -93, repeaterRSSI: [], routeFailedBetween: null };
+  const routed = scoreNode(makeNode({ stats: emptyStats({ rssi: -93, lwr: lwrRouted }) }), NOISE);
+  const direct = scoreNode(makeNode({ stats: emptyStats({ rssi: -93, lwr: lwrDirect }) }), NOISE);
+  assert.ok(direct.flags.includes('W'), 'direct node with 2dB margin raises W');
+  assert.ok(!routed.flags.includes('W'), 'routed node must NOT raise W off last-hop RSSI');
+  assert.ok(routed.score > direct.score, 'routed node is not penalized for its repeater’s margin');
+});
+
 test('Long-Range node scores without error', () => {
   const r = scoreNode(makeNode({ nodeId: 300, isLongRange: true }), NOISE);
   assert.ok(Number.isFinite(r.score));
