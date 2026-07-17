@@ -289,6 +289,10 @@ export interface ZwaveData {
   events(): LogEvent[];
   /** The resolved config-entry id (null until discovered). */
   getEntryId(): string | null;
+  /** Engine-detected symptoms (M3), ranked. */
+  symptoms(): Symptom[];
+  /** Engine enabled + graduated-baseline count (M3 Remedy empty state). */
+  engineStatus(): { enabled: boolean; ready: number; total: number };
   /** Stop polling and clear timers. */
   stop(): void;
 }
@@ -557,6 +561,7 @@ class ZwaveDataImpl implements ZwaveData {
     const blPath = (opts.baselinesPath ?? process.env.BASELINES_PATH) || null;
     this.baselines = blPath ? createBaselineStore({ path: blPath, log: this.log }) : null;
     this.baselines?.load();
+    this.log(`M3 engine: ${this.baselines ? 'baselines enabled' : 'baselines disabled (no BASELINES_PATH)'}`);
     // v0.13: READ-ONLY driver-WS telemetry client (DESIGN §2.1). Dormant-not-
     // fatal by construction; its feeds are guarded by the homeId cross-check
     // (a misconfigured URL pointing at a DIFFERENT network's server must never
