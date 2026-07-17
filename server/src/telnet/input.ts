@@ -387,6 +387,13 @@ export function applyKey(
         return REDRAW;
       }
       return NOOP;
+    case 'y':
+      // Jump to the Remedy (engine symptoms) screen.
+      if (view.screen !== 'remedy') {
+        view.screen = 'remedy';
+        return REDRAW;
+      }
+      return NOOP;
     case '/':
       // Hand control to the session's filter-capture loop.
       return { redraw: true, filter: 'start' };

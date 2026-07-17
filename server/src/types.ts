@@ -136,7 +136,13 @@ export type LogKind =
   | 'value' // a device entity's state changed (light on, sensor read, lock…)
   | 'notification' // a zwave_js_notification (entry control, keypad, tamper…)
   | 'action' // operator command outcome (ping/heal/rebuild/…)
+  | 'symptom' // engine-detected mesh/node symptom (M3)
   | 'system'; // add-on/connection lifecycle
+
+// Type-only import (no runtime cycle): the symptom engine's output shape, read
+// by DataProvider.symptoms() and the REMEDY screen.
+import type { Symptom } from './zwave/symptoms';
+export type { Symptom, SymptomKind, Severity } from './zwave/symptoms';
 
 /** An event/log line (driver event or operator command outcome). */
 export interface LogEvent {
@@ -174,6 +180,12 @@ export interface DataProvider {
   lastUpdated(): number | null; // epoch ms of the last successful roster refresh
   ready(): boolean; // has the first roster load completed?
   lastError(): string | null;
+  /** Engine-detected symptoms (M3), ranked; empty when the engine is off or
+   *  nothing is wrong. Read by the REMEDY screen. */
+  symptoms(): Symptom[];
+  /** Engine state: enabled + graduated-baseline count, for the REMEDY empty
+   *  state to tell "off" from "learning" from "all healthy". */
+  engineStatus(): { enabled: boolean; ready: number; total: number };
 }
 
 /** Which screen is active. Overview is home; the rest are overlays. */
@@ -183,7 +195,8 @@ export type ScreenView =
   | 'controller'
   | 'topology'
   | 'heatmap'
-  | 'log';
+  | 'log'
+  | 'remedy';
 
 export const SCREENS: ScreenView[] = [
   'overview',
@@ -192,6 +205,7 @@ export const SCREENS: ScreenView[] = [
   'topology',
   'heatmap',
   'log',
+  'remedy',
 ];
 
 /** Log-screen date window. `all` = the whole in-memory ring. */
