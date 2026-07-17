@@ -83,6 +83,12 @@ export const config = {
    */
   evidencePath: process.env.EVIDENCE_PATH || null,
   evidenceFlushMs: Number(process.env.EVIDENCE_FLUSH_MS ?? 300_000),
+  /**
+   * READ-ONLY zwave-js driver WS (v0.13 — DESIGN §2.1): background RSSI,
+   * lastSeen, capability flags. Empty/absent ⇒ disabled (bare dev runs
+   * without it; the add-on exports it from the driver_ws_url option).
+   */
+  driverWsUrl: process.env.DRIVER_WS_URL || null,
   /** Build stamp promoted from the Docker ARG (reported by /api/version). */
   version: process.env.BUILD_VERSION ?? '0.1.0',
 

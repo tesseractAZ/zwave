@@ -20,6 +20,8 @@ export ROUTE_POLL_INTERVAL_MS="$(( $(bashio::config 'route_poll_interval') * 100
 # Empty ZWAVE_ENTRY_ID ⇒ the data layer auto-discovers it via config_entries/get.
 export ZWAVE_ENTRY_ID="$(bashio::config 'zwave_entry_id')"
 export HA_WS_URL="$(bashio::config 'ha_ws_url')"
+# v0.13 read-only driver-WS telemetry (empty = disabled). Never used for actions.
+export DRIVER_WS_URL="$(bashio::config 'driver_ws_url')"
 
 # ── Telnet "control-room" TUI ────────────────────────────────────────────────
 # bashio bool dance — a plain `export FOO=$(bashio::config 'foo')` yields the

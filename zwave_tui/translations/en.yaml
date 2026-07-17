@@ -97,3 +97,13 @@ configuration:
       Leave at the default ws://supervisor/core/websocket for a normal install.
       Override only to point the data layer at a different HA Core / driver
       WebSocket.
+  driver_ws_url:
+    name: Advanced — Z-Wave JS driver WebSocket URL (read-only telemetry)
+    description: >-
+      Direct READ-ONLY connection to the Z-Wave JS driver for diagnostics Home
+      Assistant does not forward — the per-channel background-noise floor (real
+      signal margins + interference detection), true last-seen times, and
+      device capability flags. Default ws://core-zwave-js:3000 matches the
+      official Z-Wave JS add-on; Z-Wave JS UI users should point it at their
+      server's WS port. Leave EMPTY to disable — everything else keeps working,
+      and this connection is never used to control the mesh.

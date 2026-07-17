@@ -142,6 +142,24 @@ Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 55, **F** < 55.
 | `I` | Incomplete interview |
 | `B` | Battery low (≤ 25%) — advisory only |
 
+## Driver telemetry (read-only)
+
+The optional **`driver_ws_url`** setting (Advanced) opens a direct, strictly
+read-only connection to the Z-Wave JS driver — the source of diagnostics Home
+Assistant does not forward: the **per-channel background-noise floor** (which
+turns the NOISE field and every signal margin from an assumption into a
+measurement), true last-seen times, and device capability flags.
+
+Safety posture: the connection sends exactly two protocol commands
+(`set_api_schema`, `start_listening`) — enforced by a hard-coded allowlist —
+and is **never** used to control the mesh; all actions go through Home
+Assistant's authenticated API. The driver socket has no authentication of its
+own, so the add-on treats it as privileged and never re-exposes it. If the
+server is unreachable, speaks an untested schema version, or belongs to a
+different Z-Wave network than Home Assistant's, the extra telemetry simply
+stays blank and everything else works as before. Leave the setting empty to
+disable the connection entirely.
+
 ## Write actions & safety
 
 The add-on is **read-only by default** — **Enable Write Actions** is off, so it
