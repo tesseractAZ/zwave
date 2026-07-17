@@ -44,6 +44,15 @@ import {
   type LogKind,
 } from '../types';
 import { createHistoryStore, type HistoryStore, type HistoryMap } from './historyStore';
+import {
+  createEvidenceStore,
+  type EvidenceStore,
+  type EvidenceSample,
+  type CoarseBucket,
+  type ControllerSample,
+  type RouteFailureEvent,
+  type NodeCoverage,
+} from './evidenceStore';
 
 /**
  * Rolling per-node RSSI/RTT sample-ring depth. Shared by the live ring in
@@ -215,6 +224,16 @@ export interface ZwaveDataOptions {
   historyPath?: string | null;
   /** How often to flush history to disk (ms). Falls back to env; default 30s. */
   historyFlushMs?: number;
+  /**
+   * Path for the persistent per-node EVIDENCE store (M2 — the symptom engine's
+   * time-series substrate; JSON ring on /data). Empty/null → in-memory only.
+   * Falls back to `EVIDENCE_PATH` env.
+   */
+  evidencePath?: string | null;
+  /** Evidence sample cadence (ms) — one sample per node per tick. Default = routePollMs. */
+  evidenceSampleMs?: number;
+  /** How often to flush evidence to disk (ms). Falls back to env; default 30s. */
+  evidenceFlushMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -237,6 +256,18 @@ export interface ZwaveData {
   history(nodeId: number): { rssi: number[]; rtt: number[] };
   /** Coarse long-horizon RSSI/RTT trend for a node (~2h). */
   historyLong(nodeId: number): { rssi: number[]; rtt: number[] };
+  /** Per-node evidence samples (M2) — windowed counter deltas + instantaneous
+   *  values, newest last. Read by the symptom engine (M3). Empty if unavailable. */
+  evidence(nodeId: number): EvidenceSample[];
+  /** Coarse 30-min evidence buckets (baseline substrate; up to 14 days). */
+  evidenceCoarse(nodeId: number): CoarseBucket[];
+  /** Controller serial-link evidence samples. */
+  evidenceController(): ControllerSample[];
+  /** Event-latched route failures for a node (newest last). */
+  evidenceRouteFailures(nodeId: number): RouteFailureEvent[];
+  /** Coverage metadata — how long/how much the store has observed this node,
+   *  plus live subscription state (a coverage hole ≠ node silence). */
+  evidenceCoverage(nodeId: number): (NodeCoverage & { statusFeedLive: boolean; statsFeedLive: boolean }) | null;
   /** node id → HA device_id (for mutating actions). */
   deviceIdOf(nodeId: number): string | null;
   /** node id → its ping button entity_id. */
@@ -377,6 +408,36 @@ class ZwaveDataImpl implements ZwaveData {
   private histLongByNode = new Map<number, { rssi: number[]; rtt: number[] }>();
   private coarseAccum = new Map<number, { rssiSum: number; rssiN: number; rttSum: number; rttN: number }>();
   private coarseTimer: ReturnType<typeof setInterval> | null = null;
+  /** M2 evidence store (null → in-memory only) + its sample/flush cadence timers. */
+  private readonly evidenceStore: EvidenceStore | null;
+  private readonly evidenceSampleMs: number;
+  private readonly evidenceFlushMs: number;
+  private evidenceSampleTimer: ReturnType<typeof setInterval> | null = null;
+  private evidenceFlushTimer: ReturnType<typeof setInterval> | null = null;
+  /** Event-driven per-node accumulators, drained into each evidence sample
+   *  (DESIGN §3.1): Alive↔Dead transitions must be counted from EVENTS —
+   *  level-sampling the roster status misses sub-window flaps by construction. */
+  private flapAccum = new Map<number, number>();
+  private routeChangeAccum = new Map<number, number>();
+  /** Nodes with a live `subscribe_node_status` subscription (flap source).
+   *  Nodes NOT in this set fall back to the 2 s roster diff for flap counting. */
+  private statusSubbed = new Set<number>();
+  /** Last status seen by the node-status SUBSCRIPTION (not the roster poll). */
+  private subStatus = new Map<number, NodeStatus>();
+  /** Freshness signature at the previous evidence sample: fresh requires BOTH
+   *  a new stats event (lastSeen advanced) AND counter movement — a
+   *  (re)subscribe redelivers the current snapshot with a fresh lastSeen but
+   *  unchanged counters, which must NOT count as an observation (review). */
+  private prevSampleSig = new Map<number, SampleSig>();
+  /** Nodes with a live node-STATISTICS subscription (per-feed retry tracking). */
+  private statsSubbedNodes = new Set<number>();
+  /** Roster ids currently absent → first-absent timestamp (eviction timer). */
+  private missingSince = new Map<number, number>();
+  /** ctrlStats object identity at the previous evidence sample (freshness). */
+  private prevCtrlStatsRef: ControllerSnapshot['statistics'] = null;
+  /** Devices whose per-node subscriptions failed — retried on a slow timer. */
+  private pendingNodeSubs = new Map<number, string>();
+  private subRetryTimer: ReturnType<typeof setInterval> | null = null;
   /** Controller home_id from the last poll — a change means a different Z-Wave
    *  network (stick swap / different NVM backup), so node-keyed caches alias. */
   private lastHomeId: number | null = null;
@@ -443,6 +504,23 @@ class ZwaveDataImpl implements ZwaveData {
         if (h.crssi.length || h.crtt.length) this.histLongByNode.set(id, { rssi: h.crssi, rtt: h.crtt });
       }
     }
+
+    // M2 evidence store: the symptom engine's persistent per-node time series.
+    // Sampled on its own cadence (default = the route-poll cadence) from the
+    // latest cached stats, so windows are regular even though the driver pushes
+    // statistics event-driven. load() restores prior samples; the in-memory
+    // counter baselines re-establish on the first post-restart sample per node.
+    const evPath = (opts.evidencePath ?? process.env.EVIDENCE_PATH) || null;
+    const evSample = opts.evidenceSampleMs ?? Number(process.env.EVIDENCE_SAMPLE_MS ?? this.routePollMs);
+    this.evidenceSampleMs = Number.isFinite(evSample) && evSample > 0 ? evSample : this.routePollMs;
+    // Flush is dirty-flagged in the store; 5 min default bounds crash loss to a
+    // few samples without grinding SD cards with full-file rewrites (DR).
+    const evFlush = opts.evidenceFlushMs ?? Number(process.env.EVIDENCE_FLUSH_MS ?? 300_000);
+    this.evidenceFlushMs = Number.isFinite(evFlush) ? evFlush : 300_000;
+    this.evidenceStore = evPath
+      ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log })
+      : null;
+    this.evidenceStore?.load();
   }
 
   /** Combine the fine + coarse rings into the store's two-tier shape. */
@@ -486,6 +564,72 @@ class ZwaveDataImpl implements ZwaveData {
     if (!this.coarseTimer) {
       this.coarseTimer = setInterval(() => this.rollCoarse(), COARSE_INTERVAL_MS);
       this.coarseTimer.unref?.();
+    }
+
+    // M2 evidence: sample every node with cached stats on a regular cadence, and
+    // periodically flush the store to /data. Both timers `.unref()` so they never
+    // hold the event loop open at shutdown.
+    if (this.evidenceStore) {
+      if (!this.evidenceSampleTimer && this.evidenceSampleMs > 0) {
+        this.evidenceSampleTimer = setInterval(() => this.sampleEvidence(), this.evidenceSampleMs);
+        this.evidenceSampleTimer.unref?.();
+      }
+      if (!this.evidenceFlushTimer && this.evidenceFlushMs > 0) {
+        this.evidenceFlushTimer = setInterval(() => this.evidenceStore!.save(), this.evidenceFlushMs);
+        this.evidenceFlushTimer.unref?.();
+      }
+    }
+  }
+
+  /**
+   * Record one evidence sample per node that has reported statistics, from the
+   * latest cached NodeStats and the authoritative roster status.
+   *
+   * DISCIPLINES (DESIGN §3.1, from the design review):
+   *  - WEDGE GUARD: when the roster feed itself is stale (no successful poll
+   *    within ~2× refreshMs) the whole tick is SKIPPED — a gap in the ring is
+   *    honest; re-recording stale caches under fresh timestamps fabricates
+   *    healthy-looking windows.
+   *  - FRESHNESS: `fresh` is true iff a stats event arrived since the previous
+   *    sample (stats.lastSeen advanced). rssi/rtt are driver EMAs — re-sampling
+   *    them without a new event is pseudo-replication, which downstream
+   *    collapses MAD to 0. Baselines must ingest fresh samples only.
+   *  - FLAPS/ROUTE CHANGES are drained from EVENT-driven accumulators — the
+   *    status column in the sample is dwell context only; sub-window Alive↔Dead
+   *    flaps are invisible to level-sampling by construction.
+   *  - COVERAGE: every roster node is registered (even before its first stats
+   *    event) so "no evidence rows" is distinguishable from "node unknown".
+   */
+  private sampleEvidence(): void {
+    if (!this.evidenceStore) return;
+    const now = Date.now();
+    // Wedge guard: don't synthesize samples out of a stale cache.
+    if (this.lastOkAt == null || now - this.lastOkAt > Math.max(2 * this.refreshMs, 10_000)) return;
+    for (const n of this.lastNodes) {
+      this.evidenceStore.registerNode(n.nodeId, now);
+      const stats = this.statsByNode.get(n.nodeId);
+      // A node with NO cached stats yet cannot produce a sample (fabricating
+      // zero counters would poison the delta guards). Its flap/route events
+      // stay accumulated and drain into its FIRST real sample — attributed to
+      // a longer-than-usual window, whose length is visible via the t gap.
+      if (!stats) continue;
+      const prev = this.prevSampleSig.get(n.nodeId);
+      const fresh = isFreshSample(prev, stats);
+      this.prevSampleSig.set(n.nodeId, {
+        seen: stats.lastSeen ?? 0, tx: stats.commandsTX, rx: stats.commandsRX,
+        to: stats.timeoutResponse, dr: stats.commandsDroppedTX,
+      });
+      const flaps = this.flapAccum.get(n.nodeId) ?? 0;
+      const routeChanges = this.routeChangeAccum.get(n.nodeId) ?? 0;
+      this.flapAccum.delete(n.nodeId);
+      this.routeChangeAccum.delete(n.nodeId);
+      this.evidenceStore.record(n.nodeId, stats, n.status, { flaps, routeChanges, fresh }, now);
+    }
+    // Controller serial-link sample through the same delta guards.
+    if (this.ctrlStats) {
+      const ctrlFresh = this.ctrlStats !== this.prevCtrlStatsRef;
+      this.prevCtrlStatsRef = this.ctrlStats;
+      this.evidenceStore.recordController(this.ctrlStats, ctrlFresh, now);
     }
   }
 
@@ -557,10 +701,26 @@ class ZwaveDataImpl implements ZwaveData {
       clearInterval(this.coarseTimer);
       this.coarseTimer = null;
     }
+    if (this.evidenceSampleTimer) {
+      clearInterval(this.evidenceSampleTimer);
+      this.evidenceSampleTimer = null;
+    }
+    if (this.evidenceFlushTimer) {
+      clearInterval(this.evidenceFlushTimer);
+      this.evidenceFlushTimer = null;
+    }
+    if (this.subRetryTimer) {
+      clearInterval(this.subRetryTimer);
+      this.subRetryTimer = null;
+    }
     // Fold any pending interval into the coarse ring, then persist BOTH tiers on
     // the way down (SIGTERM from a deploy/restart) so trends resume seamlessly.
     this.rollCoarse();
     this.historyStore?.save(this.buildHistoryMap());
+    // Persist the evidence store as-is. Deliberately NO final sample: the caches
+    // may be minutes stale by shutdown, and a stale snapshot under a fresh
+    // timestamp would fabricate a healthy-looking window (DR).
+    this.evidenceStore?.save();
   }
 
   /* ─── polling ──────────────────────────────────────────────────────── */
@@ -654,8 +814,52 @@ class ZwaveDataImpl implements ZwaveData {
       if (prev !== undefined && prev !== n.status) {
         const sev = n.status === NodeStatus.Dead ? 'error' : 'info';
         this.pushEvent('net', sev, 'status', n.nodeId, `${n.name} → ${n.statusLabel}`);
+        // Flap-count FALLBACK for nodes without a live node-status subscription
+        // (subscribe failed + retry pending). The event feed is the primary
+        // source — feeding both would double-count the same transition.
+        if (!this.statusSubbed.has(n.nodeId)) {
+          const crossedDead = (prev === NodeStatus.Dead) !== (n.status === NodeStatus.Dead);
+          if (crossedDead) this.flapAccum.set(n.nodeId, (this.flapAccum.get(n.nodeId) ?? 0) + 1);
+        }
       }
       this.prevStatus.set(n.nodeId, n.status);
+    }
+    // Departed-node eviction (review): a node absent from the roster for 5+
+    // minutes has left the network (excluded / replace_failed_node). Its
+    // evidence must be EVICTED — node-id reuse would otherwise merge two
+    // physical devices' histories and pre-satisfy the ghost detector's
+    // coverage precondition. 5-min dwell rides out transient roster glitches.
+    {
+      const present = new Set(nodes.map((n) => n.nodeId));
+      const now = Date.now();
+      for (const id of [...this.prevStatus.keys()]) {
+        if (present.has(id)) {
+          this.missingSince.delete(id);
+          continue;
+        }
+        const since = this.missingSince.get(id);
+        if (since == null) {
+          this.missingSince.set(id, now);
+        } else if (now - since > 5 * 60_000) {
+          this.log(`node ${id} left the network — evicting its evidence + caches`);
+          this.evidenceStore?.evictNode(id);
+          this.statsByNode.delete(id);
+          this.histByNode.delete(id);
+          this.histLongByNode.delete(id);
+          this.coarseAccum.delete(id);
+          this.batteryByNode.delete(id);
+          this.firmwareByNode.delete(id);
+          this.flapAccum.delete(id);
+          this.routeChangeAccum.delete(id);
+          this.subStatus.delete(id);
+          this.statusSubbed.delete(id);
+          this.statsSubbedNodes.delete(id);
+          this.pendingNodeSubs.delete(id);
+          this.prevSampleSig.delete(id);
+          this.prevStatus.delete(id);
+          this.missingSince.delete(id);
+        }
+      }
     }
     this.lastNodes = nodes;
     this.lastController = this.buildController(ctrl);
@@ -675,6 +879,16 @@ class ZwaveDataImpl implements ZwaveData {
         this.histLongByNode.clear();
         this.coarseAccum.clear();
         this.firmwareByNode.clear();
+        // Evidence accumulators are node-id-keyed too.
+        this.flapAccum.clear();
+        this.routeChangeAccum.clear();
+        this.subStatus.clear();
+        this.prevSampleSig.clear();
+        this.missingSince.clear();
+        // The controller cache belongs to the OLD network — post-reset samples
+        // must not be recorded from its counters (review).
+        this.ctrlStats = null;
+        this.prevCtrlStatsRef = null;
         this.prevStatus.clear(); // else the first poll logs spurious status transitions
         // The registry-derived maps (entityIndex/deviceByNodeId/…) are now stale:
         // the new network's entity_ids won't be in entityIndex, so the activity
@@ -686,6 +900,12 @@ class ZwaveDataImpl implements ZwaveData {
         this.client.reconnect();
       }
       this.lastHomeId = homeId;
+      // Bind the live network identity to the evidence store: on the FIRST
+      // known home id this validates any restored evidence against it (a stick
+      // swapped while the add-on was stopped must not resurrect the previous
+      // network's history under new node ids); on a live change it resets +
+      // rewrites disk. No-op when unchanged.
+      this.evidenceStore?.bindHomeId(homeId);
     }
     this.lastErr = null;
     this.isReady = true;
@@ -883,22 +1103,108 @@ class ZwaveDataImpl implements ZwaveData {
         (msg) => this.onControllerStats(msg.event),
       );
 
-      // One subscription per end node (node 1 = controller, covered above).
+      // Two subscriptions per end node (node 1 = controller, covered above):
+      // statistics (counters/routes) + node status (the EVENT-driven flap
+      // source — the roster poll only sees transitions that survive 2 s).
       const nodeDevices = [...this.deviceByNodeId.entries()].filter(([nodeId]) => nodeId !== 1);
-      await Promise.all(
-        nodeDevices.map(([, dev]) =>
-          this.client
-            .subscribe({ type: 'zwave_js/subscribe_node_statistics', device_id: dev.id }, (msg) => this.onNodeStats(msg.event))
-            .catch((e) => this.log(`node-stats subscribe failed (${dev.id}): ${errMsg(e)}`)),
-        ),
-      );
-      this.log(`live statistics: subscribed controller + ${nodeDevices.length} nodes`);
+      this.statusSubbed.clear();
+      this.statsSubbedNodes.clear();
+      this.subStatus.clear();
+      this.pendingNodeSubs.clear();
+      await Promise.all(nodeDevices.map(([nodeId, dev]) => this.subscribeNode(nodeId, dev.id)));
+      this.log(`live statistics: subscribed controller + ${nodeDevices.length} nodes (${this.statusSubbed.size} status feeds)`);
+      // Failed per-node subscriptions are retried on a slow timer — a silent
+      // .catch-and-forget hole in coverage is exactly what the ghost detector
+      // must never inherit (DR).
+      if (this.pendingNodeSubs.size > 0 && !this.subRetryTimer) {
+        this.subRetryTimer = setInterval(() => void this.retryNodeSubs(), 60_000);
+        this.subRetryTimer.unref?.();
+      }
       await this.subscribeActivityEvents();
       void this.fetchEntityStates();
     } catch (e) {
       this.statsSubscribed = false;
       this.log(`subscribeStatistics failed: ${errMsg(e)}`);
     }
+  }
+
+  /** Subscribe one node's statistics + status feeds; failures queue for retry.
+   *  PER-FEED idempotent (review): a retry must only re-attempt the feed that
+   *  actually failed — re-subscribing a live feed leaks a duplicate
+   *  subscription per retry and double-counts every event thereafter. */
+  private async subscribeNode(nodeId: number, deviceId: string): Promise<void> {
+    let ok = true;
+    if (!this.statsSubbedNodes.has(nodeId)) {
+      try {
+        await this.client.subscribe(
+          { type: 'zwave_js/subscribe_node_statistics', device_id: deviceId },
+          (msg) => this.onNodeStats(msg.event),
+        );
+        this.statsSubbedNodes.add(nodeId);
+      } catch (e) {
+        ok = false;
+        this.log(`node-stats subscribe failed (node ${nodeId}): ${errMsg(e)}`);
+      }
+    }
+    if (!this.statusSubbed.has(nodeId)) {
+      try {
+        await this.client.subscribe(
+          { type: 'zwave_js/subscribe_node_status', device_id: deviceId },
+          (msg) => this.onNodeStatusEvent(nodeId, msg.event),
+        );
+        // Seed the event-feed state from the roster so the FIRST event after
+        // subscribing diffs against the node's known status instead of being
+        // swallowed (review: a real Alive→Dead as the first event counted 0).
+        if (!this.subStatus.has(nodeId)) {
+          const known = this.prevStatus.get(nodeId);
+          if (known != null) this.subStatus.set(nodeId, known);
+        }
+        this.statusSubbed.add(nodeId);
+      } catch (e) {
+        ok = false;
+        this.statusSubbed.delete(nodeId);
+        this.log(`node-status subscribe failed (node ${nodeId}): ${errMsg(e)}`);
+      }
+    }
+    if (!ok) this.pendingNodeSubs.set(nodeId, deviceId);
+    else this.pendingNodeSubs.delete(nodeId);
+  }
+
+  private async retryNodeSubs(): Promise<void> {
+    if (this.pendingNodeSubs.size === 0) {
+      if (this.subRetryTimer) {
+        clearInterval(this.subRetryTimer);
+        this.subRetryTimer = null;
+      }
+      return;
+    }
+    const pending = [...this.pendingNodeSubs.entries()];
+    await Promise.all(pending.map(([nodeId, deviceId]) => this.subscribeNode(nodeId, deviceId)));
+  }
+
+  /**
+   * Event-driven node-status feed (`zwave_js/subscribe_node_status`) — the flap
+   * source. Counts every transition ACROSS the Dead boundary into `flapAccum`,
+   * drained per evidence sample. Nodes without a live feed fall back to the 2 s
+   * roster diff (which misses sub-2 s flaps — better than nothing, worse than
+   * events; the set membership records which source a node is on).
+   */
+  private onNodeStatusEvent(nodeId: number, ev: unknown): void {
+    const e = ev as Record<string, unknown> | null;
+    if (!e) return;
+    const name = typeof e.event === 'string' ? e.event : null;
+    const next: NodeStatus | null =
+      name === 'dead' ? NodeStatus.Dead
+      : name === 'alive' ? NodeStatus.Alive
+      : name === 'sleep' ? NodeStatus.Asleep
+      : name === 'wake up' ? NodeStatus.Awake
+      : null; // 'ready' and unknown events are not status transitions
+    if (next == null) return;
+    const prev = this.subStatus.get(nodeId);
+    this.subStatus.set(nodeId, next);
+    if (prev == null) return; // first observation — no transition yet
+    const crossedDead = (prev === NodeStatus.Dead) !== (next === NodeStatus.Dead);
+    if (crossedDead) this.flapAccum.set(nodeId, (this.flapAccum.get(nodeId) ?? 0) + 1);
   }
 
   /**
@@ -997,12 +1303,47 @@ class ZwaveDataImpl implements ZwaveData {
     return h ? { rssi: [...h.rssi], rtt: [...h.rtt] } : { rssi: [], rtt: [] };
   }
 
+  /** Per-node evidence samples (M2). A copy, newest last; [] when none/no store. */
+  evidence(nodeId: number): EvidenceSample[] {
+    return this.evidenceStore ? [...this.evidenceStore.forNode(nodeId)] : [];
+  }
+
+  evidenceCoarse(nodeId: number): CoarseBucket[] {
+    return this.evidenceStore ? [...this.evidenceStore.coarseForNode(nodeId)] : [];
+  }
+
+  evidenceController(): ControllerSample[] {
+    return this.evidenceStore ? [...this.evidenceStore.controllerSamples()] : [];
+  }
+
+  evidenceRouteFailures(nodeId: number): RouteFailureEvent[] {
+    return this.evidenceStore ? [...this.evidenceStore.routeFailures(nodeId)] : [];
+  }
+
+  evidenceCoverage(nodeId: number): (NodeCoverage & { statusFeedLive: boolean; statsFeedLive: boolean }) | null {
+    const cov = this.evidenceStore?.coverage(nodeId);
+    if (!cov) return null;
+    // Subscription state is part of coverage (DESIGN §3.1): "no evidence" from
+    // a node whose feeds are DOWN is a monitoring hole, not node silence.
+    return { ...cov, statusFeedLive: this.statusSubbed.has(nodeId), statsFeedLive: this.statsSubbedNodes.has(nodeId) };
+  }
+
   /** Map a raw node-statistics event → cached NodeStats. */
   private onNodeStats(ev: unknown): void {
     const e = ev as Record<string, unknown> | null;
     if (!e || e.source !== 'node') return;
     const nodeId = statsNodeId(e);
     if (nodeId == null) return;
+    // COUNTER VALIDATION (DR): a malformed event whose counters are missing
+    // must be REJECTED, not coerced to 0 — a coerced-0 snapshot re-baselines
+    // the evidence deltas at zero, and the next real event's cumulative value
+    // then lands as one giant fabricated "valid" delta. Skip the event whole;
+    // the previous cached stats stay authoritative.
+    const counters = statsCounters(e);
+    if (!counters) {
+      this.log(`node ${nodeId}: malformed statistics event (non-numeric counters) — ignored`);
+      return;
+    }
     this.lastStatsAt = Date.now();
     const prev = this.statsByNode.get(nodeId);
     const stats: NodeStats = {
@@ -1010,14 +1351,24 @@ class ZwaveDataImpl implements ZwaveData {
       rssi: num(e.rssi),
       lwr: this.mapRoute(e.lwr),
       nlwr: this.mapRoute(e.nlwr),
-      commandsTX: int(e.commands_tx),
-      commandsRX: int(e.commands_rx),
-      commandsDroppedTX: int(e.commands_dropped_tx),
-      commandsDroppedRX: int(e.commands_dropped_rx),
-      timeoutResponse: int(e.timeout_response),
+      commandsTX: counters.tx,
+      commandsRX: counters.rx,
+      commandsDroppedTX: counters.dropTx,
+      commandsDroppedRX: counters.dropRx,
+      timeoutResponse: counters.timeout,
       lastSeen: Date.now(),
     };
     this.statsByNode.set(nodeId, stats);
+    // routeFailedBetween is TRANSIENT (overwritten on the next OK transmission)
+    // — latch it into the evidence store the moment it appears/changes (DR).
+    const rf = stats.lwr?.routeFailedBetween ?? stats.nlwr?.routeFailedBetween ?? null;
+    const prevRf = prev?.lwr?.routeFailedBetween ?? prev?.nlwr?.routeFailedBetween ?? null;
+    // `prev` required: the first event per connection is a REPLAY of driver
+    // state — latching its (possibly old) pair would fabricate a fresh
+    // failure timestamp on every restart (review).
+    if (prev && rf && (!prevRf || rf[0] !== prevRf[0] || rf[1] !== prevRf[1])) {
+      this.evidenceStore?.recordRouteFailure(nodeId, rf);
+    }
 
     // Append to the rolling history (skip RSSI sentinels 125/126/127), and
     // accumulate the same samples into the coarse interval mean (rollCoarse
@@ -1038,9 +1389,11 @@ class ZwaveDataImpl implements ZwaveData {
     }
     this.histByNode.set(nodeId, h);
     this.coarseAccum.set(nodeId, acc);
-    // Log a route change (repeater chain differs) so the mesh's re-routing is visible.
+    // Log a route change (repeater chain differs) so the mesh's re-routing is
+    // visible — and count it into the evidence accumulator (route churn).
     if (prev && routeKey(prev.lwr) !== routeKey(stats.lwr)) {
       this.pushEvent('net', 'info', 'route', nodeId, `route → ${fmtRoute(stats.lwr)}`);
+      this.routeChangeAccum.set(nodeId, (this.routeChangeAccum.get(nodeId) ?? 0) + 1);
     }
   }
 
@@ -1048,16 +1401,34 @@ class ZwaveDataImpl implements ZwaveData {
   private onControllerStats(ev: unknown): void {
     const e = ev as Record<string, unknown> | null;
     if (!e || e.source !== 'controller') return;
+    // Same rejection rule as node counters (DR): a malformed event coerced to
+    // zeros would re-baseline the controller evidence deltas and fabricate a
+    // giant delta on the next real event. ALL counters must be numeric.
+    // timeout_response: HA's dev source misspells the key 'timout_response';
+    // accept either spelling so an upstream fix can't zero the field forever.
+    const msgTx = num(e.messages_tx);
+    const msgRx = num(e.messages_rx);
+    const msgDropTx = num(e.messages_dropped_tx);
+    const msgDropRx = num(e.messages_dropped_rx);
+    const nak = num(e.nak);
+    const can = num(e.can);
+    const tAck = num(e.timeout_ack);
+    const tRes = num(e.timout_response) ?? num(e.timeout_response);
+    if (msgTx == null || msgRx == null || msgDropTx == null || msgDropRx == null ||
+        nak == null || can == null || tAck == null || tRes == null) {
+      this.log('controller: malformed statistics event (non-numeric counters) — ignored');
+      return;
+    }
     this.lastStatsAt = Date.now();
     this.ctrlStats = {
-      messagesTX: int(e.messages_tx),
-      messagesRX: int(e.messages_rx),
-      messagesDroppedTX: int(e.messages_dropped_tx),
-      messagesDroppedRX: int(e.messages_dropped_rx),
-      NAK: int(e.nak),
-      CAN: int(e.can),
-      timeoutACK: int(e.timeout_ack),
-      timeoutResponse: int(e.timout_response), // driver misspells 'timeout'
+      messagesTX: Math.trunc(msgTx),
+      messagesRX: Math.trunc(msgRx),
+      messagesDroppedTX: Math.trunc(msgDropTx),
+      messagesDroppedRX: Math.trunc(msgDropRx),
+      NAK: Math.trunc(nak),
+      CAN: Math.trunc(can),
+      timeoutACK: Math.trunc(tAck),
+      timeoutResponse: Math.trunc(tRes),
     };
   }
 
@@ -1113,6 +1484,53 @@ function num(x: unknown): number | null {
 /** Coerce to a finite integer, defaulting to 0. */
 function int(x: unknown): number {
   return typeof x === 'number' && Number.isFinite(x) ? Math.trunc(x) : 0;
+}
+
+/**
+ * Validate a node-statistics event's cumulative counters. ALL five must be
+ * finite numbers or the event is rejected (`null`) — coercing a missing field
+ * to 0 re-baselines the evidence deltas at zero, and the next real event's
+ * cumulative counter then lands as one giant fabricated "valid" delta (DR).
+ * Exported for tests.
+ */
+/** The freshness signature captured at the previous evidence sample. */
+export interface SampleSig {
+  seen: number;
+  tx: number;
+  rx: number;
+  to: number;
+  dr: number;
+}
+
+/**
+ * Is this sample a genuine OBSERVATION? Requires BOTH conjuncts (review):
+ *  - a stats event arrived since the previous sample (lastSeen advanced), AND
+ *  - at least one counter moved — a (re)subscribe redelivers the current
+ *    snapshot under a fresh lastSeen with unchanged counters; treating that as
+ *    an observation is the pseudo-replication leak that collapses MAD to 0.
+ * First-ever sample (no signature) is NOT fresh — there is no baseline to
+ * distinguish an observation from a replay.
+ */
+export function isFreshSample(prev: SampleSig | undefined, stats: NodeStats): boolean {
+  if (prev == null) return false;
+  const seen = stats.lastSeen ?? 0;
+  const seenAdvanced = seen > 0 && seen !== prev.seen;
+  const countersMoved =
+    stats.commandsTX !== prev.tx || stats.commandsRX !== prev.rx ||
+    stats.timeoutResponse !== prev.to || stats.commandsDroppedTX !== prev.dr;
+  return seenAdvanced && countersMoved;
+}
+
+export function statsCounters(
+  e: Record<string, unknown>,
+): { tx: number; rx: number; dropTx: number; dropRx: number; timeout: number } | null {
+  const tx = num(e.commands_tx);
+  const rx = num(e.commands_rx);
+  const dropTx = num(e.commands_dropped_tx);
+  const dropRx = num(e.commands_dropped_rx);
+  const timeout = num(e.timeout_response);
+  if (tx == null || rx == null || dropTx == null || dropRx == null || timeout == null) return null;
+  return { tx: Math.trunc(tx), rx: Math.trunc(rx), dropTx: Math.trunc(dropTx), dropRx: Math.trunc(dropRx), timeout: Math.trunc(timeout) };
 }
 /** A non-empty version string (numbers coerced), else null. */
 function strOrNull(x: unknown): string | null {

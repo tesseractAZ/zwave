@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.12.0 — 2026-07-16
+
+The remediation engine's evidence substrate (M2), rebuilt to close every
+substrate finding from a 52-agent adversarial design review (39 confirmed + 7
+partial findings against `DESIGN.md`/the first M2 draft — 3 blockers). No
+user-visible screens change yet; this release makes the data the future
+symptom engine will reason from trustworthy.
+
+- **Two evidence tiers**: a fine ring (10 s samples, ~40 min) plus a NEW
+  30-minute coarse tier spanning 14 days — the substrate baselines actually
+  need (the review's first blocker: 40 minutes of history cannot feed
+  time-of-day baselines). Staleness is per-tier, and a host power blip
+  (boot-grace) no longer wipes the coarse history.
+- **Event-driven flap counting**: the add-on now subscribes to
+  `zwave_js/subscribe_node_status` (per node, with retry + a roster-diff
+  fallback) and folds Alive↔Dead transition COUNTS into each sample — the
+  review proved sub-10 s flaps were structurally invisible to level-sampling,
+  and flapping is the hard RF-failure signal.
+- **Freshness provenance**: each sample records whether a statistics event
+  actually arrived in its window. Driver-side EMAs re-sampled without new
+  events are pseudo-replication (they collapse dispersion estimates to zero
+  downstream); wedged feeds now produce honest ring gaps instead of
+  fabricated healthy windows, and shutdown no longer synthesizes a final
+  sample from stale caches.
+- **Delta guards hardened**: whole-window invalidation (ANY backwards counter
+  nulls the whole sample), a max-window bound (long gaps are not
+  time-attributable), and a physical-plausibility cap (a delta the RF could
+  not carry is rejected). Malformed statistics events are now REJECTED at the
+  source instead of coerced to zero — the coercion path could fabricate a
+  full-lifetime delta as one "valid" window.
+- **Network identity + coverage**: the evidence file is bound to the
+  controller home id (a stick swap while stopped discards the old network's
+  evidence, durably); coverage metadata (recording-since, per-node
+  first-seen + cumulative counts) survives ring eviction so "no data" is
+  distinguishable from "node never communicated" — the precondition the
+  future ghost detector requires.
+- **Controller serial-link evidence ring** and event-latched
+  `routeFailedBetween` capture (it is transient — polling misses it).
+- **Persistence is genuinely columnar** with a dirty flag and a 5-minute
+  flush (was a full rewrite every 30 s), and a unit test now ENFORCES the
+  per-node size budget.
+- **Health score fix**: a routed node's RSSI describes its last hop into the
+  controller, not the device — the Signal lane now scores routed nodes
+  neutral and never raises the weak-signal flag from last-hop RSSI.
+- `DESIGN.md` rev 2 (every review finding folded in, including the decision
+  to pull a strictly read-only driver-WS telemetry client forward to v0.13)
+  and `RESEARCH.md` gains three review-surfaced open questions (Supervision
+  SETs vs `timeoutResponse`; `routeSchemeState` unavailable on either WS;
+  the `TransmitStatus.Fail` counter path).
+- A second adversarial review of this release's own diff found 27 more
+  defects (1 high: the future-dated check ran before boot-grace, wiping the
+  coarse tier on exactly the power-blip reboot it exists to survive) — all
+  fixed with regression tests: controller-ring restore on load, backward-
+  clock-safe coarse folding, per-feed subscription retry (no duplicate
+  subscriptions), roster-seeded flap counting (first event no longer
+  swallowed), departed-node eviction (node-id reuse starts clean),
+  re-subscribe redeliveries no longer count as fresh observations, and a
+  genuinely worst-case size-budget test (honest bound: ≤80 KB/node).
+
 ## 0.11.0 — 2026-07-16
 
 Correct the TX-reliability metric so it measures the failure it names. Grounded

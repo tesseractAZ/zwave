@@ -51,9 +51,17 @@ the current TUI's `txDropPct`. Reproduced against zwave-js@15.25.3:
 
 **What the counter actually means** (zwave-js 8.8.0 changelog, verbatim):
 "updated when an outgoing command **could not be sent** to a node" — a dispatch
-failure, and it also fires on `Fail` (jammed RF where the controller couldn't
-transmit at all, which usually hits *all* nodes at once), not just per-node
-NoAck.
+failure. **Fail-path precision** *(clarified after the design review flagged an
+apparent contradiction)*: the empirical "controller-cannot-send" case above was
+`wasSent=false` — the serial command never went out, and the counter did NOT
+tick. A **NOK transmit report** carrying `TransmitStatus.Fail` (jammed RF: the
+controller transmitted into a busy channel and gave up) is a *different* path —
+the increment site (`isTransmitReport && !isOK` fed back through the message
+generator) CAN fire on it, which would typically hit *all* nodes at once. That
+Fail-report path has **not been reproduced empirically** (§7 gap) — do not
+build a jamming detector on it before the probe; if confirmed, its only
+legitimate use is a fleet-simultaneous `dDropTx` spike as mesh-level
+corroboration, never a per-node signal.
 
 **The reliable RF-failure signals instead are:**
 1. **Node status flapping Alive↔Dead** (`subscribe_node_status`) — a listening
@@ -287,9 +295,13 @@ Resort-to-Direct → Explorer frame (last resort)**.
   Z-Wave Plus mesh self-heals** without any command. `TransmitOptions.DEFAULT =
   ACK | AutoRoute | Explore`. Explorer delivery **blocks the mesh for seconds**.
 
-> **Consequence:** a node routinely reached by **explorer** (`routeSchemeState =
-> Explore`) is in the worst, highest-latency, mesh-loading state — flag it
-> distinctly. But **diagnose explorer-reliance passively** — never force
+> **Consequence:** a node routinely reached by **explorer** is in the worst,
+> highest-latency, mesh-loading state. **But `routeSchemeState` is not
+> obtainable as structured data on EITHER WS surface** *(design-review
+> verified)* — it lives on the TXReport, which is not part of NodeStatistics on
+> the HA WS *or* the driver WS; text log streaming is the only (fragile)
+> carrier. Explorer-reliance can therefore only ever be a labelled best-effort
+> log-parse enrichment, never a load-bearing detector input. And never force
 > explorer-heavy probes (`tryReallyHard` ping blocks comms for seconds).
 
 ### 2.2 Rate & `protocolDataRate` *(source)*
@@ -815,6 +827,27 @@ via n7 @ 9.6k, F+R flags, RSSI improving) and #3 South Patio Light (77, "DROP
    starvation flaw persists** in current firmware — all open.
 10. The **named observe→advise→gated-auto→auto** ladder is vendor phrasing; cite
     Google SRE's hierarchy as the formal analog (§5.2).
+
+**Added by the design review (2026-07-16) — probe before M3 hardens:**
+11. **Do Supervision-encapsulated SETs accrue `timeoutResponse`?** Load-bearing
+    and unverified — a supervised Set DOES expect a report, so either answer
+    breaks a stated assumption ("Get-only" semantics vs SET-heavy nodes being
+    invisible). Probe with the same `@zwave-js/testing` harness used for the §0
+    repro (supervised Set, swallow the Supervision Report, observe
+    `timeoutResponse` + status). Until resolved, TMO-derived symptoms carry a
+    traffic-mix caveat and the return-path narrative must not claim Get-only
+    semantics as fact.
+12. **`routeSchemeState` / per-TX-report detail** (txTicks, txChannelNo,
+    measuredNoiseFloor, routingAttempts) exists on **NEITHER** WS surface as
+    structured data — TXReport-only, text logs the sole fragile carrier
+    (§2.1). No detector may load-bear on it.
+13. **Does a `TransmitStatus.Fail` NOK transmit report increment
+    `commandsDroppedTX`?** The §0 empirical pass covered `wasSent=false` (no
+    tick) but not a Fail *report* fed back through the message generator. Probe
+    before any jamming heuristic; if confirmed, the only legitimate use is a
+    fleet-simultaneous `dDropTx` spike as mesh-level corroboration — never
+    per-node. Also probe whether HA forwards zwave-js's controller `Jammed`
+    status events — that would be the clean signal.
 
 ---
 
