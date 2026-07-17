@@ -75,6 +75,8 @@ async function main(): Promise<void> {
     lastUpdated: () => zwaveData.lastUpdated(),
     history: (n) => zwaveData.history(n),
     historyLong: (n) => zwaveData.historyLong(n),
+    symptoms: () => zwaveData.symptoms(),
+    engineStatus: () => zwaveData.engineStatus(),
   };
 
   // 4) Shared, timer-refreshed render cache both transports read.

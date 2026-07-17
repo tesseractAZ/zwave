@@ -56,10 +56,12 @@ export interface ZwaveDataSource {
    * layer is assumed to own its own polling.
    */
   pollRoutes?(): void | Promise<void>;
-  /** Engine-detected symptoms (M3), ranked; absent when the engine is off. */
-  symptoms?(): Symptom[];
-  /** Engine enabled + baseline-readiness (for the Remedy empty state). */
-  engineStatus?(): { enabled: boolean; ready: number; total: number };
+  /** Engine-detected symptoms (M3), ranked. REQUIRED so a source adapter can't
+   *  silently omit it (v0.14: it did, and the whole Remedy screen read "engine
+   *  disabled" even though the engine was running). */
+  symptoms(): Symptom[];
+  /** Engine enabled + baseline-readiness (for the Remedy empty state). REQUIRED. */
+  engineStatus(): { enabled: boolean; ready: number; total: number };
 }
 
 export interface CreateTuiDataProviderOptions {
