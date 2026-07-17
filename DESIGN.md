@@ -1,9 +1,11 @@
 # Learned Remediation Engine — Design
 
-Status: **M1 — reconciled against `RESEARCH.md` (M0, verified).** Section
-references like *(RESEARCH §0)* point at the load-bearing finding that grounds a
-decision. The research overturned one assumption in the first draft (the TX-drop
-counter — see §3.1) and that correction is now baked in.
+Status: **M1 rev 2 — post design-review.** Reconciled against `RESEARCH.md`
+(M0, verified), then adversarially attacked by a 52-agent design review before
+implementation (2026-07-16): 39 confirmed + 7 partial findings — 3 blockers —
+all folded into this revision. Section references like *(RESEARCH §0)* point at
+the load-bearing finding grounding a decision; *(DR)* marks a rule that exists
+because the design review proved its absence was exploitable.
 
 ## 1. Purpose
 
@@ -21,109 +23,237 @@ Design tenets (inherited from the ecoflow-panel engine, battle-tested there):
    which window, which baseline). No fabricated numbers: an unknown renders as
    `—`, never a guess (honest-nulls rule).
 3. **Coherence over single signals.** No detector fires off one counter. A
-   symptom requires agreeing signals (e.g. drop-rate ∧ dwell ∧ non-stale
-   roster), the lesson of the ecoflow transient-zero SoC cascade.
+   symptom requires agreeing signals (e.g. timeout-rate ∧ dwell ∧ fresh
+   evidence), the lesson of the ecoflow transient-zero SoC cascade.
 4. **Measure before/after or it didn't happen.** Every executed action gets a
    before-window snapshot and an after-window verdict. Outcomes feed learning;
-   unverifiable actions count as failures, not successes.
+   unverifiable actions never count as successes.
 5. **Collapse method, never measurement.** If an input becomes unavailable,
    the detector that needs it goes dormant and says so — it does not
    approximate from a different quantity.
 6. **Blast-radius discipline.** Per-node cooldowns, global rate limits, no
    network-wide actions on a schedule, no action on stale evidence, and flap
    suppression so the engine can never oscillate a mesh.
+7. **Confidence is part of the answer** *(DR)*. Every symptom narrative and
+   every plan candidate carries a `basis` label (measured vs inferred vs
+   lore); the UI must never render an inference or a construction-class
+   heuristic in the same voice as a measurement.
 
 ## 2. Where it sits
 
 ```
-                    HA Core WS (zwave_js/*)
-                          │
-                 zwaveData.ts (snapshots, stats subscriptions)
-                          │
-        ┌─────────────────┼──────────────────────────────┐
-        │                 │                              │
-  historyStore.ts   evidenceStore.ts (M2, NEW)     health.ts (scores)
-  (sparkline rings)  bounded per-node time-series        │
-        │                 │                              │
-        │            baselines.ts (M3, NEW)              │
-        │            per-node learned normals            │
-        │                 │                              │
-        │            symptoms.ts (M3, NEW)               │
-        │            detectors: dwell+hysteresis+provenance
-        │                 │
-        │            planner.ts (M4, NEW)  ←── outcomes.ts (M5, NEW)
-        │            symptom → ranked plan       (signature×action)→success
-        │                 │                          ▲
-        │            executor.ts (M4, NEW)           │
-        │            gates, cooldowns, before/after ─┘
-        │                 │
-        │                 ▼
+        HA Core WS (zwave_js/*)          driver WS ws://core-zwave-js:3000
+        actions + telemetry              READ-ONLY telemetry (v0.13, §2.1)
+                 │                                   │
+                 └───────────┬───────────────────────┘
+                    zwaveData.ts (snapshots, stats + node-status subscriptions)
+                             │
+        ┌────────────────────┼──────────────────────────────┐
+        │                    │                              │
+  historyStore.ts   evidenceStore.ts (M2)             health.ts (scores)
+  (sparkline rings)  fine ring + coarse tier +              │
+        │            event accumulators + coverage          │
+        │                    │                              │
+        │            baselines.ts (M3)                      │
+        │            per-node learned normals (persisted aggregates)
+        │                    │
+        │            symptoms.ts (M3)
+        │            detectors: dwell+hysteresis+provenance+basis
+        │                    │
+        │            planner.ts (M4)  ←── outcomes.ts (M5)
+        │            symptom → ranked plan    episodes (action AND no-action)
+        │                    │                          ▲
+        │            executor.ts (M4)                   │
+        │            gates, cooldowns, before/after ────┘
+        │                    │
+        │                    ▼
         │        zwaveActions.ts (EXISTING chokepoint — unchanged gate)
         │
         └────────────► TUI screens: REMEDY (M4) + INTERFERENCE (M6)
                        + Activity Log lines for every engine event
 ```
 
-The engine **only** mutates the mesh through the existing `ActionRunner`.
-`write_actions_enabled=false` therefore hard-disables the executor exactly as
-it disables the Actions Menu — one gate, two callers.
+The engine **only** mutates the mesh through the existing `ActionRunner`, and
+**all actions ride the HA WS** — the driver WS is never used for anything that
+transmits RF or mutates state. `write_actions_enabled=false` hard-disables the
+executor exactly as it disables the Actions Menu — one gate, two callers.
+
+### 2.1 Read-only driver-WS evidence client (v0.13) *(DR — pulled forward)*
+
+The design review's data-source comparison was decisive: the driver WS is a
+strict diagnostic superset of HA Core WS. Decisive driver-only items:
+**background RSSI / noise floor** (the only path to real SNR margin and the
+DrZWave jamming recipe — HA's `api.py` verifiably strips it), lifeline/route
+**health checks** (the real 0-10 rating, with the only mark-dead-safe ping),
+**neighbor tables**, **cached lifeline + priority-route reads** (the documented
+pre-rebuild safety check), node `last_seen`, and `isListening`/FLiRS flags.
+Interference monitoring — a top user priority — is *impossible* via HA alone.
+
+Therefore a **strictly read-only** driver-WS evidence client is pulled forward
+from "phase-2 someday" to **v0.13, before M3's baseline schema freezes**, under
+hard conditions:
+
+- **Closed command allowlist**: `initialize`/`set_api_schema`,
+  `start_listening` (state + statistics events incl. `backgroundRSSI`),
+  `controller.get_known_lifeline_routes`, cached priority-route reads. **NO
+  health checks, NO pings, NO route surgery, nothing that transmits RF.**
+  Active health checks stay behind the consent/quiet-window machinery M4/M5
+  build.
+- **All actions stay on HA WS** through M5 (and beyond, until a separate
+  design pass).
+- Config: `driver_ws_url` defaulting to `ws://core-zwave-js:3000`;
+  empty = disabled. Z-Wave JS UI users point it at their server or disable it.
+- **Unreachable / schema-mismatch ⇒ dependent detectors go dormant and say
+  so** (collapse method, never measurement) — never a startup failure.
+- Pin `schemaVersion ≥ 32` (command renames at 32); refuse outside the tested
+  range, log the negotiated schema.
+- The socket is unauthenticated: treat it as privileged, **never proxy or
+  re-expose it** (not to the TUI, not to ingress, not to logs verbatim).
+
+The M2 evidence schema **reserves fields now** for what v0.13 will feed
+(per-channel `bgRssi` in controller samples; per-node `lastSeen`,
+`isListening`) so the client lands without a schema migration or baseline
+re-learn.
 
 ## 3. Module contracts
 
-### 3.1 `evidenceStore.ts` (M2)
+### 3.1 `evidenceStore.ts` (M2 — reworked per DR)
 
 Persistent, bounded, per-node time-series on `/data`, following the
-`historyStore.ts` discipline (atomic temp+rename, schema `v`, `savedAt`
-staleness cap, host-boot grace for no-RTC clocks).
+`historyStore.ts` discipline (atomic temp+rename, schema `v`, host-boot grace
+for no-RTC clocks) — plus the disciplines the design review proved necessary:
 
-Per node, ring-buffered samples at the route-poll cadence (default 10 s),
-downsampled to a coarse tier for multi-day horizons:
+**Two tiers, both M2 exit criteria** *(DR blocker: baselines had no substrate)*:
 
-| series | source | why *(RESEARCH ref)* |
+- **Fine ring**: one sample per node per route-poll tick (default 10 s),
+  ~40 min horizon — feeds recent-window detectors and the after-window
+  verifier.
+- **Coarse tier**: 30-minute buckets × 14 days per node — feeds baselines
+  (bands are multi-hour; 30 min resolution is ample). Each bucket: sample
+  count, fresh count, invalid-window count, Σ of each valid delta, flap +
+  route-change counts, min/sum/max of *fresh* rssi + rtt, min rate. Staleness
+  is **per-tier**: the 1 h `maxAge` applies to the fine ring only; coarse
+  buckets are pruned individually to the 14-day horizon. A 3-day-old coarse
+  bucket is valid history, not stale state. Under **boot-grace** (untrusted
+  clock) the coarse tier and coverage metadata still load — only the
+  recency-dependent fine ring is discarded; a daily power blip must not wipe
+  two weeks of baseline substrate.
+
+**Per-sample shape** (fine tier):
+
+| field | source | why *(ref)* |
 | --- | --- | --- |
-| `timeoutResponse` Δ | node stats delta / window | **primary degradation signal** — ACKed Get whose report was lost; node stays Alive *(§0)* |
-| `statusFlaps` | alive↔dead transitions | **the hard RF-failure event** — a listening node that fails all retries goes DEAD *(§0, §3.7)* |
-| `droppedTX` Δ | node stats delta / window | **weak/noisy** — does NOT count RF ACK drops; log in context only, never alarm alone *(§0)* |
-| `rtt` | node stats (EMA) | latency trend (≈ health-check latency) |
-| `rssi` | node stats (per-command ACK) | signal trend — **branch on `repeaters.length`**: routed ⇒ last-hop RSSI, not the device *(§1.3)*; drop sentinels ≥125 *(§1.11)* |
-| `rateKbps` | LWR `protocolDataRate` | rate-fallback flag (rule out 100-series/FLiRS/beam first) *(§2.2)* |
-| `routeKey` | hash of LWR repeaters | route-churn / scheme detection *(§2.1)* |
-| `routeFailedBetween` | LWR (event-driven) | names the failing hop — **transient, capture on appearance** *(§2.3)* |
-| `rxReportRate` | commandsRX delta / window | chatty-device (traffic-hygiene) outlier detection *(§4.7)* |
+| `dTx dTimeout dDropTx dRx` | counter deltas w/ guards | rate math; dTimeout is the primary signal *(§0)* |
+| `dFlaps` | **event-driven accumulator** from `zwave_js/subscribe_node_status`, drained per sample | the hard RF-failure event — level-sampling misses sub-window flaps *(DR)* |
+| `dRouteChanges` | accumulator from the existing route-change diff | route churn *(§2.1)* |
+| `fresh` | did a stats event arrive since the previous sample? | pseudo-replication guard: EMAs re-sampled without new events carry no information *(DR)* |
+| `rtt`, `rssi` | node stats (EMA; sentinels ≥125 ⇒ null) | trend — **meaningful only when `fresh`** *(§1.11, DR)* |
+| `rateKbps`, `routeKey` | LWR | rate-fallback + churn *(§2.2)* |
+| `status` | roster level at capture | dwell context only — **never diffed for flaps** *(DR)* |
+| `lastSeen`, `bgRssi[ch]`, `isListening` | **reserved** (null until v0.13) | schema stability *(§2.1)* |
 
-**Counter discipline** *(§0, §1.11)*: `commandsTX` counts **successful** sends
-only, and the counters are **cumulative since driver start**. The store keeps
-`(t, counterSnapshot)` pairs and derives per-window deltas with a **reset guard**
-(counter went backwards ⇒ driver restarted ⇒ window invalid, skip; never negative
-rates). The composite the old TUI shows as "DROP %" is *timeouts-over-successes*,
-**not** an attempt-failure rate — the engine surfaces the raw components, not one
-misleading %.
+Separately, a small per-node **route-failure ring** captures
+`routeFailedBetween` event-driven at the moment it appears (it is transient —
+overwritten on the next OK transmission, §2.3), never by polling.
 
-**Reachability caveats, from the live probe (HA 2026.7.2)** *(§3.2, §3.3, §7)*:
-neighbor tables, **background RSSI/SNR**, lifeline/route health checks, and
-priority routes are **not exposed** by HA Core WS — driver-WS-only
-(`ws://core-zwave-js:3000`), deferred to a later phase. So **SNR/noise features
-are phase-2**; M2–M6 build on passive stats only. `invoke_cc_api` *is* reachable
-but a NOP ping through it **can mark a flaky node DEAD** (can't pass
-`changeNodeStatusOnMissingACK:false`) — consented + rate-limited, never a
-background poller *(§3.4)*. **Open probe before M3:** confirm HA's node-statistics
-event actually serializes the nested `lwr/nlwr` objects *(§7 #1)*.
+**Counter discipline** *(§0, §1.11, DR)*:
 
-Controller-level series (one, not per-node): controller stats deltas
-(NAK/CAN/timeouts), plus `bgRssi` per channel if available — the
-interference watch (M6) reads these.
+- Counters are cumulative since driver start; deltas come from `(t, snapshot)`
+  pairs.
+- **Whole-window invalidation**: if ANY counter moved backwards, ALL deltas
+  for that sample are null — one driver, one restart, one shared lifetime.
+  (Per-field nulling let cross-lifetime deltas through.)
+- **Max-window bound**: if the gap since the previous sample exceeds ~3× the
+  cadence, all deltas null and the window re-baselines — long gaps are not
+  time-attributable.
+- **Plausibility bound**: a delta exceeding what Z-Wave's shared ~10–20 msg/s
+  bandwidth could physically carry in the window ⇒ null + log. This is the
+  backstop against fabricated deltas (e.g. a malformed event coerced to 0
+  becoming a full-lifetime delta on the next sample).
+- **Counters are validated at the source**: `onNodeStats` rejects an event
+  whose counter fields are missing/non-finite rather than coercing to 0 — the
+  coercion was the fabrication path.
+- `null` means "cannot know this window" — absence of evidence, never
+  evidence of health.
 
-Bounds: fixed ring sizes chosen so worst-case file size stays < ~1 MB for a
-232-node mesh; save cadence piggybacks on the existing debounced saver.
+**Integrity + coverage** *(DR)*:
 
-### 3.2 `baselines.ts` (M3)
+- The persisted envelope carries the controller **`homeId`**; on the first
+  poll that reveals the live home id, a mismatch discards restored evidence
+  (and `reset()` immediately rewrites the on-disk file, so a crash cannot
+  resurrect the old network's rings).
+- **Coverage metadata** that survives ring eviction and restarts: store-level
+  `recordingSince`, per-node `firstSampleAt` + cumulative sample/fresh
+  counts. "No evidence rows" must be distinguishable from "node never
+  communicated" — the ghost detector depends on this (§3.5).
+- **Wedge guard**: when the roster/stats feed itself is stale (no successful
+  poll within ~2× the refresh cadence), sampling **skips the tick** — a gap in
+  the ring is honest; a fabricated healthy window is not. The shutdown flush
+  saves but does not synthesize a fresh-timestamped sample from stale caches.
+- Per-node statistics subscriptions are **retried** on failure, not
+  fire-and-forgotten; subscription state is part of coverage.
 
-Per-node learned "normal" for each series: robust location/scale
-(median + MAD, not mean/σ — drop distributions are heavy-tailed), split by
-**time-of-day band** (interference is diurnal; a baby monitor at night must
-not poison the daytime baseline). Minimum-evidence rule: no baseline until
-N windows observed; detectors that compare-to-baseline stay dormant and say
-`learning (n/N)` — never compare against a fabricated prior.
+**Controller ring** (one, not per-node): controller serial-link stats
+(NAK/CAN/timeoutACK/timeoutResponse/messages) through the same delta+guard
+path, with reserved per-channel `bgRssi` fields (v0.13) — the interference
+watch (M6) and the controller-degraded detector read these.
+
+**Bounds, enforced not asserted** *(DR)*: on-disk format is genuinely columnar
+(parallel arrays per field per node); rtt rounded; all-quiet coarse buckets are
+omitted (a missing bucket = no fresh observations, which is exactly what it
+contributes to a baseline). Honest math (re-measured after the
+review caught the first estimate under-populating columns): worst case ≤ 80 KB/
+node serialized (fine 240×10 s + coarse 672×30 min, every column at maximal
+width), so **≈3 MB for a 39-node mesh, scaling linearly** (a 232-node mesh
+≈ 19 MB on /data — bounded and documented, not the old aspirational "1 MB"
+which the review showed was arithmetic fiction; typical real files run far
+smaller thanks to sparse buckets and quiet columns). A unit test enforces the
+per-node worst case. Flushes are dirty-flagged on a ~5-minute
+cadence plus shutdown — not a fixed full-file rewrite every 30 s (SD-card write
+amplification).
+
+### 3.2 `baselines.ts` (M3 — statistics specified per series, DR)
+
+Per-node learned "normal", split by **time-of-day band** and — for rssi/rtt —
+**stratified by `routeKey`** (a route change legitimately shifts both; a
+mixture baseline both false-fires on benign re-routes and mask-inflates MAD).
+Baselines are **persisted aggregates** (incremental quantile structures per
+node × series × band), updated once per aggregation window, in the same
+schema-versioned envelope — they must survive restarts and outages; the raw
+fine ring's 1 h staleness cap does NOT apply to them.
+
+**The statistic is per-series — one formula does not fit** *(DR)*:
+
+| series class | statistic | degenerate-case rule |
+| --- | --- | --- |
+| counting (dTimeout, dDropTx, flaps, route changes) | **rate over an aggregation window with a minimum-traffic denominator** (Σd/ΣdTx over ≥T min, ΣdTx ≥ D), tested with a Poisson/binomial tail | mostly-zero series ⇒ MAD is 0 by construction — never use location/scale on counts |
+| continuous (rssi, rtt) | median + MAD over **fresh samples only** | **MAD floor tied to instrument precision** (≥3 dB rssi, ≥1 EMA step rtt — §1.11); MAD below floor ⇒ "insufficient dispersion evidence", never infinite precision |
+| discrete (rateKbps, routeKey) | categorical change/dwell detection | never location/scale |
+
+**Honest learning units** *(DR)*: minimum-evidence counts **independent
+observations** — windows containing actual traffic (`fresh` / dTx > 0), with
+coverage across ≥K distinct days per band — never raw 10 s snapshots (which
+are ~99% autocorrelated duplicates of driver EMAs). The dormant state renders
+as `learning: 3/7 days × active windows`, and detectors stay dormant until
+their band graduates.
+
+**Baseline lifecycle** *(DR)*:
+
+- **Quarantine**: windows inside an active symptom's dwell are excluded from
+  baseline updates — the baseline must not chase the pathology. Quarantine is
+  bounded: after K weeks of continuous symptom, force a logged re-baseline
+  rather than diverge forever.
+- **Decay**: aggregates decay with a stated half-life so improvements are
+  absorbed deliberately, not never.
+- **Forced re-baseline triggers**, each logged: routeKey change (for
+  rssi/rtt strata), re-interview, `replace_failed_node` (node-id reuse means a
+  different physical device), controller home-id change.
+
+**Division of labor — written down** *(DR)*: the health score answers "how is
+this node NOW, in absolute terms"; relative detectors answer "did it CHANGE
+from its own normal"; the **chronic-absolute detector** (§3.3) bridges the gap
+a compare-to-own-baseline engine cannot see — a node that has been bad since
+inclusion. All three surface on REMEDY; none substitutes for another.
 
 ### 3.3 `symptoms.ts` (M3)
 
@@ -131,181 +261,220 @@ Pure functions `(evidence, baselines) → Symptom[]`. Each symptom:
 
 ```ts
 interface Symptom {
-  kind: SymptomKind;            // e.g. 'drop-anomaly', 'route-churn', ...
+  kind: SymptomKind;
   nodeId: number | null;        // null = mesh/controller-scoped
   severity: 'watch' | 'warn' | 'crit';
   sinceMs: number;              // dwell start
   evidence: EvidenceRef[];      // provenance: series+window+values
+  basis: 'measured' | 'inferred'; // is this observed or a diagnosis-of-exclusion? (DR)
+  subsumedBy?: string;          // active mesh-event id demoting (not deleting) this row (DR)
   narrative: string;            // one-line technician-grade explanation
 }
 ```
 
-Initial detector set (thresholds reuse the zwave-js health-check rubric verbatim
-where one exists — §3.5, so our scores match Z-Wave JS UI):
+Initial detector set (thresholds reuse the zwave-js health-check rubric
+verbatim where one exists — §3.5):
 
-| kind | fires when (sketch) | confound it must reject *(RESEARCH ref)* |
+| kind | fires when (sketch) | confound it must reject *(ref)* |
 | --- | --- | --- |
-| `return-path-degraded` | windowed `timeoutResponse` rate ≫ own baseline, dwell ≥ D, min Get traffic | tiny-sample spikes; SET-only nodes (never accrue) *(§0)* |
-| `dead-flap` | ≥ K alive↔dead transitions/window | driver restart (reset guard); silent node ≠ healthy *(§0, §3.7)* |
-| `rate-fallback` | sustained LWR < 100k where baseline was 100k **and** no 100-series/FLiRS/beam hop in path | legacy/FLiRS capability cap; single-exchange retry *(§2.2)* |
-| `route-churn` | distinct routeKeys/window ≫ baseline, or `routeSchemeState=Explore` | one legit re-route after topology change *(§2.1)* |
-| `rtt-degraded` | RTT median ≫ baseline with dwell | asleep/FLiRS wake latency; EMA lag *(§1.11)* |
-| `weak-signal` | low RSSI **on a direct (non-routed) node** + drop/timeout | routed node (RSSI = last hop, not device) *(§1.3)* |
-| `chatty-device` | `rxReportRate` ≫ mesh median (orders of magnitude) | normal reporter; S0 3×-airtime inflation *(§4.7)* |
-| `ghost-suspect` | node failed/dead with no successful-comms history | asleep battery within 2× wake interval *(§4.4, §4.6)* |
+| `return-path-degraded` | windowed per-command timeout **rate** (ΣdTimeout/ΣdTx, min denominator) ≫ own baseline, dwell ≥ D | tiny samples; traffic-volume shifts (rate not count — DR); SET-only nodes *(§0)*; carries a Get-mix caveat until the Supervision question is resolved *(RESEARCH §7)* |
+| `chronic-return-path` | per-command timeout rate above the **absolute** health-check-rubric threshold, sustained D days — baseline-independent | the bad-since-inclusion node invisible to relative detectors *(DR)* |
+| `dead-flap` | ≥ K transitions/window from the **`dFlaps` event counter** — never from diffing the status column | driver restart (reset guard); silent node ≠ healthy *(§0, DR)* |
+| `quiet-node` | mains **listening** node whose last-activity age ≫ its own learned reporting cadence — emits honest "unreachability unknown, no traffic attempted" (state ≠ healthy) | battery/FLiRS within wake interval; nodes with no learned cadence yet *(DR; §3.7)* |
+| `rate-fallback` | the **same routeKey** that previously sustained 100k now persistently below 100k — same-route regression needs no capability data *(fail-closed: cross-route comparison excluded until driver-WS capability data exists — DR)* | legacy/FLiRS capability cap; single-exchange retry *(§2.2)* |
+| `route-churn` | routeKey churn ≫ baseline + rate/RTT corroboration (**routeSchemeState does not exist on either WS — dropped**; explorer detection only ever as a labelled best-effort log parse) | one legit re-route after topology change *(§2.1, DR)* |
+| `rtt-degraded` | RTT median over **fresh** samples ≫ route-stratified baseline, dwell | route change (settle window); EMA lag; wake latency *(§1.11, DR)* |
+| `weak-signal` | low RSSI **on a direct (non-routed) node** + timeout corroboration | routed node (RSSI = last hop, not the device) *(§1.3)* |
+| `diurnal-degradation` | a node's band median vs its own other-band medians AND vs the mesh same-band norm — persistent night-vs-day asymmetry | time-of-day banding otherwise makes recurring diurnal interference *permanently invisible* — the banding rationale, inverted *(DR)* |
+| `chatty-device` | dRx rate ≫ mesh median (orders of magnitude) | normal reporter; S0 3×-airtime *(§4.7)* |
+| `ghost-suspect` | requires **proven coverage**: store recording the node ≥N days with live subscriptions, zero successful comms AND zero non-dead status in that span; a young/empty store yields `insufficient history (n/N days)`, never a ghost verdict | rarely-woken battery node; store just wiped; subscription failure *(DR blocker)* |
 | `controller-degraded` | rising controller NAK/CAN/timeoutACK (serial link) | one node's RF problem *(§2.11)* |
-| `mesh-correlated` | ≥ M nodes degrade in the SAME window (the correlation gate) | N coincidental independent faults *(§5.4)* |
-| `edge-cluster` | persistent degradation on nodes that co-move with each other but not the mesh | coincidence — requires sustained correlation *(§6)* |
+| `mesh-correlated` | breadth over **nodes-with-observable-traffic-in-window** (≥30–40% of active nodes, never an absolute K), sustained ≥2–3 consecutive windows, or corroborating controller-stats degradation | pipeline artifacts: post-gap windows are invalid for correlation (queued deltas aren't time-attributable); single-window unanimity after silence is evidence about the pipeline, not the mesh *(DR)* |
+| `edge-cluster` | a **small correlated subset** with shared-signature evidence: shared repeater/`routeFailedBetween` hop, same-band co-movement, co-onset — the explicit tier between per-node and mesh-level | coincidence (two nodes breaching different metrics at unrelated hours) *(§6, DR)* |
 
-**The correlation gate runs first** *(§5.4)*: if `mesh-correlated` or
-`controller-degraded` fires, **per-node symptoms are suppressed** and the engine
-reports a single mesh-level event (interference / controller / flooding) — never
-N independent node problems. Dwell + hysteresis on every detector (fire after
-sustained breach, clear only below a lower release threshold). All detectors gate
-on **evidence freshness**: stale roster or WS-reconnect windows produce no new
-symptom state (restart-continuation suppression, as in ecoflow). Every RSSI read
-rejects sentinels ≥ 125 and every counter read applies the reset guard.
+**Detection vs advice — two layers, never conflated** *(DR)*:
+
+- **Detection/evidence**: every detector always computes; dwell accumulates
+  from the evidence store continuously and is **never reset, paused, or
+  suppressed** by another symptom's state.
+- **Advice/presentation**: when a mesh-level event is active, per-node
+  symptoms are still emitted but annotated `subsumedBy` — the planner and TUI
+  demote them, never delete them. `edge-cluster` reads the evidence store and
+  per-node detector state directly, never the post-gate symptom list.
+
+**Mesh-level disambiguation is a ladder, not a label** *(DR)* — evidence
+strength first, and never two mesh-scoped symptoms at once:
+
+1. **controller-degraded** (direct serial-link counters — deterministic
+   evidence) wins and subsumes mesh-correlated;
+2. **flooding** — a `chatty-device` whose dRx outlier onset precedes/coincides
+   with the fleet degradation; the chatty symptom is a CAUSE hypothesis and is
+   **exempt from suppression by construction**; advice targets the offender;
+3. **interference** — the explicit residual, `basis: 'inferred'`, severity
+   capped at `warn`, and the narrative must state "no noise-floor measurement
+   available (arrives with the driver-WS client)" until v0.13 corroboration
+   exists.
+
+The mesh gate has its own dwell plus an RFC-2439-style decaying-penalty hold
+with burst-tolerant thresholds *(§5.3)*: a duty-cycled interferer produces ONE
+sustained mesh event with a duty-cycle annotation — one Activity Log line at
+open, one at close, flap count folded in.
+
+Every RSSI read rejects sentinels ≥125; every counter read honors null
+windows; rssi/rtt ingestion uses **fresh samples only**.
 
 ### 3.4 `planner.ts` (M4)
 
-`(Symptom, OutcomeLedger) → Plan` — a ranked list of candidate actions with
-expected efficacy and cost:
+`(Symptom, OutcomeLedger) → Plan` — a ranked list of candidates:
 
 ```ts
 interface Plan {
   symptom: Symptom;
   candidates: Array<{
     action: ActionKind;              // from actionsCatalog — no new verbs
-    rationale: string;               // grounded in RESEARCH.md causal table
-    expectedEfficacy: number | null; // learned; null until enough outcomes (honest null)
-    cost: 'safe' | 'caution' | 'disruptive';
+    rationale: string;               // grounded in the RESEARCH causal table
+    basis: 'spec' | 'source' | 'empirical' | 'lore' | 'learned'; // worst-of when chained (DR)
+    expectedEfficacy: number | null; // null until it beats the no-action arm (§3.6)
+    cost: 'safe' | 'caution' | 'disruptive' | 'destructive';
     blocked?: string;                // why it can't run now (cooldown, gate, stale)
   }>;
 }
 ```
 
-The symptom→action causal table is grounded in RESEARCH and ordered by the
-spec-backed remediation sequence *(§4.3)*: **controller/interference → ghost
-cleanup → traffic hygiene → repeater/placement → targeted rebuild (topology
-change only) → mesh-wide rebuild (last resort)**. Key priors:
+The REMEDY screen must render `basis` (e.g. *likely — construction-class
+heuristic* vs *confirmed — driver behavior*); **no numeric dB claims in any
+rationale template** (M7 ships a lint for this). The causal table is
+machine-readable and keyed to RESEARCH sections.
 
-| symptom | first-line recommendation | explicitly NOT | why *(RESEARCH ref)* |
+| symptom | first-line recommendation | explicitly NOT | why *(ref)* |
 | --- | --- | --- | --- |
-| return-path-degraded, good RSSI, edge-wall | **repeater placement** (interior path) | rebuild | rebuild can't fix a physically bad link and can regress a working LWR *(§4.1, §6)* |
-| rate-fallback (100k-capable path) | repeater / relocate | rebuild-first | 9k6 = degraded route, not a routing-table bug *(§2.2)* |
+| return-path-degraded, good RSSI, edge-wall | **repeater placement** (interior path) — basis: lore | rebuild | rebuild can't fix a physically bad link *(§4.1, §6)* |
+| rate-fallback (same-route regression) | repeater / relocate | rebuild-first | 9k6 = degraded route, not a routing-table bug *(§2.2)* |
 | route-churn **with topology-change evidence** | targeted `rebuild_node_routes` | scheduled/mesh-wide rebuild | rebuild helps *only* on topology change *(§4.1, §4.2)* |
-| ghost-suspect | `remove_failed_node` (verify `isFailedNode`) | rebuild a dead node | ghosts poison routes; unreachable nodes can't be rebuilt *(§4.4, §4.6)* |
-| chatty-device | tune reporting / re-include S2 | any RF remedy | traffic floods the mesh; fix the cause *(§4.7)* |
-| controller-degraded / mesh-correlated | USB-2 extension, relocate stick, check interference | per-node action | fleet symptom ⇒ controller side *(§4.5, §5.4)* |
-| dead-flap | reachability runbook (ping→power-cycle→re-include) | rebuild | rebuild's first step queries the node — a dead node can't be repaired *(§4.4)* |
+| ghost-suspect (coverage-proven) | `remove_failed_node` — **advise-only, always type-CONFIRM** | rebuild a dead node; any auto path | destructive; the removal attempt is itself the only in-band verification *(§4.4, DR)* |
+| chatty-device / flooding | tune reporting / re-include S2 | any RF remedy | traffic floods the mesh; fix the cause *(§4.7)* |
+| edge-cluster | shared-path diagnosis: repeater/placement for the cluster | treating as N independent faults, or as mesh-wide | the patio-pair case *(§6, DR)* |
+| controller-degraded | USB-2 extension, relocate stick | per-node action | serial-link symptom ⇒ controller side *(§4.5)* |
+| mesh-correlated (interference residual) | environment survey; driver-WS noise floor when available | per-node actions | inferred-by-exclusion until measured *(DR)* |
+| quiet-node | consented, rate-limited ping (never background) | marking unhealthy outright | absence of traffic ≠ absence of node *(§3.4, DR)* |
+| dead-flap | reachability runbook (ping→power-cycle→re-include) | rebuild | a dead node can't be repaired *(§4.4)* |
 
-**Hard gates in the planner** *(§8)*: a **protocol predicate** removes all
-route/repeater/priority candidates for **LR nodes** (rebuild *throws* on them);
-rebuild candidates require **topology-change evidence** and carry the
-**"may delete manual priority routes"** warning unconditionally (HA can't read
-cached priority routes). Learned outcomes reweight priors per mesh *(§3.6)*, gated
-by minimum-evidence (a 39-node mesh has almost no statistical power — §5.1).
+**Hard gates in the planner**: protocol predicate removes route/repeater/
+priority candidates for **LR nodes** (rebuild *throws*); rebuild candidates
+require **topology-change evidence** and carry the **"may delete manual
+priority routes"** warning until v0.13's cached-route read replaces it with a
+real check; learned reweighting only after §3.6's controls are met.
 
-The planner is **pure and always-on** — it powers the advisory REMEDY screen even
-when execution is fully disabled.
+The planner is **pure and always-on** — it powers the advisory REMEDY screen
+even when execution is fully disabled.
 
 ### 3.5 `executor.ts` (M4)
 
 The only module that calls `ActionRunner`, behind stacked gates:
 
 1. `write_actions_enabled` (existing master gate).
-2. `auto_remediation: list(off|advise|auto_safe)` — new option, default `off`.
-   `advise` = plans surface in TUI + log; human executes via the Actions Menu
-   type-CONFIRM path. `auto_safe` = engine may auto-execute **SAFE-tier only**.
-   **Tiering, fixed by research** *(§3.8, §4.1, §5.5)*: **`rebuild_node_routes`
-   is disruptive and priority-route-destroying — it is NEVER auto-tier**, on any
-   setting; likewise anything network-wide or destructive. `refresh_values` /
-   `remove_failed_node`(verified ghost) may be `auto_safe`; even a NOP **ping is
-   NOT background-safe** (it can flip a marginal node to DEAD — §3.4), so it is
-   consented + rate-limited, not an idle poller.
-3. **Protocol predicate** — LR nodes: route/repeater/priority candidates removed
-   (they *throw*) *(§1.10)*.
-4. **Topology-change precondition** for any rebuild candidate; **empty/degenerate
-   node-selection refuses** (Diskerase lesson — §5.2).
-5. Per-node cooldown (same action ≤ 1× / `engine_cooldown_hours`, default 24 h)
-   + **exponential backoff** per node *(§5.3)*.
-6. Global budget: ≤ `engine_max_actions_per_hour` mesh-wide **and** a daily cap;
-   **one action in flight per mesh** (the driver serializes anyway — §3.6).
-7. Evidence freshness — no action on stale inputs; **quiet abort** on any WS
-   wedge/reconnect *(restart-continuation)*.
-8. **Busy-mesh precondition** — no diagnostic/rebuild while a chatty device or
-   command burst floods the mesh (results would be invalid anyway — §3.5, §4.7).
-9. **Battery/FLiRS guard** — no test-frame/active-link action against battery or
-   FLiRS nodes; per-node actions on sleeping nodes **queue until next wake**, and
-   their after-windows key off the next wake report, not a clock *(§4.6, §5.5)*.
+2. `auto_remediation: list(off|advise|auto_safe)` — default `off`. `advise` =
+   plans surface in TUI + log; human executes via type-CONFIRM. **`auto_safe`
+   = refresh-class reads only** (`refresh_values`). *(DR blocker resolved:)*
+   **`remove_failed_node` is destructive and NEVER auto-tier** — it is
+   advise-only behind type-CONFIRM, requires §3.3's coverage-proven ghost
+   evidence, and `isFailedNode` is **not queryable via HA WS**: the removal
+   attempt is the only in-band verification, which is precisely why it can
+   never be automated. A driver refusal (node responded) is recorded as
+   **diagnosis refuted**, not action failure (§3.6). `rebuild_node_routes`
+   stays NEVER auto-tier; ping is consented + rate-limited, never a background
+   poller *(§3.4)*.
+3. **Protocol predicate** — LR nodes: route/repeater/priority candidates
+   removed *(§1.10)*.
+4. **Topology-change precondition** for any rebuild; **empty/degenerate
+   node-selection refuses** (Diskerase — §5.2).
+5. Per-node cooldown (≤1× / `engine_cooldown_hours`, default 24 h) +
+   exponential backoff *(§5.3)*.
+6. Global budget: ≤ `engine_max_actions_per_hour` + a daily cap; **one action
+   in flight per mesh** *(§3.6)*.
+7. Evidence freshness — no action on stale inputs; quiet abort on WS
+   wedge/reconnect.
+8. **Busy-mesh precondition** — no diagnostic/rebuild while flooding is
+   active *(§3.5, §4.7)*.
+9. **Battery/FLiRS guard** — no test-frame actions against battery/FLiRS
+   nodes; sleeping-node actions queue until wake; their after-windows key off
+   the next wake report *(§4.6, §5.5)*.
 10. **`backup_nvm` pre-step** before any disruptive action *(§3.8)*.
-11. **Act while the user is awake** (quiet *traffic* window ≠ 2 am) so breakage is
-    noticed — the nightly-heal precedent failed partly on this *(§5.2)*.
+11. **Act while the user is awake** (quiet *traffic* window ≠ 2 am) *(§5.2)*.
 
-Execution protocol: snapshot before-window stats → act via ActionRunner →
-wait settle period → measure after-window → emit `Outcome`. Every step is a
-line in the Activity Log (source `engine`), so the existing Log screen is the
-complete audit trail for free. Route rebuilds are observed (not
-fire-and-forget) via `zwave_js/subscribe_rebuild_routes_progress`
-(live-probed present on HA 2026.7.2) — the after-window starts when the
-rebuild *finishes*, not when it's requested.
+Execution protocol: before-window snapshot → act via ActionRunner → settle →
+after-window → `Outcome`. Every step is an Activity Log line (source
+`engine`). Rebuilds are observed via `subscribe_rebuild_routes_progress`
+(live-probed) — the after-window starts when the rebuild *finishes*. An
+after-window without fresh evidence (wedge, no traffic) yields
+**`unverifiable`**, never `improved` *(DR)*.
 
-### 3.6 `outcomes.ts` (M5)
+### 3.6 `outcomes.ts` (M5 — episodes, not just actions; DR)
 
-Ledger of `(symptomSignature × action) → {attempts, successes, lastAt}` with
-exponential decay (old outcomes fade; a mesh changes when furniture moves).
-Success = the symptom's own metric improved past its release threshold in the
-after-window *and stayed there* through a confirmation window (no
-regression-flap). Persisted in the evidence store file, same schema-versioned
-envelope. Minimum-attempts rule before `expectedEfficacy` is non-null.
+The ledger records **every symptom episode**, action taken or not — the
+no-action episodes are the control arm the learned layer cannot be honest
+without:
 
-Signature = `(symptom.kind, coarse context)` — context bands, not raw node
-ids, so learning transfers across similar nodes but a pathological node can't
-poison the global prior. **Ship static spec-derived playbooks first, learn
-second** *(§5.1)*: a 39-node mesh has almost no statistical power, and no public
-Z-Wave heal-efficacy data exists to calibrate against — so learned re-ranking
-only overrides a prior once minimum-attempts is met, and the honest verdict set
-is `improved | no-change | worse` (the ledger must catch the rebuild-made-it-
-worse case the docs predict — §4.1).
+- **Verdicts**: `improved | no-change | worse | refused-misdiagnosis |
+  unverifiable`. A driver refusal (removeFailedNode throws on a responsive
+  node; rebuild returns false; progress reports `skipped`) writes
+  `refused-misdiagnosis` keyed to the **symptom** — incrementing a
+  per-detector false-positive counter that raises that detector's evidence
+  bar — and never touches the action's efficacy stats.
+- **Spontaneous-recovery base rate** per symptom kind, measured from
+  episodes that resolved with no action. Collecting this during M3's
+  advisory-only weeks is an **explicit M3 deliverable** (the patio lights
+  healing on their own is exactly this datum).
+- **Success** = the symptom's own *per-command rate* (never a count) improved
+  past its release threshold in the after-window, stayed through a
+  confirmation window, **exceeded the base rate by a minimum effect size**,
+  and the after-window's traffic composition was comparable to the before
+  (dTx and dRx within a factor band) — otherwise `unverifiable` *(DR:
+  traffic-mix shifts must not poison stats in either direction)*.
+- `expectedEfficacy` stays null until the action **beats the no-action arm**
+  — not merely until minimum-attempts — and renders with its n and a
+  "not distinguishable from self-healing" state.
+- Exponential decay; signature = `(symptom.kind, coarse context)` bands.
 
 ### 3.7 TUI surfaces (M4 advisory + M6 interference)
 
-- **REMEDY screen** (`E` key): symptom list ranked by severity — each row
-  expandable to evidence, causal narrative, candidate actions with learned
-  efficacy, and (when actionable) a jump into the existing type-CONFIRM
-  modal. Uses `chrome.ts frame()` like every other screen.
+- **REMEDY screen** (`E`): symptoms ranked by severity — chronic-absolute rows
+  rank alongside anomalies *(DR)*; each row expands to evidence, narrative
+  with `basis`, candidates with efficacy (or "not distinguishable from
+  self-healing"), and the type-CONFIRM jump. Subsumed rows render demoted
+  under their mesh event, not hidden.
 - **INTERFERENCE screen** (M6): correlated-degradation matrix, time-of-day
-  degradation heatmap per node band, the edge-cluster view (nodes whose symptoms
-  co-move — the patio-lights pattern), and controller serial-link health. Read-
-  only. **Background-RSSI/noise-floor trend is phase-2-gated** — HA drops
-  `background_rssi` at its WS boundary *(§1.5, §7)*, so M6 v1 infers interference
-  from correlated timeout/rate/status signals; a real noise floor arrives only
-  with the driver-WS phase or an upstream HA PR.
+  heatmap rendering **raw windowed rates, never baseline-relative scores**
+  *(DR: banded baselines are blind to recurring diurnal interference by
+  construction — the heatmap is the human's view of what the bands absorbed)*,
+  the edge-cluster view, controller serial-link health, and — once v0.13
+  lands — the real per-channel background-RSSI floor trend.
 
 ## 4. Config surface (additions, all safe-defaulted for strangers' meshes)
 
 ```yaml
 auto_remediation: off        # off | advise | auto_safe   (list())
 engine_enabled: true          # detectors + advisory always-on compute
+driver_ws_url: "ws://core-zwave-js:3000"  # read-only telemetry; empty = disabled (v0.13)
 # advanced:
 engine_cooldown_hours: 24     # int(1,168) per-node same-action cooldown
 engine_max_actions_per_hour: 2  # int(1,10) global engine-initiated cap
 ```
 
-Everything else (dwell windows, thresholds) ships as tuned constants —
-options only for the knobs a stranger genuinely needs (shareability rule:
-nothing house-tuned in defaults).
+Everything else (dwell windows, thresholds, bands) ships as tuned constants —
+options only for knobs a stranger genuinely needs.
 
 ## 5. Milestones
 
 | | ships | proves |
 | --- | --- | --- |
-| M2 | evidenceStore + counter-delta discipline + tests | evidence is trustworthy across restarts/resets |
-| M3 | baselines + detectors + REMEDY advisory screen | symptoms are right (weeks of advisory validation) |
-| M4 | planner + executor in `advise` mode + gates | recommendations are grounded + auditable |
-| M5 | outcome ledger + learned efficacy + `auto_safe` | the loop actually learns; automation stays inside SAFE tier |
-| M6 | interference watch screen | correlated/diurnal interference is visible |
-| M7 | docs + defaults audit | safe for other users' meshes |
+| M2 (v0.12) | reworked evidence substrate: fine+coarse tiers, event-driven flaps/route accumulators, freshness, homeId binding, coverage metadata, controller ring, columnar persistence w/ size test | evidence is trustworthy across restarts/resets/wedges — every DR substrate finding closed |
+| v0.13 | read-only driver-WS evidence client (§2.1) | noise floor + last_seen + capability flags feed the reserved schema before baselines learn |
+| M3 | baselines (per-series statistics) + detectors + REMEDY advisory | symptoms are right — detectors arm only after their bands graduate (days × active windows); base-rate collection starts |
+| M4 | planner + executor in `advise` mode + gates | recommendations grounded + auditable, with `basis` labels |
+| M5 | episode ledger + learned efficacy + `auto_safe` (refresh-class only) | the loop learns honestly against a no-action control arm |
+| M6 | interference watch screen | correlated/diurnal interference visible; measured, not inferred, once v0.13 feeds it |
+| M7 | docs + defaults audit (incl. the no-dB-numbers lint) | safe for other users' meshes |
 
-Each lands as its own `vX.Y` (v0.11+), typecheck+tests+adversarial review,
-same pipeline as v0.5–v0.10. **No publish** — private repo, local add-on.
+Each lands as its own `vX.Y`, typecheck+tests+adversarial review, same
+pipeline as v0.5–v0.11. **No publish** — private repo, local add-on.

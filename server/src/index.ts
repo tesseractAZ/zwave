@@ -55,6 +55,8 @@ async function main(): Promise<void> {
     routePollMs: config.routePollMs,
     historyPath: config.historyPath,
     historyFlushMs: config.historyFlushMs,
+    evidencePath: config.evidencePath,
+    evidenceFlushMs: config.evidenceFlushMs,
     log,
   });
   zwaveData.start();

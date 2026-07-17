@@ -245,14 +245,20 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   }
 
   // ── Lane: Signal (25%, 35% for LR) — SNR margin over the live noise floor.
+  // ROUTED-NODE BRANCH (RESEARCH §1.3, design review): NodeStatistics.rssi is
+  // fed exclusively from the ACK's RSSI as measured at the CONTROLLER — for a
+  // routed node that ACK's final hop is repeater→controller, so the value
+  // describes the LAST HOP, not the end device. Scoring the device's "signal"
+  // from it (or raising W) would be confidently wrong; score neutral instead.
   const nf =
     Number.isFinite(noiseFloor) && noiseFloor < 0 && noiseFloor > -120
       ? noiseFloor
       : DEFAULT_NOISE_FLOOR;
+  const routed = !isLR && (stats.lwr?.repeaters?.length ?? 0) > 0;
   const rssi = validRssi(stats.rssi) ?? validRssi(stats.lwr?.rssi ?? null);
   let signalFrac: number;
-  if (rssi == null) {
-    signalFrac = 0.7; // no usable RSSI (all sentinels/null): neutral, can't flag weak
+  if (rssi == null || routed) {
+    signalFrac = 0.7; // no usable RSSI, or routed (last-hop RSSI): neutral, no W
   } else {
     const margin = rssi - nf;
     signalFrac = linstep(margin, SIGNAL_MARGIN_LO, SIGNAL_MARGIN_HI);

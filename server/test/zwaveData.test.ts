@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { statsNodeId, mapRouteRaw } from '../src/zwave/zwaveData';
+import { statsNodeId, mapRouteRaw, statsCounters, isFreshSample } from '../src/zwave/zwaveData';
 
 // ── statsNodeId: the casing bug that froze all live stats ──────────────────
 // HA delivers the INITIAL on-subscribe event with `nodeId` (camelCase) but every
@@ -53,4 +53,43 @@ test('mapRouteRaw resolves route_failed_between device_ids and null-guards', () 
 
 test('mapRouteRaw returns null for a null route', () => {
   assert.equal(mapRouteRaw(null, resolve), null);
+});
+
+// ── statsCounters: the delta-fabrication guard (design review) ─────────────
+// A malformed event whose counters are missing must be REJECTED, never coerced
+// to 0 — a coerced-0 snapshot re-baselines the evidence deltas at zero, and the
+// next real event's cumulative counter lands as one giant "valid" delta.
+test('statsCounters accepts a fully-numeric event', () => {
+  const c = statsCounters({ commands_tx: 100, commands_rx: 90, commands_dropped_tx: 1, commands_dropped_rx: 0, timeout_response: 5 });
+  assert.deepEqual(c, { tx: 100, rx: 90, dropTx: 1, dropRx: 0, timeout: 5 });
+});
+test('statsCounters REJECTS an event with any missing/non-numeric counter', () => {
+  assert.equal(statsCounters({ commands_rx: 90, commands_dropped_tx: 1, commands_dropped_rx: 0, timeout_response: 5 }), null);
+  assert.equal(statsCounters({ commands_tx: 'x', commands_rx: 90, commands_dropped_tx: 1, commands_dropped_rx: 0, timeout_response: 5 }), null);
+  assert.equal(statsCounters({ commands_tx: NaN, commands_rx: 90, commands_dropped_tx: 1, commands_dropped_rx: 0, timeout_response: 5 }), null);
+});
+
+test('statsCounters truncates float counters and rejects Infinity', () => {
+  const c = statsCounters({ commands_tx: 100.7, commands_rx: 90.2, commands_dropped_tx: 1, commands_dropped_rx: 0, timeout_response: 5 });
+  assert.deepEqual(c, { tx: 100, rx: 90, dropTx: 1, dropRx: 0, timeout: 5 });
+  assert.equal(statsCounters({ commands_tx: Infinity, commands_rx: 90, commands_dropped_tx: 1, commands_dropped_rx: 0, timeout_response: 5 }), null);
+});
+
+// ── isFreshSample: the pseudo-replication guard (design review) ────────────
+const sigStats = (over = {}) => ({
+  rtt: 30, rssi: -60, lwr: null, nlwr: null,
+  commandsTX: 100, commandsRX: 90, commandsDroppedTX: 1, commandsDroppedRX: 0,
+  timeoutResponse: 5, lastSeen: 1_000, ...over,
+});
+test('isFreshSample: lastSeen advanced + counters moved ⇒ fresh', () => {
+  assert.equal(isFreshSample({ seen: 500, tx: 90, rx: 80, to: 4, dr: 1 }, sigStats()), true);
+});
+test('isFreshSample: a re-subscribe redelivery (new lastSeen, SAME counters) is NOT fresh', () => {
+  assert.equal(isFreshSample({ seen: 500, tx: 100, rx: 90, to: 5, dr: 1 }, sigStats()), false);
+});
+test('isFreshSample: no stats event since last sample (same lastSeen) is NOT fresh', () => {
+  assert.equal(isFreshSample({ seen: 1_000, tx: 90, rx: 80, to: 4, dr: 1 }, sigStats()), false);
+});
+test('isFreshSample: the first-ever sample (no signature) is NOT fresh — it is a replay', () => {
+  assert.equal(isFreshSample(undefined, sigStats()), false);
 });
