@@ -74,3 +74,67 @@ test('an inferred mesh symptom is labelled "inferred", and a subsumed one is mar
   assert.ok(/inferred/.test(joined), 'inferred basis shown');
   assert.ok(/under mesh event/.test(joined), 'subsumed symptom annotated');
 });
+
+test('M4: a symptom renders the planner headline and at least one ranked, cost-tagged recommendation', () => {
+  const joined = renderRemedy(ctx(120, 40, [sym()])).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  // `▎` is the plan-headline bar — unique to a rendered plan (never in a narrative).
+  assert.ok(/▎/.test(joined), 'a plan block is rendered');
+  assert.ok(/\[(physical|safe|caution|disruptive|destructive) · /.test(joined), 'a candidate carries a cost·basis tag');
+  // The anti-footgun is visible: rebuild is present only as NOT-recommended.
+  assert.ok(/NOT recommended/.test(joined), 'rebuild is surfaced only as not-recommended');
+});
+
+test('M4: on a screen too short for all symptoms, the worst survive and the overflow footer is honest', () => {
+  // 2 crit, 1 warn, 2 watch — deliberately more than a 20-row screen holds.
+  const syms: Symptom[] = [
+    sym({ severity: 'watch', kind: 'weak-signal', nodeId: 6, sinceMs: now - 6 * 60_000 }),
+    sym({ severity: 'crit', kind: 'dead-flap', nodeId: 6, sinceMs: now - 4 * 60_000 }),
+    sym({ severity: 'watch', kind: 'rtt-degraded', nodeId: 7, sinceMs: now - 5 * 60_000 }),
+    sym({ severity: 'crit', kind: 'controller-degraded', nodeId: null, sinceMs: now - 3 * 60_000 }),
+    sym({ severity: 'warn', kind: 'return-path-degraded', nodeId: 7, sinceMs: now - 20 * 60_000 }),
+  ];
+  const rows = 20;
+  const plain = renderRemedy(ctx(100, rows, syms)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  assert.equal(plain.length, rows, 'exact-rows contract holds under overflow');
+
+  // Which severities got a rendered header, in render order?
+  const RANK: Record<string, number> = { CRIT: 0, WARN: 1, WATCH: 2 };
+  const shownSev = plain.map((l) => (l.match(/^(CRIT|WARN|WATCH)\b/) ?? [])[1]).filter(Boolean) as string[];
+  assert.ok(shownSev.length >= 1 && shownSev.length < syms.length, 'some but not all symptoms shown');
+  // Worst-first: render order is non-decreasing in severity rank (no watch before a crit).
+  for (let i = 1; i < shownSev.length; i++) {
+    assert.ok(RANK[shownSev[i]] >= RANK[shownSev[i - 1]], `severity order preserved at ${i} (${shownSev.join(',')})`);
+  }
+  // Retention: the shown set is a prefix of the severity-sorted list — so every
+  // crit is shown before any warn is, and no watch displaces a crit.
+  assert.equal(shownSev[0], 'CRIT', 'the worst symptom is shown first');
+
+  // The footer count is honest: shown + "N more" === total.
+  const footer = plain.find((l) => /▾ \d+ more symptom/.test(l));
+  assert.ok(footer, 'an honest overflow footer is present');
+  const n = Number((footer!.match(/▾ (\d+) more/) ?? [])[1]);
+  assert.equal(shownSev.length + n, syms.length, `footer count honest: ${shownSev.length} shown + ${n} more === ${syms.length}`);
+});
+
+test('M4: the overflow footer survives even when one oversized block fills a tiny screen', () => {
+  // Two symptoms, a screen so short even one block overflows: the footer must
+  // still be the last visible line, never silently dropped.
+  const syms: Symptom[] = [
+    sym({ severity: 'crit', kind: 'dead-flap', nodeId: 6 }),
+    sym({ severity: 'warn', kind: 'return-path-degraded', nodeId: 7 }),
+  ];
+  const rows = 9;
+  const plain = renderRemedy(ctx(100, rows, syms)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  assert.equal(plain.length, rows, 'exact-rows contract holds');
+  assert.ok(plain.some((l) => /▾ \d+ more symptom/.test(l)), 'footer present despite an oversized first block');
+});
+
+test('M4: a subsumed symptom shows NO recommendation (its plan defers to the mesh event)', () => {
+  // Only the subsumed symptom present, on a tall screen so nothing is clipped.
+  const joined = renderRemedy(ctx(120, 40, [sym({ subsumedBy: 'mesh' })])).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.ok(/under mesh event/.test(joined), 'subsumed symptom still shown');
+  // No plan bar and no cost tag — the recommendation defers to the mesh event.
+  // (The narrative may mention "repeater", so we anchor on plan-only markers.)
+  assert.ok(!/▎/.test(joined), 'no plan headline bar for a subsumed symptom');
+  assert.ok(!/\[(physical|safe|caution|disruptive|destructive) · /.test(joined), 'no candidate cost tags either');
+});

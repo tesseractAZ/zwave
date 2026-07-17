@@ -1,15 +1,17 @@
 /**
- * REMEDY screen (M3, DESIGN.md §3.7) — the engine's advisory surface. Lists the
- * symptoms the detectors have found, ranked by severity, each with its evidence,
- * a technician-grade narrative, and a `basis` label so an inference never reads
- * like a measurement. Advisory-only: M3 recommends nothing to *do* here (that is
- * M4's planner); this screen is where the operator VALIDATES that the symptoms
- * are right over the advisory-first weeks.
+ * REMEDY screen (M3 + M4, DESIGN.md §3.7) — the engine's advisory surface. Lists
+ * the symptoms the detectors found, ranked by severity, each with its evidence,
+ * a technician-grade narrative, a `basis` label so an inference never reads like
+ * a measurement, and (M4) the planner's ranked RECOMMENDATIONS — each with its
+ * own basis + cost, executable ones marked, physical ones described. Still
+ * advisory-only: nothing runs from here; executable actions go through the
+ * existing Actions Menu (`a`) + type-CONFIRM.
  */
 
-import type { ScreenCtx, Symptom } from '../../types';
-import { c, truncate, visLen, padEnd } from '../ansi';
+import type { ScreenCtx, Symptom, NodeSnapshot } from '../../types';
+import { c, truncate } from '../ansi';
 import { frame } from '../chrome';
+import { planFor, type PlanCandidate } from '../../zwave/planner';
 
 const SEV_TAG: Record<Symptom['severity'], string> = {
   crit: c.redB('CRIT'),
@@ -27,8 +29,18 @@ function ago(sinceMs: number, now: number): string {
   return `${Math.floor(h / 24)}d`;
 }
 
-/** One header line + its evidence + narrative for a symptom (2–4 rows). */
-function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string): string[] {
+/** Cost-tier tag — physical guidance vs escalating executable blast radius. */
+function costTag(cost: PlanCandidate['cost']): string {
+  switch (cost) {
+    case 'physical': return c.blue('physical');
+    case 'safe': return c.green('safe');
+    case 'caution': return c.yellow('caution');
+    case 'disruptive': return c.yellow('disruptive');
+    case 'destructive': return c.redB('destructive');
+  }
+}
+
+function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined): string[] {
   const rows: string[] = [];
   const who = sym.nodeId != null ? c.cyan(`#${sym.nodeId} ${nameOf(sym.nodeId)}`) : c.blue('MESH');
   // Compact basis GLYPH placed right after severity so it survives truncation at
@@ -50,10 +62,41 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     const parts = [basisWord, ...sym.evidence.map((e) => `${c.label(e.label)} ${c.white(e.value)}`)];
     rows.push(truncate('    ' + parts.join(c.grey('  ·  ')), W));
   }
-  // Narrative — wrapped to width across up to 2 rows.
-  for (const line of wrap(sym.narrative, W - 4).slice(0, 2)) rows.push(truncate('    ' + c.grey(line), W));
+  // Narrative — one line of diagnostic context (the plan headline carries the
+  // recommendation, so a single line here keeps the block scannable).
+  for (const line of wrap(sym.narrative, W - 4).slice(0, 1)) rows.push(truncate('    ' + c.grey(line), W));
+
+  // ── M4: the planner's ranked recommendations (skip subsumed — the mesh event
+  // owns the recommendation). Each candidate is ONE line: a marker (▸ executable,
+  // · physical), the title, a [cost · basis] tag, and — when blocked — the reason
+  // inline (⊘). Only the top candidate carries a rationale line, so a screenful of
+  // symptoms stays readable without scrolling.
+  if (sym.subsumedBy == null) {
+    const plan = planFor(sym, sym.nodeId != null ? nodeOf(sym.nodeId) : undefined, { writeActions });
+    rows.push(truncate('    ' + c.label('▎ ') + c.white(plan.headline), W));
+    plan.candidates.slice(0, 3).forEach((cand, i) => {
+      const runnable = cand.action != null && cand.blocked == null;
+      const marker = cand.action != null ? (runnable ? c.green('▸') : c.grey('▸')) : c.grey('·');
+      const tags = `${c.grey('[')}${costTag(cand.cost)}${c.grey(' · ')}${c.grey(cand.basis)}${c.grey(']')}`;
+      const block = cand.blocked ? c.grey('  ⊘ ' + cand.blocked) : '';
+      rows.push(truncate(`      ${marker} ${c.white(cand.title)} ${tags}${block}`, W));
+      // Grounding for the primary recommendation only; "…" signals more detail.
+      if (i === 0) {
+        const rl = wrap(cand.rationale, W - 8);
+        if (rl.length) rows.push(truncate('        ' + c.grey(rl[0] + (rl.length > 1 ? ' …' : '')), W));
+      }
+    });
+  }
   rows.push('');
   return rows;
+}
+
+/** Render order: worst first (crit → warn → watch), newest-breaching as tiebreak,
+ *  so a low-severity watch can never bury a critical off the bottom of a
+ *  no-scroll screen. */
+const SEV_RANK: Record<Symptom['severity'], number> = { crit: 0, warn: 1, watch: 2 };
+function bySeverity(a: Symptom, b: Symptom): number {
+  return SEV_RANK[a.severity] - SEV_RANK[b.severity] || b.sinceMs - a.sinceMs;
 }
 
 /** Naive word-wrap on plain text (narratives carry no ANSI). */
@@ -79,6 +122,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
   const now = Date.now();
   const symptoms = data.symptoms();
   const nameOf = (id: number): string => data.nodeById(id)?.name ?? `Node ${id}`;
+  const nodeOf = (id: number): NodeSnapshot | undefined => data.nodeById(id);
 
   const body: string[] = [];
   if (symptoms.length === 0) {
@@ -108,8 +152,30 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     const warn = symptoms.filter((s) => s.severity === 'warn').length;
     body.push(truncate(c.grey('  ') + summaryLine(crit, warn, symptoms.length), W));
     body.push('');
-    for (const sym of symptoms) {
-      for (const r of symptomBlock(sym, now, W, nameOf)) body.push(r);
+    // frame() reserves masthead + title-rule + command-bar = 3 lines; the summary
+    // + spacer above cost 2 more. The screen does not scroll, so build blocks
+    // worst-first and stop before overflowing — an honest footer beats silently
+    // dropping a critical off the bottom.
+    const bodyCap = Math.max(0, view.rows - 3);
+    const sorted = [...symptoms].sort(bySeverity);
+    let used = body.length; // summary + spacer already pushed
+    let shown = 0;
+    for (const sym of sorted) {
+      const blk = symptomBlock(sym, now, W, nameOf, ctx.actionsEnabled === true, nodeOf);
+      const remaining = sorted.length - shown;
+      // Reserve one line for the "N more" footer whenever blocks remain unshown.
+      const reserve = remaining > 1 ? 1 : 0;
+      if (used + blk.length > bodyCap - reserve && shown > 0) break;
+      for (const r of blk) body.push(r);
+      used += blk.length;
+      shown += 1;
+    }
+    if (shown < sorted.length) {
+      // Guarantee the footer is the LAST visible body line even in the degenerate
+      // case where a single oversized block already filled the screen: trim the
+      // body so footer lands within frame()'s bodyCap, never silently dropped.
+      if (body.length > bodyCap - 1) body.length = Math.max(0, bodyCap - 1);
+      body.push(truncate(c.yellow(`  ▾ ${sorted.length - shown} more symptom${sorted.length - shown === 1 ? '' : 's'} not shown`) + c.grey(' — worst are listed first; widen/heighten the terminal to see all'), W));
     }
   }
 
@@ -133,6 +199,3 @@ function summaryLine(crit: number, warn: number, total: number): string {
   if (watch) bits.push(c.grey(`${watch} watch`));
   return bits.join(c.grey(' · ')) + c.grey('  —  advisory only; nothing is acted on');
 }
-
-void padEnd;
-void visLen;
