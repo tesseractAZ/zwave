@@ -123,6 +123,8 @@ function kindTag(ev: LogEvent): string {
       return c.yellow('ntf');
     case 'action':
       return c.cyanB('act');
+    case 'symptom':
+      return c.yellowB('sym');
     case 'system':
       return c.grey('sys');
   }
@@ -189,6 +191,7 @@ function kindWord(ev: LogEvent): string {
     route: 'route change',
     notification: 'notification',
     action: 'operator action',
+    symptom: 'engine symptom',
     system: 'system',
   };
   return c.white(map[ev.kind]);

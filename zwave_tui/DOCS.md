@@ -53,6 +53,7 @@ over it and dismisses with `q` or `Esc`, preserving your selection.
 | **Controller** | Node 1 radio health: home id, RF region, firmware/SDK, primary/SUC/SIS roles, per-channel background-RSSI noise floor, and the controller traffic/timeout counters. |
 | **Topology** | Hop-grouped ASCII route tree from each node's last-working route, repeater-load view, and a Long-Range star panel. |
 | **Heatmap** | Nodes grouped by HA area, cells graded by SNR-margin bucket against the live noise floor. |
+| **Remedy** | The engine's advisory board: symptoms it has detected from learned baselines — reply-timeout anomalies, flapping, rate fallback, weak signal, chatty devices, controller-serial trouble, and correlated mesh-wide events — each with its evidence, a plain-language explanation, and a *measured vs inferred* label. Advisory-only; nothing is acted on. |
 | **Activity Log** | Real-time, scrollable stream of everything the mesh does — device value changes (a light toggles, a sensor reads, a lock changes), node status & route changes, `zwave_js` notifications, and operator-action outcomes. Each event is category-tagged; a detail pane shows the selected event's full context and associated device; a date-range filter narrows the window. |
 
 > As of **v0.2** all six screens are live and the stat columns (Margin / Hop /
@@ -70,7 +71,7 @@ over it and dismisses with `q` or `Esc`, preserving your selection.
 | `s` | Cycle sort key (health / id / name / rssi / seen) |
 | `t` | Toggle signal display (margin ↔ dBm) |
 | `1`–`6` | Jump to Overview / Detail / Controller / Topology / Heatmap / Log |
-| `c` / `e` | Jump to Controller / Log |
+| `c` / `e` / `y` | Jump to Controller / Log / Remedy |
 | `q` | Quit the session |
 
 **Actions** (only when **Enable Write Actions** is on) — operate on the selected

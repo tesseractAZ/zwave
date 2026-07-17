@@ -54,6 +54,8 @@ import {
   type NodeCoverage,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
+import { createBaselineStore, type BaselineStore } from './baselines';
+import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomState } from './symptoms';
 
 /**
  * Rolling per-node RSSI/RTT sample-ring depth. Shared by the live ring in
@@ -241,6 +243,8 @@ export interface ZwaveDataOptions {
    * disabled; the add-on runs fine without it (dependent telemetry stays null).
    */
   driverWsUrl?: string | null;
+  /** Persistent BASELINES store (M3). Empty/null ⇒ in-memory only. */
+  baselinesPath?: string | null;
   log?: (msg: string) => void;
 }
 
@@ -459,6 +463,13 @@ class ZwaveDataImpl implements ZwaveData {
    *  the driver_ws_url points at a different network; a config fix + restart
    *  clears it). Once set, ALL driver telemetry is rejected. */
   private driverHomeMismatch = false;
+  /** M3 engine: learned baselines, dwell state, and the last computed symptoms. */
+  private readonly baselines: BaselineStore | null;
+  private readonly symptomState: SymptomState = new Map();
+  private lastSymptoms: Symptom[] = [];
+  /** Keys of symptoms already logged, so only NEW ones emit a log line. */
+  private loggedSymptomKeys = new Set<string>();
+  private baselineFlushTimer: ReturnType<typeof setInterval> | null = null;
   /** Controller home_id from the last poll — a change means a different Z-Wave
    *  network (stick swap / different NVM backup), so node-keyed caches alias. */
   private lastHomeId: number | null = null;
@@ -542,6 +553,10 @@ class ZwaveDataImpl implements ZwaveData {
       ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log })
       : null;
     this.evidenceStore?.load();
+    // M3 engine: per-node learned baselines (persisted; boot-grace KEEPS them).
+    const blPath = (opts.baselinesPath ?? process.env.BASELINES_PATH) || null;
+    this.baselines = blPath ? createBaselineStore({ path: blPath, log: this.log }) : null;
+    this.baselines?.load();
     // v0.13: READ-ONLY driver-WS telemetry client (DESIGN §2.1). Dormant-not-
     // fatal by construction; its feeds are guarded by the homeId cross-check
     // (a misconfigured URL pointing at a DIFFERENT network's server must never
@@ -620,6 +635,10 @@ class ZwaveDataImpl implements ZwaveData {
     // periodically flush the store to /data. Both timers `.unref()` so they never
     // hold the event loop open at shutdown.
     this.driverWs?.start();
+    if (this.baselines && !this.baselineFlushTimer) {
+      this.baselineFlushTimer = setInterval(() => this.baselines!.save(), 5 * 60_000);
+      this.baselineFlushTimer.unref?.();
+    }
     if (this.evidenceStore) {
       if (!this.evidenceSampleTimer && this.evidenceSampleMs > 0) {
         this.evidenceSampleTimer = setInterval(() => this.sampleEvidence(), this.evidenceSampleMs);
@@ -728,6 +747,81 @@ class ZwaveDataImpl implements ZwaveData {
           : null;
       this.evidenceStore.recordController(this.ctrlStats, ctrlFresh, now, bg);
     }
+    this.runEngine(now);
+  }
+
+  /**
+   * M3 engine tick: detect symptoms from the current evidence + baselines, log
+   * newly-appeared ones to the Activity Log, then fold the just-recorded samples
+   * into the baselines — QUARANTINING nodes that currently have a symptom so the
+   * baseline never chases the pathology (DESIGN §3.2/§3.3).
+   */
+  private runEngine(now: number): void {
+    if (!this.evidenceStore || !this.baselines) return;
+    const ev = this.evidenceStore;
+    const bl = this.baselines;
+    const symptoms = detectSymptoms(
+      {
+        now,
+        nodes: this.lastNodes,
+        controller: this.lastController,
+        baselines: bl,
+        latest: (id) => { const r = ev.forNode(id); return r.length ? r[r.length - 1] : undefined; },
+        recent: (id) => ev.forNode(id),
+        coarse: (id) => ev.coarseForNode(id),
+        controllerSamples: () => ev.controllerSamples(),
+        coverage: (id) => ev.coverage(id),
+        recordingSince: () => ev.recordingSince(),
+        hasRealNoise: () =>
+          this.driverBgRssi != null && now - this.driverBgRssi.at <= 90_000 && this.driverHomeOk(),
+      },
+      this.symptomState,
+    );
+    this.lastSymptoms = symptoms;
+    // Log NEW symptoms once (source 'net', kind 'symptom'); prune resolved keys.
+    const live = new Set<string>();
+    for (const sym of symptoms) {
+      const k = `${sym.nodeId ?? 'mesh'}:${sym.kind}`;
+      live.add(k);
+      if (!this.loggedSymptomKeys.has(k)) {
+        this.loggedSymptomKeys.add(k);
+        const sev = sym.severity === 'crit' ? 'error' : sym.severity === 'warn' ? 'warn' : 'info';
+        this.pushEvent('net', sev, 'symptom', sym.nodeId, `${sym.kind}${sym.subsumedBy ? ' (under mesh event)' : ''}: ${sym.narrative.split('.')[0]}`);
+      }
+    }
+    for (const k of [...this.loggedSymptomKeys]) if (!live.has(k)) this.loggedSymptomKeys.delete(k);
+    // Fold the freshest sample per node into the baselines, quarantining nodes
+    // that are SYMPTOMATIC OR ARMING (any active dwell) — folding the pre-dwell
+    // breach would ratchet the baseline toward the pathology (v0.14 review).
+    const quarantine = symptomaticNodes(symptoms);
+    for (const id of armingNodes(this.symptomState)) quarantine.add(id);
+    for (const n of this.lastNodes) {
+      if (n.isController) continue;
+      const ring = ev.forNode(n.nodeId);
+      if (ring.length === 0) continue;
+      bl.observe(n.nodeId, ring[ring.length - 1], quarantine.has(n.nodeId));
+    }
+  }
+
+  /** Engine-detected symptoms (M3), ranked; [] when the engine is off. */
+  symptoms(): Symptom[] {
+    return this.lastSymptoms;
+  }
+
+  /** Honest engine state for the Remedy screen: whether the engine is enabled,
+   *  and how many nodes have a graduated timeout baseline vs total — so the
+   *  screen can distinguish "off" / "still learning" / "all healthy". */
+  engineStatus(): { enabled: boolean; ready: number; total: number } {
+    if (!this.baselines) return { enabled: false, ready: 0, total: 0 };
+    const now = Date.now();
+    let ready = 0;
+    let total = 0;
+    for (const n of this.lastNodes) {
+      if (n.isController) continue;
+      total += 1;
+      if (this.baselines.timeoutNormal(n.nodeId, now)?.ready) ready += 1;
+    }
+    return { enabled: true, ready, total };
   }
 
   /** Fold each node's since-last-tick interval mean into its coarse ring. */
@@ -819,6 +913,11 @@ class ZwaveDataImpl implements ZwaveData {
     // may be minutes stale by shutdown, and a stale snapshot under a fresh
     // timestamp would fabricate a healthy-looking window (DR).
     this.evidenceStore?.save();
+    if (this.baselineFlushTimer) {
+      clearInterval(this.baselineFlushTimer);
+      this.baselineFlushTimer = null;
+    }
+    this.baselines?.save();
   }
 
   /* ─── polling ──────────────────────────────────────────────────────── */
@@ -994,6 +1093,11 @@ class ZwaveDataImpl implements ZwaveData {
         this.driverBgRssi = null;
         this.driverLastSeen.clear();
         this.driverListening.clear();
+        // M3 engine state is node-id-keyed — a different network invalidates it.
+        this.baselines?.reset();
+        this.symptomState.clear();
+        this.lastSymptoms = [];
+        this.loggedSymptomKeys.clear();
         // The new network gets a fresh homeId cross-check; restart the driver
         // client so it re-handshakes and re-validates (start() after stop() is
         // supported — see driverWsClient.stop()).

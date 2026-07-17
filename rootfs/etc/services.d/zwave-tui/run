@@ -77,6 +77,9 @@ export HISTORY_PATH=/data/history.json
 # route-poll cadence; flush is dirty-flagged in code (5 min + on shutdown).
 # No user knob.
 export EVIDENCE_PATH=/data/evidence.json
+# M3 learned baselines (the symptom engine's per-node normals; boot-grace keeps
+# them). Atomic JSON on /data; flush is fixed in code (5 min + on shutdown).
+export BASELINES_PATH=/data/baselines.json
 
 # SUPERVISOR_TOKEN is injected automatically by the HA Supervisor (unlocked by
 # homeassistant_api: true) — the Node process inherits it. Do NOT export it.
