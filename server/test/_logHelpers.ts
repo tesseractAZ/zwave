@@ -102,6 +102,6 @@ export function mockData(opts: { events?: LogEvent[]; nodes?: NodeSnapshot[] } =
     historyLong: () => ({ rssi: [], rtt: [] }),
     lastUpdated: () => NOW,
     ready: () => true,
-    lastError: () => null,
+    lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }),
   };
 }
