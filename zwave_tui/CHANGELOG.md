@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.15.0 — 2026-07-17
+
+**The engine starts recommending (M4).** The **Remedy** screen (press **7** or
+**y**) now shows, under each symptom, a ranked list of *what to do about it* —
+still advisory-first: it recommends, it never acts. Executable steps run through
+the existing Actions Menu with its typed CONFIRM; nothing is executed from the
+Remedy screen.
+
+- **Remediation planner** (`planner.ts`) — a pure `Symptom → Plan` mapping built
+  from the research causal table. Each recommendation carries a **basis** label
+  (spec / source / lore / inference) so a rule-of-thumb never reads like a
+  measurement, and a **cost** tier (physical / safe / caution / disruptive /
+  destructive). Crucially, most correct Z-Wave fixes are *physical* — place a
+  repeater, move the stick, power-cycle a device — so **physical guidance is a
+  first-class recommendation**, and the executable actions are the minority.
+- **A route rebuild is never offered as a runnable fix.** Where a rebuild might
+  be tempting (a weak link, a churning route) it appears only as an explicit
+  *NOT recommended* entry with the reason — a rebuild can't repair a physically
+  marginal link and deletes any manual priority routes. This is enforced by a
+  test, not just a convention.
+- **Protocol-aware.** Long-Range nodes (no mesh routing) get only physical /
+  antenna guidance — never a route, repeater, or rebuild suggestion (a rebuild
+  throws on them). Ping/probe steps are withheld from battery/FLiRS nodes.
+- **Honest surface.** Symptoms are shown worst-first (critical before warning
+  before watch), each recommendation is grounded with a one-line rationale, and
+  when more symptoms exist than fit the screen it says so ("▾ N more not shown")
+  rather than dropping one silently. Symptoms demoted under a mesh event carry no
+  standalone plan — the mesh event owns the recommendation.
+- The `auto_remediation` config knob and the auto-execution gate-stack move to
+  M5, where auto-execution is actually built and its safety surfaced explicitly.
+
 ## 0.14.0 — 2026-07-17
 
 **The engine starts diagnosing (M3).** The add-on now learns each node's normal
