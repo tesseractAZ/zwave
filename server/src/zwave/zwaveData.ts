@@ -53,6 +53,7 @@ import {
   type RouteFailureEvent,
   type NodeCoverage,
 } from './evidenceStore';
+import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 
 /**
  * Rolling per-node RSSI/RTT sample-ring depth. Shared by the live ring in
@@ -234,6 +235,12 @@ export interface ZwaveDataOptions {
   evidenceSampleMs?: number;
   /** How often to flush evidence to disk (ms). Falls back to env; default 30s. */
   evidenceFlushMs?: number;
+  /**
+   * READ-ONLY zwave-js driver WS (v0.13, DESIGN §2.1) — feeds background RSSI
+   * (real noise floor), node lastSeen, and listening/FLiRS flags. Empty/null ⇒
+   * disabled; the add-on runs fine without it (dependent telemetry stays null).
+   */
+  driverWsUrl?: string | null;
   log?: (msg: string) => void;
 }
 
@@ -438,6 +445,20 @@ class ZwaveDataImpl implements ZwaveData {
   /** Devices whose per-node subscriptions failed — retried on a slow timer. */
   private pendingNodeSubs = new Map<number, string>();
   private subRetryTimer: ReturnType<typeof setInterval> | null = null;
+  /** v0.13 read-only driver-WS telemetry (null = disabled). */
+  private readonly driverWs: DriverWsClient | null;
+  /** Latest driver background RSSI (per-channel averages) + arrival time. */
+  private driverBgRssi: { channels: BgRssiChannels; at: number } | null = null;
+  /** Driver-side lastSeen per node (epoch ms — REAL last communication). */
+  private driverLastSeen = new Map<number, number>();
+  /** Driver-reported capability flags per node. */
+  private driverListening = new Map<number, { isListening: boolean | null; isFrequentListening: boolean | null }>();
+  /** homeId the driver server reported — cross-checked against HA's. */
+  private driverHomeId: number | null = null;
+  /** Latched once a driver/HA homeId mismatch is proven (permanent this run —
+   *  the driver_ws_url points at a different network; a config fix + restart
+   *  clears it). Once set, ALL driver telemetry is rejected. */
+  private driverHomeMismatch = false;
   /** Controller home_id from the last poll — a change means a different Z-Wave
    *  network (stick swap / different NVM backup), so node-keyed caches alias. */
   private lastHomeId: number | null = null;
@@ -521,6 +542,35 @@ class ZwaveDataImpl implements ZwaveData {
       ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log })
       : null;
     this.evidenceStore?.load();
+    // v0.13: READ-ONLY driver-WS telemetry client (DESIGN §2.1). Dormant-not-
+    // fatal by construction; its feeds are guarded by the homeId cross-check
+    // (a misconfigured URL pointing at a DIFFERENT network's server must never
+    // pollute this network's evidence).
+    const driverUrl = (opts.driverWsUrl ?? process.env.DRIVER_WS_URL ?? '').trim() || null;
+    this.driverWs = driverUrl
+      ? createDriverWsClient({
+          url: driverUrl,
+          log: this.log,
+          callbacks: {
+            onHomeId: (id) => {
+              this.driverHomeId = id;
+            },
+            onBgRssi: (channels, at) => {
+              if (!this.driverHomeOk()) return;
+              this.driverBgRssi = { channels, at };
+            },
+            onNodeLastSeen: (nodeId, seen) => {
+              if (!this.driverHomeOk()) return;
+              const prev = this.driverLastSeen.get(nodeId);
+              if (prev == null || seen > prev) this.driverLastSeen.set(nodeId, seen);
+            },
+            onNodeFlags: (nodeId, flags) => {
+              if (!this.driverHomeOk()) return;
+              this.driverListening.set(nodeId, flags);
+            },
+          },
+        })
+      : null;
   }
 
   /** Combine the fine + coarse rings into the store's two-tier shape. */
@@ -569,6 +619,7 @@ class ZwaveDataImpl implements ZwaveData {
     // M2 evidence: sample every node with cached stats on a regular cadence, and
     // periodically flush the store to /data. Both timers `.unref()` so they never
     // hold the event loop open at shutdown.
+    this.driverWs?.start();
     if (this.evidenceStore) {
       if (!this.evidenceSampleTimer && this.evidenceSampleMs > 0) {
         this.evidenceSampleTimer = setInterval(() => this.sampleEvidence(), this.evidenceSampleMs);
@@ -600,6 +651,38 @@ class ZwaveDataImpl implements ZwaveData {
    *  - COVERAGE: every roster node is registered (even before its first stats
    *    event) so "no evidence rows" is distinguishable from "node unknown".
    */
+  /**
+   * May driver-WS telemetry be applied? Only when the driver server's homeId
+   * matches HA's. We are OPTIMISTIC while either side is still unknown (the
+   * driver's fast state dump often lands before HA's first network_status
+   * poll), so data admitted during that startup window must be PURGED the
+   * moment a mismatch becomes provable — otherwise a driver_ws_url pointing at
+   * a DIFFERENT Z-Wave network would leave that network's lastSeen/isListening
+   * aliased under this network's node ids for the life of the process (v0.13
+   * review, high). On first mismatch we also QUIESCE the client so it stops
+   * parsing the foreign event stream entirely.
+   */
+  private driverHomeOk(): boolean {
+    const g = driverHomeGuard(this.driverHomeId, this.lastHomeId, this.driverHomeMismatch);
+    if (g.newlyMismatched) {
+      // First provable mismatch: the URL is misconfigured. Latch it, scrub every
+      // datum admitted during the optimistic acceptance window, and stop the
+      // client so it stops parsing the foreign network's event stream.
+      this.driverHomeMismatch = true;
+      this.driverBgRssi = null;
+      this.driverLastSeen.clear();
+      this.driverListening.clear();
+      this.driverWs?.stop();
+      this.log(`driver-ws: server homeId ${this.driverHomeId} ≠ HA homeId ${this.lastHomeId} — telemetry PURGED + client stopped (check driver_ws_url)`);
+    }
+    return g.ok;
+  }
+
+  /** Driver-WS status line for logs/diagnostics (never payload data). */
+  driverWsStatus(): string {
+    return this.driverWs?.status() ?? 'disabled (no driver_ws_url)';
+  }
+
   private sampleEvidence(): void {
     if (!this.evidenceStore) return;
     const now = Date.now();
@@ -623,13 +706,27 @@ class ZwaveDataImpl implements ZwaveData {
       const routeChanges = this.routeChangeAccum.get(n.nodeId) ?? 0;
       this.flapAccum.delete(n.nodeId);
       this.routeChangeAccum.delete(n.nodeId);
-      this.evidenceStore.record(n.nodeId, stats, n.status, { flaps, routeChanges, fresh }, now);
+      // Driver-WS telemetry (v0.13): the REAL last-communication time and the
+      // listening/FLiRS capability — null when the client is absent/dormant.
+      const drvSeen = this.driverLastSeen.get(n.nodeId) ?? null;
+      const drvFlags = this.driverListening.get(n.nodeId);
+      this.evidenceStore.record(
+        n.nodeId, stats, n.status,
+        { flaps, routeChanges, fresh, lastSeen: drvSeen, isListening: drvFlags?.isListening ?? null, isFrequentListening: drvFlags?.isFrequentListening ?? null },
+        now,
+      );
     }
-    // Controller serial-link sample through the same delta guards.
+    // Controller serial-link sample through the same delta guards, carrying the
+    // driver-WS noise floor when it is FRESH (driver auto-polls ~30s on idle;
+    // a stale reading is recorded as null, not re-used — honest unknown).
     if (this.ctrlStats) {
       const ctrlFresh = this.ctrlStats !== this.prevCtrlStatsRef;
       this.prevCtrlStatsRef = this.ctrlStats;
-      this.evidenceStore.recordController(this.ctrlStats, ctrlFresh, now);
+      const bg =
+        this.driverBgRssi && now - this.driverBgRssi.at <= 90_000 && this.driverHomeOk()
+          ? this.driverBgRssi.channels
+          : null;
+      this.evidenceStore.recordController(this.ctrlStats, ctrlFresh, now, bg);
     }
   }
 
@@ -713,6 +810,7 @@ class ZwaveDataImpl implements ZwaveData {
       clearInterval(this.subRetryTimer);
       this.subRetryTimer = null;
     }
+    this.driverWs?.stop();
     // Fold any pending interval into the coarse ring, then persist BOTH tiers on
     // the way down (SIGTERM from a deploy/restart) so trends resume seamlessly.
     this.rollCoarse();
@@ -858,6 +956,8 @@ class ZwaveDataImpl implements ZwaveData {
           this.prevSampleSig.delete(id);
           this.prevStatus.delete(id);
           this.missingSince.delete(id);
+          this.driverLastSeen.delete(id);
+          this.driverListening.delete(id);
         }
       }
     }
@@ -889,6 +989,17 @@ class ZwaveDataImpl implements ZwaveData {
         // must not be recorded from its counters (review).
         this.ctrlStats = null;
         this.prevCtrlStatsRef = null;
+        // Driver-WS telemetry is node-id-keyed too; the homeId guard will
+        // re-validate feeds against the NEW network.
+        this.driverBgRssi = null;
+        this.driverLastSeen.clear();
+        this.driverListening.clear();
+        // The new network gets a fresh homeId cross-check; restart the driver
+        // client so it re-handshakes and re-validates (start() after stop() is
+        // supported — see driverWsClient.stop()).
+        this.driverHomeMismatch = false;
+        this.driverWs?.stop();
+        this.driverWs?.start();
         this.prevStatus.clear(); // else the first poll logs spurious status transitions
         // The registry-derived maps (entityIndex/deviceByNodeId/…) are now stale:
         // the new network's entity_ids won't be in entityIndex, so the activity
@@ -1017,7 +1128,9 @@ class ZwaveDataImpl implements ZwaveData {
       isRouting: raw.is_routing === true,
       // network_status doesn't expose is_listening; v0.2 derives it from the
       // node's CC info (FLiRS/sleeping). null = unknown, not "listening".
-      isListening: null,
+      // HA network_status omits is_listening; the driver-WS state dump (v0.13)
+      // supplies it — the battery/FLiRS guards and quiet-node detector need it.
+      isListening: this.driverListening.get(raw.node_id)?.isListening ?? null,
       isLongRange: nodeId >= 256,
       isController,
       isSecure: raw.is_secure ?? null,
@@ -1058,9 +1171,14 @@ class ZwaveDataImpl implements ZwaveData {
       isRebuildingRoutes: rebuilding,
       rebuildStartedAt: this.rebuildStartedAt,
       firmwareUpdatesAvailable: [...this.firmwareByNode.values()].filter((f) => f.updateAvailable).length,
-      // HA's subscribe_controller_statistics event carries no background RSSI,
-      // so the per-channel noise floor stays empty (summary shows "noise —").
-      backgroundRSSI: [],
+      // HA strips background RSSI at its WS boundary; the driver-WS client
+      // (v0.13) restores it. Staleness-gated: a reading older than 90s (the
+      // driver polls every ~30s when idle) reverts to [] → "noise —", never a
+      // re-used stale floor.
+      backgroundRSSI:
+        this.driverBgRssi && Date.now() - this.driverBgRssi.at <= 90_000 && this.driverHomeOk()
+          ? leadingRun(this.driverBgRssi.channels)
+          : [],
       statistics: this.ctrlStats,
     };
   }
@@ -1480,6 +1598,40 @@ export function mapRouteRaw(r: unknown, resolve: (dev: unknown) => number): Rout
 /** Coerce to a finite number or null. */
 function num(x: unknown): number | null {
   return typeof x === 'number' && Number.isFinite(x) ? x : null;
+}
+
+/**
+ * The homeId cross-check decision (pure — the side-effecting purge/stop live in
+ * `driverHomeOk`). OPTIMISTIC while either id is unknown (the driver's state
+ * dump often precedes HA's first poll); once both are known a mismatch is
+ * PROVEN and latches permanently (`latched`). Returns `newlyMismatched` on the
+ * transition so the caller purges the acceptance-window data exactly once.
+ */
+export function driverHomeGuard(
+  driverHomeId: number | null,
+  haHomeId: number | null,
+  latched: boolean,
+): { ok: boolean; newlyMismatched: boolean } {
+  if (latched) return { ok: false, newlyMismatched: false };
+  if (driverHomeId == null || haHomeId == null) return { ok: true, newlyMismatched: false };
+  if (driverHomeId === haHomeId) return { ok: true, newlyMismatched: false };
+  return { ok: false, newlyMismatched: true };
+}
+
+/**
+ * The leading contiguous run of present per-channel values. Background-RSSI
+ * channels 0/1 are mandatory and 2/3 optional+trailing (RESEARCH §1.5), so the
+ * consumer renders each entry as `ch<index>` — compacting with filter() would
+ * misattribute ch1 as ch0 when ch0 is absent. Stopping at the first gap keeps
+ * every surviving entry at its true channel index.
+ */
+export function leadingRun(channels: (number | null)[]): number[] {
+  const out: number[] = [];
+  for (const c of channels) {
+    if (c == null) break;
+    out.push(c);
+  }
+  return out;
 }
 /** Coerce to a finite integer, defaulting to 0. */
 function int(x: unknown): number {

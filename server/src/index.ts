@@ -57,6 +57,7 @@ async function main(): Promise<void> {
     historyFlushMs: config.historyFlushMs,
     evidencePath: config.evidencePath,
     evidenceFlushMs: config.evidenceFlushMs,
+    driverWsUrl: config.driverWsUrl,
     log,
   });
   zwaveData.start();

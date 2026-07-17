@@ -89,6 +89,10 @@ export interface EvidenceSample {
   lastSeen: number | null;
   /** Reserved for the driver-WS client (v0.13); null until then. */
   isListening: boolean | null;
+  /** FLiRS (frequently-listening) capability — driver-WS (v0.13). Distinguishes
+   *  a beaming lock (isListening:false, isFrequentListening:true) from a plain
+   *  sleeping battery node — load-bearing for the battery/FLiRS executor guard. */
+  isFrequentListening: boolean | null;
 }
 
 /** One controller-level sample (serial-link health), same delta discipline. */
@@ -157,6 +161,10 @@ export interface SampleExtras {
   flaps?: number;
   routeChanges?: number;
   fresh?: boolean;
+  /** Driver-WS telemetry (v0.13); absent ⇒ recorded null (honest unknown). */
+  lastSeen?: number | null;
+  isListening?: boolean | null;
+  isFrequentListening?: boolean | null;
 }
 
 export interface EvidenceStoreOptions {
@@ -191,8 +199,9 @@ export interface EvidenceStore {
   evictNode(nodeId: number): void;
   /** Capture one fine sample + fold it into the coarse tier. Never throws. */
   record(nodeId: number, stats: NodeStats, status: NodeStatus, extras?: SampleExtras, at?: number): EvidenceSample;
-  /** Capture one controller sample through the same delta guards. */
-  recordController(stats: CtrlStats, fresh: boolean, at?: number): ControllerSample;
+  /** Capture one controller sample through the same delta guards. `bg` is the
+   *  driver-WS per-channel background RSSI (v0.13); omitted ⇒ nulls. */
+  recordController(stats: CtrlStats, fresh: boolean, at?: number, bg?: (number | null)[] | null): ControllerSample;
   /** Latch a route failure the moment it appears (event-driven, deduped by caller). */
   recordRouteFailure(nodeId: number, between: [number, number], at?: number): void;
   forNode(nodeId: number): EvidenceSample[];
@@ -235,6 +244,7 @@ interface FineCols {
   st: number[];
   ls: (number | null)[];
   il: (0 | 1 | null)[];
+  ifl: (0 | 1 | null)[];
 }
 
 interface CoarseCols {
@@ -537,8 +547,9 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         rateKbps: stats.lwr?.protocolDataRate != null ? RATE_KBPS[stats.lwr.protocolDataRate] ?? null : null,
         routeKey: routeKeyOf(stats),
         status,
-        lastSeen: null, // reserved (v0.13)
-        isListening: null, // reserved (v0.13)
+        lastSeen: extras?.lastSeen ?? null, // driver-WS (v0.13); null when absent
+        isListening: extras?.isListening ?? null,
+        isFrequentListening: extras?.isFrequentListening ?? null,
       };
       lastCounters.set(nodeId, cur);
       const ring = fine.get(nodeId) ?? [];
@@ -554,7 +565,11 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       return sample;
     },
 
-    recordController(stats, fresh, at): ControllerSample {
+    recordController(stats, fresh, at, bg): ControllerSample {
+      const bg0 = bg?.[0] ?? null;
+      const bg1 = bg?.[1] ?? null;
+      const bg2 = bg?.[2] ?? null;
+      const bg3 = bg?.[3] ?? null;
       const t = at ?? now();
       const cur: CtrlSnapshot = {
         t,
@@ -577,7 +592,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           cur.nak < lastCtrl.nak || cur.can < lastCtrl.can ||
           cur.timeoutAck < lastCtrl.timeoutAck || cur.timeoutResponse < lastCtrl.timeoutResponse ||
           cur.msgTx - lastCtrl.msgTx > ctrlCap) {
-        s = { t, ...invalidOut, fresh, bg0: null, bg1: null, bg2: null, bg3: null };
+        s = { t, ...invalidOut, fresh, bg0, bg1, bg2, bg3 };
       } else {
         s = {
           t,
@@ -588,7 +603,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           dTimeoutAck: cur.timeoutAck - lastCtrl.timeoutAck,
           dTimeoutResponse: cur.timeoutResponse - lastCtrl.timeoutResponse,
           fresh,
-          bg0: null, bg1: null, bg2: null, bg3: null, // reserved (v0.13)
+          bg0, bg1, bg2, bg3, // driver-WS noise floor (v0.13); nulls when absent
         };
       }
       lastCtrl = cur;
@@ -782,6 +797,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
                 status: typeof st === 'number' && st >= 0 && st <= 4 ? (st as NodeStatus) : NodeStatus.Unknown,
                 lastSeen: numOrNull(cols.ls?.[i]),
                 isListening: cols.il?.[i] == null ? null : cols.il[i] === 1,
+                isFrequentListening: cols.ifl?.[i] == null ? null : cols.ifl[i] === 1,
               });
             }
             const bounded = ring.length > maxSamples ? ring.slice(ring.length - maxSamples) : ring;
@@ -806,7 +822,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         const nodes: Persisted['nodes'] = {};
         for (const [id, ring] of fine) {
           if (!Number.isInteger(id) || id <= 0 || ring.length === 0) continue;
-          const cols: FineCols = { t: [], dTx: [], dTo: [], dDr: [], dRx: [], dF: [], dRC: [], fr: [], rtt: [], rssi: [], rate: [], rk: [], st: [], ls: [], il: [] };
+          const cols: FineCols = { t: [], dTx: [], dTo: [], dDr: [], dRx: [], dF: [], dRC: [], fr: [], rtt: [], rssi: [], rate: [], rk: [], st: [], ls: [], il: [], ifl: [] };
           for (const s of ring.slice(-maxSamples)) {
             cols.t.push(s.t);
             cols.dTx.push(s.dTx);
@@ -823,6 +839,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             cols.st.push(s.status);
             cols.ls.push(s.lastSeen);
             cols.il.push(s.isListening == null ? null : s.isListening ? 1 : 0);
+            cols.ifl.push(s.isFrequentListening == null ? null : s.isFrequentListening ? 1 : 0);
           }
           nodes[String(id)] = cols;
         }
