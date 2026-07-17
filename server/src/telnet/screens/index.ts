@@ -24,6 +24,7 @@ import { renderController } from './controller';
 import { renderTopology } from './topology';
 import { renderHeatmap } from './heatmap';
 import { renderLog } from './log';
+import { renderRemedy } from './remedy';
 
 export { SCREENS } from '../../types';
 
@@ -35,6 +36,7 @@ export const SCREEN_LABEL: Record<ScreenView, string> = {
   topology: 'Topology',
   heatmap: 'Heatmap',
   log: 'Log',
+  remedy: 'Remedy',
 };
 
 /**
@@ -56,6 +58,8 @@ export function renderScreen(ctx: ScreenCtx): string[] {
       return renderHeatmap(ctx);
     case 'log':
       return renderLog(ctx);
+    case 'remedy':
+      return renderRemedy(ctx);
     default: {
       // Exhaustiveness guard — a new ScreenView must be wired above or this
       // fails the typecheck.

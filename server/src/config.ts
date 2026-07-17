@@ -89,6 +89,9 @@ export const config = {
    * without it; the add-on exports it from the driver_ws_url option).
    */
   driverWsUrl: process.env.DRIVER_WS_URL || null,
+  /** Persistent BASELINES store (M3 — the symptom engine's learned normals).
+   *  Exported as BASELINES_PATH=/data/baselines.json; absent → in-memory. */
+  baselinesPath: process.env.BASELINES_PATH || null,
   /** Build stamp promoted from the Docker ARG (reported by /api/version). */
   version: process.env.BUILD_VERSION ?? '0.1.0',
 

@@ -24,6 +24,7 @@ import type {
   HealthResult,
   LogEvent,
   NodeSnapshot,
+  Symptom,
 } from '../types';
 import { scoreNode, DEFAULT_NOISE_FLOOR } from '../zwave/health';
 
@@ -55,6 +56,10 @@ export interface ZwaveDataSource {
    * layer is assumed to own its own polling.
    */
   pollRoutes?(): void | Promise<void>;
+  /** Engine-detected symptoms (M3), ranked; absent when the engine is off. */
+  symptoms?(): Symptom[];
+  /** Engine enabled + baseline-readiness (for the Remedy empty state). */
+  engineStatus?(): { enabled: boolean; ready: number; total: number };
 }
 
 export interface CreateTuiDataProviderOptions {
@@ -193,6 +198,8 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     lastUpdated: () => cachedLastUpdated,
     ready: () => cachedReady,
     lastError: () => cachedError,
+    symptoms: () => zwaveData.symptoms?.() ?? [],
+    engineStatus: () => zwaveData.engineStatus?.() ?? { enabled: false, ready: 0, total: 0 },
   };
 
   return {

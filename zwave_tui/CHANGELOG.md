@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.14.0 — 2026-07-17
+
+**The engine starts diagnosing (M3).** The add-on now learns each node's normal
+and surfaces anomalies on a new **Remedy** screen — advisory-first: it explains
+what it sees and why, and recommends nothing to *do* yet (that is the next
+milestone). Press **7** or **y** to open it.
+
+- **Learned baselines** (`baselines.ts`) — per node, per time-of-day band, the
+  statistic that fits each signal: a decayed Poisson **rate** for counting
+  series (reply timeouts), and **median + MAD** for continuous ones (RSSI, RTT)
+  with a precision floor so a tight cluster can never manufacture a false
+  anomaly. A band only "graduates" (its detectors may fire) after enough
+  independent observations across several distinct days — never off a handful of
+  autocorrelated samples. Baselines persist and, unlike the recent-evidence ring,
+  survive a power blip; a symptomatic node is *quarantined* from its own baseline
+  so the normal never chases the pathology; a route change resets the RSSI/RTT
+  normals.
+- **Symptom detectors** (`symptoms.ts`) — pure functions over evidence +
+  baselines: return-path-degraded (relative and a baseline-independent chronic
+  variant), dead-flap, rate-fallback, RTT-degraded, weak-signal (direct nodes
+  only — a routed node's RSSI is its last hop, not the device), chatty-device,
+  ghost-suspect (only with proven multi-day coverage), controller-degraded, and
+  a **correlation gate** that classifies a mesh-wide event (interference vs a
+  flooding device) and *demotes* per-node symptoms under it rather than listing
+  N faults. Every symptom carries a **basis** label (measured vs inferred), its
+  evidence, and a dwell timer (a breach must persist 5 minutes to surface).
+- **Remedy screen** + Activity-Log lines (kind `sym`) for every new symptom, so
+  the whole engine remains auditable from the existing Log.
+- Nothing is acted on: this milestone is for *validating* that the detections
+  are right before any remediation is wired.
+- A 5-dimension adversarial review of the diagnosis core found 13 issues (2 high),
+  all fixed with regression tests: rate-fallback now requires a *same-route
+  regression* (a 40k-only device no longer flags forever); the baseline
+  quarantine covers the pre-symptom arming window (bad samples no longer ratchet
+  a node's own "normal" toward its fault); RTT/weak-signal use the newest *fresh*
+  sample so their timers don't reset every quiet tick; "chronic" now requires
+  repeated observation, not just wall-clock age; the mesh-event gate got hard
+  floors + hysteresis so a coincidental pair can't read as mesh-wide and a
+  momentary dip doesn't drop the event; weak-signal is honestly labelled
+  *inferred* against the fallback floor; and the Remedy empty state now tells
+  "engine off" from "still learning" from "all healthy".
+
 ## 0.13.0 — 2026-07-16
 
 **Real noise-floor measurement** — a strictly READ-ONLY connection to the
