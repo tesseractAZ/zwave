@@ -63,7 +63,7 @@ Design tenets (inherited from the ecoflow-panel engine, battle-tested there):
         │            planner.ts (M4)  ←── outcomes.ts (M5)
         │            symptom → ranked plan    episodes (action AND no-action)
         │                    │                          ▲
-        │            executor.ts (M4)                   │
+        │            executor.ts (M5)                   │
         │            gates, cooldowns, before/after ────┘
         │                    │
         │                    ▼
@@ -325,21 +325,31 @@ windows; rssi/rtt ingestion uses **fresh samples only**.
 
 ### 3.4 `planner.ts` (M4)
 
-`(Symptom, OutcomeLedger) → Plan` — a ranked list of candidates:
+`Symptom → Plan` — a pure, ranked list of candidates (as-built, M4):
 
 ```ts
 interface Plan {
-  symptom: Symptom;
+  kind: SymptomKind;
+  nodeId: number | null;
+  headline: string;                  // one-line lead recommendation
   candidates: Array<{
-    action: ActionKind;              // from actionsCatalog — no new verbs
-    rationale: string;               // grounded in the RESEARCH causal table
-    basis: 'spec' | 'source' | 'empirical' | 'lore' | 'learned'; // worst-of when chained (DR)
-    expectedEfficacy: number | null; // null until it beats the no-action arm (§3.6)
-    cost: 'safe' | 'caution' | 'disruptive' | 'destructive';
-    blocked?: string;                // why it can't run now (cooldown, gate, stale)
+    action: ActionKind | null;       // existing verb, or null = PHYSICAL guidance (the majority)
+    title: string;
+    rationale: string;               // grounded in the RESEARCH causal table; NO numeric dB claims
+    basis: 'spec' | 'source' | 'empirical' | 'lore' | 'inference' | 'learned'; // worst-of when chained (DR)
+    cost: 'physical' | 'safe' | 'caution' | 'disruptive' | 'destructive';
+    blocked: string | null;          // terse reason it can't run now (gate, protocol, precondition)
   }>;
 }
 ```
+
+> `expectedEfficacy` and the `OutcomeLedger` input join in M5 (the learned
+> reweighting needs the episode ledger + no-action control arm; §3.6). The M4
+> planner is pure `Symptom → Plan` — no history dependency, so it is trivially
+> testable and can't regress on a cold ledger. Note the added `action: null`
+> case: most correct Z-Wave remediations are **physical** (place a repeater,
+> move the stick), not executable verbs — so physical guidance is a first-class
+> candidate, and the executable actions are the minority.
 
 The REMEDY screen must render `basis` (e.g. *likely — construction-class
 heuristic* vs *confirmed — driver behavior*); **no numeric dB claims in any
@@ -368,9 +378,17 @@ real check; learned reweighting only after §3.6's controls are met.
 The planner is **pure and always-on** — it powers the advisory REMEDY screen
 even when execution is fully disabled.
 
-### 3.5 `executor.ts` (M4)
+### 3.5 `executor.ts` (M5)
 
-The only module that calls `ActionRunner`, behind stacked gates:
+> **Milestone split (as-built).** M4 ships the planner (§3.4) + the advisory
+> REMEDY surface only. In `advise` mode there is **no new execution path**: the
+> planner surfaces recommendations and the human runs the executable ones
+> through the *existing* type-CONFIRM Actions Menu (v0.9). `executor.ts` — the
+> gate-stack below — and the `auto_remediation` config knob earn their existence
+> only when an **auto** tier drives actions itself, so both move to **M5**,
+> where auto-execution is actually built and its safety surfaced explicitly.
+
+The only module that calls `ActionRunner` autonomously, behind stacked gates:
 
 1. `write_actions_enabled` (existing master gate).
 2. `auto_remediation: list(off|advise|auto_safe)` — default `off`. `advise` =
@@ -438,11 +456,17 @@ without:
 
 ### 3.7 TUI surfaces (M4 advisory + M6 interference)
 
-- **REMEDY screen** (`E`): symptoms ranked by severity — chronic-absolute rows
-  rank alongside anomalies *(DR)*; each row expands to evidence, narrative
-  with `basis`, candidates with efficacy (or "not distinguishable from
-  self-healing"), and the type-CONFIRM jump. Subsumed rows render demoted
-  under their mesh event, not hidden.
+- **REMEDY screen** (`7`/`y`): symptoms **severity-sorted** (crit→warn→watch,
+  recency tiebreak) so the worst are never buried — chronic-absolute rows rank
+  alongside anomalies *(DR)*. Each block shows evidence, a one-line narrative
+  with `basis`, then the planner's ranked candidates: a marker (▸ executable /
+  · physical), title, `[cost · basis]` tag, and — when blocked — a terse inline
+  `⊘` reason. Executable candidates are run through the existing Actions Menu +
+  type-CONFIRM (no execution from this screen). Subsumed rows render demoted
+  under their mesh event and carry **no standalone plan** (the mesh event owns
+  the recommendation). The screen does not scroll: it builds worst-first and
+  ends with an honest "▾ N more not shown" footer rather than dropping a
+  critical silently. Per-candidate learned efficacy annotations join in M5.
 - **INTERFERENCE screen** (M6): correlated-degradation matrix, time-of-day
   heatmap rendering **raw windowed rates, never baseline-relative scores**
   *(DR: banded baselines are blind to recurring diurnal interference by
@@ -453,7 +477,7 @@ without:
 ## 4. Config surface (additions, all safe-defaulted for strangers' meshes)
 
 ```yaml
-auto_remediation: off        # off | advise | auto_safe   (list())
+auto_remediation: off        # off | advise | auto_safe   (list()) — lands in M5 with executor.ts
 engine_enabled: true          # detectors + advisory always-on compute
 driver_ws_url: "ws://core-zwave-js:3000"  # read-only telemetry; empty = disabled (v0.13)
 # advanced:
@@ -471,8 +495,8 @@ options only for knobs a stranger genuinely needs.
 | M2 (v0.12) | reworked evidence substrate: fine+coarse tiers, event-driven flaps/route accumulators, freshness, homeId binding, coverage metadata, controller ring, columnar persistence w/ size test | evidence is trustworthy across restarts/resets/wedges — every DR substrate finding closed |
 | v0.13 | read-only driver-WS evidence client (§2.1) | noise floor + last_seen + capability flags feed the reserved schema before baselines learn |
 | M3 | baselines (per-series statistics) + detectors + REMEDY advisory | symptoms are right — detectors arm only after their bands graduate (days × active windows); base-rate collection starts |
-| M4 | planner + executor in `advise` mode + gates | recommendations grounded + auditable, with `basis` labels |
-| M5 | episode ledger + learned efficacy + `auto_safe` (refresh-class only) | the loop learns honestly against a no-action control arm |
+| M4 (v0.15) | planner (pure, always-on) + advisory REMEDY surface — severity-sorted, cost/basis-tagged candidates, honest overflow; `advise` runs via the existing type-CONFIRM Actions Menu (no new execution path) | recommendations grounded + auditable, with `basis` labels; rebuild never offered as a runnable candidate |
+| M5 | `executor.ts` gate-stack + `auto_remediation` (off/advise/auto_safe) + episode ledger + learned efficacy + `auto_safe` (refresh-class only) | the loop learns honestly against a no-action control arm; auto-execution is gated + its safety surfaced explicitly |
 | M6 | interference watch screen | correlated/diurnal interference visible; measured, not inferred, once v0.13 feeds it |
 | M7 | docs + defaults audit (incl. the no-dB-numbers lint) | safe for other users' meshes |
 
