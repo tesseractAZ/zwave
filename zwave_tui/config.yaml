@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.12.0"
+version: "0.13.0"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
@@ -69,6 +69,7 @@ options:
   log_level: info
   zwave_entry_id: ""
   ha_ws_url: ws://supervisor/core/websocket
+  driver_ws_url: ws://core-zwave-js:3000
 schema:
   # KEEP THIS ORDER IN LOCK-STEP WITH options: above — HA renders the form in
   # schema order, and matching the two keeps the file readable.
@@ -93,3 +94,7 @@ schema:
   # Do not "tidy" these to url?.
   zwave_entry_id: "str?"
   ha_ws_url: "str?"
+  # READ-ONLY zwave-js driver telemetry (noise floor / lastSeen / capability
+  # flags). str? not url? for the same voluptuous reason as above — and empty
+  # DISABLES the client entirely. Never used for actions.
+  driver_ws_url: "str?"

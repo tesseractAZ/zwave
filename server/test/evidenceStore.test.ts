@@ -232,12 +232,12 @@ test('save → load round-trips EVERY column with null fidelity (fine, coarse, c
   // Full null-fidelity on the first sample.
   assert.deepEqual(
     ring[0],
-    { t: FIXED, dTx: null, dTimeout: null, dDropTx: null, dRx: null, dFlaps: 0, dRouteChanges: 0, fresh: false, rtt: null, rssi: null, rateKbps: null, routeKey: null, status: NodeStatus.Asleep, lastSeen: null, isListening: null },
+    { t: FIXED, dTx: null, dTimeout: null, dDropTx: null, dRx: null, dFlaps: 0, dRouteChanges: 0, fresh: false, rtt: null, rssi: null, rateKbps: null, routeKey: null, status: NodeStatus.Asleep, lastSeen: null, isListening: null, isFrequentListening: null },
   );
   // Full value-fidelity on the second (rtt rounded to 0.1 at record time).
   assert.deepEqual(
     ring[1],
-    { t: FIXED + TICK, dTx: 40, dTimeout: 4, dDropTx: 2, dRx: 130, dFlaps: 1, dRouteChanges: 2, fresh: true, rtt: 45.7, rssi: -64, rateKbps: 9.6, routeKey: 'r7-9', status: NodeStatus.Alive, lastSeen: null, isListening: null },
+    { t: FIXED + TICK, dTx: 40, dTimeout: 4, dDropTx: 2, dRx: 130, dFlaps: 1, dRouteChanges: 2, fresh: true, rtt: 45.7, rssi: -64, rateKbps: 9.6, routeKey: 'r7-9', status: NodeStatus.Alive, lastSeen: null, isListening: null, isFrequentListening: null },
   );
   // Coarse bucket: every aggregate field round-trips.
   const b = s2.coarseForNode(6)[0];

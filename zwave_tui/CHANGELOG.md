@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.13.0 — 2026-07-16
+
+**Real noise-floor measurement** — a strictly READ-ONLY connection to the
+Z-Wave JS driver restores the diagnostics Home Assistant strips at its
+WebSocket boundary.
+
+- **New advanced option `driver_ws_url`** (default `ws://core-zwave-js:3000`,
+  matching the official Z-Wave JS add-on; empty disables it; Z-Wave JS UI
+  users point it at their server). The connection is passive telemetry only:
+  a hard-coded command allowlist (`set_api_schema`, `start_listening`) is
+  enforced in code and proven by test — no pings, no health checks, no route
+  surgery, nothing that transmits RF. All mesh actions stay on the
+  authenticated HA WebSocket, and the unauthenticated driver socket is never
+  proxied or re-exposed.
+- **The noise floor is now measured, not assumed.** The per-channel
+  background RSSI feeds the Controller screen (per-channel values +
+  "(measured)" tag), the Overview NOISE field, and the health score's
+  SNR-margin math — replacing the −95 dBm fallback with the driver's real
+  floor. Readings are staleness-gated (a floor older than 90 s reverts to
+  "—", never a re-used stale value).
+- **Evidence enrichment**: controller evidence samples now carry the
+  per-channel floor (the interference watch's substrate); node samples carry
+  the driver's true `lastSeen`; and node capability flags
+  (listening / FLiRS) — which HA omits entirely — now populate both the
+  evidence schema and the node dossier.
+- **Fails soft by design**: unreachable server, schema outside the tested
+  range (32–41), or a homeId that doesn't match Home Assistant's (a
+  misconfigured URL pointing at a different network) all leave the dependent
+  telemetry honestly null — the add-on runs exactly as before. Capped-backoff
+  reconnect + a WS ping/pong liveness probe handle driver restarts without
+  churning a healthy-but-idle socket.
+- A 4-dimension adversarial review of this release found 1 high-severity issue
+  and several hardening items, all fixed with regression tests: the homeId
+  cross-check had a startup-race window (the driver's fast state dump could
+  land before HA's homeId was known) where wrong-network data was admitted and
+  never purged — now the first proven mismatch purges the cached telemetry AND
+  stops the client; the client is restartable; the allowlist is spread-order
+  safe; server-sent strings and the configured URL are sanitized/redacted in
+  logs; node ids from the driver are range-validated; per-channel noise keeps
+  its channel index; and the FLiRS capability flag is now recorded in the
+  evidence schema.
+
 ## 0.12.0 — 2026-07-16
 
 The remediation engine's evidence substrate (M2), rebuilt to close every
