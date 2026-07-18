@@ -84,6 +84,25 @@ test('the diurnal heat scale is ABSOLUTE, not normalized-to-max (the core honest
   assert.ok(/█/.test(hot), `a real 6% hour reaches a full block, got "${hot}"`);
 });
 
+test('diurnal heat colour is not inverted — a HOT hour is red, a cool mesh is green', () => {
+  const rawStrip = (iv: InterferenceView): string => {
+    // Keep ANSI; grab the heat-strip line (shade cells, no letters after strip).
+    const lines = renderInterference(ctx(100, 30, iv));
+    return lines.find((l) => /[░▒▓█]/.test(l) && !/[A-Za-z]/.test(l.replace(/\x1b\[[0-9;]*m/g, ''))) ?? '';
+  };
+  const hot = rawStrip(cleanView({ coverageDays: 16, diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 200, rate: h === 12 ? 0.06 : 0.008 })) }));
+  assert.ok(/\x1b\[(1;)?91m[░▒▓█]/.test(hot), 'a 6% hour renders a RED shade cell (bad = red)');
+  const cool = rawStrip(cleanView({ coverageDays: 16, diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 200, rate: 0.008 })) }));
+  assert.ok(/\x1b\[92m[░▒▓█]/.test(cool), 'a quiet mesh renders GREEN shade cells (good = green)');
+  assert.ok(!/\x1b\[(1;)?91m[░▒▓█]/.test(cool), 'and NOT red — the colour must not be inverted');
+});
+
+test('an active correlated event is surfaced in the title rule (never clipped on a short screen)', () => {
+  const iv = cleanView({ correlated: { active: true, degradedNodes: 4, narrative: 'Correlated (4 of 11 active).' } });
+  const titleLine = renderInterference(ctx(100, 12, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''))[1]; // the title rule
+  assert.ok(/⚠ correlated/.test(titleLine), 'the alarm shows in the title even when the body section is clipped');
+});
+
 test('correlated degradation is called out with the degraded/active ratio', () => {
   const iv = cleanView({ correlated: { active: true, degradedNodes: 4, narrative: 'Correlated mesh degradation (4 of 11 active) likely from RF interference.' } });
   const joined = renderInterference(ctx(100, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');

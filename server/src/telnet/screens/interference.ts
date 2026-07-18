@@ -41,10 +41,13 @@ function dbm(v: number | null): string {
   return v == null ? '—' : `${Math.round(v)}`;
 }
 
-/** Per-hour rate as a heat cell (grey dot when the hour had no real traffic). */
+/** Per-hour rate as a heat cell (grey dot when the hour had no real traffic).
+ *  Explicit colour: heatCell's DEFAULT zoneColor is built for SNR margin
+ *  (high = good = green); a timeout RATE is the opposite (high = bad = red), so
+ *  we pass heatColorFor to invert it — else a hot hour would render green. */
 function heatFor(rate: number | null): string {
   if (rate == null) return heatCell(0, { none: true });
-  return heatCell(rate / HEAT_MAX);
+  return heatCell(rate / HEAT_MAX, { color: heatColorFor(rate) });
 }
 
 export function renderInterference(ctx: ScreenCtx): string[] {
@@ -122,7 +125,10 @@ export function renderInterference(ctx: ScreenCtx): string[] {
     push('  ' + c.green('✓ ') + c.grey(iv.correlated.narrative));
   }
 
-  const right = iv.noise.real ? `${iv.noise.band} · ${dbm(iv.noise.floor)} dBm` : 'noise n/a';
+  // Surface an ACTIVE correlated event in the title rule too — it is the last
+  // body section and could be clipped on a short terminal; the title never is.
+  const noiseStr = iv.noise.real ? `${iv.noise.band} · ${dbm(iv.noise.floor)} dBm` : 'noise n/a';
+  const right = iv.correlated.active ? c.yellowB('⚠ correlated') + c.grey(' · ') + noiseStr : noiseStr;
   return frame(view, data, {
     title: 'INTERFERENCE',
     rightStatus: right,
