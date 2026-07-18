@@ -16,7 +16,7 @@ function mkData(controller: ControllerSnapshot | null = null): DataProvider {
   return {
     nodes: () => [node], nodeById: () => node, controller: () => controller, events: () => [], scoreFor: () => score,
     noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0,
-    ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }),
+    ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }), efficacyFor: () => null,
   };
 }
 const data = mkData();

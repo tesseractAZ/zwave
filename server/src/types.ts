@@ -141,8 +141,24 @@ export type LogKind =
 
 // Type-only import (no runtime cycle): the symptom engine's output shape, read
 // by DataProvider.symptoms() and the REMEDY screen.
-import type { Symptom } from './zwave/symptoms';
+import type { Symptom, SymptomKind } from './zwave/symptoms';
 export type { Symptom, SymptomKind, Severity } from './zwave/symptoms';
+
+/** M5 learned efficacy of an action against a symptom kind — read by the planner
+ *  so a recommendation can say "beat self-healing N×" or "not distinguishable". */
+export interface Efficacy {
+  /** P(improved | action), but null until it beats the no-action arm with enough n. */
+  expectedEfficacy: number | null;
+  /** Decayed episode count backing the estimate. */
+  n: number;
+  /** The kind's spontaneous-recovery base rate (control arm), for context. */
+  baseRate: number | null;
+  /** True once the action's success rate clears baseRate by the min effect size. */
+  beatsSelfHealing: boolean;
+  /** Enough episodes to have an opinion at all (n ≥ min). Distinguishes
+   *  "still learning" from "learned: not distinguishable from self-healing". */
+  ready: boolean;
+}
 
 /** An event/log line (driver event or operator command outcome). */
 export interface LogEvent {
@@ -186,6 +202,10 @@ export interface DataProvider {
   /** Engine state: enabled + graduated-baseline count, for the REMEDY empty
    *  state to tell "off" from "learning" from "all healthy". */
   engineStatus(): { enabled: boolean; ready: number; total: number };
+  /** M5 learned efficacy of an action against a symptom kind, or null when the
+   *  outcome ledger is off / has no estimate yet. Read by the REMEDY screen so
+   *  the planner's candidates can carry an evidence-backed efficacy note. */
+  efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
 }
 
 /** Which screen is active. Overview is home; the rest are overlays. */

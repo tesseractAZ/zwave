@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.16.0 — 2026-07-17
+
+**The engine starts *learning* (M5).** The Remedy screen's recommendations now
+carry an evidence-backed efficacy note: after you run an action through the
+Actions Menu, the add-on watches whether the symptom actually recovered — and,
+crucially, compares that against how often the same kind of symptom recovers on
+its own with *no* action. Advisory-only: nothing is executed automatically; the
+learning only makes the advice more honest.
+
+- **Outcome ledger** (`outcomes.ts`) — records every symptom *episode*, whether
+  or not you acted on it. Symptoms that recover untouched form the
+  **spontaneous-recovery control arm**; actions are credited only when they beat
+  that base rate by a real margin.
+- **Honest by construction.** An action counts as a success only if the node's
+  own per-command reliability improved past its release threshold *and* by a
+  minimum effect size — a count dropping isn't enough. The before/after windows
+  must carry comparable traffic, or the episode is scored *unverifiable* (a mesh
+  that went quiet can't fake a win in either direction). A recovery is only
+  credited after it *holds* through a 10-minute confirmation window.
+- **What you'll see.** Under an executable recommendation: `✓ helped 86% vs 19%
+  self-heal (n=7)` once an action is proven to beat self-healing, or `≈ not
+  distinguishable from self-healing (n=8)` when the data says it isn't — and
+  nothing at all until there's enough evidence to have an opinion.
+- **Still advisory-only.** Per the owner's decision, the engine never actuates
+  the mesh on its own; every action still goes through the typed CONFIRM. The
+  learning is persisted to `/data` and survives restarts.
+
 ## 0.15.0 — 2026-07-17
 
 **The engine starts recommending (M4).** The **Remedy** screen (press **7** or

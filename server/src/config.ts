@@ -92,6 +92,9 @@ export const config = {
   /** Persistent BASELINES store (M3 — the symptom engine's learned normals).
    *  Exported as BASELINES_PATH=/data/baselines.json; absent → in-memory. */
   baselinesPath: process.env.BASELINES_PATH || null,
+  /** Persistent OUTCOMES ledger (M5 — learned action efficacy vs the no-action
+   *  arm). Exported as OUTCOMES_PATH=/data/outcomes.json; absent → in-memory. */
+  outcomesPath: process.env.OUTCOMES_PATH || null,
   /** Build stamp promoted from the Docker ARG (reported by /api/version). */
   version: process.env.BUILD_VERSION ?? '0.1.0',
 

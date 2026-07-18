@@ -59,6 +59,7 @@ async function main(): Promise<void> {
     evidenceFlushMs: config.evidenceFlushMs,
     driverWsUrl: config.driverWsUrl,
     baselinesPath: config.baselinesPath,
+    outcomesPath: config.outcomesPath,
     log,
   });
   zwaveData.start();
@@ -77,6 +78,7 @@ async function main(): Promise<void> {
     historyLong: (n) => zwaveData.historyLong(n),
     symptoms: () => zwaveData.symptoms(),
     engineStatus: () => zwaveData.engineStatus(),
+    efficacyFor: (kind, action) => zwaveData.efficacyFor(kind, action),
   };
 
   // 4) Shared, timer-refreshed render cache both transports read.
@@ -96,6 +98,8 @@ async function main(): Promise<void> {
     deviceIdOf: (n) => zwaveData.deviceIdOf(n),
     pingEntityOf: (n) => zwaveData.pingEntityOf(n),
     log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
+    // M5: feed operator-action outcomes into the learning ledger.
+    onOutcome: (kind, nodeId, ok) => zwaveData.recordActionOutcome(kind, nodeId, ok),
     enabled: config.writeActions,
   });
   log(

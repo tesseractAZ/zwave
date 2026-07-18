@@ -80,6 +80,9 @@ export EVIDENCE_PATH=/data/evidence.json
 # M3 learned baselines (the symptom engine's per-node normals; boot-grace keeps
 # them). Atomic JSON on /data; flush is fixed in code (5 min + on shutdown).
 export BASELINES_PATH=/data/baselines.json
+# M5 outcome ledger (learned action efficacy vs the no-action control arm).
+# Atomic JSON on /data; flush is fixed in code (5 min + on shutdown). No user knob.
+export OUTCOMES_PATH=/data/outcomes.json
 
 # SUPERVISOR_TOKEN is injected automatically by the HA Supervisor (unlocked by
 # homeassistant_api: true) — the Node process inherits it. Do NOT export it.
