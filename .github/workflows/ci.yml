@@ -70,3 +70,37 @@ jobs:
           # ignore-error=true so a flaky GHA cache doesn't fail the smoke build.
           cache-from: type=gha,scope=docker-smoke
           cache-to: type=gha,mode=max,scope=docker-smoke,ignore-error=true
+
+  docs:
+    # Assemble README + SECURITY + zwave_tui/DOCS.md into one printable manual on
+    # every push/PR, as BOTH an editable .docx (pandoc) and a reader-friendly
+    # .pdf (LibreOffice converts the .docx — no LaTeX). Purpose: (1) fail the PR
+    # if DOCS.md no longer converts cleanly, and (2) upload a downloadable offline
+    # manual for the branch. This repo does NOT publish releases, so this is the
+    # only doc-build path.
+    name: Build documentation (.docx + .pdf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Ensure pandoc + libreoffice
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc libreoffice-writer-nogui
+          pandoc --version | head -1
+          soffice --version | head -1
+
+      - name: Build .docx + .pdf
+        run: |
+          python3 scripts/build-docs-docx.py \
+            --ref "${GITHUB_SHA:0:7}" \
+            --pdf \
+            --output "Z-Wave-TUI-Documentation.docx"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: documentation
+          path: |
+            Z-Wave-TUI-Documentation.docx
+            Z-Wave-TUI-Documentation.pdf
+          if-no-files-found: error

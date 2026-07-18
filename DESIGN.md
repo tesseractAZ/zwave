@@ -539,7 +539,7 @@ options only for knobs a stranger genuinely needs.
 | M5 (v0.16) | episode ledger (`outcomes.ts`) + learned efficacy on the Remedy screen — **advisory-only**: the action arm is populated by operator type-CONFIRM actions; the spontaneous-recovery control arm accrues from untouched recoveries | the loop learns honestly against a no-action control arm; an action is credited only when it beats self-healing by a real margin with comparable traffic |
 | ~~executor~~ | `executor.ts` gate-stack + `auto_remediation` (off/advise/auto_safe) — **DEFERRED, not built** (owner chose advisory-only); design of record kept in §3.5 for a future opt-in | — |
 | M6 (v0.17) | interference-watch screen (key `8`/`f`): measured noise floor + trend, controller serial-link health, diurnal raw-timeout-rate heatmap, correlated-degradation state | correlated/diurnal interference visible; measured (driver-WS noise floor), not inferred; heatmap raw not baseline-relative |
-| M7 | docs + defaults audit (incl. the no-dB-numbers lint) | safe for other users' meshes |
+| M7 (v0.18) | complete `DOCS.md` system & engine reference (12 chapters) + `SECURITY.md` + a printable `.docx`/`.pdf` manual built in CI (`scripts/build-docs-docx.py`). The no-dB-numbers guard already ships as a planner test (`no candidate fabricates a numeric dB claim`); defaults are safe-defaulted for strangers' meshes (read-only, driver-WS empty=disabled) | the whole system is documented from source; the offline manual stays current; safe for other users' meshes |
 
 Each lands as its own `vX.Y`, typecheck+tests+adversarial review, same
 pipeline as v0.5–v0.11. **No publish** — private repo, local add-on.
