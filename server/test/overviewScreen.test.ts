@@ -23,7 +23,7 @@ const data: DataProvider = {
   nodes: () => nodes, nodeById: (id) => nodes.find((n) => n.nodeId === id), controller: () => ctrl, events: () => [],
   scoreFor: (id) => scores[id] ?? { score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] },
   noiseFloor: () => -92, hasRealNoise: () => true, history: () => ({ rssi: [-60, -59, -58], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
-  lastUpdated: () => now - 1200, ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }), efficacyFor: () => null,
+  lastUpdated: () => now - 1200, ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }), efficacyFor: () => null, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
 };
 const mkView = (cols: number, rows: number, selected = 5): ViewState => ({ screen: 'overview', cols, rows, selected, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', followTail: true, errorsOnly: false, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null } as ViewState);
 const ctx = (cols: number, rows: number, selected = 5): ScreenCtx => ({ view: mkView(cols, rows, selected), data, visibleNodes: nodes, filtering: false, actionsEnabled: true });

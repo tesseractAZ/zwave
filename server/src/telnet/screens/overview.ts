@@ -156,7 +156,7 @@ export function renderOverview(ctx: ScreenCtx): string[] {
   // The scroll counter is concatenated AFTER commandBar()'s own truncate, so the
   // combined line must be re-clipped to W or it overruns the primary screen.
   out.push(truncate(commandBar(view, [
-    ['1-6', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS'],
+    ['1-8', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS'],
     ['/', 'FILTER'], ['S', 'SORT'], ['T', 'UNITS'], ['Q', 'EXIT'],
   ]) + (more ? c.grey(more) : ''), W));
   // Defensive clamp — the session guarantees rows >= 16, but never overrun.

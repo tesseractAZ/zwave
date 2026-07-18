@@ -208,7 +208,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     rightStatus: right,
     body,
     keys: [
-      ['1-7', 'SCREENS'],
+      ['1-8', 'SCREENS'],
       ['Q', 'BACK'],
     ],
   });

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.17.0 — 2026-07-17
+
+**See the airwaves (M6).** A new **Interference** screen (press **8** or **f**)
+puts the mesh's RF environment on one page:
+
+- **Noise floor** — the per-channel 900 MHz background RSSI the radio measures
+  (Home Assistant hides it; the add-on's read-only driver link surfaces it),
+  with a 14-day trend. Lower is quieter; around −110 dBm is the near-radio
+  ideal. Your mesh currently sits near −102 dBm — clean.
+- **Controller serial link** — the host↔stick NAK/CAN/timeout rates, shown
+  *separately* because a flaky USB/serial link looks exactly like mesh-wide RF
+  trouble and needs the opposite fix (move the stick, not the nodes).
+- **Diurnal heatmap** — the mesh-wide reply-timeout rate by hour of day, drawn
+  as raw rates (never smoothed against a baseline — the whole point is to reveal
+  a recurring, time-of-day interferer like a smart meter or baby monitor that a
+  time-banded baseline would quietly absorb). A persistently hot hour stands out.
+- **Correlated degradation** — whether several nodes are struggling *together*
+  right now (the signature of an environmental cause rather than one bad node).
+
+Everything is honest about missing data: no driver link → the noise floor reads
+"unavailable" rather than a fabricated number; too little history → the heatmap
+says "building" instead of showing fake zeros.
+
 ## 0.16.0 — 2026-07-17
 
 **The engine starts *learning* (M5).** The Remedy screen's recommendations now

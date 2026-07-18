@@ -241,8 +241,8 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   const st = statusColor(n.status)(n.statusLabel.toUpperCase());
   const sc = dead(n) ? c.grey('—') : scoreColor(health.score)(`${health.score} (${health.grade})`);
   const keys: Array<readonly [string, string]> = ctx.actionsEnabled
-    ? [['A', 'ACTIONS'], ['⏎', 'LIST'], ['1-6', 'SCREENS'], ['Q', 'BACK']]
-    : [['A', 'ACTIONS'], ['1-6', 'SCREENS'], ['Q', 'BACK']];
+    ? [['A', 'ACTIONS'], ['⏎', 'LIST'], ['1-8', 'SCREENS'], ['Q', 'BACK']]
+    : [['A', 'ACTIONS'], ['1-8', 'SCREENS'], ['Q', 'BACK']];
   return frame(view, data, {
     title: `NODE #${n.nodeId} · ${n.name}`,
     rightStatus: st + c.grey(' · ') + c.grey('SCORE ') + sc,
