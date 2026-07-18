@@ -24,6 +24,7 @@ import type {
   DataProvider,
   Efficacy,
   HealthResult,
+  InterferenceView,
   LogEvent,
   NodeSnapshot,
   Symptom,
@@ -67,6 +68,8 @@ export interface ZwaveDataSource {
   engineStatus(): { enabled: boolean; ready: number; total: number };
   /** M5 learned action efficacy (null when the ledger is off / no estimate). REQUIRED. */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
+  /** M6 interference view (noise floor + serial health + diurnal heatmap). REQUIRED. */
+  interference(): InterferenceView;
 }
 
 export interface CreateTuiDataProviderOptions {
@@ -208,6 +211,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     symptoms: () => zwaveData.symptoms?.() ?? [],
     engineStatus: () => zwaveData.engineStatus?.() ?? { enabled: false, ready: 0, total: 0 },
     efficacyFor: (kind, action) => zwaveData.efficacyFor?.(kind, action) ?? null,
+    interference: () => zwaveData.interference(),
   };
 
   return {

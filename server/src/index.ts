@@ -79,6 +79,7 @@ async function main(): Promise<void> {
     symptoms: () => zwaveData.symptoms(),
     engineStatus: () => zwaveData.engineStatus(),
     efficacyFor: (kind, action) => zwaveData.efficacyFor(kind, action),
+    interference: () => zwaveData.interference(),
   };
 
   // 4) Shared, timer-refreshed render cache both transports read.

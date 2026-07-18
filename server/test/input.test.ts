@@ -17,7 +17,7 @@ const score: HealthResult = { score: 79, rating: 8, grade: 'C', state: 'ok', fla
 const data: DataProvider = {
   nodes: () => [node], nodeById: () => node, controller: () => null, events: () => [],
   scoreFor: () => score, noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }),
-  historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0, ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }), efficacyFor: () => null,
+  historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0, ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }), efficacyFor: () => null, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
 };
 const mkView = (screen: ViewState['screen'] = 'overview'): ViewState => ({
   screen, cols: 100, rows: 30, selected: 0, scroll: 0, filter: '',

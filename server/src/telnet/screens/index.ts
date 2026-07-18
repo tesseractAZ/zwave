@@ -25,6 +25,7 @@ import { renderTopology } from './topology';
 import { renderHeatmap } from './heatmap';
 import { renderLog } from './log';
 import { renderRemedy } from './remedy';
+import { renderInterference } from './interference';
 
 export { SCREENS } from '../../types';
 
@@ -37,6 +38,7 @@ export const SCREEN_LABEL: Record<ScreenView, string> = {
   heatmap: 'Heatmap',
   log: 'Log',
   remedy: 'Remedy',
+  interference: 'Interference',
 };
 
 /**
@@ -60,6 +62,8 @@ export function renderScreen(ctx: ScreenCtx): string[] {
       return renderLog(ctx);
     case 'remedy':
       return renderRemedy(ctx);
+    case 'interference':
+      return renderInterference(ctx);
     default: {
       // Exhaustiveness guard — a new ScreenView must be wired above or this
       // fails the typecheck.

@@ -73,7 +73,7 @@ export function renderLog(ctx: ScreenCtx): string[] {
     body,
     keys: [
       ['↑↓', 'MOVE'], ['␣/b', 'PAGE'], ['⏎', 'DEVICE'], ['D', 'DATE'],
-      ['O', 'ERRORS'], ['1-6', 'SCREENS'], ['Q', 'CLOSE'],
+      ['O', 'ERRORS'], ['1-8', 'SCREENS'], ['Q', 'CLOSE'],
     ],
   });
 }
