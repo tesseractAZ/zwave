@@ -117,29 +117,23 @@ screen. If you expose mesh controls on an untrusted LAN, enable the login gate.
 
 ## Releasing a new version
 
-Three workflows relay a release end-to-end:
+This is a **private, single-tenant** add-on deployed by **local build** on the
+Pi — it publishes **no** container image. A release is just a private, versioned
+record plus the downloadable manual. To cut one:
 
-1. **`release.yml`** (manual, `workflow_dispatch`) — bumps `version:` in
-   `zwave_tui/config.yaml`, prepends a `## X.Y.Z — DATE` section to
-   `zwave_tui/CHANGELOG.md` (no leading `v`), and opens an auto-merge
-   `release/vX.Y.Z` PR.
-2. **`tag-release.yml`** (on push to `main`, gated on a `Release v…` commit) —
-   creates the `vX.Y.Z` tag and dispatches the image build.
-3. **`images.yml`** (on the `vX.Y.Z` tag) — builds the `aarch64` and `amd64`
-   images natively (no QEMU), pushes them to
-   `ghcr.io/tesseractaz/{arch}-zwave-tui:{version}` + `:latest`, and cuts the
-   GitHub Release.
+1. Bump `version:` in `zwave_tui/config.yaml` and add a `## X.Y.Z — DATE`
+   section to `zwave_tui/CHANGELOG.md`, then merge that to `main` (a normal
+   `vX.Y…` PR subject — CI gates it).
+2. Push the tag at the merge commit:
+   ```bash
+   git tag v0.21.0 <merge-sha> && git push origin v0.21.0
+   ```
+3. **`publish-release.yml`** (on the `vX.Y.Z` tag) runs the server tests, builds
+   the printable manual (`.docx` + `.pdf`), and cuts a **private GitHub Release**
+   with the CHANGELOG notes and the manual attached. No GHCR image is pushed.
 
-`ci.yml` (typecheck + docker smoke build) is the required gate on every PR, and
-`codeql.yml` runs the self-contained CodeQL security check.
-
-### First publish — one-time GHCR Private → Public flip
-
-The very first image push creates **two private packages** (one per arch):
-`aarch64-zwave-tui` and `amd64-zwave-tui`. Home Assistant pulls anonymously, so
-flip **both** packages to **Public** once, under
-**github.com/users/tesseractAZ → Packages → each package → Package settings →
-Change visibility → Public**. Subsequent releases just push new tags.
+`ci.yml` (typecheck + tests + docs build + docker smoke build) is the required
+gate on every PR; `codeql.yml` runs the self-contained CodeQL security check.
 
 ## Local development
 
@@ -150,4 +144,4 @@ Change visibility → Public**. Subsequent releases just push new tags.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+© 2026 Eric Paschal. MIT — see [LICENSE](./LICENSE).
