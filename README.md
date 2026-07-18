@@ -157,4 +157,4 @@ gate on every PR; `codeql.yml` runs the self-contained CodeQL security check.
 
 ## License
 
-© 2026 Eric Paschal. MIT — see [LICENSE](./LICENSE).
+MIT © 2026 Eric Paschal — see [LICENSE](./LICENSE).
