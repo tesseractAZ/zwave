@@ -16,7 +16,7 @@ function sym(kind: SymptomKind, nodeId: number | null): Symptom {
   return { kind, nodeId, severity: 'warn', sinceMs: now - 600_000, basis: 'measured', evidence: [], narrative: `${kind} narrative.` };
 }
 function inp(over: Partial<InterferenceInput> = {}): InterferenceInput {
-  return { now, bgChannels: null, controllerSamples: [], coarseByNode: new Map(), symptoms: [], activeNodes: 0, ...over };
+  return { now, bgChannels: null, controllerSamples: [], coarseByNode: new Map(), symptoms: [], ...over };
 }
 
 test('noise floor = MEDIAN of valid channels (matches the masthead); band classifies', () => {
@@ -26,6 +26,15 @@ test('noise floor = MEDIAN of valid channels (matches the masthead); band classi
   assert.equal(v.noise.band, 'clean'); // <= -98
   assert.equal(computeInterference(inp({ bgChannels: [-92, -94, -93, -95] })).noise.band, 'elevated');
   assert.equal(computeInterference(inp({ bgChannels: [-80, -82, -84, -83] })).noise.band, 'noisy');
+});
+
+test('floor uses the LEADING channel run (matches the masthead) — a middle null truncates it', () => {
+  // leadingRun([-101, null, -103, -95]) = [-101] → floor -101, NOT the
+  // all-valid median (-103). This is exactly what the masthead does, so the two
+  // screens can never disagree on the noise floor.
+  assert.equal(computeInterference(inp({ bgChannels: [-101, null, -103, -95] })).noise.floor, -101);
+  // All channels present → median of all four (the live-mesh common case).
+  assert.equal(computeInterference(inp({ bgChannels: [-101, -103, -103, -95] })).noise.floor, -102);
 });
 
 test('no live bg reading → floor null, real false, band unknown; sentinels ignored', () => {
@@ -52,6 +61,14 @@ test('serial band: NAK/CAN/timeoutACK drive "strained"; reply-timeout does NOT',
   assert.ok(vh.serial.tmoRespPerH != null && vh.serial.tmoRespPerH > 0, 'but it is still reported');
   const strained = [cs({ t: now }), cs({ t: now + span, dNak: 20 })];
   assert.equal(computeInterference(inp({ controllerSamples: strained })).serial.band, 'strained');
+});
+
+test('serial rate is fencepost-correct — the first sample’s pre-window delta is excluded', () => {
+  const span = 2 * 3_600_000; // 2h span
+  // cs[0] carries a big delta from BEFORE the window (100); only cs[1]'s 20
+  // occurred during the span → 20 / 2h = 10/h, NOT (100+20)/2h = 60/h.
+  const v = computeInterference(inp({ controllerSamples: [cs({ t: now, dNak: 100 }), cs({ t: now + span, dNak: 20 })] }));
+  assert.ok(v.serial.nakPerH != null && Math.abs(v.serial.nakPerH - 10) < 1e-9, `10/h, got ${v.serial.nakPerH}`);
 });
 
 test('serial band unknown with fewer than two fresh samples', () => {
@@ -98,10 +115,9 @@ test('correlated: mesh-interference symptom → active; degradedNodes counts dis
     sym('weak-signal', 8),
     sym('controller-degraded', null), // excluded
   ];
-  const v = computeInterference(inp({ symptoms, activeNodes: 11 }));
+  const v = computeInterference(inp({ symptoms }));
   assert.equal(v.correlated.active, true);
   assert.equal(v.correlated.degradedNodes, 2, 'nodes 7 and 8 (rtt on 7 dedups; controller excluded)');
-  assert.equal(v.correlated.activeNodes, 11);
   assert.ok(/mesh-interference/.test(v.correlated.narrative));
 });
 

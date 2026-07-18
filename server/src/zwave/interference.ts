@@ -26,6 +26,18 @@ import type { InterferenceView } from '../types';
 import type { ControllerSample, CoarseBucket } from './evidenceStore';
 import type { Symptom } from './symptoms';
 
+/** Leading contiguous run of non-null channels (a null ends the run) — the
+ *  driver's channel convention. Inlined (not imported from zwaveData) to avoid a
+ *  module cycle; identical to zwaveData.leadingRun. */
+function leadingRun(channels: (number | null)[]): number[] {
+  const out: number[] = [];
+  for (const ch of channels) {
+    if (ch == null) break;
+    out.push(ch);
+  }
+  return out;
+}
+
 export interface InterferenceInput {
   now: number;
   /** Current per-channel background RSSI (ch0..3), or null when no live reading. */
@@ -36,9 +48,6 @@ export interface InterferenceInput {
   coarseByNode: Map<number, CoarseBucket[]>;
   /** Live symptoms — the correlated-degradation state + degraded-node count. */
   symptoms: Symptom[];
-  /** Count of nodes with observable traffic in the current window (for the
-   *  correlated ratio) — the detector's own denominator, passed through. */
-  activeNodes: number;
 }
 
 const HOURS = 24;
@@ -53,15 +62,16 @@ function noiseBand(floor: number | null, real: boolean): InterferenceView['noise
   return 'noisy';
 }
 
-/** Valid (finite, negative) RSSI channels only — sentinels ≥125 are positive. */
-function validChannels(channels: (number | null)[] | null | undefined): number[] {
-  if (!channels) return [];
-  return channels.filter((v): v is number => v != null && Number.isFinite(v) && v < 0);
-}
-
-/** MEDIAN of the valid channels — matches the masthead's noiseFloor exactly. */
+/** MEDIAN of the representative channels, IDENTICAL to the masthead's
+ *  computeNoiseFloor: take the leading contiguous run of channels (the driver's
+ *  own convention — a null ends the run), then median the finite, non-sentinel,
+ *  negative values. Matching exactly avoids showing two different "noise floor"
+ *  numbers on two screens. */
 function medianFloor(channels: (number | null)[] | null | undefined): number | null {
-  const vals = validChannels(channels).sort((a, b) => a - b);
+  if (!channels) return null;
+  const vals = leadingRun(channels)
+    .filter((v) => Number.isFinite(v) && v < 0)
+    .sort((a, b) => a - b);
   if (!vals.length) return null;
   const mid = vals.length >> 1;
   return vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
@@ -85,7 +95,11 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   let nak = 0, can = 0, tmoAck = 0, tmoResp = 0, spanMs = 0;
   if (cs.length >= MIN_SERIAL_SAMPLES) {
     spanMs = Math.max(0, cs[cs.length - 1].t - cs[0].t);
-    for (const s of cs) {
+    // Fencepost: sum deltas from the SECOND sample on. cs[0]'s delta covers the
+    // window BEFORE the span (up to cs[0].t) and must not be attributed to it;
+    // each of cs[1..last]'s deltas covers a sub-window inside [cs[0].t, last].
+    for (let i = 1; i < cs.length; i++) {
+      const s = cs[i];
       nak += s.dNak ?? 0; can += s.dCan ?? 0;
       tmoAck += s.dTimeoutAck ?? 0; tmoResp += s.dTimeoutResponse ?? 0;
     }
@@ -123,7 +137,11 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   }));
   const coverageDays = Number.isFinite(minT0) ? Math.max(0, (maxT0 - minT0) / 86_400_000) : 0;
 
-  // ── Correlated degradation (from the mesh-interference detector) ────────
+  // ── Correlated degradation ─────────────────────────────────────────────
+  // The mesh-interference detector owns the coherent "degraded X of Y active"
+  // ratio (its narrative carries it). We do NOT re-derive a ratio here — a
+  // separately-computed numerator/denominator can be incoherent (X > Y, X of 0).
+  // We only count distinct symptomatic nodes for the honest inactive-case label.
   const mesh = input.symptoms.find((s) => s.kind === 'mesh-interference');
   const degradedNodes = new Set(
     input.symptoms.filter((s) => s.nodeId != null && s.kind !== 'controller-degraded').map((s) => s.nodeId),
@@ -131,7 +149,6 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   const correlated = {
     active: mesh != null,
     degradedNodes,
-    activeNodes: input.activeNodes,
     narrative: mesh
       ? mesh.narrative
       : degradedNodes > 0

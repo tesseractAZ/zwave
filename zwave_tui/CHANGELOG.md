@@ -7,7 +7,7 @@ puts the mesh's RF environment on one page:
 
 - **Noise floor** — the per-channel 900 MHz background RSSI the radio measures
   (Home Assistant hides it; the add-on's read-only driver link surfaces it),
-  with a 14-day trend. Lower is quieter; around −110 dBm is the near-radio
+  with a recent trend spark. Lower is quieter; around −110 dBm is the near-radio
   ideal. Your mesh currently sits near −102 dBm — clean.
 - **Controller serial link** — the host↔stick NAK/CAN/timeout rates, shown
   *separately* because a flaky USB/serial link looks exactly like mesh-wide RF

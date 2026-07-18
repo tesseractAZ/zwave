@@ -1,9 +1,11 @@
 /**
- * INTERFERENCE screen (M6, DESIGN.md §3.7) — key `8`/`i`. The mesh's RF
- * environment on one screen, read from the pre-computed `data.interference()`
- * view (the heavy coarse-bucket fold is memoized in the data layer):
+ * INTERFERENCE screen (M6, DESIGN.md §3.7) — key `8`/`f` (`i` is the
+ * re-interview action). The mesh's RF environment on one screen, read from the
+ * pre-computed `data.interference()` view (the heavy coarse-bucket fold is
+ * memoized in the data layer):
  *
- *   NOISE FLOOR   per-channel 900 MHz background RSSI + a 14-day trend spark —
+ *   NOISE FLOOR   per-channel 900 MHz background RSSI + a recent trend spark
+ *                 (the ~40-min controller ring, NOT the 14-day coarse tier) —
  *                 the driver-WS measurement (HA strips it). Lower = quieter.
  *   SERIAL LINK   controller host↔stick NAK/CAN/timeout rates, shown APART: a
  *                 serial fault mimics mesh-wide RF trouble.
@@ -110,12 +112,14 @@ export function renderInterference(ctx: ScreenCtx): string[] {
   push();
 
   // ── CORRELATED DEGRADATION ──────────────────────────────────────────────
+  // The detector owns the ratio — the narrative carries "degraded X of Y active"
+  // when a mesh event is live; we never re-derive a (possibly incoherent) ratio.
   push(c.label('CORRELATED DEGRADATION'));
   if (iv.correlated.active) {
-    push('  ' + c.yellowB('⚠ ') + c.white(`${iv.correlated.degradedNodes} of ${iv.correlated.activeNodes} active nodes co-degrading`));
+    push('  ' + c.yellowB('⚠ correlated mesh degradation'));
     for (const line of wrap(iv.correlated.narrative, W - 4).slice(0, 2)) push('    ' + c.grey(line));
   } else {
-    push('  ' + c.green('✓ ') + c.grey(iv.correlated.narrative) + c.grey(`  (${iv.correlated.degradedNodes} of ${iv.correlated.activeNodes} active degraded)`));
+    push('  ' + c.green('✓ ') + c.grey(iv.correlated.narrative));
   }
 
   const right = iv.noise.real ? `${iv.noise.band} · ${dbm(iv.noise.floor)} dBm` : 'noise n/a';

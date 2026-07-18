@@ -921,19 +921,15 @@ class ZwaveDataImpl implements ZwaveData {
         ? this.driverBgRssi.channels
         : null;
     const coarseByNode = new Map<number, import('./evidenceStore').CoarseBucket[]>();
-    let activeNodes = 0;
-    const WINDOW = 5 * 60_000;
     if (this.evidenceStore) {
       for (const n of this.lastNodes) {
         if (n.isController) continue;
         const cb = this.evidenceStore.coarseForNode(n.nodeId);
         if (cb.length) coarseByNode.set(n.nodeId, cb);
-        const ring = this.evidenceStore.forNode(n.nodeId);
-        if (ring.some((s) => now - s.t <= WINDOW && s.dTx != null && s.dTx > 0)) activeNodes += 1;
       }
     }
     const controllerSamples = this.evidenceStore ? this.evidenceStore.controllerSamples() : [];
-    const view = computeInterference({ now, bgChannels, controllerSamples, coarseByNode, symptoms: this.lastSymptoms, activeNodes });
+    const view = computeInterference({ now, bgChannels, controllerSamples, coarseByNode, symptoms: this.lastSymptoms });
     this.lastInterference = { at: now, view };
     return view;
   }
@@ -1247,6 +1243,9 @@ class ZwaveDataImpl implements ZwaveData {
         this.outcomes?.reset();
         this.outcomes?.save();
         this.pendingResolve.clear();
+        // M6 interference view is derived from this network's evidence — drop the
+        // memoized snapshot so it recomputes against the new network immediately.
+        this.lastInterference = null;
         // The new network gets a fresh homeId cross-check; restart the driver
         // client so it re-handshakes and re-validates (start() after stop() is
         // supported — see driverWsClient.stop()).

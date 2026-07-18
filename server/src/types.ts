@@ -237,11 +237,13 @@ export interface InterferenceView {
   diurnal: { hour: number; rate: number | null; tx: number }[]; // length 24
   /** Days of coarse history backing the heatmap (for an honest "n days" label). */
   coverageDays: number;
-  /** Current correlated-degradation state (from the mesh-interference detector). */
+  /** Current correlated-degradation state. When a mesh event is active the
+   *  `narrative` carries the DETECTOR's own coherent "degraded X of Y active"
+   *  ratio; `degradedNodes` is a plain count of distinct symptomatic nodes for
+   *  the inactive case (no invented denominator — the detector owns the ratio). */
   correlated: {
     active: boolean;
-    degradedNodes: number; // distinct nodes with an active per-node symptom
-    activeNodes: number; // nodes with observable traffic in the window
+    degradedNodes: number;
     narrative: string;
   };
 }
