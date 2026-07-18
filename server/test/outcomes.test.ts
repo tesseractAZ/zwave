@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
-import { createOutcomeStore, windowMetrics, type WindowMetrics } from '../src/zwave/outcomes';
+import { createOutcomeStore, windowMetrics, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
 import type { EvidenceSample } from '../src/zwave/evidenceStore';
+import type { SymptomKind } from '../src/zwave/symptoms';
 
 // A window with plenty of traffic; rate = timeouts/tx.
 const W = (tx: number, timeouts: number, rx = tx): WindowMetrics => ({ tx, rx, timeouts, rate: tx >= 5 ? timeouts / tx : null, samples: 6 });
@@ -68,6 +69,21 @@ test('action arm: efficacy is offered once the action clears the base rate + eff
   assert.ok(eff.beatsSelfHealing, 'action beats self-healing');
   assert.ok(eff.expectedEfficacy != null && eff.expectedEfficacy > 0.9, `efficacy ~1.0, got ${eff.expectedEfficacy}`);
   assert.ok(eff.baseRate != null && eff.baseRate < 0.3, 'base rate surfaced for context');
+});
+
+test('efficacy CANNOT claim to beat self-healing with no measured control arm (base rate null)', () => {
+  const o = store();
+  // 4 action episodes, ALL improved — but ZERO no-action episodes → base unknown.
+  for (let i = 0; i < 4; i++) {
+    o.open(i, 'rate-fallback', 1000, W(100, 40));
+    o.recordAction(i, 'refreshValues', false, 1500);
+    o.resolve(i, 'rate-fallback', 2000, W(100, 1));
+  }
+  const eff = o.efficacyFor('rate-fallback', 'refreshValues');
+  assert.equal(o.baseRate('rate-fallback'), null, 'no control arm measured');
+  assert.equal(eff.ready, true, 'enough attempts to have an opinion');
+  assert.equal(eff.beatsSelfHealing, false, 'but cannot BEAT an unmeasured base rate');
+  assert.equal(eff.expectedEfficacy, null, 'so no efficacy claim — "not distinguishable"');
 });
 
 test('refused action → refused-misdiagnosis, keyed to the SYMPTOM, never counted as efficacy', () => {
@@ -153,6 +169,20 @@ test('a node-scoped action attributes to ALL that node’s open episodes (not ju
   assert.equal(o.efficacyFor('dead-flap', 'ping').n, 0, 'node 8 was NOT credited the ping');
 });
 
+test('an action is NOT credited to an episode already in the confirmation window (skip predicate)', () => {
+  const o = store();
+  o.open(7, 'dead-flap', 1000, W(100, 40));
+  // The symptom went absent; the caller marks its key as "pending resolution".
+  o.recordAction(7, 'ping', false, 1500, (key) => key === '7:dead-flap');
+  const ep = o.resolve(7, 'dead-flap', 2000, W(100, 1));
+  assert.equal(ep?.action, null, 'the action taken during recovery was not credited');
+  // Same setup WITHOUT skipping → the action IS attributed.
+  const o2 = store();
+  o2.open(7, 'dead-flap', 1000, W(100, 40));
+  o2.recordAction(7, 'ping', false, 1500);
+  assert.equal(o2.resolve(7, 'dead-flap', 2000, W(100, 1))?.action?.kind, 'ping');
+});
+
 test('openEpisodes exposes (key,nodeId,kind) for the confirmation-window resolution loop', () => {
   const o = store();
   o.open(7, 'rtt-degraded', 1000, W(100, 40));
@@ -175,6 +205,63 @@ test('persistence round-trips the learned arms and rejects a corrupt tally', () 
   const o3 = store();
   o3.loadJSON({ v: 1, control: [['dead-flap', { n: 2, ok: 9 }]], action: [], fp: [] });
   assert.equal(o3.baseRate('dead-flap'), null, 'garbage tally rejected');
+});
+
+// ── planEpisodeLifecycle: the confirmation-window decision (the HIGH-value gap) ──
+type Sym = { nodeId: number | null; kind: SymptomKind; subsumedBy?: string | null };
+const openEp = (nodeId: number | null, kind: SymptomKind) => ({ key: `${nodeId ?? 'mesh'}:${kind}`, nodeId, kind });
+
+test('lifecycle: a new non-subsumed symptom is opened; a subsumed one opens NO episode', () => {
+  const syms: Sym[] = [
+    { nodeId: 7, kind: 'rtt-degraded' },
+    { nodeId: 8, kind: 'weak-signal', subsumedBy: 'mesh-1' },
+  ];
+  const { toOpen } = planEpisodeLifecycle(syms, [], new Map(), 1000, 600_000);
+  assert.deepEqual(toOpen, [{ nodeId: 7, kind: 'rtt-degraded' }], 'only the independent symptom opens');
+});
+
+test('lifecycle: an absent symptom is NOT resolved until it stays gone through the confirm window', () => {
+  const open = [openEp(7, 'dead-flap')];
+  const pending = new Map<string, number>();
+  const confirm = 600_000;
+  // Tick 1: symptom absent → pending timer starts, nothing resolves yet.
+  let r = planEpisodeLifecycle([], open, pending, 1_000, confirm);
+  assert.equal(r.toResolve.length, 0, 'a blink of absence does not resolve');
+  assert.equal(pending.get('7:dead-flap'), 1_000);
+  // Tick 2: still absent but before the window elapses → still pending.
+  r = planEpisodeLifecycle([], open, pending, 1_000 + confirm - 1, confirm);
+  assert.equal(r.toResolve.length, 0);
+  // Tick 3: absent past the window → resolve, pending cleared.
+  r = planEpisodeLifecycle([], open, pending, 1_000 + confirm, confirm);
+  assert.deepEqual(r.toResolve, [{ nodeId: 7, kind: 'dead-flap', key: '7:dead-flap' }]);
+  assert.equal(pending.has('7:dead-flap'), false, 'pending cleared on resolve');
+});
+
+test('lifecycle: a symptom that becomes SUBSUMED (still present) is NOT resolved — subsumption ≠ recovery', () => {
+  const open = [openEp(8, 'weak-signal')];
+  const pending = new Map<string, number>();
+  const confirm = 600_000;
+  // The symptom is now subsumed under a mesh event but STILL present.
+  const syms: Sym[] = [{ nodeId: 8, kind: 'weak-signal', subsumedBy: 'mesh-1' }];
+  const r = planEpisodeLifecycle(syms, open, pending, 1_000, confirm);
+  assert.equal(r.toResolve.length, 0, 'a subsumed-but-present symptom does not resolve');
+  assert.equal(pending.has('8:weak-signal'), false, 'and it is treated as live (no pending timer)');
+  assert.equal(r.toOpen.length, 0, 'nor re-opened (already open)');
+  // Even well past the confirm window, still present-but-subsumed → still open.
+  const r2 = planEpisodeLifecycle(syms, open, pending, 1_000 + confirm * 2, confirm);
+  assert.equal(r2.toResolve.length, 0, 'still not resolved while present');
+});
+
+test('lifecycle: a symptom that REAPPEARS inside the window cancels its pending resolution', () => {
+  const open = [openEp(7, 'dead-flap')];
+  const pending = new Map<string, number>();
+  const confirm = 600_000;
+  planEpisodeLifecycle([], open, pending, 1_000, confirm); // absent → pending
+  assert.equal(pending.has('7:dead-flap'), true);
+  const r = planEpisodeLifecycle([{ nodeId: 7, kind: 'dead-flap' }], open, pending, 1_500, confirm); // back
+  assert.equal(pending.has('7:dead-flap'), false, 'reappearance clears pending');
+  assert.equal(r.toResolve.length, 0, 'and it is not resolved');
+  assert.equal(r.toOpen.length, 0, 'nor re-opened (already open)');
 });
 
 test('fs load/save persists the learned arms atomically across a restart', () => {

@@ -37,7 +37,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import type { ActionKind, Efficacy } from '../types';
 import type { SymptomKind } from './symptoms';
 import type { EvidenceSample } from './evidenceStore';
-import { bandOf, N_BANDS } from './baselines';
+import { bandOf } from './baselines';
 
 export type { Efficacy };
 
@@ -94,8 +94,11 @@ export interface OutcomeStore {
   open(nodeId: number | null, kind: SymptomKind, onsetMs: number, before: WindowMetrics | null): void;
   /** Attribute an operator action to EVERY open episode on this node (the
    *  operator picks an action for a node, not a specific symptom). First action
-   *  per episode wins the attribution. */
-  recordAction(nodeId: number | null, actionKind: ActionKind, refused: boolean, atMs: number): void;
+   *  per episode wins the attribution. `skip(key)` excludes episodes whose
+   *  symptom has already gone absent (in the caller's confirmation window) — an
+   *  action taken after the symptom already cleared must NOT be credited for the
+   *  spontaneous recovery. */
+  recordAction(nodeId: number | null, actionKind: ActionKind, refused: boolean, atMs: number, skip?: (key: string) => boolean): void;
   /** Close an episode: the symptom resolved. Computes + folds the verdict. */
   resolve(nodeId: number | null, kind: SymptomKind, resolvedMs: number, after: WindowMetrics | null): Episode | null;
   /** Drop an open episode without a verdict (e.g. node left the roster). */
@@ -108,7 +111,7 @@ export interface OutcomeStore {
   /** Spontaneous-recovery base rate for a kind (control arm), or null if n too low. */
   baseRate(kind: SymptomKind): number | null;
   /** Learned efficacy of an action against a kind, for the planner. */
-  efficacyFor(kind: SymptomKind, action: ActionKind, band?: number): Efficacy;
+  efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy;
   /** How many episodes of this kind ended `refused-misdiagnosis` (false positives). */
   falsePositives(kind: SymptomKind): number;
   /** Load the learned arms from `path` (no-op if unset/missing/corrupt). */
@@ -146,6 +149,12 @@ const TRAFFIC_FACTOR = 3;
 const WORSE_FACTOR = 1.5;
 
 function comparable(a: WindowMetrics, b: WindowMetrics): boolean {
+  // Comparability is on TX only — it is the denominator of the per-command rate
+  // being compared, so a large TX shift is what actually poisons the rate. RX is
+  // deliberately NOT gated: a SET-only node legitimately has near-zero unsolicited
+  // RX, and requiring RX-comparability would wrongly mark all such nodes
+  // `unverifiable`. (An RX-collapse-while-TX-steady case is a rare uncovered edge,
+  // documented rather than papered over with a guard that breaks SET-only nodes.)
   if (a.tx < MIN_WINDOW_TX || b.tx < MIN_WINDOW_TX) return false;
   const hi = Math.max(a.tx, b.tx), lo = Math.min(a.tx, b.tx);
   return hi <= lo * TRAFFIC_FACTOR;
@@ -163,7 +172,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   const action = new Map<string, Tally>();
 
   const key = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
-  const aKey = (kind: SymptomKind, act: ActionKind, band: number): string => `${kind}|${act}|${band}`;
+  const aKey = (kind: SymptomKind, act: ActionKind): string => `${kind}|${act}`;
 
   const bump = (t: Tally | undefined, improved: boolean): Tally => {
     const cur = t ?? { n: 0, ok: 0 };
@@ -187,13 +196,16 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       open.set(k, { kind, nodeId, band: bandOf(onsetMs), onsetMs, before, action: null, resolvedMs: null, after: null, verdict: null });
     },
 
-    recordAction(nodeId, actionKind, refused, atMs): void {
+    recordAction(nodeId, actionKind, refused, atMs, skip): void {
       // Attribute to EVERY open episode on this node (an action targets a node;
       // any of its active symptoms could be the one it addresses). First action
-      // per episode wins — a later action can't cleanly be credited.
+      // per episode wins — a later action can't cleanly be credited. Skip
+      // episodes whose symptom already went absent (confirmation window): an
+      // action there would steal credit for a spontaneous recovery.
       const prefix = `${nodeId ?? 'mesh'}:`;
       for (const [k, ep] of open) {
         if (!k.startsWith(prefix)) continue;
+        if (skip?.(k)) continue;
         if (ep.action == null) ep.action = { kind: actionKind, atMs, refused };
       }
     },
@@ -215,8 +227,13 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         // Control arm: a symptom that resolved with no action taken.
         control.set(kind, bump(control.get(kind), ep.verdict === 'improved'));
       } else {
-        // Action arm, keyed to the coarse context band.
-        const ak = aKey(kind, ep.action.kind, ep.band);
+        // Action arm — keyed by (kind, action) to match the un-banded control
+        // arm. Time-of-day banding is deliberately NOT applied: it would need
+        // n≥MIN per band across 6 bands to learn, and comparing a band-summed
+        // action rate against an un-banded base rate is a Simpson's-paradox
+        // confound. Both arms stay marginal (a documented diurnal-confound
+        // limitation — see baseRate/efficacyFor).
+        const ak = aKey(kind, ep.action.kind);
         action.set(ak, bump(action.get(ak), ep.verdict === 'improved'));
       }
       log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'}`);
@@ -241,22 +258,17 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       return t.ok / t.n;
     },
 
-    efficacyFor(kind, act, band): Efficacy {
+    efficacyFor(kind, act): Efficacy {
       const base = this.baseRate(kind);
-      // Sum the action arm across bands, or a specific band when given.
-      let n = 0, ok = 0;
-      for (let b = 0; b < N_BANDS; b++) {
-        if (band != null && b !== band) continue;
-        const t = action.get(aKey(kind, act, b));
-        if (t) { n += t.n; ok += t.ok; }
-      }
+      const t = action.get(aKey(kind, act));
+      const n = t?.n ?? 0, ok = t?.ok ?? 0;
       if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, beatsSelfHealing: false, ready: false };
       const rate = ok / n;
-      // Beats self-healing = clears the base rate (or a floor when base unknown)
-      // by the minimum effect size. Until then expectedEfficacy stays null so
-      // the planner renders "not distinguishable from self-healing".
-      const bar = (base ?? 0) + cfg.minEffect;
-      const beats = rate >= bar;
+      // "Beats self-healing" REQUIRES a measured control arm to beat — you cannot
+      // out-perform a base rate you have not measured. With no base rate yet the
+      // action is `ready` (enough attempts) but NOT distinguishable, so
+      // expectedEfficacy stays null and the planner says exactly that.
+      const beats = base != null && rate >= base + cfg.minEffect;
       return { expectedEfficacy: beats ? rate : null, n, baseRate: base, beatsSelfHealing: beats, ready: true };
     },
 
@@ -312,6 +324,52 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       for (const [k, v] of o.fp ?? []) if (Number.isFinite(v) && v >= 0) fp.set(k, v);
     },
   };
+}
+
+/** PURE episode-lifecycle decision (extracted from zwaveData so the
+ *  confirmation-window logic is unit-testable). Given the current symptoms, the
+ *  ledger's open episodes, and a mutable `pending` map (key → first-absent ms),
+ *  returns which episodes to OPEN and which to RESOLVE. Rules:
+ *   • a non-subsumed symptom with no open episode → OPEN (a subsumed symptom's
+ *     fate belongs to its mesh event, so it opens no episode of its own);
+ *   • an open episode whose symptom is present again → its pending timer is
+ *     cleared (a blink of absence does not resolve it);
+ *   • an open episode absent through the whole `confirmMs` window → RESOLVE. */
+export function planEpisodeLifecycle(
+  symptoms: { nodeId: number | null; kind: SymptomKind; subsumedBy?: string | null }[],
+  openEpisodes: { key: string; nodeId: number | null; kind: SymptomKind }[],
+  pending: Map<string, number>,
+  now: number,
+  confirmMs: number,
+): { toOpen: { nodeId: number | null; kind: SymptomKind }[]; toResolve: { nodeId: number | null; kind: SymptomKind; key: string }[] } {
+  const epKey = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
+  // A symptom is "live" (must NOT resolve) whenever it is present — INCLUDING
+  // when it is merely subsumed under a mesh event. Subsumption demotes the
+  // recommendation, it does not mean the symptom recovered. Only genuine absence
+  // resolves an episode.
+  const live = new Set<string>();
+  for (const s of symptoms) {
+    const k = epKey(s.nodeId, s.kind);
+    live.add(k);
+    pending.delete(k); // present again → cancel any pending resolution
+  }
+  const openSet = new Set(openEpisodes.map((e) => e.key));
+  const toOpen: { nodeId: number | null; kind: SymptomKind }[] = [];
+  for (const s of symptoms) {
+    if (s.subsumedBy != null) continue;
+    if (!openSet.has(epKey(s.nodeId, s.kind))) toOpen.push({ nodeId: s.nodeId, kind: s.kind });
+  }
+  const toResolve: { nodeId: number | null; kind: SymptomKind; key: string }[] = [];
+  for (const ep of openEpisodes) {
+    if (live.has(ep.key)) continue;
+    const since = pending.get(ep.key) ?? now;
+    pending.set(ep.key, since);
+    if (now - since >= confirmMs) {
+      toResolve.push({ nodeId: ep.nodeId, kind: ep.kind, key: ep.key });
+      pending.delete(ep.key);
+    }
+  }
+  return { toOpen, toResolve };
 }
 
 function validTally(t: Tally): boolean {

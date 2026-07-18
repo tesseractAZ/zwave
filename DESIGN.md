@@ -60,12 +60,12 @@ Design tenets (inherited from the ecoflow-panel engine, battle-tested there):
         │            symptoms.ts (M3)
         │            detectors: dwell+hysteresis+provenance+basis
         │                    │
-        │            planner.ts (M4)  ←── outcomes.ts (M5)
+        │            planner.ts (M4)  ←── outcomes.ts (M5, advisory)
         │            symptom → ranked plan    episodes (action AND no-action)
         │                    │                          ▲
-        │            executor.ts (M5)                   │
-        │            gates, cooldowns, before/after ────┘
-        │                    │
+        │            executor.ts (DEFERRED — not built)  │
+        │            gates, cooldowns  ·  human type-CONFIRM populates ┘
+        │                    │  (advisory-only: operator runs actions)
         │                    ▼
         │        zwaveActions.ts (EXISTING chokepoint — unchanged gate)
         │
@@ -378,17 +378,22 @@ real check; learned reweighting only after §3.6's controls are met.
 The planner is **pure and always-on** — it powers the advisory REMEDY screen
 even when execution is fully disabled.
 
-### 3.5 `executor.ts` (M5)
+### 3.5 `executor.ts` (DEFERRED — not built; owner chose advisory-only)
 
-> **Milestone split (as-built).** M4 ships the planner (§3.4) + the advisory
-> REMEDY surface only. In `advise` mode there is **no new execution path**: the
-> planner surfaces recommendations and the human runs the executable ones
-> through the *existing* type-CONFIRM Actions Menu (v0.9). `executor.ts` — the
-> gate-stack below — and the `auto_remediation` config knob earn their existence
-> only when an **auto** tier drives actions itself, so both move to **M5**,
-> where auto-execution is actually built and its safety surfaced explicitly.
+> **As-built status.** M4 shipped the planner (§3.4) + advisory REMEDY surface;
+> **M5 (v0.16) shipped the learning loop (§3.6) — also advisory-only.** In
+> `advise` mode there is **no new execution path**: the planner surfaces
+> recommendations and the human runs the executable ones through the *existing*
+> type-CONFIRM Actions Menu (v0.9); the outcome ledger's "action arm" is
+> populated by exactly those operator actions. `executor.ts` — the gate-stack
+> below — and the `auto_remediation` config knob only earn their existence when
+> an **auto** tier drives actions itself. **The owner explicitly chose to keep
+> the engine advisory-only, so this module and `auto_remediation` are NOT built**
+> and remain a future opt-in; if they are ever built, auto-execution's safety
+> must be surfaced and agreed first. The gate-stack below is the design of record
+> for that future tier.
 
-The only module that calls `ActionRunner` autonomously, behind stacked gates:
+The (future) module that would call `ActionRunner` autonomously, behind stacked gates:
 
 1. `write_actions_enabled` (existing master gate).
 2. `auto_remediation: list(off|advise|auto_safe)` — default `off`. `advise` =
@@ -447,25 +452,34 @@ no-action episodes are the control arm the learned layer cannot be honest
 without:
 
 - **Verdicts**: `improved | no-change | worse | refused-misdiagnosis |
-  unverifiable`. A driver refusal (removeFailedNode throws on a responsive
-  node; rebuild returns false; progress reports `skipped`) writes
-  `refused-misdiagnosis` keyed to the **symptom** — incrementing a
-  per-detector false-positive counter that raises that detector's evidence
-  bar — and never touches the action's efficacy stats.
-- **Spontaneous-recovery base rate** per symptom kind, measured from
-  episodes that resolved with no action. Collecting this during M3's
-  advisory-only weeks is an **explicit M3 deliverable** (the patio lights
-  healing on their own is exactly this datum).
+  unverifiable`. `refused-misdiagnosis` (a driver refusal — e.g.
+  `remove_failed_node` on a node that responds — keyed to the **symptom**,
+  raising that detector's false-positive bar without touching action efficacy)
+  exists in the model but is **NOT auto-detected in M5**: the operator-action
+  hook cannot reliably tell a genuine refusal from a transient WS error, and a
+  node-scoped stamp would wrongly mark non-ghost symptoms. Only *successful*
+  operator actions are recorded; refusal detection is reserved for a future
+  executor (§3.5) that receives structured driver errors. So in M5 an action
+  either records a success/failure via the recovery window, or is not attributed.
+- **Spontaneous-recovery base rate** per symptom kind, measured from episodes
+  that resolved with no action — the control arm. *(As-built:)* it is collected
+  by **this ledger once it runs (M5+), advisory-only**, from live operator
+  behaviour; the patio-lights-healing-unaided case is exactly this datum. (The
+  design originally slated collection for M3's advisory weeks, but the ledger
+  itself is M5, so that is where the base rate accrues.)
 - **Success** = the symptom's own *per-command rate* (never a count) improved
-  past its release threshold in the after-window, stayed through a
-  confirmation window, **exceeded the base rate by a minimum effect size**,
-  and the after-window's traffic composition was comparable to the before
-  (dTx and dRx within a factor band) — otherwise `unverifiable` *(DR:
-  traffic-mix shifts must not poison stats in either direction)*.
+  past its release threshold in the after-window, **exceeded the base rate by a
+  minimum effect size** (and cannot claim to beat a base rate that has not yet
+  been measured), and the before/after windows carried **comparable traffic**
+  (tx within a factor band, both above a floor) — otherwise `unverifiable`
+  *(DR: traffic-mix shifts must not poison stats in either direction)*. The
+  "stayed through a confirmation window" requirement is enforced upstream: the
+  episode only resolves after the symptom is gone for 10 minutes.
 - `expectedEfficacy` stays null until the action **beats the no-action arm**
   — not merely until minimum-attempts — and renders with its n and a
   "not distinguishable from self-healing" state.
-- Exponential decay; signature = `(symptom.kind, coarse context)` bands.
+- Exponential (per-episode) decay; the action arm is keyed by
+  `(symptom.kind, action, time-of-day band)`.
 
 ### 3.7 TUI surfaces (M4 advisory + M6 interference)
 
@@ -479,7 +493,10 @@ without:
   under their mesh event and carry **no standalone plan** (the mesh event owns
   the recommendation). The screen does not scroll: it builds worst-first and
   ends with an honest "▾ N more not shown" footer rather than dropping a
-  critical silently. Per-candidate learned efficacy annotations join in M5.
+  critical silently. Per-candidate learned efficacy annotations shipped in M5
+  (v0.16): a runnable candidate shows "✓ helped X% vs Y% self-heal (n)" once the
+  action beats the control arm, or "≈ not distinguishable" — never on a blocked
+  or anti-pattern candidate.
 - **INTERFERENCE screen** (M6): correlated-degradation matrix, time-of-day
   heatmap rendering **raw windowed rates, never baseline-relative scores**
   *(DR: banded baselines are blind to recurring diurnal interference by
@@ -490,7 +507,8 @@ without:
 ## 4. Config surface (additions, all safe-defaulted for strangers' meshes)
 
 ```yaml
-auto_remediation: off        # off | advise | auto_safe   (list()) — lands in M5 with executor.ts
+# auto_remediation: DEFERRED — the executor tier (§3.5) is NOT built (owner chose
+#   advisory-only). This knob lands only if/when auto-execution is ever built.
 engine_enabled: true          # detectors + advisory always-on compute
 driver_ws_url: "ws://core-zwave-js:3000"  # read-only telemetry; empty = disabled (v0.13)
 # advanced:
@@ -507,9 +525,10 @@ options only for knobs a stranger genuinely needs.
 | --- | --- | --- |
 | M2 (v0.12) | reworked evidence substrate: fine+coarse tiers, event-driven flaps/route accumulators, freshness, homeId binding, coverage metadata, controller ring, columnar persistence w/ size test | evidence is trustworthy across restarts/resets/wedges — every DR substrate finding closed |
 | v0.13 | read-only driver-WS evidence client (§2.1) | noise floor + last_seen + capability flags feed the reserved schema before baselines learn |
-| M3 | baselines (per-series statistics) + detectors + REMEDY advisory | symptoms are right — detectors arm only after their bands graduate (days × active windows); base-rate collection starts |
+| M3 (v0.14) | baselines (per-series statistics) + detectors + REMEDY advisory | symptoms are right — detectors arm only after their bands graduate (days × active windows) |
 | M4 (v0.15) | planner (pure, always-on) + advisory REMEDY surface — severity-sorted, cost/basis-tagged candidates, honest overflow; `advise` runs via the existing type-CONFIRM Actions Menu (no new execution path) | recommendations grounded + auditable, with `basis` labels; rebuild never offered as a runnable candidate |
-| M5 | `executor.ts` gate-stack + `auto_remediation` (off/advise/auto_safe) + episode ledger + learned efficacy + `auto_safe` (refresh-class only) | the loop learns honestly against a no-action control arm; auto-execution is gated + its safety surfaced explicitly |
+| M5 (v0.16) | episode ledger (`outcomes.ts`) + learned efficacy on the Remedy screen — **advisory-only**: the action arm is populated by operator type-CONFIRM actions; the spontaneous-recovery control arm accrues from untouched recoveries | the loop learns honestly against a no-action control arm; an action is credited only when it beats self-healing by a real margin with comparable traffic |
+| ~~executor~~ | `executor.ts` gate-stack + `auto_remediation` (off/advise/auto_safe) — **DEFERRED, not built** (owner chose advisory-only); design of record kept in §3.5 for a future opt-in | — |
 | M6 | interference watch screen | correlated/diurnal interference visible; measured, not inferred, once v0.13 feeds it |
 | M7 | docs + defaults audit (incl. the no-dB-numbers lint) | safe for other users' meshes |
 

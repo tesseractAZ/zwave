@@ -133,13 +133,13 @@ test('M4: the overflow footer survives even when one oversized block fills a tin
 test('M5: a learned "beat self-healing" efficacy renders a green note on the executable candidate', () => {
   const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, beatsSelfHealing: true, ready: true };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
-  assert.ok(/✓ helped 83% vs 20% self-heal \(n=6\)/.test(joined), 'efficacy note shows the win, the base rate, and n');
+  assert.ok(/✓ helped 83% \(n=6\) vs 20% self-heal/.test(joined), 'efficacy note shows the win, the base rate, and n');
 });
 
 test('M5: a learned-but-not-distinguishable efficacy renders the honest "not distinguishable" note', () => {
   const eff: Eff = { expectedEfficacy: null, n: 8, baseRate: 0.9, beatsSelfHealing: false, ready: true };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
-  assert.ok(/≈ not distinguishable from self-healing \(n=8\)/.test(joined), 'honest null-result note');
+  assert.ok(/≈ n=8: not distinguishable from self-healing/.test(joined), 'honest null-result note');
 });
 
 test('M5: while still learning (not ready) NO efficacy note is shown', () => {

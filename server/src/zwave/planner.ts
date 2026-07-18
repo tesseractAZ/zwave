@@ -5,12 +5,13 @@
  * like a measurement), a cost tier, and — when it can't run right now — a
  * `blocked` reason.
  *
- * Advisory-first (this milestone): the planner only RECOMMENDS. Nothing here
- * executes; the executor + auto-tier are M5. A candidate that maps to an
- * `ActionKind` can be run by the human through the existing type-CONFIRM
- * Actions Menu; a candidate with `action: null` is PHYSICAL guidance (place a
- * repeater, move the stick) — the majority of correct Z-Wave remediations, and
- * not something software can do.
+ * Advisory-only: the planner only RECOMMENDS. Nothing here executes; the engine
+ * is advisory by design (the executor + auto-tier are deferred, not built). A
+ * candidate that maps to an `ActionKind` can be run by the human through the
+ * existing type-CONFIRM Actions Menu; a candidate with `action: null` is
+ * PHYSICAL guidance (place a repeater, move the stick) — the majority of correct
+ * Z-Wave remediations, and not something software can do. M5 attaches learned
+ * `efficacy` to executable candidates (from the outcome ledger).
  *
  * The causal table is grounded in RESEARCH.md and follows the spec-backed
  * remediation ORDER (§4.3): controller/interference → ghost cleanup → traffic

@@ -18,12 +18,14 @@ import { planFor, type PlanCandidate } from '../../zwave/planner';
  *  distinguishable" once enough episodes exist, nothing while still learning. */
 function efficacyNote(e: Efficacy | null | undefined): string | null {
   if (!e || !e.ready) return null; // still learning → say nothing (honest)
+  const n = Math.round(e.n);
   if (e.expectedEfficacy != null) {
+    // `n` first (after the headline %) so the trust signal survives truncation.
     const pct = Math.round(e.expectedEfficacy * 100);
     const base = e.baseRate != null ? ` vs ${Math.round(e.baseRate * 100)}% self-heal` : '';
-    return c.green(`✓ helped ${pct}%${base} (n=${Math.round(e.n)})`);
+    return c.green(`✓ helped ${pct}% (n=${n})${base}`);
   }
-  return c.grey(`≈ not distinguishable from self-healing (n=${Math.round(e.n)})`);
+  return c.grey(`≈ n=${n}: not distinguishable from self-healing`);
 }
 
 const SEV_TAG: Record<Symptom['severity'], string> = {
@@ -98,9 +100,13 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
         const rl = wrap(cand.rationale, W - 8);
         if (rl.length) rows.push(truncate('        ' + c.grey(rl[0] + (rl.length > 1 ? ' …' : '')), W));
       }
-      // M5: learned efficacy note (only when the ledger has an opinion).
-      const note = efficacyNote(cand.efficacy);
-      if (note) rows.push(truncate('        ' + note, W));
+      // M5: learned efficacy note — ONLY on a runnable recommendation. A blocked
+      // or anti-pattern candidate (e.g. the "rebuild — NOT recommended" row) must
+      // never carry a green "✓ helped …" note that contradicts the advice.
+      if (runnable) {
+        const note = efficacyNote(cand.efficacy);
+        if (note) rows.push(truncate('        ' + note, W));
+      }
     });
   }
   rows.push('');

@@ -57,7 +57,7 @@ import {
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, type BaselineStore } from './baselines';
 import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
-import { createOutcomeStore, windowMetrics, type OutcomeStore, type Efficacy } from './outcomes';
+import { createOutcomeStore, windowMetrics, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 
 /**
  * Rolling per-node RSSI/RTT sample-ring depth. Shared by the live ring in
@@ -845,35 +845,24 @@ class ZwaveDataImpl implements ZwaveData {
     const oc = this.outcomes;
     if (!oc) return;
     const CONFIRM_MS = 10 * 60_000;
-    // Live, independently-owned episodes (subsumed symptoms excluded).
-    const liveEp = new Set<string>();
-    for (const s of symptoms) {
-      if (s.subsumedBy != null) continue;
-      const k = `${s.nodeId ?? 'mesh'}:${s.kind}`;
-      liveEp.add(k);
-      this.pendingResolve.delete(k); // present again → cancel any pending resolution
-    }
-    const openNow = new Set(oc.openKeys());
-    for (const s of symptoms) {
-      if (s.subsumedBy != null) continue;
-      const k = `${s.nodeId ?? 'mesh'}:${s.kind}`;
-      if (!openNow.has(k)) oc.open(s.nodeId, s.kind, now, this.nodeWindow(s.nodeId, now));
-    }
-    // Resolve episodes whose symptom has been absent through the confirm window.
-    for (const ep of oc.openEpisodes()) {
-      if (liveEp.has(ep.key)) continue;
-      const since = this.pendingResolve.get(ep.key) ?? now;
-      this.pendingResolve.set(ep.key, since);
-      if (now - since >= CONFIRM_MS) {
-        oc.resolve(ep.nodeId, ep.kind, now, this.nodeWindow(ep.nodeId, now));
-        this.pendingResolve.delete(ep.key);
-      }
-    }
+    const { toOpen, toResolve } = planEpisodeLifecycle(symptoms, oc.openEpisodes(), this.pendingResolve, now, CONFIRM_MS);
+    // Capture the degraded before-window at onset and the settled after-window
+    // at resolution (well past the transition, thanks to the confirm window).
+    for (const s of toOpen) oc.open(s.nodeId, s.kind, now, this.nodeWindow(s.nodeId, now));
+    for (const r of toResolve) oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now));
   }
 
   /** The per-command reliability window for a node (last 5 min of evidence), for
    *  episode before/after scoring. Mesh-scoped symptoms have no per-node
-   *  evidence → null (rendered `unverifiable` rather than fabricated). */
+   *  evidence → null (rendered `unverifiable` rather than fabricated).
+   *
+   *  SCOPING LIMITATION (M5): success is scored by the per-command TIMEOUT rate
+   *  — the primary reliability signal, apt for the return-path / timeout family.
+   *  A symptom kind whose recovery does NOT show up as a timeout-rate change
+   *  (e.g. a purely RSSI-based weak-signal, or rate-fallback where the node still
+   *  responds) simply yields no measurable improvement → its episodes read
+   *  `unverifiable`/`no-change` and accrue no efficacy. That is honest (no false
+   *  claim), just incomplete; per-kind recovery metrics are a future refinement. */
   private nodeWindow(nodeId: number | null, now: number): ReturnType<typeof windowMetrics> | null {
     if (nodeId == null || !this.evidenceStore) return null;
     const WINDOW_MS = 5 * 60_000;
@@ -886,14 +875,23 @@ class ZwaveDataImpl implements ZwaveData {
    *  action (removeFailed on a live node) is `refused` → refused-misdiagnosis;
    *  a plain failed action (couldn't run) is NOT attributed as "taken". */
   recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean): void {
+    // Mesh-wide actions (rebuildAll/stopRebuild, nodeId == null) are NOT
+    // attributed: they can't be credited to any single node's episode without
+    // confounding, so they are deliberately dropped from the ledger.
     if (!this.outcomes || nodeId == null) return;
-    if (ok) {
-      this.outcomes.recordAction(nodeId, actionKind, false, Date.now());
-    } else if (actionKind === 'removeFailed') {
-      // The node was NOT actually failed → the ghost diagnosis was wrong.
-      this.outcomes.recordAction(nodeId, actionKind, true, Date.now());
-    }
-    // Other failed actions (transient WS error, no device) are not episode data.
+    // Only SUCCESSFUL operator actions become episode data. A FAILED action is
+    // not "taken", and we intentionally do NOT infer `refused-misdiagnosis` from
+    // a failure here: the operator-action hook cannot distinguish a genuine
+    // driver refusal ("node is not failed") from a transient WS/connectivity
+    // error, and a node-scoped stamp would wrongly mark non-ghost symptoms. That
+    // verdict is reserved for a future executor that receives structured driver
+    // errors (§3.5); here we stay conservative and never fabricate a false
+    // positive against a detector.
+    if (!ok) return;
+    // Do not credit an action against an episode whose symptom already went
+    // absent (it's in the confirmation window recovering on its own).
+    const skip = (key: string): boolean => this.pendingResolve.has(key);
+    this.outcomes.recordAction(nodeId, actionKind, false, Date.now(), skip);
   }
 
   /** Learned efficacy of an action against a symptom kind (M5) — for the planner. */
@@ -1209,8 +1207,11 @@ class ZwaveDataImpl implements ZwaveData {
         this.symptomState.clear();
         this.lastSymptoms = [];
         this.loggedSymptomKeys.clear();
-        // M5 ledger is per-mesh too — wipe episodes + learned efficacy.
+        // M5 ledger is per-mesh too — wipe episodes + learned efficacy AND
+        // persist the empty state, else a restart would reload the OLD network's
+        // learning from /data (the reset must write THROUGH to disk).
         this.outcomes?.reset();
+        this.outcomes?.save();
         this.pendingResolve.clear();
         // The new network gets a fresh homeId cross-check; restart the driver
         // client so it re-handshakes and re-validates (start() after stop() is
