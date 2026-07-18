@@ -82,7 +82,7 @@ export function renderController(ctx: ScreenCtx): string[] {
     title: 'CONTROLLER & NETWORK',
     rightStatus: c.grey(`NODE ${ctrl.nodeId} · `) + c.white(model),
     body,
-    keys: [['1-6', 'SCREENS'], ['Q', 'BACK']],
+    keys: [['1-8', 'SCREENS'], ['Q', 'BACK']],
   });
 }
 

@@ -43,6 +43,7 @@ import {
   type LogEvent,
   type LogKind,
   type ActionKind,
+  type InterferenceView,
 } from '../types';
 import { createHistoryStore, type HistoryStore, type HistoryMap } from './historyStore';
 import {
@@ -58,6 +59,7 @@ import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from '
 import { createBaselineStore, type BaselineStore } from './baselines';
 import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
 import { createOutcomeStore, windowMetrics, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
+import { computeInterference } from './interference';
 
 /**
  * Rolling per-node RSSI/RTT sample-ring depth. Shared by the live ring in
@@ -301,6 +303,8 @@ export interface ZwaveData {
   recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean): void;
   /** M5: learned efficacy of an action against a symptom kind (null if off). */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
+  /** M6: interference view (noise floor, serial health, diurnal heatmap). */
+  interference(): InterferenceView;
   /** Stop polling and clear timers. */
   stop(): void;
 }
@@ -488,6 +492,8 @@ class ZwaveDataImpl implements ZwaveData {
   private readonly pendingResolve = new Map<string, number>();
   private outcomesFlushTimer: ReturnType<typeof setInterval> | null = null;
   private baselineFlushTimer: ReturnType<typeof setInterval> | null = null;
+  /** M6 interference view, memoized on the sample cadence (heavy coarse fold). */
+  private lastInterference: { at: number; view: InterferenceView } | null = null;
   /** Controller home_id from the last poll — a change means a different Z-Wave
    *  network (stick swap / different NVM backup), so node-keyed caches alias. */
   private lastHomeId: number | null = null;
@@ -904,6 +910,30 @@ class ZwaveDataImpl implements ZwaveData {
     return this.lastSymptoms;
   }
 
+  /** M6 interference view — memoized on the ~10s sample cadence. The diurnal
+   *  aggregation folds every node's coarse buckets (~26k), so it must NOT run
+   *  per render frame (the screen redraws at 1 Hz). */
+  interference(): InterferenceView {
+    const now = Date.now();
+    if (this.lastInterference && now - this.lastInterference.at < 10_000) return this.lastInterference.view;
+    const bgChannels =
+      this.driverBgRssi && now - this.driverBgRssi.at <= 90_000 && this.driverHomeOk()
+        ? this.driverBgRssi.channels
+        : null;
+    const coarseByNode = new Map<number, import('./evidenceStore').CoarseBucket[]>();
+    if (this.evidenceStore) {
+      for (const n of this.lastNodes) {
+        if (n.isController) continue;
+        const cb = this.evidenceStore.coarseForNode(n.nodeId);
+        if (cb.length) coarseByNode.set(n.nodeId, cb);
+      }
+    }
+    const controllerSamples = this.evidenceStore ? this.evidenceStore.controllerSamples() : [];
+    const view = computeInterference({ now, bgChannels, controllerSamples, coarseByNode, symptoms: this.lastSymptoms });
+    this.lastInterference = { at: now, view };
+    return view;
+  }
+
   /** Honest engine state for the Remedy screen: whether the engine is enabled,
    *  and how many nodes have a graduated timeout baseline vs total — so the
    *  screen can distinguish "off" / "still learning" / "all healthy". */
@@ -1213,6 +1243,9 @@ class ZwaveDataImpl implements ZwaveData {
         this.outcomes?.reset();
         this.outcomes?.save();
         this.pendingResolve.clear();
+        // M6 interference view is derived from this network's evidence — drop the
+        // memoized snapshot so it recomputes against the new network immediately.
+        this.lastInterference = null;
         // The new network gets a fresh homeId cross-check; restart the driver
         // client so it re-handshakes and re-validates (start() after stop() is
         // supported — see driverWsClient.stop()).

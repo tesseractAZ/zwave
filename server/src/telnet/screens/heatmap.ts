@@ -11,7 +11,7 @@
  *   rows     Garage          ▒▓          μ[██░░░] Back Door ↓ -4dB   3n
  *            Living Room      ▓████████   μ[████░] TV Lamp   ↓+11dB   8n
  *            (no area)        ··          — ·                  —      2n
- *   footer   sorted worst-first · q/Esc back · 1-6 screens
+ *   footer   sorted worst-first · q/Esc back · 1-8 screens
  *
  * Each cell = heatCell(marginFrac), marginFrac = clamp(margin / 25dB). Cells
  * are shaded ░▒▓█ and coloured red→yellow→green by that fraction. Margin =
@@ -98,7 +98,7 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
       c.grey('sorted worst-first'),
     ]),
     body,
-    keys: [['1-6', 'SCREENS'], ['T', 'UNITS'], ['Q', 'BACK']],
+    keys: [['1-8', 'SCREENS'], ['T', 'UNITS'], ['Q', 'BACK']],
   });
 }
 

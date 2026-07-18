@@ -10,7 +10,7 @@
  *   header   ID St Name             Sc      Signal  Hop  Rate  Seen  Bat  Flags   Trend
  *   rows     ▶  12 ● Kitchen Lamp  █94  ▁▃▅▇  +21dB    0   100k    3s   AC          ▁▂▄▆█
  *              7 ✕ Garage Sensor    —          —      —    —      4d  12%  D B
- *   legend   j/k move · / filter · s sort · ⏎ detail · 1-6 screens · q quit
+ *   legend   j/k move · / filter · s sort · ⏎ detail · 1-8 screens · q quit
  *
  * Graphics (from ../gauges) sit ON TOP of the already-correct data: a WiFi
  * signalBars strength cluster in the Signal column, a 1-cell vblock health mark
@@ -156,7 +156,7 @@ export function renderOverview(ctx: ScreenCtx): string[] {
   // The scroll counter is concatenated AFTER commandBar()'s own truncate, so the
   // combined line must be re-clipped to W or it overruns the primary screen.
   out.push(truncate(commandBar(view, [
-    ['1-6', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS'],
+    ['1-8', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS'],
     ['/', 'FILTER'], ['S', 'SORT'], ['T', 'UNITS'], ['Q', 'EXIT'],
   ]) + (more ? c.grey(more) : ''), W));
   // Defensive clamp — the session guarantees rows >= 16, but never overrun.

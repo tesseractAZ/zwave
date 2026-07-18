@@ -394,6 +394,14 @@ export function applyKey(
         return REDRAW;
       }
       return NOOP;
+    case 'f':
+      // Jump to the interFerence (RF environment) screen. ('i' is the
+      // re-interview action shortcut, so interference uses 'f' + the 8 key.)
+      if (view.screen !== 'interference') {
+        view.screen = 'interference';
+        return REDRAW;
+      }
+      return NOOP;
     case '/':
       // Hand control to the session's filter-capture loop.
       return { redraw: true, filter: 'start' };

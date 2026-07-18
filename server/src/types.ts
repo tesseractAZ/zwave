@@ -206,6 +206,46 @@ export interface DataProvider {
    *  outcome ledger is off / has no estimate yet. Read by the REMEDY screen so
    *  the planner's candidates can carry an evidence-backed efficacy note. */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
+  /** M6 interference view (cached) — the noise floor, its trend, controller
+   *  serial-link health, the diurnal timeout-rate heatmap, and the current
+   *  correlated-degradation state. Read by the INTERFERENCE screen. */
+  interference(): InterferenceView;
+}
+
+/** M6 interference-watch view — a pre-computed summary the INTERFERENCE screen
+ *  renders purely (aggregating the coarse buckets per frame would be too heavy). */
+export interface InterferenceView {
+  /** Background 900 MHz noise floor (dBm) — the driver-WS measurement. */
+  noise: {
+    channels: (number | null)[]; // per-channel ch0..3 current
+    floor: number | null; // representative floor (null when no real reading)
+    real: boolean; // true = a live driver-WS reading, false = fallback/absent
+    trend: number[]; // recent representative-floor samples (for a sparkline)
+    band: 'clean' | 'elevated' | 'noisy' | 'unknown';
+  };
+  /** Controller serial-link health (host↔stick), as per-hour event rates. */
+  serial: {
+    nakPerH: number | null;
+    canPerH: number | null;
+    tmoAckPerH: number | null;
+    tmoRespPerH: number | null;
+    band: 'healthy' | 'strained' | 'unknown';
+    spanH: number; // hours of controller-sample history backing the rates
+  };
+  /** Diurnal (hour-of-day) mesh-wide RAW timeout rate — never baseline-relative;
+   *  a persistently hot hour reveals recurring interference the bands absorbed. */
+  diurnal: { hour: number; rate: number | null; tx: number }[]; // length 24
+  /** Days of coarse history backing the heatmap (for an honest "n days" label). */
+  coverageDays: number;
+  /** Current correlated-degradation state. When a mesh event is active the
+   *  `narrative` carries the DETECTOR's own coherent "degraded X of Y active"
+   *  ratio; `degradedNodes` is a plain count of distinct symptomatic nodes for
+   *  the inactive case (no invented denominator — the detector owns the ratio). */
+  correlated: {
+    active: boolean;
+    degradedNodes: number;
+    narrative: string;
+  };
 }
 
 /** Which screen is active. Overview is home; the rest are overlays. */
@@ -216,7 +256,8 @@ export type ScreenView =
   | 'topology'
   | 'heatmap'
   | 'log'
-  | 'remedy';
+  | 'remedy'
+  | 'interference';
 
 export const SCREENS: ScreenView[] = [
   'overview',
@@ -226,6 +267,7 @@ export const SCREENS: ScreenView[] = [
   'heatmap',
   'log',
   'remedy',
+  'interference',
 ];
 
 /** Log-screen date window. `all` = the whole in-memory ring. */

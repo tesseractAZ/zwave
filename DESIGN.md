@@ -497,12 +497,21 @@ without:
   (v0.16): a runnable candidate shows "✓ helped X% vs Y% self-heal (n)" once the
   action beats the control arm, or "≈ not distinguishable" — never on a blocked
   or anti-pattern candidate.
-- **INTERFERENCE screen** (M6): correlated-degradation matrix, time-of-day
-  heatmap rendering **raw windowed rates, never baseline-relative scores**
-  *(DR: banded baselines are blind to recurring diurnal interference by
-  construction — the heatmap is the human's view of what the bands absorbed)*,
-  the edge-cluster view, controller serial-link health, and — once v0.13
-  lands — the real per-channel background-RSSI floor trend.
+- **INTERFERENCE screen** (M6, v0.17 — key `8`/`f`): as-built it shows the
+  measured per-channel **background-RSSI noise floor** (median = the masthead
+  value) + a fixed-scale −110..−80 dBm trend spark; **controller serial-link
+  health** (NAK/CAN/timeout-ACK per-hour, shown apart because a serial fault
+  mimics mesh-wide RF trouble — reply-timeout is reported but never sets the
+  band); a **diurnal (hour-of-day) heatmap of the mesh-wide RAW timeout rate**
+  summed across every node's coarse buckets — deliberately **NOT
+  baseline-relative** *(DR: banded baselines are blind to recurring diurnal
+  interference by construction — the heatmap is the human's view of what the
+  bands absorbed)*, absolute-scaled (0→5%) with an honest "building" state until
+  the coarse tier spans the day and null (·) cells for no-traffic hours; and the
+  current **correlated-degradation** state from the mesh-interference detector.
+  The heavy coarse fold is memoized in `data.interference()` (the screen is pure
+  render). The edge-cluster detector/view is not built (no edge-cluster detector
+  shipped in M3); it remains future work.
 
 ## 4. Config surface (additions, all safe-defaulted for strangers' meshes)
 
@@ -529,7 +538,7 @@ options only for knobs a stranger genuinely needs.
 | M4 (v0.15) | planner (pure, always-on) + advisory REMEDY surface — severity-sorted, cost/basis-tagged candidates, honest overflow; `advise` runs via the existing type-CONFIRM Actions Menu (no new execution path) | recommendations grounded + auditable, with `basis` labels; rebuild never offered as a runnable candidate |
 | M5 (v0.16) | episode ledger (`outcomes.ts`) + learned efficacy on the Remedy screen — **advisory-only**: the action arm is populated by operator type-CONFIRM actions; the spontaneous-recovery control arm accrues from untouched recoveries | the loop learns honestly against a no-action control arm; an action is credited only when it beats self-healing by a real margin with comparable traffic |
 | ~~executor~~ | `executor.ts` gate-stack + `auto_remediation` (off/advise/auto_safe) — **DEFERRED, not built** (owner chose advisory-only); design of record kept in §3.5 for a future opt-in | — |
-| M6 | interference watch screen | correlated/diurnal interference visible; measured, not inferred, once v0.13 feeds it |
+| M6 (v0.17) | interference-watch screen (key `8`/`f`): measured noise floor + trend, controller serial-link health, diurnal raw-timeout-rate heatmap, correlated-degradation state | correlated/diurnal interference visible; measured (driver-WS noise floor), not inferred; heatmap raw not baseline-relative |
 | M7 | docs + defaults audit (incl. the no-dB-numbers lint) | safe for other users' meshes |
 
 Each lands as its own `vX.Y`, typecheck+tests+adversarial review, same
