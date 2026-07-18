@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderInterference } from '../src/telnet/screens/interference';
+import { renderInterference, downsampleMean } from '../src/telnet/screens/interference';
 import { visLen } from '../src/telnet/ansi';
 import type { DataProvider, ControllerSnapshot, ScreenCtx, ViewState, InterferenceView } from '../src/types';
 
@@ -8,7 +8,7 @@ const now = Date.now();
 const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
 
 const cleanView = (over: Partial<InterferenceView> = {}): InterferenceView => ({
-  noise: { channels: [-101, -103, -103, -95], floor: -102, real: true, trend: [-101, -102, -103, -102, -101], band: 'clean' },
+  noise: { channels: [-101, -103, -103, -95], floor: -102, real: true, trend: [-101, -102, -103, -102, -101], trendCoarse: [-100, -101, -102, -101, -103, -102], trendCoarseDays: 3, band: 'clean' },
   serial: { nakPerH: 0, canPerH: 0, tmoAckPerH: 0, tmoRespPerH: 2, band: 'healthy', spanH: 6.2 },
   diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 200, rate: h === 18 ? 0.031 : 0.008 })),
   coverageDays: 16,
@@ -30,7 +30,7 @@ const ctx = (cols: number, rows: number, iv: InterferenceView): ScreenCtx =>
 test('INTERFERENCE holds EXACTLY view.rows lines within view.cols at every size + state', () => {
   const views = [
     cleanView(),
-    cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], band: 'unknown' } }), // no driver-WS
+    cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' } }), // no driver-WS
     cleanView({ coverageDays: 0.1, diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 0, rate: null })) }), // building
     cleanView({ correlated: { active: true, degradedNodes: 4, narrative: 'Several nodes degraded together (4 of 11 active) — likely an RF-environment event.' } }),
   ];
@@ -56,7 +56,7 @@ test('a clean mesh shows the measured floor, healthy serial, and no correlated d
 });
 
 test('without the driver-WS client the noise floor honestly reads unavailable, not fabricated', () => {
-  const iv = cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], band: 'unknown' } });
+  const iv = cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' } });
   const joined = renderInterference(ctx(100, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(/unavailable/.test(joined), 'says unavailable');
   assert.ok(!/median .* dBm/.test(joined), 'no fabricated floor number');
@@ -108,4 +108,16 @@ test('correlated degradation is called out with the degraded/active ratio', () =
   const joined = renderInterference(ctx(100, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(/⚠ correlated mesh degradation/.test(joined), 'correlated state flagged');
   assert.ok(/4 of 11 active/.test(joined), 'the DETECTOR\'s own coherent ratio (from the narrative) is shown');
+});
+
+test('downsampleMean bins a long series into ≤cells means spanning the WHOLE series (not just the tail)', () => {
+  // First half noisy (-90), second half quiet (-100). A tail-slice (the old bug)
+  // would show only the quiet recent half; downsampling must surface BOTH.
+  const vals = Array.from({ length: 100 }, (_, i) => (i < 50 ? -90 : -100));
+  const ds = downsampleMean(vals, 24);
+  assert.equal(ds.length, 24, 'reduced to the cell count');
+  assert.equal(ds[0], -90, 'first cell reflects the OLDEST buckets — not lost to a tail slice');
+  assert.equal(ds[ds.length - 1], -100, 'last cell reflects the newest');
+  // A short series passes through unchanged (no binning needed).
+  assert.deepEqual(downsampleMean([-100, -101], 24), [-100, -101]);
 });

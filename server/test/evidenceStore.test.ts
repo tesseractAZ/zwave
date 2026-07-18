@@ -270,6 +270,45 @@ test('load rejects a wrong-schema file', () => {
   assert.equal(s.all().size, 0);
 });
 
+test('controller noise-floor coarse tier round-trips (mean/min/max), fresh-only leading-run floor, no-bg samples skipped', () => {
+  const path = freshPath();
+  const s = mkStore(path);
+  const cstat = (over = {}) => ({ messagesTX: 1000, messagesRX: 900, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutResponse: 0, ...over });
+  // Two bg readings in the same 30-min bucket. A trailing null ends the driver's
+  // leading channel run → each per-sample floor = median of the run.
+  s.recordController(cstat(), true, FIXED, [-100, -102, null, null]); // floor = median(-100,-102) = -101
+  s.recordController(cstat({ messagesTX: 1010 }), true, FIXED + TICK, [-98, -104, null, null]); // floor = -101
+  s.recordController(cstat({ messagesTX: 1020 }), true, FIXED + 2 * TICK, null); // no bg → no floor folded
+  s.save();
+  const s2 = mkStore(path);
+  s2.load();
+  const cc = s2.controllerCoarse();
+  assert.equal(cc.length, 1, 'all samples share one 30-min bucket');
+  assert.equal(cc[0].floorN, 2, 'only the two bg-bearing samples are counted');
+  assert.equal(cc[0].floorSum, -202, 'Σ per-sample median floor');
+  assert.equal(cc[0].floorMin, -101);
+  assert.equal(cc[0].floorMax, -101);
+});
+
+test('a pre-tier v2 file (no controllerCoarse key) loads with an empty controller-coarse tier (back-compat)', () => {
+  const path = freshPath();
+  writeFileSync(path, JSON.stringify({ v: 2, savedAt: FIXED, homeId: null, recordingSince: FIXED, nodes: {}, coarse: {}, controller: null, routeFails: {}, meta: {} }));
+  const s = mkStore(path);
+  s.load();
+  assert.equal(s.controllerCoarse().length, 0, 'absent key → empty tier, no crash');
+});
+
+test('the controller noise-floor tier survives BOOT-GRACE (multi-day history is not wiped by a power blip)', () => {
+  const path = freshPath();
+  const writer = mkStore(path);
+  writer.recordController({ messagesTX: 1000, messagesRX: 900, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutResponse: 0 }, true, FIXED, [-100, -102, null, null]);
+  writer.save();
+  const booting = createEvidenceStore({ path, cadenceMs: TICK, now: () => FIXED + 60_000, uptimeMs: () => 5_000, bootGraceMs: 180_000 });
+  booting.load();
+  assert.equal(booting.controllerCoarse().length, 1, 'the persisted noise-floor tier is age-judgment-free history');
+  assert.equal(booting.controllerCoarse()[0].floorN, 1);
+});
+
 test('a stale snapshot loses the FINE ring but KEEPS the coarse tier (per-tier staleness)', () => {
   const path = freshPath();
   const old = createEvidenceStore({ path, cadenceMs: TICK, now: () => FIXED - 2 * 60 * 60 * 1000, uptimeMs: () => UP });

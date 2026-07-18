@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeInterference, type InterferenceInput } from '../src/zwave/interference';
-import type { ControllerSample, CoarseBucket } from '../src/zwave/evidenceStore';
+import type { ControllerSample, CoarseBucket, CtrlCoarseBucket } from '../src/zwave/evidenceStore';
 import type { Symptom, SymptomKind } from '../src/zwave/symptoms';
 
 const now = 1_700_000_000_000;
@@ -15,8 +15,12 @@ function bucket(hour: number, dTx: number, dTimeout: number): CoarseBucket {
 function sym(kind: SymptomKind, nodeId: number | null): Symptom {
   return { kind, nodeId, severity: 'warn', sinceMs: now - 600_000, basis: 'measured', evidence: [], narrative: `${kind} narrative.` };
 }
+function ccb(t0: number, floors: number[]): CtrlCoarseBucket {
+  const floorSum = floors.reduce((a, b) => a + b, 0);
+  return { t0, floorN: floors.length, floorSum, floorMin: Math.min(...floors), floorMax: Math.max(...floors) };
+}
 function inp(over: Partial<InterferenceInput> = {}): InterferenceInput {
-  return { now, bgChannels: null, controllerSamples: [], coarseByNode: new Map(), symptoms: [], ...over };
+  return { now, bgChannels: null, controllerSamples: [], controllerCoarse: [], coarseByNode: new Map(), symptoms: [], ...over };
 }
 
 test('noise floor = MEDIAN of valid channels (matches the masthead); band classifies', () => {
@@ -51,6 +55,32 @@ test('noise trend is the per-sample median floor over controller samples that ca
   const samples = [cs({ bg0: -101, bg1: -103 }), cs({ bg0: null }), cs({ bg0: -99, bg1: -101 })];
   const v = computeInterference(inp({ controllerSamples: samples }));
   assert.deepEqual(v.noise.trend, [-102, -100], 'only bg-bearing samples; median each');
+});
+
+test('long-horizon coarse trend = MEAN floor per 30-min bucket (oldest first); empty buckets skipped; span in days', () => {
+  const DAY = 86_400_000;
+  const coarse = [
+    ccb(now - 3 * DAY, [-100, -102]), // mean -101
+    { t0: now - 2 * DAY, floorN: 0, floorSum: 0, floorMin: null, floorMax: null } as CtrlCoarseBucket, // no reading → skipped
+    ccb(now - 1 * DAY, [-98, -100, -102]), // mean -100
+    ccb(now, [-103, -101]), // mean -102
+  ];
+  const v = computeInterference(inp({ controllerCoarse: coarse }));
+  assert.deepEqual(v.noise.trendCoarse, [-101, -100, -102], 'per-bucket means, floor-bearing buckets only, oldest first');
+  assert.equal(v.noise.trendCoarseDays, 3, 'span from first to last floor-bearing bucket = 3 days');
+});
+
+test('coarse trend is empty when no controller-coarse history exists yet', () => {
+  const v = computeInterference(inp({ controllerCoarse: [] }));
+  assert.deepEqual(v.noise.trendCoarse, []);
+  assert.equal(v.noise.trendCoarseDays, 0);
+});
+
+test('edge-cluster does NOT inflate the correlated degraded-node count (its shared repeater is healthy)', () => {
+  // #6,#7 are degrading members; #10 is the edge-cluster head (a HEALTHY repeater).
+  const syms = [sym('return-path-degraded', 6), sym('return-path-degraded', 7), sym('edge-cluster', 10)];
+  const v = computeInterference(inp({ symptoms: syms }));
+  assert.equal(v.correlated.degradedNodes, 2, 'only the two degrading members, never the healthy repeater #10');
 });
 
 test('serial band: NAK/CAN/timeoutACK drive "strained"; reply-timeout does NOT', () => {

@@ -243,3 +243,103 @@ test('mesh gate needs ≥ MESH_MIN_DEGRADED (3) — a coincidental PAIR among ma
   });
   assert.equal(settle(inp, new Map(), T, 8).filter((s) => s.kind === 'mesh-interference').length, 0, 'a pair is not a mesh event');
 });
+
+// ── edge-cluster: 2–4 nodes sharing ONE healthy upstream repeater ────────────
+import type { NodeStats } from '../src/types';
+
+/** Real link stats naming the node's upstream repeater list (the edge-cluster
+ *  detector reads `lwr.repeaters`; the base `node()` helper leaves stats empty,
+ *  which is exactly why the existing detectors that read `recent()` are
+ *  unaffected and never spuriously cluster). */
+function st(repeaters: number[]): NodeStats {
+  return { rtt: 30, rssi: -60, lwr: { repeaters, protocolDataRate: 3, rssi: -60, repeaterRSSI: [], routeFailedBetween: null }, nlwr: null, commandsTX: 200, commandsRX: 198, commandsDroppedTX: 0, commandsDroppedRX: 1, timeoutResponse: 0, lastSeen: null };
+}
+const BAD = { dTx: 100, dTimeout: 40 }; // 40% timeout ≫ 2% baseline → degrading
+const OK = { dTx: 100, dTimeout: 0 }; // healthy, active
+
+test('EDGE-CLUSTER: ≥2 degrading nodes sharing a HEALTHY repeater ⇒ one cluster on the shared node; members subsumed', () => {
+  // #6,#7,#8 all route through repeater #10 and are degrading; #10 is itself
+  // healthy. Only 4 active nodes (< MESH_MIN_ACTIVE=8), so the mesh gate can't fire.
+  const nodes = [
+    node(1),
+    node(10, { stats: st([]) }), // the shared repeater (direct to controller), healthy
+    node(6, { stats: st([10]) }),
+    node(7, { stats: st([10]) }),
+    node(8, { stats: st([10]) }),
+  ];
+  const inp = (now: number) => input({
+    nodes,
+    recent: new Map([
+      [10, window(now, 12, OK)], // repeater healthy → eligible as a cluster head
+      [6, window(now, 12, BAD)],
+      [7, window(now, 12, BAD)],
+      [8, window(now, 12, BAD)],
+    ]),
+    now,
+  });
+  const fired = settle(inp, new Map(), T, 8);
+  const cluster = fired.find((s) => s.kind === 'edge-cluster');
+  assert.ok(cluster, 'edge-cluster fired');
+  assert.equal(cluster!.nodeId, 10, 'the cluster is keyed to the shared repeater (the actionable node)');
+  assert.deepEqual(cluster!.members, [6, 7, 8], 'the degrading downstream members');
+  assert.equal(fired.filter((s) => s.kind === 'mesh-interference').length, 0, 'not mesh-wide');
+  // Members collapse under the cluster (not N independent faults on the screen).
+  const members = fired.filter((s) => s.kind === 'return-path-degraded' && [6, 7, 8].includes(s.nodeId as number));
+  assert.ok(members.length >= 1 && members.every((s) => s.subsumedBy === '10:edge-cluster'), 'members subsumed under the cluster');
+});
+
+test('EDGE-CLUSTER: a lone degrading dependent under a shared repeater is NOT a cluster (needs ≥2)', () => {
+  const nodes = [node(1), node(10, { stats: st([]) }), node(6, { stats: st([10]) }), node(7, { stats: st([10]) })];
+  const inp = (now: number) => input({
+    nodes,
+    recent: new Map([
+      [10, window(now, 12, OK)],
+      [6, window(now, 12, BAD)], // only #6 degrading
+      [7, window(now, 12, OK)],
+    ]),
+    now,
+  });
+  const fired = settle(inp, new Map(), T, 8);
+  assert.equal(fired.filter((s) => s.kind === 'edge-cluster').length, 0, 'a single dependent is not a cluster');
+  const rp = fired.find((s) => s.kind === 'return-path-degraded' && s.nodeId === 6);
+  assert.ok(rp && rp.subsumedBy == null, 'the lone per-node symptom stands on its own');
+});
+
+test('EDGE-CLUSTER: if the shared repeater is ITSELF degrading, no cluster fires (the head must look healthy)', () => {
+  // A repeater that is also failing already explains the downstream via its own
+  // per-node card — the "silent shared dependency" signal does not apply.
+  const nodes = [node(1), node(10, { stats: st([]) }), node(6, { stats: st([10]) }), node(7, { stats: st([10]) }), node(8, { stats: st([10]) })];
+  const inp = (now: number) => input({
+    nodes,
+    recent: new Map([
+      [10, window(now, 12, BAD)], // repeater ITSELF degrading
+      [6, window(now, 12, BAD)],
+      [7, window(now, 12, BAD)],
+      [8, window(now, 12, BAD)],
+    ]),
+    now,
+  });
+  const fired = settle(inp, new Map(), T, 8);
+  assert.equal(fired.filter((s) => s.kind === 'edge-cluster').length, 0, 'a degrading head is not a cluster head');
+  assert.ok(fired.some((s) => s.kind === 'return-path-degraded' && s.nodeId === 10), 'the repeater surfaces its own per-node fault instead');
+});
+
+test('EDGE-CLUSTER: a mesh-wide event SUPPRESSES the cluster (mesh owns the story)', () => {
+  // 8 degrading dependents through #10 → broad enough to trip the mesh gate; the
+  // cluster yields and the members subsume under the mesh event, not the cluster.
+  const memIds = [2, 3, 4, 5, 6, 7, 8, 9];
+  const nodes = [node(1), node(10, { stats: st([]) }), ...memIds.map((i) => node(i, { stats: st([10]) }))];
+  const inp = (now: number) => input({
+    nodes,
+    recent: new Map<number, EvidenceSample[]>([
+      [10, window(now, 12, OK)],
+      ...memIds.map((i) => [i, window(now, 12, BAD)] as [number, EvidenceSample[]]),
+    ]),
+    now,
+  });
+  const fired = settle(inp, new Map(), T, 8);
+  assert.ok(fired.some((s) => s.kind === 'mesh-interference'), 'mesh-interference fired (broad degradation)');
+  assert.equal(fired.filter((s) => s.kind === 'edge-cluster').length, 0, 'edge-cluster suppressed under a mesh event');
+  const mem = fired.find((s) => s.kind === 'return-path-degraded' && s.nodeId === 2);
+  assert.ok(mem && mem.subsumedBy === 'mesh', 'members subsume under the MESH event, not the cluster');
+});

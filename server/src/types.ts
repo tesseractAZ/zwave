@@ -220,7 +220,12 @@ export interface InterferenceView {
     channels: (number | null)[]; // per-channel ch0..3 current
     floor: number | null; // representative floor (null when no real reading)
     real: boolean; // true = a live driver-WS reading, false = fallback/absent
-    trend: number[]; // recent representative-floor samples (for a sparkline)
+    trend: number[]; // recent representative-floor samples (~40-min fine ring, for a sparkline)
+    /** Long-horizon (multi-day) floor: one point per 30-min coarse bucket, oldest
+     *  first — the persisted tier, so the trend survives restarts and spans days. */
+    trendCoarse: number[];
+    /** Days of coarse noise-floor history behind `trendCoarse` (honest "n days" label). */
+    trendCoarseDays: number;
     band: 'clean' | 'elevated' | 'noisy' | 'unknown';
   };
   /** Controller serial-link health (host↔stick), as per-hour event rates. */

@@ -24,7 +24,7 @@ function sym(kind: SymptomKind, over: Partial<Symptom> = {}): Symptom {
 const ALL_KINDS = [
   'return-path-degraded', 'chronic-return-path', 'dead-flap', 'quiet-node',
   'rate-fallback', 'route-churn', 'rtt-degraded', 'weak-signal', 'chatty-device',
-  'ghost-suspect', 'controller-degraded', 'mesh-interference',
+  'ghost-suspect', 'controller-degraded', 'edge-cluster', 'mesh-interference',
 ] as const satisfies readonly SymptomKind[];
 // Compile-time exhaustiveness: if this errors, a SymptomKind is missing above.
 type _MissingKind = Exclude<SymptomKind, (typeof ALL_KINDS)[number]>;

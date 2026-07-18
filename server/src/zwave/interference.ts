@@ -23,7 +23,7 @@
  */
 
 import type { InterferenceView } from '../types';
-import type { ControllerSample, CoarseBucket } from './evidenceStore';
+import type { ControllerSample, CoarseBucket, CtrlCoarseBucket } from './evidenceStore';
 import type { Symptom } from './symptoms';
 
 /** Leading contiguous run of non-null channels (a null ends the run) — the
@@ -44,6 +44,9 @@ export interface InterferenceInput {
   bgChannels: (number | null)[] | null;
   /** Controller serial-link samples (newest last) — bg trend + serial rates. */
   controllerSamples: ControllerSample[];
+  /** Long-horizon controller noise-floor buckets (30-min, oldest first) — the
+   *  multi-day floor trend that survives restarts. Empty ⇒ no coarse trend yet. */
+  controllerCoarse: CtrlCoarseBucket[];
   /** Per-node coarse buckets (30-min × 14-day) for the diurnal heatmap. */
   coarseByNode: Map<number, CoarseBucket[]>;
   /** Live symptoms — the correlated-degradation state + degraded-node count. */
@@ -83,12 +86,26 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   const floor = medianFloor(channels); // median — matches the masthead noiseFloor
   const real = floor != null;
   const band = noiseBand(floor, real);
-  // Trend = per-channel median per controller sample that carried a bg reading.
+  // Trend = per-channel median per controller sample that carried a bg reading
+  // (the ~40-min fine ring).
   const trend: number[] = [];
   for (const s of input.controllerSamples) {
     const m = medianFloor([s.bg0, s.bg1, s.bg2, s.bg3]);
     if (m != null) trend.push(m);
   }
+  // Long-horizon coarse trend = one MEAN floor per 30-min bucket (oldest first),
+  // the persisted multi-day tier. `trendCoarseDays` is the honest span it covers.
+  const trendCoarse: number[] = [];
+  let firstBucketT0: number | null = null;
+  let lastBucketT0: number | null = null;
+  for (const b of input.controllerCoarse) {
+    if (b.floorN <= 0) continue;
+    trendCoarse.push(b.floorSum / b.floorN);
+    if (firstBucketT0 == null) firstBucketT0 = b.t0;
+    lastBucketT0 = b.t0;
+  }
+  const trendCoarseDays =
+    firstBucketT0 != null && lastBucketT0 != null ? (lastBucketT0 - firstBucketT0) / 86_400_000 : 0;
 
   // ── Controller serial-link health ──────────────────────────────────────
   const cs = input.controllerSamples.filter((s) => s.fresh);
@@ -143,8 +160,13 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   // separately-computed numerator/denominator can be incoherent (X > Y, X of 0).
   // We only count distinct symptomatic nodes for the honest inactive-case label.
   const mesh = input.symptoms.find((s) => s.kind === 'mesh-interference');
+  // Count distinct DEGRADED nodes. Exclude controller-degraded (the stick, not a
+  // node) and edge-cluster (its nodeId is the shared repeater the detector
+  // requires to be HEALTHY — counting it would mislabel a node the engine just
+  // declared fine; the cluster's degrading members are already counted via their
+  // own per-node symptoms).
   const degradedNodes = new Set(
-    input.symptoms.filter((s) => s.nodeId != null && s.kind !== 'controller-degraded').map((s) => s.nodeId),
+    input.symptoms.filter((s) => s.nodeId != null && s.kind !== 'controller-degraded' && s.kind !== 'edge-cluster').map((s) => s.nodeId),
   ).size;
   const correlated = {
     active: mesh != null,
@@ -157,7 +179,7 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   };
 
   return {
-    noise: { channels, floor, real, trend, band },
+    noise: { channels, floor, real, trend, trendCoarse, trendCoarseDays, band },
     serial: { nakPerH, canPerH, tmoAckPerH, tmoRespPerH, band: serialBand, spanH },
     diurnal,
     coverageDays,
