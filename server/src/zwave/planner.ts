@@ -202,6 +202,28 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
       break;
     }
 
+    case 'edge-cluster': {
+      // nodeId is the SHARED upstream node (a repeater), not a member. Keep the
+      // word "repeater" OUT of candidate TITLES — the invariant test loops every
+      // kind through an LR node and forbids a repeater-titled candidate there
+      // (an edge-cluster head is never LR, but the guard must hold regardless).
+      const shared = nodeId != null ? `#${nodeId}${node ? ' ' + node.name : ''}` : 'the shared node';
+      headline = 'Correlated cluster on a shared route — check the common relay, not each node';
+      candidates.push({
+        action: null,
+        title: `Inspect the shared upstream node (${shared})`,
+        rationale: 'Several nodes that route through one common repeater are failing together while the rest of the mesh is healthy — and that repeater itself looks fine. The likely cause is the shared dependency: the repeater’s power, placement, or the RF link between it and its dependents. Check that one node before touching the downstream devices individually.',
+        basis: 'inference', cost: 'physical', blocked: null,
+      });
+      candidates.push({
+        action: 'ping',
+        title: 'Ping the shared node (confirm it is reachable)',
+        rationale: 'A quick reachability check of the common relay. If it is slow or unreachable, that confirms the shared node — not each dependent — is where to intervene. It changes no routes.',
+        basis: 'source', cost: 'safe', blocked: gateExecutable(node, ctx, { probes: true }),
+      });
+      break;
+    }
+
     default: {
       headline = 'No specific remediation — see the symptom detail';
       candidates.push({ action: null, title: 'Observe', rationale: 'This symptom has no specific recommended action yet.', basis: 'inference', cost: 'physical', blocked: null });

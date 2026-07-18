@@ -62,7 +62,9 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
   // 40 cols — it is the only measured-vs-inferred guardrail and must never be
   // clipped off the row (v0.14 review). Full word repeated on the evidence line.
   const glyph = sym.basis === 'measured' ? c.green('◆') : c.yellow('◇');
-  const subsumed = sym.subsumedBy ? c.grey(' · under mesh event') : '';
+  const subsumed = sym.subsumedBy
+    ? c.grey(sym.subsumedBy.endsWith(':edge-cluster') ? ' · under edge cluster' : ' · under mesh event')
+    : '';
   // Header: severity · basis-glyph · kind · who · dwell age.
   rows.push(
     truncate(

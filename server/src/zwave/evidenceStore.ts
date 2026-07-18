@@ -138,6 +138,19 @@ export interface CoarseBucket {
   rateMin: number | null;
 }
 
+/** A 30-min downsampled bucket of the CONTROLLER's background-noise floor — the
+ *  long-horizon (multi-day) tier behind the ~40-min fine controller ring, so the
+ *  interference screen's noise trend survives restarts and spans days. Each fold
+ *  is one sample's median-of-channels floor (dBm); the bucket keeps the sum+count
+ *  (→ mean) plus the quietest/noisiest extremes. */
+export interface CtrlCoarseBucket {
+  t0: number; // bucket start (aligned to COARSE_BUCKET_MS)
+  floorN: number; // samples that carried a real noise-floor reading
+  floorSum: number; // Σ per-sample median floor (dBm, negative) → mean = floorSum/floorN
+  floorMin: number | null; // most-negative (quietest) floor in the bucket
+  floorMax: number | null; // least-negative (noisiest) floor in the bucket
+}
+
 /** An event-captured route failure (transient — latched on appearance). */
 export interface RouteFailureEvent {
   t: number;
@@ -207,6 +220,8 @@ export interface EvidenceStore {
   forNode(nodeId: number): EvidenceSample[];
   coarseForNode(nodeId: number): CoarseBucket[];
   controllerSamples(): ControllerSample[];
+  /** The long-horizon (multi-day) controller noise-floor tier (30-min buckets). */
+  controllerCoarse(): CtrlCoarseBucket[];
   routeFailures(nodeId: number): RouteFailureEvent[];
   coverage(nodeId: number): NodeCoverage | null;
   /** Store-level: when evidence collection first began (survives restarts). */
@@ -282,6 +297,14 @@ interface CtrlCols {
   bg3: (number | null)[];
 }
 
+interface CtrlCoarseCols {
+  t0: number[];
+  fN: number[]; // floorN
+  fS: number[]; // floorSum
+  fMin: (number | null)[];
+  fMax: (number | null)[];
+}
+
 interface Persisted {
   v: number;
   savedAt: number;
@@ -290,6 +313,9 @@ interface Persisted {
   nodes: Record<string, FineCols>;
   coarse: Record<string, CoarseCols>;
   controller: CtrlCols | null;
+  /** Optional (added within v2, read defensively): the long-horizon controller
+   *  noise-floor tier. Absent in a pre-tier v2 file ⇒ the tier loads empty. */
+  controllerCoarse?: CtrlCoarseCols | null;
   routeFails: Record<string, { t: number[]; a: number[]; b: number[] }>;
   meta: Record<string, { firstSeenAt: number; samples: number; fresh: number }>;
 }
@@ -343,6 +369,20 @@ function numOrNull(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+/** The per-sample noise floor: median of the finite negative values in the
+ *  LEADING contiguous run of channels (a null ends the run — the driver's own
+ *  convention). Byte-for-byte identical to interference.ts `medianFloor`, so the
+ *  persisted coarse trend and the live fine trend never disagree on "the floor".
+ *  Kept here (not imported) so the store stays free of the interference module. */
+function medFloor(chs: (number | null)[]): number | null {
+  const run: number[] = [];
+  for (const ch of chs) { if (ch == null) break; run.push(ch); }
+  const v = run.filter((x) => Number.isFinite(x) && x < 0).sort((a, b) => a - b);
+  if (v.length === 0) return null;
+  const m = v.length >> 1;
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
 export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   const path = opts.path;
   const tmp = `${path}.tmp`;
@@ -360,6 +400,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   const fine: EvidenceMap = new Map();
   const coarse = new Map<number, CoarseBucket[]>();
   const ctrlRing: ControllerSample[] = [];
+  const ctrlCoarse: CtrlCoarseBucket[] = []; // long-horizon controller noise-floor tier
   const routeFails = new Map<number, RouteFailureEvent[]>();
   const meta = new Map<number, NodeCoverage>();
   const lastCounters = new Map<number, CounterSnapshot>();
@@ -458,6 +499,50 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     if (s.fresh && s.rateKbps != null) {
       b.rateMin = b.rateMin == null ? s.rateKbps : Math.min(b.rateMin, s.rateKbps);
     }
+  }
+
+  /** Fold one controller noise-floor reading into the 30-min coarse tier. Mirrors
+   *  `foldCoarse`'s single-ring bucketing + backward-clock discipline + prune. */
+  function foldCtrlCoarse(t: number, floor: number): void {
+    const t0 = Math.floor(t / COARSE_BUCKET_MS) * COARSE_BUCKET_MS;
+    const last = ctrlCoarse.length > 0 ? ctrlCoarse[ctrlCoarse.length - 1] : null;
+    let b: CtrlCoarseBucket | null = null;
+    if (last && last.t0 === t0) {
+      b = last;
+    } else if (last && t0 < last.t0) {
+      // Backward clock step: fold into a nearby exact-match bucket or drop the
+      // fold (never append an out-of-order/duplicate t0).
+      for (let i = ctrlCoarse.length - 1; i >= 0 && i >= ctrlCoarse.length - 4; i--) {
+        if (ctrlCoarse[i].t0 === t0) { b = ctrlCoarse[i]; break; }
+        if (ctrlCoarse[i].t0 < t0) break;
+      }
+      if (!b) return;
+    }
+    if (!b) {
+      b = { t0, floorN: 0, floorSum: 0, floorMin: null, floorMax: null };
+      ctrlCoarse.push(b);
+      const cutoff = t - coarseHorizonMs;
+      while (ctrlCoarse.length > 0 && ctrlCoarse[0].t0 < cutoff) ctrlCoarse.shift();
+    }
+    b.floorN += 1;
+    b.floorSum += floor;
+    b.floorMin = b.floorMin == null ? floor : Math.min(b.floorMin, floor);
+    b.floorMax = b.floorMax == null ? floor : Math.max(b.floorMax, floor);
+  }
+
+  /** Sort a loaded controller-coarse ring by t0 and merge duplicate-t0 buckets. */
+  function normalizeCtrlCoarse(ring: CtrlCoarseBucket[]): CtrlCoarseBucket[] {
+    ring.sort((a, b) => a.t0 - b.t0);
+    const out: CtrlCoarseBucket[] = [];
+    for (const b of ring) {
+      const prev = out[out.length - 1];
+      if (!prev || prev.t0 !== b.t0) { out.push(b); continue; }
+      prev.floorN += b.floorN;
+      prev.floorSum += b.floorSum;
+      prev.floorMin = prev.floorMin == null ? b.floorMin : b.floorMin == null ? prev.floorMin : Math.min(prev.floorMin, b.floorMin);
+      prev.floorMax = prev.floorMax == null ? b.floorMax : b.floorMax == null ? prev.floorMax : Math.max(prev.floorMax, b.floorMax);
+    }
+    return out;
   }
 
   /** A bucket that witnessed nothing (no fresh obs, no events, no traffic) is omitted on disk. */
@@ -609,6 +694,10 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       lastCtrl = cur;
       ctrlRing.push(s);
       if (ctrlRing.length > CTRL_MAX_SAMPLES) ctrlRing.splice(0, ctrlRing.length - CTRL_MAX_SAMPLES);
+      // Fold the noise floor into the long-horizon tier (bg is already staleness-
+      // gated to null upstream, so a non-null median = a real, recent reading).
+      const floor = medFloor([bg0, bg1, bg2, bg3]);
+      if (floor != null) foldCtrlCoarse(t, floor);
       dirty = true;
       return s;
     },
@@ -625,6 +714,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     forNode: (nodeId) => fine.get(nodeId) ?? [],
     coarseForNode: (nodeId) => coarse.get(nodeId) ?? [],
     controllerSamples: () => ctrlRing,
+    controllerCoarse: () => ctrlCoarse,
     routeFailures: (nodeId) => routeFails.get(nodeId) ?? [],
     coverage: (nodeId) => meta.get(nodeId) ?? null,
     recordingSince: () => since,
@@ -645,6 +735,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       fine.clear();
       coarse.clear();
       ctrlRing.length = 0;
+      ctrlCoarse.length = 0;
       routeFails.clear();
       meta.clear();
       lastCounters.clear();
@@ -757,6 +848,28 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
               bg3: numOrNull(c.bg3?.[i]),
             });
           }
+        }
+        // Controller noise-floor coarse tier — age-judgment-free history (like the
+        // node coarse tier): loaded regardless of grace/staleness, pruned to
+        // horizon (skip pruning under grace — the clock is untrusted). Optional
+        // key: a pre-tier v2 file simply loads it empty.
+        if (obj.controllerCoarse && Array.isArray(obj.controllerCoarse.t0)) {
+          const cc = obj.controllerCoarse;
+          const cutoff = now() - coarseHorizonMs;
+          const ring: CtrlCoarseBucket[] = [];
+          for (let i = 0; i < cc.t0.length; i++) {
+            const t0 = cc.t0[i];
+            if (typeof t0 !== 'number' || !Number.isFinite(t0)) continue;
+            if (!grace && t0 < cutoff) continue;
+            ring.push({
+              t0,
+              floorN: cc.fN?.[i] ?? 0,
+              floorSum: cc.fS?.[i] ?? 0,
+              floorMin: numOrNull(cc.fMin?.[i]),
+              floorMax: numOrNull(cc.fMax?.[i]),
+            });
+          }
+          if (ring.length > 0) ctrlCoarse.push(...normalizeCtrlCoarse(ring));
         }
         // Route-failure rings (small, kept both tiers' rules aside — event history).
         if (obj.routeFails && typeof obj.routeFails === 'object') {
@@ -891,6 +1004,20 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             controller.bg3.push(s.bg3);
           }
         }
+        // Controller noise-floor coarse tier — pruned to horizon at save time
+        // (mirrors the node coarse tier); empty buckets are omitted.
+        let controllerCoarse: CtrlCoarseCols | null = null;
+        const keepCtrl = ctrlCoarse.filter((b) => b.floorN > 0 && b.t0 >= now() - coarseHorizonMs);
+        if (keepCtrl.length > 0) {
+          controllerCoarse = { t0: [], fN: [], fS: [], fMin: [], fMax: [] };
+          for (const b of keepCtrl) {
+            controllerCoarse.t0.push(b.t0);
+            controllerCoarse.fN.push(b.floorN);
+            controllerCoarse.fS.push(b.floorSum);
+            controllerCoarse.fMin.push(b.floorMin);
+            controllerCoarse.fMax.push(b.floorMax);
+          }
+        }
         const rf: Persisted['routeFails'] = {};
         for (const [id, ring] of routeFails) {
           if (ring.length === 0) continue;
@@ -908,6 +1035,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           nodes,
           coarse: coarseOut,
           controller,
+          controllerCoarse,
           routeFails: rf,
           meta: metaOut,
         };
@@ -923,6 +1051,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       fine.clear();
       coarse.clear();
       ctrlRing.length = 0;
+      ctrlCoarse.length = 0;
       routeFails.clear();
       meta.clear();
       lastCounters.clear();

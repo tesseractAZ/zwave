@@ -1262,6 +1262,8 @@ There is **one** controller ring (`ctrlRing`, capped at `CTRL_MAX_SAMPLES = 240`
 
 The `bg0..bg3` fields hold the **per-channel background RSSI** (the mesh noise floor). They were reserved at M2 and are populated by the v0.13 read-only driver-WS client: the caller only passes `bg` when the reading is fresh (`≤ 90 s` old) and the driver's homeId matches HA's (`driverHomeOk()`); a stale reading is recorded as `null`, not re-used. The interference watch (M6) reads these channels.
 
+**The controller noise-floor coarse tier.** The 240-sample fine ring spans only ~40 min. Alongside it, `recordController` folds each sample's **median floor** (the finite negatives in the leading channel run — byte-identical to `interference.ts medianFloor`, so the two never disagree) into a single 30-min `CtrlCoarseBucket` ring — the long-horizon tier. Each bucket keeps `floorN`, `floorSum` (→ mean), `floorMin`, `floorMax`; the fold mirrors the node coarse tier exactly (same `COARSE_BUCKET_MS`, same backward-clock discipline, prune-to-horizon on bucket birth). It is persisted as an *optional* `controllerCoarse` key (schema stays **v2** — a pre-tier file reads it empty) and is **age-judgment-free** on load: like the node coarse tier it survives boot-grace and staleness, because a multi-day noise-floor history is history, not current state. `controllerCoarse()` exposes it; the interference view reduces it to `noise.trendCoarse` (§6.x) so the screen's noise trend spans days and survives restarts.
+
 ### 5.7 Route-failure ring, coverage metadata
 
 `recordRouteFailure(nodeId, between, at)` latches a `routeFailedBetween` event the moment it appears — this datum is transient (overwritten on the next successful transmission), so it must be captured event-driven, never by polling. Each node keeps a small ring capped at `ROUTE_FAIL_RING = 20`; `between` is the `[last-functional, first-non-functional]` node-id pair.
@@ -1792,9 +1794,9 @@ Two helpers keep dwell stable against the freshness flag:
 - `latestFresh(samples, now, pick, window)` — scans newest-first, skips non-fresh samples, and returns the first usable value. This is why `rtt-degraded` and `weak-signal` gate on the newest *fresh* reading instead of `last`, so a non-fresh tick doesn't reset the dwell (v0.14 review: those detectors almost never matured before this fix).
 - `windowTimeoutRate`, `windowFlaps`, `windowRxRate` — windowed aggregations over the recent fine ring (default `WINDOW_MS = 10 min`).
 
-#### 7.2.3 The 12 `SymptomKind`s
+#### 7.2.3 The 13 `SymptomKind`s
 
-The `SymptomKind` union declares **12** kinds. Ten have live detector bodies in `detectSymptoms`; two (`quiet-node`, `route-churn`) are declared in the union but have **no detector implemented yet** — they are reserved names from the DESIGN table awaiting the driver-WS cadence/route-scheme data:
+The `SymptomKind` union declares **13** kinds. Eleven have live detector bodies in `detectSymptoms`; two (`quiet-node`, `route-churn`) are declared in the union but have **no detector implemented yet** — they are reserved names from the DESIGN table awaiting the driver-WS cadence/route-scheme data:
 
 | # | kind | scope | severity | basis | implemented? |
 | --- | --- | --- | --- | --- | --- |
@@ -1809,7 +1811,10 @@ The `SymptomKind` union declares **12** kinds. Ten have live detector bodies in 
 | 9 | `chatty-device` | node | watch | measured | yes |
 | 10 | `ghost-suspect` | node | warn | inferred | yes |
 | 11 | `controller-degraded` | mesh | warn/crit | measured | yes |
-| 12 | `mesh-interference` | mesh | warn | measured/inferred | yes |
+| 12 | `edge-cluster` | cluster (shared repeater; carries `members[]`) | warn | measured | yes |
+| 13 | `mesh-interference` | mesh | warn | measured/inferred | yes |
+
+`edge-cluster` is the only **cluster-scoped** kind: its `nodeId` is the shared upstream repeater (the actionable node), and a new optional `Symptom.members[]` carries the affected downstream node ids. It sits between the per-node detectors and the mesh-wide event (§7.2.7a).
 
 #### 7.2.4 Per-node detectors — exact firing conditions
 
@@ -1936,6 +1941,15 @@ meshSince = dwell(meshKey, meshBreach && !controllerEvent, now)   // ladder rung
 - If a `floodNode` is present → `mesh-interference` with `basis: 'measured'`, narrative blaming that chatty device ("fix the chatty device first").
 - Otherwise → `mesh-interference` with `basis: 'inferred'`, `severity: 'warn'`, narrative explicitly stating no noise-floor confirmation ("treat as a lead, not a verdict").
 
+#### 7.3.1 The edge-cluster detector (middle scale)
+
+Between a single node's fault and a mesh-wide event lies a common real pattern: a **small group of nodes that all route through one repeater** fails together while the rest of the mesh is fine. The `edge-cluster` detector (runs after the per-node loop and the mesh gate, **only when no mesh/controller event is active**) surfaces it.
+
+- **Grouping.** For every genuinely-degrading non-controller node (in the same `degradingNow` set the mesh gate reads), it collects that node's `lwr`/`nlwr` `repeaters` (already resolved to node ids) and builds `repeater → {degrading dependents}`.
+- **The sharp gate — a healthy head.** A candidate repeater must itself be **non-degrading** (`!degradingNow.get(rep)`). A repeater that is failing already shows its own per-node card; the interesting, non-obvious signal is the *silent* shared dependency — dependents all failing through a relay that reports fine, pointing at that relay's link, power, or placement.
+- **Disjoint assignment.** Candidates with ≥ `EDGE_MIN_MEMBERS` (2) dependents are taken largest-first (tie: repeater id) with greedy claiming, so a node routed through two shared repeaters is credited to exactly one cluster — never double-carded or double-subsumed. Each surviving cluster is dwell-gated (5 min) on the key `${rep}:edge-cluster`; stale keys that lose quorum or are superseded by a mesh event are cleared so a re-formed cluster can't mature off a stale `since`.
+- **Emission.** One `edge-cluster` symptom per matured cluster: `nodeId` = the shared repeater (the actionable node), `members[]` = the degrading dependents, `basis: 'measured'`, `severity: 'warn'`. It then sets `subsumedBy = '${rep}:edge-cluster'` on those members' own per-node RF symptoms (chatty-device exempt), collapsing N cards into one — exactly mirroring the mesh subsumption below.
+
 ---
 
 ### 7.4 `subsumedBy` demotion and quarantine feedback
@@ -1947,7 +1961,7 @@ if (meshEventId) for (const s of out)
   if (s.nodeId != null && s.kind !== 'chatty-device') s.subsumedBy = meshEventId;
 ```
 
-`chatty-device` is exempt (it is the cause hypothesis, not a victim). The operator sees one mesh event with N demoted contributors instead of N loud independent faults.
+`chatty-device` is exempt (it is the cause hypothesis, not a victim). The operator sees one mesh event with N demoted contributors instead of N loud independent faults. An `edge-cluster` applies the *same* demotion at a smaller scale — its members' per-node symptoms are stamped `subsumedBy = '${rep}:edge-cluster'` (§7.3.1). The two are mutually exclusive: edge-cluster only fires when no mesh event is active, so a symptom is never demoted under both.
 
 **Ranking.** The output is sorted `crit > warn > watch`, then mesh/controller-scoped rows first, then by dwell age (`sinceMs`).
 
@@ -2015,7 +2029,7 @@ export function planAll(
 ): Plan[];
 ```
 
-`planFor` is a single `switch (symptom.kind)` over the twelve `SymptomKind`s (§8.4). It never reads a clock, a store, or the network — its only inputs are the symptom, the node snapshot (which may be `undefined`), and the `PlanContext` (the write-actions gate and an optional M5 efficacy lookup). `planAll` is the batch entry point used to plan a whole symptom list; it drops symptoms subsumed under a mesh event (§8.7) before mapping.
+`planFor` is a single `switch (symptom.kind)` over the thirteen `SymptomKind`s (§8.4). It never reads a clock, a store, or the network — its only inputs are the symptom, the node snapshot (which may be `undefined`), and the `PlanContext` (the write-actions gate and an optional M5 efficacy lookup). `planAll` is the batch entry point used to plan a whole symptom list; it drops symptoms subsumed under a mesh event (§8.7) before mapping.
 
 Data trace into the planner:
 
@@ -2107,6 +2121,7 @@ The full as-built table (LR variants noted separately in §8.5):
 | `chatty-device` | "Tune the device's reporting — it is flooding the mesh" | `action: null` "Reduce its reporting … or re-include without S0" — source / physical | `reInterview` "Re-interview (after changing its config)" — source / **caution**, gated | — |
 | `ghost-suspect` | "Possible ghost — verify before the destructive removal" | `removeFailed` "Remove failed node (**DESTRUCTIVE — verify first**)" — source / **destructive**, gated | `action: null` "First confirm the device is truly gone" — lore / physical | — |
 | `controller-degraded` | "Controller serial link is struggling — fix the stick side" | `action: null` "USB-2 port + short passive extension, away from USB-3; relocate the stick" — source / physical | — | — |
+| `edge-cluster` | "Correlated cluster on a shared route — check the common relay, not each node" | `action: null` "Inspect the shared upstream node (#R Name)" — inference / physical | `ping` "Ping the shared node (confirm it is reachable)" — source / **safe**, gated w/ probes | — |
 | `mesh-interference` (`basis: 'inferred'`) | "Correlated mesh degradation — likely RF interference (unconfirmed)" | `action: null` "Survey the RF environment (900 MHz interferers) — measurement needed to confirm" — **inference** / physical | — | — |
 | `mesh-interference` (not inferred) | "Correlated mesh degradation — a flooding device is the likely cause" | `action: null` "Fix the flooding device first (see its chatty-device card)" — source / physical | — | — |
 | *default (unmapped kind)* | "No specific remediation — see the symptom detail" | `action: null` "Observe" — inference / physical | — | — |
@@ -2479,7 +2494,7 @@ The whole screen exists because of a load-bearing measurement fact: Home Assista
 
 | Panel | Source field | One-line meaning |
 | --- | --- | --- |
-| **NOISE FLOOR** | `iv.noise` | per-channel 900 MHz background RSSI + a fixed-scale trend spark (driver-measured; lower = quieter) |
+| **NOISE FLOOR** | `iv.noise` | per-channel 900 MHz background RSSI + a fixed-scale ~40-min trend spark **and** a multi-day `days` spark (persisted coarse tier; driver-measured; lower = quieter) |
 | **CONTROLLER SERIAL LINK** | `iv.serial` | host↔stick NAK/CAN/timeout rates, shown *apart* because a serial fault mimics mesh-wide RF trouble |
 | **DIURNAL TIMEOUT-RATE HEATMAP** | `iv.diurnal`, `iv.coverageDays` | hour-of-day mesh-wide **raw** timeout rate — deliberately not baseline-relative |
 | **CORRELATED DEGRADATION** | `iv.correlated` | the current mesh-interference state from the detector (inferred-by-exclusion) |
@@ -2540,6 +2555,7 @@ interface InterferenceInput {
   now: number;
   bgChannels: (number | null)[] | null;      // current ch0..3 background RSSI, or null when no live reading
   controllerSamples: ControllerSample[];      // the ~40-min controller ring (bg trend + serial rates)
+  controllerCoarse: CtrlCoarseBucket[];        // 30-min noise-floor buckets → the multi-day trend
   coarseByNode: Map<number, CoarseBucket[]>;  // per-node 30-min × 14-day buckets → the diurnal heatmap
   symptoms: Symptom[];                         // live symptoms → correlated-degradation state
 }
@@ -2548,6 +2564,7 @@ interface InterferenceInput {
 ```ts
 interface InterferenceView {
   noise:  { channels: (number|null)[]; floor: number|null; real: boolean; trend: number[];
+            trendCoarse: number[]; trendCoarseDays: number;  // multi-day floor (30-min buckets) + its span
             band: 'clean' | 'elevated' | 'noisy' | 'unknown' };
   serial: { nakPerH: number|null; canPerH: number|null; tmoAckPerH: number|null; tmoRespPerH: number|null;
             band: 'healthy' | 'strained' | 'unknown'; spanH: number };
@@ -2619,6 +2636,8 @@ const spark = iv.noise.trend.length >= 2
 ```
 
 The fixed window is a correctness choice, not a cosmetic one: an auto-scaled spark over a flat quiet floor would amplify ±1 dB jitter into fake spikes. With the fixed scale a quiet floor reads flat and low, and only a real rise visibly climbs. `sparkline` itself renders a genuinely flat (all-equal) series as a mid-height grey line rather than a red row of minima. With fewer than two points it shows `· building trend`.
+
+**The multi-day floor (`trendCoarse`).** Directly under the `trend` spark, a second **`days`** spark renders the persisted controller noise-floor coarse tier (§5.6): `noise.trendCoarse` is one **mean floor per 30-min bucket** (oldest first, buckets with no reading skipped), reduced by `computeInterference` from `input.controllerCoarse`. Because a fixed-width sparkline tail-slices to its width, the screen first **downsamples** the whole `trendCoarse` into the 24 drawn cells (`downsampleMean`) so the graphic genuinely spans the labeled window — never collapsing to just the most-recent 24 buckets while the label claims days (a review fix). It is drawn on the **same** fixed −110..−80 dBm scale as the fine trend, so the two are directly comparable — the fine one shows the last ~40 min, the coarse one the whole persisted span (an honest `Nd`/`Nh` label from `noise.trendCoarseDays`, the first-to-last bucket span). Because the tier is persisted and age-judgment-free, this trend survives restarts and the daily power blip; before two buckets exist it shows `· building multi-day history`. Note the edge-cluster head (a *healthy* shared repeater, §7.3.1) is excluded from §10.5's correlated degraded-node count — it is a suspect, not a degraded node.
 
 ### 10.4 Controller serial-link health
 
