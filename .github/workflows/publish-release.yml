@@ -1,0 +1,166 @@
+name: Publish release
+
+# Cut a PRIVATE GitHub Release on a `v*.*.*` tag push — release notes from the
+# CHANGELOG + the printable manual (.docx editable, .pdf reader-friendly) as
+# assets. Deliberately does NOT publish a container image: this add-on is
+# deployed by LOCAL build (the Pi builds from source), the repo stays private,
+# and no GHCR package is ever pushed. A Release here is a private, versioned
+# record + a downloadable manual — nothing is made public.
+#
+# To cut a release: after the version's PR is merged to main (subject `vX.Y…`,
+# never `Release v`), push the tag at that merge commit:
+#     git tag v0.21.0 <merge-sha> && git push origin v0.21.0
+# This workflow then builds the manual and creates the private Release.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to (re)release, without leading v (e.g. 0.21.0)"
+        type: string
+        required: true
+
+permissions:
+  contents: write   # GitHub Release creation only — NO packages:write (no GHCR)
+
+jobs:
+  resolve:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - id: v
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.version }}" ]]; then
+            v="${{ inputs.version }}"
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ ! "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid version '$v' (expected X.Y.Z)"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          echo "📦 Releasing v$v"
+
+  test:
+    name: Server tests
+    needs: resolve
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install server deps
+        working-directory: server
+        run: npm ci
+      - name: Run server tests
+        working-directory: server
+        run: npm test
+      - name: tsc --noEmit (server)
+        working-directory: server
+        run: npx tsc --noEmit
+
+  release:
+    name: Cut GitHub Release (private) + attach manual
+    needs: [resolve, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - name: Skip if Release already exists
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ needs.resolve.outputs.tag }}" >/dev/null 2>&1; then
+            echo "Release ${{ needs.resolve.outputs.tag }} already exists; skipping create"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure pandoc + libreoffice
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc libreoffice-writer-nogui
+          pandoc --version | head -1
+          soffice --version | head -1
+
+      - name: Build the manual (.docx + .pdf)
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          python3 scripts/build-docs-docx.py --pdf \
+            --version "${{ needs.resolve.outputs.version }}" \
+            --ref "${{ github.sha }}" \
+            --output "Z-Wave-TUI-Documentation-v${{ needs.resolve.outputs.version }}.docx"
+          ls -la Z-Wave-TUI-Documentation-v${{ needs.resolve.outputs.version }}.*
+
+      - name: Extract notes from CHANGELOG.md
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          NEXT: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > /tmp/notes.md
+          import os, re
+          version = os.environ["NEXT"]
+          with open("zwave_tui/CHANGELOG.md") as f:
+              content = f.read()
+          pattern = re.compile(
+              rf"^## {re.escape(version)}\b.*?(?=^## |\Z)",
+              re.MULTILINE | re.DOTALL,
+          )
+          m = pattern.search(content)
+          if m:
+              body = m.group(0).split("\n", 1)[1].strip()
+              print(body)
+          else:
+              print("_(see CHANGELOG.md)_")
+          PY
+          echo "── notes preview ────────────────────────────"
+          cat /tmp/notes.md
+          echo "─────────────────────────────────────────────"
+
+      - name: Create GitHub Release (private) with the manual attached
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ needs.resolve.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file /tmp/notes.md \
+            --latest \
+            "Z-Wave-TUI-Documentation-v${V}.docx" \
+            "Z-Wave-TUI-Documentation-v${V}.pdf"
+
+      - name: Summary
+        env:
+          V: ${{ needs.resolve.outputs.version }}
+        run: |
+          {
+            echo "## ✅ v${V} released (private)"
+            echo
+            echo "A private GitHub Release was cut with the CHANGELOG notes and the"
+            echo "printable manual (.docx + .pdf) attached. No container image was"
+            echo "published — the add-on is deployed by local build on the Pi."
+          } >> "$GITHUB_STEP_SUMMARY"
