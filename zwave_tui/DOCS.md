@@ -2239,13 +2239,22 @@ interface Episode {
   verdict: Verdict | null;
 }
 
-// Per-command reliability over a window of EvidenceSamples.
+// Every recovery signal over a window of EvidenceSamples, computed kind-agnostically.
 interface WindowMetrics {
+  samples: number;              // total samples folded
+  freshN: number;              // samples that carried a NEW stats event (rssi/rtt/flap denominator)
+  // ── timeout family (return-path-degraded, chronic-return-path, quiet-node) ──
   tx: number;                   // Σ dTx (successful commands sent to the node)
   rx: number;                   // Σ dRx
   timeouts: number;             // Σ dTimeout (Get replies that never came — the reliability signal)
   rate: number | null;          // timeouts / tx, or null when tx < minTx (never a fabricated 0/0)
-  samples: number;
+  // ── other recovery signals ──
+  flaps: number;                // Σ dFlaps (Alive↔Dead transitions) — dead-flap recovery
+  rssiMedian: number | null;    // median of FRESH rssi readings — weak-signal recovery
+  rssiN: number;                // COUNT of fresh rssi readings behind rssiMedian (its evidence floor)
+  rttMedian: number | null;     // median of FRESH rtt readings — rtt-degraded recovery
+  rttN: number;                 // COUNT of fresh rtt readings behind rttMedian (its evidence floor)
+  rateKbpsMin: number | null;   // worst FRESH negotiated PHY rate — rate-fallback recovery (null = no fresh reading)
 }
 
 // A DECAYED tally — the learned memory (not raw counts).
@@ -2254,9 +2263,9 @@ interface Tally { n: number; ok: number; }
 type Verdict = 'improved' | 'no-change' | 'worse' | 'refused-misdiagnosis' | 'unverifiable';
 ```
 
-Note the reliability signal is **timeouts/tx**, consistent with the load-bearing fact that `commandsDroppedTX` does *not* count RF ACK failures. `timeoutResponse` (a `Get` whose reply never arrived, node stays Alive) is the measurable per-command degradation, and it is exactly what `WindowMetrics.rate` is computed from.
+A window carries **every** recovery signal, because a symptom's recovery shows up in a *different* signal depending on its kind (§9.4). The timeout family's signal is **timeouts/tx**, consistent with the load-bearing fact that `commandsDroppedTX` does *not* count RF ACK failures — `timeoutResponse` (a `Get` whose reply never arrived, node stays Alive) is the measurable per-command degradation `WindowMetrics.rate` is computed from. RSSI, RTT, and the negotiated PHY rate are all re-sampled from the driver's cached stats, so they are folded **only from `fresh` samples** — a re-read of the same cached value between stats events is not a new observation. Crucially, a *fresh* sample can still carry a **null** rssi/rtt (the no-signal sentinels 125/126/127, or a null rtt), so `freshN` (fresh-sample count) is **not** the count of usable readings; `rssiN`/`rttN` carry the true per-signal observation counts, which is what §9.4's evidence floors gate on. `flaps` is an event-drain count, folded over **all** samples (a flap is concrete whether or not a stats event landed).
 
-`windowMetrics(samples, minTx = 5)` sums `dTx/dRx/dTimeout` across the supplied `EvidenceSample[]` and returns `rate = tx >= minTx ? timeouts / tx : null`. Below five commands a per-command rate is not meaningful, so it stays `null` rather than manufacturing a value — a `null` rate downstream forces an `unverifiable` verdict, never a false claim.
+`windowMetrics(samples, minTx = 5)` sums `dTx/dRx/dTimeout` and `dFlaps`, and — under the `fresh` gate — medians `rssi`/`rtt` (tracking `rssiN`/`rttN`) and mins `rateKbps`. Below five commands a per-command timeout rate is not meaningful, so `rate` stays `null` rather than manufacturing a value — a `null` rate downstream forces an `unverifiable` verdict, never a false claim. The same fail-closed rule applies to every other metric: a window with no fresh rate reading has `rateKbpsMin == null`, and a median backed by fewer than `MIN_OBS` readings is rejected — both → `unverifiable`, never a verdict fabricated from stale or single-sample data.
 
 ### 9.2 The episode lifecycle
 
@@ -2335,33 +2344,51 @@ else:                                  action[kind|act]   = bump(action[kind|act
 
 ### 9.4 The verdict and the statistical-honesty guards
 
-`computeVerdict(ep)` is where the ledger refuses to lie. It runs top to bottom:
+`computeVerdict(ep)` is where the ledger refuses to lie. After the refusal short-circuit and a before/after presence check, it dispatches to the recovery metric that **this symptom's kind actually moves** — because a `weak-signal` fix shows up in RSSI, not in the timeout rate, and scoring every kind by timeouts (the original M5 behaviour, v0.16) meant non-timeout kinds could never register an improvement:
 
 ```ts
 if (ep.action?.refused) return 'refused-misdiagnosis';
-if (!ep.before || !ep.after || ep.before.rate == null || ep.after.rate == null) return 'unverifiable';
-if (!comparable(ep.before, ep.after)) return 'unverifiable';
-if (ep.after.rate > ep.before.rate * WORSE_FACTOR && ep.after.rate > cfg.releaseRate) return 'worse';
-const improved = ep.after.rate <= cfg.releaseRate && ep.before.rate - ep.after.rate >= cfg.minEffect;
-return improved ? 'improved' : 'no-change';
+if (!ep.before || !ep.after) return 'unverifiable';
+return scoreRecovery(metricOf(ep.kind), ep.before, ep.after, cfg.releaseRate, cfg.minEffect);
 ```
+
+`metricOf(kind)` maps each kind to the one signal its recovery registers in:
+
+| Metric | Kinds | Recovery signal |
+|---|---|---|
+| `timeout` | `return-path-degraded`, `chronic-return-path`, `quiet-node` | reply-timeout rate falls |
+| `flap` | `dead-flap` | Alive↔Dead transitions stop |
+| `rssi` | `weak-signal` | signal strength rises ≥ 4 dB |
+| `rtt` | `rtt-degraded` | round-trip time drops ≥ 25% AND ≥ 20 ms |
+| `rate` | `rate-fallback` | negotiated PHY rate climbs back to ≥ 100k |
+| `none` | `chatty-device`, `ghost-suspect`, `mesh-interference`, … | no per-node recovery window → always `unverifiable` |
+
+`scoreRecovery` holds one branch per metric, and **every branch keeps the same honesty contract**: an evidence-poor or incomparable before/after pair is `unverifiable` (never a fabricated win), a genuine regression is `worse`, and "improvement" always requires a threshold crossing plus a minimum effect size — never a raw count nudging in the right direction.
 
 The tuning constants (all defaults; overridable via `OutcomeStoreOptions`, but the add-on wires only `path` + `log`, so in production these are effectively fixed):
 
 ```ts
 const DEFAULTS = { releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0.03 };
-const MIN_WINDOW_TX = 5;   // both windows must carry ≥5 commands
-const TRAFFIC_FACTOR = 3;  // before/after tx must be within 3× of each other
-const WORSE_FACTOR = 1.5;  // rate that grew past 1.5× the before-rate is a regression
+const MIN_WINDOW_TX = 5;   // timeout metric: both windows must carry ≥5 commands
+const TRAFFIC_FACTOR = 3;  // timeout metric: before/after tx must be within 3× of each other
+const WORSE_FACTOR = 1.5;  // timeout & rtt: a value that grew past 1.5× the before is a regression
+const MIN_OBS = 3;         // rssi/rtt: both medians need ≥3 fresh READINGS (rssiN/rttN), not just fresh samples
+const MIN_LIVE = 3;        // flap: the AFTER window needs ≥3 fresh samples proving the node is alive & talking
+const RSSI_MIN_GAIN = 4;   // dB gain (or drop) that counts as an rssi improvement (or regression)
+const RTT_DROP_FRAC = 0.25; const RTT_MIN_DROP_MS = 20; // rtt improvement needs BOTH
 ```
 
 Each guard corresponds to a specific way a naïve counter would fool itself:
 
-- **"Success" needs a release-threshold crossing AND a minimum effect size.** `improved` requires both `after.rate <= releaseRate` (0.075 — mirroring the symptom detectors' release threshold so "resolved" means the same thing here as to the symptom engine) **and** an absolute per-command-rate drop `before.rate − after.rate >= minEffect` (0.05). A count merely dropping, or a rate nudging down without crossing the threshold, is `no-change`, not success. The metric is always a *per-command rate*, never a raw count.
+- **"Success" needs a threshold crossing AND a minimum effect size** — per metric. On the timeout metric, `improved` requires both `after.rate <= releaseRate` (0.075 — mirroring the symptom detectors' release threshold so "resolved" means the same thing here as to the symptom engine) **and** an absolute rate drop `before.rate − after.rate >= minEffect` (0.05). The rtt metric mirrors this with a *fractional* ≥25% drop **and** an absolute ≥20 ms drop (so a 12 ms→9 ms window is not a "win"); the rssi metric needs a ≥4 dB gain; the rate metric needs an actual climb back across the 100k line. A signal merely nudging in the right direction without clearing the bar is `no-change`, not success.
 
-- **Traffic-mix comparability, or it's unverifiable.** `comparable(a, b)` gates on TX only: both windows must carry ≥ `MIN_WINDOW_TX` (5) commands and be within `TRAFFIC_FACTOR` (3×) of each other (`hi <= lo * 3`). A mesh that went quiet can fake improvement in *either* direction — the denominator of a per-command rate collapsing is not a recovery. RX is deliberately **not** gated: a SET-only node legitimately has near-zero unsolicited RX, and requiring RX-comparability would wrongly mark every such node `unverifiable` (an RX-collapse-while-TX-steady case is a documented rare uncovered edge, not papered over with a guard that breaks SET-only nodes).
+- **Evidence, or it's unverifiable — and each metric gates on evidence of ITS OWN signal.** This is the load-bearing subtlety: `freshN` (fresh-sample count) is **not** a valid evidence floor for rssi/rtt, because a fresh sample routinely carries a null rssi/rtt (the no-signal sentinels), so a median built from a single reading could pass a `freshN ≥ 3` gate. Each branch therefore gates on its own denominator:
+    - **timeout** — `comparable(a, b)` gates on TX only: both windows carry ≥ `MIN_WINDOW_TX` (5) commands and are within `TRAFFIC_FACTOR` (3×) of each other. A mesh that went quiet can fake improvement in either direction, because the denominator of a per-command rate collapsing is not a recovery. RX is deliberately **not** gated (a SET-only node legitimately has near-zero unsolicited RX).
+    - **rssi / rtt** — both windows need ≥ `MIN_OBS` (3) actual **readings** (`rssiN`/`rttN`), not merely 3 fresh samples. A median backed by fewer readings is `unverifiable`.
+    - **rate** — `rateKbpsMin` is folded from **fresh** samples only, so a non-null value already means ≥1 fresh negotiated-rate reading; a quiet after-window (all stale carry-forwards) is `null` → `unverifiable`, never scored from a sticky pre-fix rate.
+    - **flap** — flaps are concrete event drains (fresh-independent), so the *before* window needs only prior flapping (`flaps ≥ 1`), **not** a fresh-sample floor a mostly-Dead flapping node rarely meets. The *after* window must instead prove liveness (≥ `MIN_LIVE` fresh samples), so a node that simply went hard-dead — `after.flaps === 0` only because it stopped transitioning — is `unverifiable`, not a fabricated recovery.
 
-- **Regression detection.** If the after-rate grew past `WORSE_FACTOR` (1.5×) the before-rate *and* is still above the release threshold, the verdict is `worse` — the action (or the interval) made things worse, not neutral.
+- **Regression detection is per-metric too.** Timeout: after-rate past `WORSE_FACTOR` (1.5×) the before *and* still above release → `worse`. RTT: after-median ≥ 1.5× the before → `worse`. RSSI: a ≥4 dB *drop* → `worse`. Flap: *more* flaps after than before → `worse`. Rate: any drop below the before-rate → `worse`. The action (or the interval) made things worse, not neutral.
 
 - **`refused-misdiagnosis` is reserved, keyed to the symptom.** Conceptually a driver refusal (e.g. `remove_failed_node` on a node that actually responds, or a rebuild returning `false`) refutes the *diagnosis*, so it bumps that detector's false-positive tally (`fp`) and NEVER counts as action efficacy. In M5 it is present in the model but **not auto-detected**: `recordActionOutcome` always passes `refused = false`, because the operator-action hook cannot reliably distinguish a genuine driver refusal from a transient WS/connectivity error, and a node-scoped stamp would wrongly mark non-ghost symptoms. That verdict is reserved for a future executor (§3.5) that receives structured driver errors.
 

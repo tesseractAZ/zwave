@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.19.0 — 2026-07-17
+
+**Per-symptom-kind recovery metrics (M5 refinement).** The outcome-learning
+ledger now scores each resolved episode by the signal its symptom's fix actually
+moves, instead of judging every kind by the reply-timeout rate. A `weak-signal`
+recovery shows up in RSSI, a `dead-flap` recovery in the Alive↔Dead flap count,
+an `rtt-degraded` recovery in round-trip time, a `rate-fallback` recovery in the
+negotiated PHY rate — scoring all of them by timeouts (the original v0.16
+behaviour) meant those kinds could essentially never register an improvement, so
+their control/action arms stayed empty and unlearnable.
+
+- **`WindowMetrics`** now carries every recovery signal (`flaps`, `rssiMedian`,
+  `rttMedian`, `rateKbpsMin`, plus `freshN`) alongside the timeout family, all
+  computed kind-agnostically. RSSI/RTT are medianed from **fresh samples only**
+  (a redelivered driver EMA carries no new information).
+- **`computeVerdict`** dispatches through `metricOf(kind)` → `scoreRecovery`,
+  one branch per metric. Every branch keeps the same honesty contract as the
+  timeout metric: evidence-poor or incomparable windows are `unverifiable`
+  (never a fabricated win), regressions are `worse`, and "improved" always needs
+  a threshold crossing **plus** a minimum effect size.
+- Kinds with no per-node recovery window (`chatty-device`, `ghost-suspect`,
+  `mesh-interference`) map to `none` and remain `unverifiable` by design.
+- **Per-signal evidence floors** (adversarial-review hardening). Each metric now
+  gates on evidence of *its own* signal, not a shared fresh-sample count — a
+  fresh sample routinely carries a null rssi/rtt (no-signal sentinels), so the
+  old `freshN` gate could let a median-of-one pass as robust:
+  - `rssi`/`rtt` gate on `rssiN`/`rttN` — the count of actual readings behind the
+    median — needing ≥ `MIN_OBS` (3), so a single noisy reading can't drive a
+    verdict.
+  - `rateKbps` is now folded from **fresh** samples only (matching the evidence
+    store's own coarse tier), so a quiet after-window of stale carry-forwards is
+    `unverifiable` instead of being scored from a sticky pre-fix rate.
+  - `flap` drops the before-window fresh floor (a mostly-Dead flapping node is
+    legitimately fresh-poor) and instead requires the *after* window to prove
+    liveness, so a node that went hard-dead isn't mistaken for a recovery.
+- Robustness: `windowMetrics` now guards `dFlaps` (like its `dTx`/`dRx` siblings)
+  so a legacy evidence sample reloaded from disk after an upgrade folds to 0
+  rather than poisoning the flap aggregate with `NaN`.
+- Documentation: `zwave_tui/DOCS.md` §9.1/§9.4 updated to describe the per-kind
+  dispatch and its per-signal evidence floors; tests extended to 36 outcomes
+  cases (309 total), including regression tests for each floor.
+
 ## 0.18.0 — 2026-07-17
 
 **The complete manual (M7).** The add-on's **Documentation** tab is now a full
