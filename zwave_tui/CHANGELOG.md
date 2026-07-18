@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.18.0 — 2026-07-17
+
+**The complete manual (M7).** The add-on's **Documentation** tab is now a full
+system & engine reference — twelve chapters covering every screen, the health
+score, the whole learned-remediation engine (evidence store → baselines →
+symptom detectors → advisory planner → outcome-learning → interference watch),
+the write-action safety model, and configuration/deployment. Everything is
+written from the source with real constants, thresholds, and formulas.
+
+- **`zwave_tui/DOCS.md`** rewritten as the complete reference (was a short
+  operator card).
+- **`SECURITY.md`** added — the security posture and how to report an issue.
+- **Downloadable manual**: CI now assembles README + SECURITY + DOCS into a
+  single printable **`.docx`** (editable) and **`.pdf`** (opens anywhere) on
+  every change, so the offline manual is always current and a docs change that
+  breaks conversion fails the check. Built with `scripts/build-docs-docx.py`.
+
+No runtime behavior changed in this release — it is documentation and tooling.
+
 ## 0.17.0 — 2026-07-17
 
 **See the airwaves (M6).** A new **Interference** screen (press **8** or **f**)
