@@ -8,10 +8,25 @@
  * existing Actions Menu (`a`) + type-CONFIRM.
  */
 
-import type { ScreenCtx, Symptom, NodeSnapshot } from '../../types';
+import type { ScreenCtx, Symptom, NodeSnapshot, SymptomKind, ActionKind, Efficacy } from '../../types';
 import { c, truncate } from '../ansi';
 import { frame } from '../chrome';
 import { planFor, type PlanCandidate } from '../../zwave/planner';
+
+/** One-line learned-efficacy note for an executable candidate (M5): a green
+ *  "beat self-healing" when it clears the control arm, a grey "not
+ *  distinguishable" once enough episodes exist, nothing while still learning. */
+function efficacyNote(e: Efficacy | null | undefined): string | null {
+  if (!e || !e.ready) return null; // still learning → say nothing (honest)
+  const n = Math.round(e.n);
+  if (e.expectedEfficacy != null) {
+    // `n` first (after the headline %) so the trust signal survives truncation.
+    const pct = Math.round(e.expectedEfficacy * 100);
+    const base = e.baseRate != null ? ` vs ${Math.round(e.baseRate * 100)}% self-heal` : '';
+    return c.green(`✓ helped ${pct}% (n=${n})${base}`);
+  }
+  return c.grey(`≈ n=${n}: not distinguishable from self-healing`);
+}
 
 const SEV_TAG: Record<Symptom['severity'], string> = {
   crit: c.redB('CRIT'),
@@ -40,7 +55,7 @@ function costTag(cost: PlanCandidate['cost']): string {
   }
 }
 
-function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined): string[] {
+function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, efficacyFor: (kind: SymptomKind, action: ActionKind) => Efficacy | null): string[] {
   const rows: string[] = [];
   const who = sym.nodeId != null ? c.cyan(`#${sym.nodeId} ${nameOf(sym.nodeId)}`) : c.blue('MESH');
   // Compact basis GLYPH placed right after severity so it survives truncation at
@@ -72,7 +87,7 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
   // inline (⊘). Only the top candidate carries a rationale line, so a screenful of
   // symptoms stays readable without scrolling.
   if (sym.subsumedBy == null) {
-    const plan = planFor(sym, sym.nodeId != null ? nodeOf(sym.nodeId) : undefined, { writeActions });
+    const plan = planFor(sym, sym.nodeId != null ? nodeOf(sym.nodeId) : undefined, { writeActions, efficacyFor });
     rows.push(truncate('    ' + c.label('▎ ') + c.white(plan.headline), W));
     plan.candidates.slice(0, 3).forEach((cand, i) => {
       const runnable = cand.action != null && cand.blocked == null;
@@ -84,6 +99,13 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       if (i === 0) {
         const rl = wrap(cand.rationale, W - 8);
         if (rl.length) rows.push(truncate('        ' + c.grey(rl[0] + (rl.length > 1 ? ' …' : '')), W));
+      }
+      // M5: learned efficacy note — ONLY on a runnable recommendation. A blocked
+      // or anti-pattern candidate (e.g. the "rebuild — NOT recommended" row) must
+      // never carry a green "✓ helped …" note that contradicts the advice.
+      if (runnable) {
+        const note = efficacyNote(cand.efficacy);
+        if (note) rows.push(truncate('        ' + note, W));
       }
     });
   }
@@ -123,6 +145,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
   const symptoms = data.symptoms();
   const nameOf = (id: number): string => data.nodeById(id)?.name ?? `Node ${id}`;
   const nodeOf = (id: number): NodeSnapshot | undefined => data.nodeById(id);
+  const efficacyFor = (kind: SymptomKind, action: ActionKind): Efficacy | null => data.efficacyFor(kind, action);
 
   const body: string[] = [];
   if (symptoms.length === 0) {
@@ -161,7 +184,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     let used = body.length; // summary + spacer already pushed
     let shown = 0;
     for (const sym of sorted) {
-      const blk = symptomBlock(sym, now, W, nameOf, ctx.actionsEnabled === true, nodeOf);
+      const blk = symptomBlock(sym, now, W, nameOf, ctx.actionsEnabled === true, nodeOf, efficacyFor);
       const remaining = sorted.length - shown;
       // Reserve one line for the "N more" footer whenever blocks remain unshown.
       const reserve = remaining > 1 ? 1 : 0;

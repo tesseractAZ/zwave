@@ -42,6 +42,7 @@ import {
   type RouteStat,
   type LogEvent,
   type LogKind,
+  type ActionKind,
 } from '../types';
 import { createHistoryStore, type HistoryStore, type HistoryMap } from './historyStore';
 import {
@@ -55,7 +56,8 @@ import {
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, type BaselineStore } from './baselines';
-import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomState } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
+import { createOutcomeStore, windowMetrics, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 
 /**
  * Rolling per-node RSSI/RTT sample-ring depth. Shared by the live ring in
@@ -245,6 +247,8 @@ export interface ZwaveDataOptions {
   driverWsUrl?: string | null;
   /** Persistent BASELINES store (M3). Empty/null ⇒ in-memory only. */
   baselinesPath?: string | null;
+  /** Persistent OUTCOMES ledger (M5). Empty/null ⇒ in-memory (re-learns on restart). */
+  outcomesPath?: string | null;
   log?: (msg: string) => void;
 }
 
@@ -293,6 +297,10 @@ export interface ZwaveData {
   symptoms(): Symptom[];
   /** Engine enabled + graduated-baseline count (M3 Remedy empty state). */
   engineStatus(): { enabled: boolean; ready: number; total: number };
+  /** M5: fold an operator action's outcome into the learning ledger. */
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean): void;
+  /** M5: learned efficacy of an action against a symptom kind (null if off). */
+  efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
   /** Stop polling and clear timers. */
   stop(): void;
 }
@@ -473,6 +481,12 @@ class ZwaveDataImpl implements ZwaveData {
   private lastSymptoms: Symptom[] = [];
   /** Keys of symptoms already logged, so only NEW ones emit a log line. */
   private loggedSymptomKeys = new Set<string>();
+  /** M5 outcome LEDGER (learned efficacy vs the no-action control arm). */
+  private readonly outcomes: OutcomeStore | null;
+  /** Symptom key → first tick it went absent, for the confirmation-window before
+   *  an episode is resolved (an improvement must HOLD, not just blink). */
+  private readonly pendingResolve = new Map<string, number>();
+  private outcomesFlushTimer: ReturnType<typeof setInterval> | null = null;
   private baselineFlushTimer: ReturnType<typeof setInterval> | null = null;
   /** Controller home_id from the last poll — a change means a different Z-Wave
    *  network (stick swap / different NVM backup), so node-keyed caches alias. */
@@ -562,6 +576,13 @@ class ZwaveDataImpl implements ZwaveData {
     this.baselines = blPath ? createBaselineStore({ path: blPath, log: this.log }) : null;
     this.baselines?.load();
     this.log(`M3 engine: ${this.baselines ? 'baselines enabled' : 'baselines disabled (no BASELINES_PATH)'}`);
+    // M5 outcome ledger — only meaningful when the engine (baselines+evidence)
+    // runs, so gate it on the same substrate. Persists if OUTCOMES_PATH is set,
+    // else in-memory (re-learns after a restart — honest, not a fault).
+    const ocPath = (opts.outcomesPath ?? process.env.OUTCOMES_PATH) || undefined;
+    this.outcomes = this.baselines ? createOutcomeStore({ path: ocPath, log: this.log }) : null;
+    this.outcomes?.load();
+    this.log(`M5 engine: ${this.outcomes ? `outcome learning enabled${ocPath ? ' (persisted)' : ' (in-memory)'}` : 'outcome learning off (no baselines)'}`);
     // v0.13: READ-ONLY driver-WS telemetry client (DESIGN §2.1). Dormant-not-
     // fatal by construction; its feeds are guarded by the homeId cross-check
     // (a misconfigured URL pointing at a DIFFERENT network's server must never
@@ -643,6 +664,10 @@ class ZwaveDataImpl implements ZwaveData {
     if (this.baselines && !this.baselineFlushTimer) {
       this.baselineFlushTimer = setInterval(() => this.baselines!.save(), 5 * 60_000);
       this.baselineFlushTimer.unref?.();
+    }
+    if (this.outcomes && !this.outcomesFlushTimer) {
+      this.outcomesFlushTimer = setInterval(() => this.outcomes!.save(), 5 * 60_000);
+      this.outcomesFlushTimer.unref?.();
     }
     if (this.evidenceStore) {
       if (!this.evidenceSampleTimer && this.evidenceSampleMs > 0) {
@@ -795,6 +820,8 @@ class ZwaveDataImpl implements ZwaveData {
       }
     }
     for (const k of [...this.loggedSymptomKeys]) if (!live.has(k)) this.loggedSymptomKeys.delete(k);
+    // M5: advance the outcome ledger's episode lifecycle off the same signal.
+    this.updateEpisodes(symptoms, now);
     // Fold the freshest sample per node into the baselines, quarantining nodes
     // that are SYMPTOMATIC OR ARMING (any active dwell) — folding the pre-dwell
     // breach would ratchet the baseline toward the pathology (v0.14 review).
@@ -806,6 +833,70 @@ class ZwaveDataImpl implements ZwaveData {
       if (ring.length === 0) continue;
       bl.observe(n.nodeId, ring[ring.length - 1], quarantine.has(n.nodeId));
     }
+  }
+
+  /** M5 episode lifecycle (called each engine tick). Opens an episode when a
+   *  NON-subsumed symptom appears (a subsumed one's fate belongs to the mesh
+   *  event, so counting it would pollute the base rate), and resolves it only
+   *  after the symptom has stayed gone for a CONFIRMATION window — a blink of
+   *  improvement is not a recovery, and the extra dwell also lets the
+   *  after-window settle past the transition. */
+  private updateEpisodes(symptoms: Symptom[], now: number): void {
+    const oc = this.outcomes;
+    if (!oc) return;
+    const CONFIRM_MS = 10 * 60_000;
+    const { toOpen, toResolve } = planEpisodeLifecycle(symptoms, oc.openEpisodes(), this.pendingResolve, now, CONFIRM_MS);
+    // Capture the degraded before-window at onset and the settled after-window
+    // at resolution (well past the transition, thanks to the confirm window).
+    for (const s of toOpen) oc.open(s.nodeId, s.kind, now, this.nodeWindow(s.nodeId, now));
+    for (const r of toResolve) oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now));
+  }
+
+  /** The per-command reliability window for a node (last 5 min of evidence), for
+   *  episode before/after scoring. Mesh-scoped symptoms have no per-node
+   *  evidence → null (rendered `unverifiable` rather than fabricated).
+   *
+   *  SCOPING LIMITATION (M5): success is scored by the per-command TIMEOUT rate
+   *  — the primary reliability signal, apt for the return-path / timeout family.
+   *  A symptom kind whose recovery does NOT show up as a timeout-rate change
+   *  (e.g. a purely RSSI-based weak-signal, or rate-fallback where the node still
+   *  responds) simply yields no measurable improvement → its episodes read
+   *  `unverifiable`/`no-change` and accrue no efficacy. That is honest (no false
+   *  claim), just incomplete; per-kind recovery metrics are a future refinement. */
+  private nodeWindow(nodeId: number | null, now: number): ReturnType<typeof windowMetrics> | null {
+    if (nodeId == null || !this.evidenceStore) return null;
+    const WINDOW_MS = 5 * 60_000;
+    const ring = this.evidenceStore.forNode(nodeId).filter((s) => now - s.t <= WINDOW_MS);
+    return ring.length ? windowMetrics(ring) : null;
+  }
+
+  /** Attribute an operator action's outcome to the ledger (M5). Called by the
+   *  ActionRunner AFTER each action. A driver refusal of a diagnosis-verifying
+   *  action (removeFailed on a live node) is `refused` → refused-misdiagnosis;
+   *  a plain failed action (couldn't run) is NOT attributed as "taken". */
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean): void {
+    // Mesh-wide actions (rebuildAll/stopRebuild, nodeId == null) are NOT
+    // attributed: they can't be credited to any single node's episode without
+    // confounding, so they are deliberately dropped from the ledger.
+    if (!this.outcomes || nodeId == null) return;
+    // Only SUCCESSFUL operator actions become episode data. A FAILED action is
+    // not "taken", and we intentionally do NOT infer `refused-misdiagnosis` from
+    // a failure here: the operator-action hook cannot distinguish a genuine
+    // driver refusal ("node is not failed") from a transient WS/connectivity
+    // error, and a node-scoped stamp would wrongly mark non-ghost symptoms. That
+    // verdict is reserved for a future executor that receives structured driver
+    // errors (§3.5); here we stay conservative and never fabricate a false
+    // positive against a detector.
+    if (!ok) return;
+    // Do not credit an action against an episode whose symptom already went
+    // absent (it's in the confirmation window recovering on its own).
+    const skip = (key: string): boolean => this.pendingResolve.has(key);
+    this.outcomes.recordAction(nodeId, actionKind, false, Date.now(), skip);
+  }
+
+  /** Learned efficacy of an action against a symptom kind (M5) — for the planner. */
+  efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null {
+    return this.outcomes ? this.outcomes.efficacyFor(kind, action) : null;
   }
 
   /** Engine-detected symptoms (M3), ranked; [] when the engine is off. */
@@ -923,6 +1014,11 @@ class ZwaveDataImpl implements ZwaveData {
       this.baselineFlushTimer = null;
     }
     this.baselines?.save();
+    if (this.outcomesFlushTimer) {
+      clearInterval(this.outcomesFlushTimer);
+      this.outcomesFlushTimer = null;
+    }
+    this.outcomes?.save();
   }
 
   /* ─── polling ──────────────────────────────────────────────────────── */
@@ -1062,6 +1158,14 @@ class ZwaveDataImpl implements ZwaveData {
           this.missingSince.delete(id);
           this.driverLastSeen.delete(id);
           this.driverListening.delete(id);
+          // M5: abandon any open episodes for the departed node — their after-
+          // window would be empty, and a node-id reuse after replace_failed_node
+          // must start clean (mirrors the evidence eviction).
+          if (this.outcomes) {
+            for (const ep of this.outcomes.openEpisodes()) {
+              if (ep.nodeId === id) { this.outcomes.abandon(ep.nodeId, ep.kind); this.pendingResolve.delete(ep.key); }
+            }
+          }
         }
       }
     }
@@ -1103,6 +1207,12 @@ class ZwaveDataImpl implements ZwaveData {
         this.symptomState.clear();
         this.lastSymptoms = [];
         this.loggedSymptomKeys.clear();
+        // M5 ledger is per-mesh too — wipe episodes + learned efficacy AND
+        // persist the empty state, else a restart would reload the OLD network's
+        // learning from /data (the reset must write THROUGH to disk).
+        this.outcomes?.reset();
+        this.outcomes?.save();
+        this.pendingResolve.clear();
         // The new network gets a fresh homeId cross-check; restart the driver
         // client so it re-handshakes and re-validates (start() after stop() is
         // supported — see driverWsClient.stop()).

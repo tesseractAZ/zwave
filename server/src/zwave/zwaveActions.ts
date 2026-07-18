@@ -14,7 +14,7 @@
  */
 
 import type { HaWsClient } from '../ha/haWsClient';
-import type { ActionRunner, ActionResult } from '../types';
+import type { ActionRunner, ActionResult, ActionKind } from '../types';
 
 export interface ActionRunnerOptions {
   client: HaWsClient;
@@ -26,6 +26,9 @@ export interface ActionRunnerOptions {
   pingEntityOf: (nodeId: number) => string | null;
   /** Append an outcome line to the event ring (source 'you'). */
   log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string) => void;
+  /** M5: structured outcome hook — the outcome ledger attributes the action to
+   *  its node's open episodes. Fired AFTER the action resolves. */
+  onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean) => void;
   enabled: boolean;
 }
 
@@ -43,17 +46,19 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     await o.client.send({ type, entry_id: entry });
   };
 
-  /** Run one action: gate → log start → execute → log outcome → result. */
-  const run = async (nodeId: number | null, verb: string, fn: () => Promise<void>): Promise<ActionResult> => {
+  /** Run one action: gate → log start → execute → log + LEARN outcome → result. */
+  const run = async (kind: ActionKind, nodeId: number | null, verb: string, fn: () => Promise<void>): Promise<ActionResult> => {
     if (!o.enabled) return { ok: false, message: 'write actions are disabled' };
     o.log('info', nodeId, `${verb} …`);
     try {
       await fn();
       o.log('info', nodeId, `${verb} → ok`);
+      o.onOutcome?.(kind, nodeId, true);
       return { ok: true, message: `${verb}: ok` };
     } catch (e) {
       const msg = errMsg(e);
       o.log('error', nodeId, `${verb} → failed: ${msg}`);
+      o.onOutcome?.(kind, nodeId, false);
       return { ok: false, message: msg };
     }
   };
@@ -61,16 +66,16 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
   return {
     enabled: o.enabled,
     ping: (n) =>
-      run(n, `ping node ${n}`, async () => {
+      run('ping', n, `ping node ${n}`, async () => {
         const ent = o.pingEntityOf(n);
         if (!ent) throw new Error(`node ${n} has no ping button`);
         await o.client.send({ type: 'call_service', domain: 'button', service: 'press', service_data: { entity_id: ent } });
       }),
-    refreshValues: (n) => run(n, `refresh values node ${n}`, () => deviceCmd('zwave_js/refresh_node_values', n)),
-    reInterview: (n) => run(n, `re-interview node ${n}`, () => deviceCmd('zwave_js/refresh_node_info', n)),
-    healNode: (n) => run(n, `rebuild routes node ${n}`, () => deviceCmd('zwave_js/rebuild_node_routes', n)),
-    rebuildAll: () => run(null, 'rebuild ALL routes', () => entryCmd('zwave_js/begin_rebuilding_routes')),
-    stopRebuild: () => run(null, 'stop rebuilding routes', () => entryCmd('zwave_js/stop_rebuilding_routes')),
-    removeFailed: (n) => run(n, `remove failed node ${n}`, () => deviceCmd('zwave_js/remove_failed_node', n)),
+    refreshValues: (n) => run('refreshValues', n, `refresh values node ${n}`, () => deviceCmd('zwave_js/refresh_node_values', n)),
+    reInterview: (n) => run('reInterview', n, `re-interview node ${n}`, () => deviceCmd('zwave_js/refresh_node_info', n)),
+    healNode: (n) => run('healNode', n, `rebuild routes node ${n}`, () => deviceCmd('zwave_js/rebuild_node_routes', n)),
+    rebuildAll: () => run('rebuildAll', null, 'rebuild ALL routes', () => entryCmd('zwave_js/begin_rebuilding_routes')),
+    stopRebuild: () => run('stopRebuild', null, 'stop rebuilding routes', () => entryCmd('zwave_js/stop_rebuilding_routes')),
+    removeFailed: (n) => run('removeFailed', n, `remove failed node ${n}`, () => deviceCmd('zwave_js/remove_failed_node', n)),
   };
 }

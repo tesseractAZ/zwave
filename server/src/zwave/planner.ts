@@ -5,12 +5,13 @@
  * like a measurement), a cost tier, and — when it can't run right now — a
  * `blocked` reason.
  *
- * Advisory-first (this milestone): the planner only RECOMMENDS. Nothing here
- * executes; the executor + auto-tier are M5. A candidate that maps to an
- * `ActionKind` can be run by the human through the existing type-CONFIRM
- * Actions Menu; a candidate with `action: null` is PHYSICAL guidance (place a
- * repeater, move the stick) — the majority of correct Z-Wave remediations, and
- * not something software can do.
+ * Advisory-only: the planner only RECOMMENDS. Nothing here executes; the engine
+ * is advisory by design (the executor + auto-tier are deferred, not built). A
+ * candidate that maps to an `ActionKind` can be run by the human through the
+ * existing type-CONFIRM Actions Menu; a candidate with `action: null` is
+ * PHYSICAL guidance (place a repeater, move the stick) — the majority of correct
+ * Z-Wave remediations, and not something software can do. M5 attaches learned
+ * `efficacy` to executable candidates (from the outcome ledger).
  *
  * The causal table is grounded in RESEARCH.md and follows the spec-backed
  * remediation ORDER (§4.3): controller/interference → ghost cleanup → traffic
@@ -21,7 +22,7 @@
  * as a caveated, blocked last resort.
  */
 
-import type { NodeSnapshot, ActionKind } from '../types';
+import type { NodeSnapshot, ActionKind, Efficacy } from '../types';
 import type { Symptom, SymptomKind } from './symptoms';
 
 /** Evidence-grade of a recommendation — surfaced so the UI can distinguish a
@@ -42,6 +43,9 @@ export interface PlanCandidate {
   cost: Cost;
   /** Why this can't run right now (protocol / gate / precondition), or null. */
   blocked: string | null;
+  /** M5 learned efficacy vs the no-action arm — populated for executable
+   *  candidates when the outcome ledger has data; null otherwise. */
+  efficacy?: Efficacy | null;
 }
 
 export interface Plan {
@@ -56,6 +60,9 @@ export interface Plan {
 export interface PlanContext {
   /** Is the write-actions master gate on? (executable candidates need it) */
   writeActions: boolean;
+  /** M5: learned efficacy lookup (from the outcome ledger). Optional — when
+   *  absent, candidates carry no efficacy note (advisory reads as before). */
+  efficacyFor?: (kind: SymptomKind, action: ActionKind) => Efficacy | null;
 }
 
 const REPEATER_RATIONALE =
@@ -201,6 +208,14 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
     }
   }
 
+  // M5: attach learned efficacy to the executable candidates (physical guidance
+  // isn't an action the ledger can score). Purely additive — the recommendation
+  // ORDER is unchanged this milestone; efficacy is shown, not yet used to rank.
+  if (ctx.efficacyFor) {
+    for (const c of candidates) {
+      if (c.action != null) c.efficacy = ctx.efficacyFor(symptom.kind, c.action);
+    }
+  }
   return { kind: symptom.kind, nodeId, headline, candidates };
 }
 

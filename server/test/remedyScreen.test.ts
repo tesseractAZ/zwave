@@ -17,19 +17,20 @@ function node(id: number): NodeSnapshot {
 const nodes = [node(1), node(6), node(7)];
 const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
 
-function data(symptoms: Symptom[]): DataProvider {
+type Eff = ReturnType<DataProvider['efficacyFor']>;
+function data(symptoms: Symptom[], efficacyFor: DataProvider['efficacyFor'] = () => null): DataProvider {
   return {
     nodes: () => nodes, nodeById: (id) => nodes.find((n) => n.nodeId === id), controller: () => ctrl, events: () => [],
     scoreFor: () => ({ score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] }),
     noiseFloor: () => -100, hasRealNoise: () => true, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
     lastUpdated: () => now - 1000, ready: () => true, lastError: () => null, symptoms: () => symptoms,
-    engineStatus: () => ({ enabled: true, ready: 3, total: 3 }),
+    engineStatus: () => ({ enabled: true, ready: 3, total: 3 }), efficacyFor,
   };
 }
 const mkView = (cols: number, rows: number): ViewState =>
   ({ screen: 'remedy', cols, rows, selected: 0, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', followTail: true, errorsOnly: false, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null } as ViewState);
-const ctx = (cols: number, rows: number, symptoms: Symptom[]): ScreenCtx =>
-  ({ view: mkView(cols, rows), data: data(symptoms), visibleNodes: nodes, filtering: false, actionsEnabled: true });
+const ctx = (cols: number, rows: number, symptoms: Symptom[], eff?: DataProvider['efficacyFor']): ScreenCtx =>
+  ({ view: mkView(cols, rows), data: data(symptoms, eff), visibleNodes: nodes, filtering: false, actionsEnabled: true });
 
 const sym = (over: Partial<Symptom> = {}): Symptom => ({
   kind: 'return-path-degraded', nodeId: 6, severity: 'warn', sinceMs: now - 20 * 60_000, basis: 'measured',
@@ -127,6 +128,24 @@ test('M4: the overflow footer survives even when one oversized block fills a tin
   const plain = renderRemedy(ctx(100, rows, syms)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
   assert.equal(plain.length, rows, 'exact-rows contract holds');
   assert.ok(plain.some((l) => /▾ \d+ more symptom/.test(l)), 'footer present despite an oversized first block');
+});
+
+test('M5: a learned "beat self-healing" efficacy renders a green note on the executable candidate', () => {
+  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, beatsSelfHealing: true, ready: true };
+  const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.ok(/✓ helped 83% \(n=6\) vs 20% self-heal/.test(joined), 'efficacy note shows the win, the base rate, and n');
+});
+
+test('M5: a learned-but-not-distinguishable efficacy renders the honest "not distinguishable" note', () => {
+  const eff: Eff = { expectedEfficacy: null, n: 8, baseRate: 0.9, beatsSelfHealing: false, ready: true };
+  const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.ok(/≈ n=8: not distinguishable from self-healing/.test(joined), 'honest null-result note');
+});
+
+test('M5: while still learning (not ready) NO efficacy note is shown', () => {
+  const eff: Eff = { expectedEfficacy: null, n: 1, baseRate: null, beatsSelfHealing: false, ready: false };
+  const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.ok(!/helped|not distinguishable/.test(joined), 'says nothing until it has an opinion');
 });
 
 test('M4: a subsumed symptom shows NO recommendation (its plan defers to the mesh event)', () => {
