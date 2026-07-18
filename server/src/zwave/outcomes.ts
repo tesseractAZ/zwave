@@ -43,14 +43,25 @@ export type { Efficacy };
 
 export type Verdict = 'improved' | 'no-change' | 'worse' | 'refused-misdiagnosis' | 'unverifiable';
 
-/** Aggregated per-command metrics over a window of evidence samples. */
+/** Aggregated metrics over a window of evidence samples. Carries EVERY signal a
+ *  symptom kind's recovery might show up in (timeout rate, flaps, RSSI, RTT,
+ *  negotiated rate), computed kind-agnostically; `computeVerdict` then reads the
+ *  ONE that matches the episode's kind (see `metricOf`). */
 export interface WindowMetrics {
+  samples: number; // total samples folded
+  freshN: number; // samples that carried a new stats event (node was alive & communicating)
+  // ── timeout family (return-path, chronic, quiet) ──
   tx: number; // Σ dTx  (successful commands the node was sent)
   rx: number; // Σ dRx
-  timeouts: number; // Σ dTimeout (Get replies that never came — the reliability signal)
-  /** timeouts / tx, or null when tx is too small to be a rate. */
-  rate: number | null;
-  samples: number;
+  timeouts: number; // Σ dTimeout (Get replies that never came)
+  rate: number | null; // timeouts / tx, or null when tx is too small to be a rate
+  // ── other recovery signals ──
+  flaps: number; // Σ dFlaps (Alive↔Dead transitions) — dead-flap recovery
+  rssiMedian: number | null; // median of FRESH rssi readings — weak-signal recovery
+  rssiN: number; // COUNT of non-null fresh rssi readings behind rssiMedian (its evidence floor)
+  rttMedian: number | null; // median of FRESH rtt readings — rtt-degraded recovery
+  rttN: number; // COUNT of non-null fresh rtt readings behind rttMedian (its evidence floor)
+  rateKbpsMin: number | null; // worst FRESH negotiated rate seen — rate-fallback recovery (null = no fresh reading)
 }
 
 /** One symptom episode: opens on symptom onset, closes on resolution. */
@@ -126,17 +137,48 @@ export interface OutcomeStore {
   loadJSON(raw: unknown): void;
 }
 
-/** Aggregate a window of samples into per-command metrics. `minTx` below which
- *  a rate is not meaningful → rate stays null (never a fabricated 0/0). */
+/** Median of a numeric list, or null if empty. */
+function median(vals: number[]): number | null {
+  if (!vals.length) return null;
+  const s = [...vals].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+/** Aggregate a window of samples into EVERY recovery signal. `minTx` below which
+ *  a timeout rate is not meaningful → rate stays null (never a fabricated 0/0).
+ *  RSSI/RTT are taken from FRESH samples only (a re-sampled EMA carries no new
+ *  information); flaps are event-driven counts; rateKbps is the worst seen. */
 export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetrics {
-  let tx = 0, rx = 0, timeouts = 0, n = 0;
+  let tx = 0, rx = 0, timeouts = 0, flaps = 0, n = 0, freshN = 0;
+  const rssis: number[] = [], rtts: number[] = [];
+  let rateKbpsMin: number | null = null;
   for (const s of samples) {
+    n++;
     if (s.dTx != null) tx += s.dTx;
     if (s.dRx != null) rx += s.dRx;
     if (s.dTimeout != null) timeouts += s.dTimeout;
-    n++;
+    if (s.dFlaps != null) flaps += s.dFlaps; // typed non-null, but guard legacy/persisted samples from NaN
+    // rssi/rtt/rateKbps are re-sampled from the driver's cached stats and carry
+    // NEW information ONLY when the sample is fresh — a re-read of the same cached
+    // value is not an observation (evidenceStore: "route fields meaningful ONLY
+    // when fresh"). Fold all three under the fresh gate so a quiet node cannot
+    // manufacture a metric from stale carry-forwards.
+    if (s.fresh) {
+      freshN++;
+      if (s.rssi != null) rssis.push(s.rssi);
+      if (s.rtt != null) rtts.push(s.rtt);
+      if (s.rateKbps != null) rateKbpsMin = rateKbpsMin == null ? s.rateKbps : Math.min(rateKbpsMin, s.rateKbps);
+    }
   }
-  return { tx, rx, timeouts, rate: tx >= minTx ? timeouts / tx : null, samples: n };
+  return {
+    samples: n, freshN,
+    tx, rx, timeouts, rate: tx >= minTx ? timeouts / tx : null,
+    flaps,
+    rssiMedian: median(rssis), rssiN: rssis.length,
+    rttMedian: median(rtts), rttN: rtts.length,
+    rateKbpsMin,
+  };
 }
 
 const DEFAULTS = { releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0.03 } as const;
@@ -158,6 +200,92 @@ function comparable(a: WindowMetrics, b: WindowMetrics): boolean {
   if (a.tx < MIN_WINDOW_TX || b.tx < MIN_WINDOW_TX) return false;
   const hi = Math.max(a.tx, b.tx), lo = Math.min(a.tx, b.tx);
   return hi <= lo * TRAFFIC_FACTOR;
+}
+
+// ── Per-kind recovery metric ────────────────────────────────────────────────
+// A symptom's recovery shows up in a DIFFERENT signal depending on its kind, on
+// a different scale. Scoring every episode by the timeout rate (the original M5
+// behaviour) meant non-timeout kinds could never register improvement. Each kind
+// is mapped to the signal its recovery actually moves.
+type RecoveryMetric = 'timeout' | 'flap' | 'rssi' | 'rtt' | 'rate' | 'none';
+
+function metricOf(kind: SymptomKind): RecoveryMetric {
+  switch (kind) {
+    case 'return-path-degraded':
+    case 'chronic-return-path':
+    case 'quiet-node':
+      return 'timeout'; // reply-timeout rate
+    case 'dead-flap':
+      return 'flap'; // Alive↔Dead transitions stopping
+    case 'weak-signal':
+      return 'rssi'; // signal strength improving
+    case 'rtt-degraded':
+      return 'rtt'; // round-trip time dropping
+    case 'rate-fallback':
+      return 'rate'; // negotiated rate back to 100k
+    default:
+      // chatty-device, route-churn, ghost-suspect, controller-degraded,
+      // mesh-interference: not scorable by a per-node recovery window.
+      return 'none';
+  }
+}
+
+// Evidence floors. Each metric must gate on observations of ITS OWN signal, not
+// on a shared "fresh sample" count — a fresh sample routinely carries a null
+// rssi/rtt (no-signal sentinels), so freshN over-counts usable readings and a
+// median-of-one could otherwise pass as robust.
+const MIN_OBS = 3; // minimum non-null rssi/rtt readings behind a trustworthy median
+const MIN_LIVE = 3; // minimum FRESH samples proving the node is alive & communicating (flap after-window)
+const RSSI_MIN_GAIN = 4; // dB — a meaningful signal-strength improvement
+const RTT_DROP_FRAC = 0.25; // ≥25% faster …
+const RTT_MIN_DROP_MS = 20; // … AND at least this many ms (guards tiny-baseline noise)
+
+/** Score an episode's recovery by its kind's metric. Each branch keeps the same
+ *  honesty contract as the timeout metric: an incomparable / evidence-poor pair
+ *  is `unverifiable` (never a fabricated win), and a regression is `worse`. Every
+ *  branch gates on evidence of ITS OWN signal (rssiN/rttN readings, fresh-only
+ *  rateKbps, live after-window for flaps) — never the shared freshN. */
+function scoreRecovery(m: RecoveryMetric, before: WindowMetrics, after: WindowMetrics, releaseRate: number, minEffect: number): Verdict {
+  switch (m) {
+    case 'timeout': {
+      if (before.rate == null || after.rate == null || !comparable(before, after)) return 'unverifiable';
+      if (after.rate > before.rate * WORSE_FACTOR && after.rate > releaseRate) return 'worse';
+      return after.rate <= releaseRate && before.rate - after.rate >= minEffect ? 'improved' : 'no-change';
+    }
+    case 'flap': {
+      // flaps are concrete event drains (fresh-independent), so the before-window
+      // needs only prior flapping (flaps ≥ 1) — NOT a fresh-sample floor, which a
+      // mostly-Dead flapping node rarely meets. The after-window, though, must
+      // prove the node is ALIVE and communicating (MIN_LIVE fresh samples), so a
+      // node that simply went hard-dead (0 flaps because 0 transitions) is not
+      // mistaken for a recovery.
+      if (before.flaps < 1 || after.freshN < MIN_LIVE) return 'unverifiable';
+      if (after.flaps > before.flaps) return 'worse';
+      return after.flaps === 0 ? 'improved' : 'no-change'; // a clean, live after-window = flapping stopped
+    }
+    case 'rssi': {
+      if (before.rssiMedian == null || after.rssiMedian == null || before.rssiN < MIN_OBS || after.rssiN < MIN_OBS) return 'unverifiable';
+      const gain = after.rssiMedian - before.rssiMedian; // higher (less negative) = stronger
+      if (gain <= -RSSI_MIN_GAIN) return 'worse';
+      return gain >= RSSI_MIN_GAIN ? 'improved' : 'no-change';
+    }
+    case 'rtt': {
+      if (before.rttMedian == null || after.rttMedian == null || before.rttN < MIN_OBS || after.rttN < MIN_OBS) return 'unverifiable';
+      if (after.rttMedian >= before.rttMedian * WORSE_FACTOR) return 'worse';
+      return after.rttMedian <= before.rttMedian * (1 - RTT_DROP_FRAC) && before.rttMedian - after.rttMedian >= RTT_MIN_DROP_MS
+        ? 'improved' : 'no-change';
+    }
+    case 'rate': {
+      // rateKbpsMin is fresh-only (windowMetrics), so a non-null value already
+      // means ≥1 fresh negotiated-rate reading; a purely-stale (quiet) window is
+      // null → unverifiable, matching the other signals' fail-closed rule.
+      if (before.rateKbpsMin == null || after.rateKbpsMin == null) return 'unverifiable';
+      if (after.rateKbpsMin < before.rateKbpsMin) return 'worse';
+      return before.rateKbpsMin < 100 && after.rateKbpsMin >= 100 ? 'improved' : 'no-change';
+    }
+    case 'none':
+      return 'unverifiable';
+  }
 }
 
 export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore {
@@ -182,11 +310,9 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
 
   const computeVerdict = (ep: Episode): Verdict => {
     if (ep.action?.refused) return 'refused-misdiagnosis';
-    if (!ep.before || !ep.after || ep.before.rate == null || ep.after.rate == null) return 'unverifiable';
-    if (!comparable(ep.before, ep.after)) return 'unverifiable';
-    if (ep.after.rate > ep.before.rate * WORSE_FACTOR && ep.after.rate > cfg.releaseRate) return 'worse';
-    const improved = ep.after.rate <= cfg.releaseRate && ep.before.rate - ep.after.rate >= cfg.minEffect;
-    return improved ? 'improved' : 'no-change';
+    if (!ep.before || !ep.after) return 'unverifiable';
+    // Score by the recovery signal that THIS symptom kind's fix actually moves.
+    return scoreRecovery(metricOf(ep.kind), ep.before, ep.after, cfg.releaseRate, cfg.minEffect);
   };
 
   return {
