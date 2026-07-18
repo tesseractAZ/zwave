@@ -5,8 +5,10 @@
  * memoized in the data layer):
  *
  *   NOISE FLOOR   per-channel 900 MHz background RSSI + a recent trend spark
- *                 (the ~40-min controller ring, NOT the 14-day coarse tier) —
- *                 the driver-WS measurement (HA strips it). Lower = quieter.
+ *                 (the ~40-min controller ring) AND a `days` spark over the
+ *                 persisted multi-day coarse tier, downsampled so its cells span
+ *                 the whole retained history — the driver-WS measurement (HA
+ *                 strips it). Lower = quieter.
  *   SERIAL LINK   controller host↔stick NAK/CAN/timeout rates, shown APART: a
  *                 serial fault mimics mesh-wide RF trouble.
  *   DIURNAL HEAT  hour-of-day mesh-wide RAW timeout rate — deliberately NOT
@@ -29,6 +31,23 @@ type ColorFn = (s: string) => string;
  *  NOT normalized-to-max — a normalized scale would be baseline-relative, the
  *  exact thing this heatmap exists to avoid. */
 const HEAT_MAX = 0.05;
+
+/** Downsample a series into ≤`cells` mean-of-bin points so a fixed-width
+ *  sparkline spans the WHOLE series, not just its last `cells` samples
+ *  (`sparkline` tail-slices; a multi-day trend must not silently collapse to its
+ *  most-recent tail while its label claims the full span). */
+export function downsampleMean(vals: number[], cells: number): number[] {
+  if (vals.length <= cells) return vals;
+  const out: number[] = [];
+  for (let i = 0; i < cells; i++) {
+    const lo = Math.floor((i * vals.length) / cells);
+    const hi = Math.floor(((i + 1) * vals.length) / cells);
+    let sum = 0, n = 0;
+    for (let j = lo; j < hi; j++) { sum += vals[j]; n++; }
+    out.push(n > 0 ? sum / n : vals[Math.min(lo, vals.length - 1)]);
+  }
+  return out;
+}
 
 const NOISE_COLOR: Record<InterferenceView['noise']['band'], ColorFn> = {
   clean: c.green, elevated: c.yellow, noisy: c.redB, unknown: c.grey,
@@ -75,6 +94,19 @@ export function renderInterference(ctx: ScreenCtx): string[] {
       ? sparkline(iv.noise.trend, Math.min(24, iv.noise.trend.length), { min: -110, max: -80, color: c.cyan })
       : c.grey('· building trend');
     push('  ' + c.grey('trend ') + spark + c.grey('   lower = quieter · ~-110 dBm near-radio ideal'));
+    // Long-horizon floor: the persisted 30-min coarse tier, SAME fixed scale as
+    // the fine trend above so the two are directly comparable at a glance.
+    if (iv.noise.trendCoarse.length >= 2) {
+      const days = iv.noise.trendCoarseDays;
+      const span = days >= 1 ? `${days.toFixed(days >= 10 ? 0 : 1)}d` : `${Math.max(1, Math.round(days * 24))}h`;
+      // Downsample the full retained series into the 24 drawn cells so the spark
+      // actually spans `span`, not just its most-recent 24 buckets (12 h).
+      const cells = downsampleMean(iv.noise.trendCoarse, 24);
+      const coarseSpark = sparkline(cells, cells.length, { min: -110, max: -80, color: c.cyan });
+      push('  ' + c.grey('days  ') + coarseSpark + c.grey(`   ${span} span (persisted 30-min buckets, survives restarts)`));
+    } else {
+      push('  ' + c.grey('days  ') + c.grey('· building multi-day history'));
+    }
   }
   push();
 

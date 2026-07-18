@@ -24,7 +24,7 @@ function data(symptoms: Symptom[], efficacyFor: DataProvider['efficacyFor'] = ()
     scoreFor: () => ({ score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] }),
     noiseFloor: () => -100, hasRealNoise: () => true, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
     lastUpdated: () => now - 1000, ready: () => true, lastError: () => null, symptoms: () => symptoms,
-    engineStatus: () => ({ enabled: true, ready: 3, total: 3 }), efficacyFor, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
+    engineStatus: () => ({ enabled: true, ready: 3, total: 3 }), efficacyFor, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
   };
 }
 const mkView = (cols: number, rows: number): ViewState =>

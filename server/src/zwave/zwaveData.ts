@@ -929,7 +929,8 @@ class ZwaveDataImpl implements ZwaveData {
       }
     }
     const controllerSamples = this.evidenceStore ? this.evidenceStore.controllerSamples() : [];
-    const view = computeInterference({ now, bgChannels, controllerSamples, coarseByNode, symptoms: this.lastSymptoms });
+    const controllerCoarse = this.evidenceStore ? this.evidenceStore.controllerCoarse() : [];
+    const view = computeInterference({ now, bgChannels, controllerSamples, controllerCoarse, coarseByNode, symptoms: this.lastSymptoms });
     this.lastInterference = { at: now, view };
     return view;
   }

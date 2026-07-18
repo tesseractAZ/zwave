@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.20.0 — 2026-07-17
+
+**Two engine enhancements (M3 + M6), shipped together.**
+
+**Edge-cluster detector (M3).** A new middle-scale symptom between a per-node
+fault and a mesh-wide event: when 2+ nodes that all route through one common
+**repeater** are degrading together — while the rest of the mesh is healthy and
+that repeater itself looks fine — the shared dependency (its link, power, or
+placement) is the likely single cause, not each node individually.
+
+- New `edge-cluster` `SymptomKind`; the `Symptom` gains an optional `members[]`
+  for its affected downstream nodes (`nodeId` is then the shared repeater — the
+  actionable target). Greedy disjoint clustering, so a node routed through two
+  shared repeaters is credited to exactly one cluster.
+- Requiring the shared repeater to be **non-degrading** is the sharp signal (a
+  failing repeater already shows its own card); the interesting case is the
+  *silent* shared dependency. Suppressed while a mesh/controller event owns the
+  story.
+- Collapses the members' per-node faults under the cluster (mirrors the mesh
+  subsumption), so the Remedy screen shows one shared cause, not N scattered
+  cards. The planner points at the repeater (inspect / ping); DOCS §9.x notes.
+
+**Longer-horizon noise-floor history (M6).** The interference screen's noise-
+floor trend previously spanned only the ~40-min in-memory controller ring. A new
+persisted **30-min coarse tier** (mirroring the node coarse tier) now backs a
+multi-day floor trend that survives restarts.
+
+- `evidenceStore` gains a controller `CtrlCoarseBucket` ring (mean/min/max of the
+  per-sample median floor), folded synchronously in `recordController`, pruned to
+  the 14-day horizon, persisted (schema stays v2 — the new key reads defensively,
+  so a pre-tier file loads it empty) and **age-judgment-free** (survives boot-
+  grace, like the node coarse tier).
+- The Interference screen renders a second "days" sparkline under the live
+  "trend" one, on the same fixed −110..−80 dBm scale for direct comparison. The
+  coarse per-sample floor uses the exact same leading-run `medianFloor` as the
+  fine trend, so the two never disagree.
+
+**Adversarial-review hardening** (7-dimension review): the coarse noise-floor
+sparkline now **downsamples** the whole retained series into its drawn cells, so
+the "days" graphic actually spans its label instead of collapsing to the most-
+recent 12 h; and the INTERFERENCE correlated-node count excludes the edge-cluster
+head (a *healthy* shared repeater — a suspect, not a degraded node).
+
+Advisory-only throughout. Tests: 320 total (edge-cluster detection + subsumption
++ mesh-suppression; coarse-tier round-trip, back-compat, boot-grace survival;
+coarse-trend reduction; downsample-spans-whole-series + degraded-count-excludes-
+cluster-head regression tests).
+
 ## 0.19.0 — 2026-07-17
 
 **Per-symptom-kind recovery metrics (M5 refinement).** The outcome-learning

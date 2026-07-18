@@ -34,6 +34,7 @@ export type SymptomKind =
   | 'chatty-device'
   | 'ghost-suspect'
   | 'controller-degraded'
+  | 'edge-cluster'
   | 'mesh-interference';
 
 export type Severity = 'watch' | 'warn' | 'crit';
@@ -53,6 +54,9 @@ export interface Symptom {
   narrative: string;
   /** id of an active mesh-level event this per-node symptom is demoted under. */
   subsumedBy?: string;
+  /** For a multi-node symptom (edge-cluster): the affected member node ids.
+   *  `nodeId` is then the SHARED node they depend on (the suspect), not a member. */
+  members?: number[];
 }
 
 /** Caller-owned dwell state — one entry per (nodeId,kind) currently breaching.
@@ -102,6 +106,8 @@ const MESH_RELEASE_FRACTION = 0.2; // hold: stays active until it dips below thi
 const MESH_MIN_ACTIVE = 8; // never call it "mesh-wide" on a handful of active nodes
 const MESH_MIN_DEGRADED = 3; // and never on a coincidental pair
 const CHRONIC_MIN_HITS = 400; // evaluable-bad observations before "chronic" (≫ wall-clock alone)
+const EDGE_MIN_MEMBERS = 2; // a shared-repeater cluster needs ≥2 degrading dependents (a single is a per-node symptom)
+const EDGE_SUFFIX = ':edge-cluster'; // dwell-key suffix for edge-cluster (for stale-key cleanup)
 
 function key(nodeId: number | null, kind: SymptomKind): string {
   return `${nodeId ?? 'mesh'}:${kind}`;
@@ -460,6 +466,82 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
         evidence: [{ label: 'active nodes degraded', value: `${degradedActive}/${activeNodes.length} in the same window` }],
         narrative: 'Many nodes degraded together with no controller-serial or flooding cause — likely an RF-environment event (interference). No noise-floor measurement is used to confirm this yet; treat as a lead, not a verdict.',
       });
+    }
+  }
+
+  // ── edge-cluster: a small correlated subset sharing ONE upstream repeater ──
+  // The middle scale between a per-node symptom and a mesh-wide event: when the
+  // degradation is NOT mesh-wide but ≥EDGE_MIN_MEMBERS nodes that all route
+  // through a COMMON repeater are degrading together — AND that repeater itself
+  // looks healthy — the shared dependency (its link, power, or placement) is the
+  // single likely cause, not each node individually. Requiring the repeater to be
+  // NON-degrading is the sharp signal: a repeater that is itself failing already
+  // shows its own card, and the interesting case is the SILENT shared dependency.
+  // Suppressed entirely while a mesh/controller event owns the story.
+  const edgeReps = new Set<number>(); // repeater ids that head a matured cluster this tick
+  const edgeClusters: { rep: number; repName: string; key: string; members: number[]; since: number }[] = [];
+  if (!meshEventId) {
+    const nodeById = new Map(nodes.map((n) => [n.nodeId, n] as const));
+    // repeater id → degrading downstream member node ids that route through it.
+    const byRepeater = new Map<number, Set<number>>();
+    for (const node of nodes) {
+      if (node.isController) continue;
+      if (!degradingNow.get(node.nodeId)) continue; // only genuinely-degrading dependents
+      const reps = new Set<number>();
+      for (const rt of [node.stats.lwr, node.stats.nlwr]) {
+        if (rt) for (const r of rt.repeaters) reps.add(r);
+      }
+      for (const r of reps) {
+        if (r === node.nodeId) continue; // never cluster a node under itself
+        if (!nodeById.has(r) || nodeById.get(r)!.isController) continue; // head must be a known, non-controller node
+        if (degradingNow.get(r)) continue; // ← the head repeater must itself look healthy
+        (byRepeater.get(r) ?? byRepeater.set(r, new Set()).get(r)!).add(node.nodeId);
+      }
+    }
+    // Greedy DISJOINT assignment: largest cluster first (tie: repeater id asc), so
+    // a node routed through two shared repeaters is credited to exactly ONE
+    // cluster — never double-counted, double-subsumed, or double-carded.
+    const candidates = [...byRepeater.entries()]
+      .filter(([, m]) => m.size >= EDGE_MIN_MEMBERS)
+      .sort((a, b) => b[1].size - a[1].size || a[0] - b[0]);
+    const claimed = new Set<number>();
+    for (const [rep, memberSet] of candidates) {
+      const members = [...memberSet].filter((m) => !claimed.has(m)).sort((a, b) => a - b);
+      if (members.length < EDGE_MIN_MEMBERS) continue; // dropped below quorum after earlier claims
+      members.forEach((m) => claimed.add(m));
+      const k = key(rep, 'edge-cluster');
+      const since = dwell(state, k, true, now);
+      edgeReps.add(rep);
+      if (since != null) edgeClusters.push({ rep, repName: nodeById.get(rep)?.name ?? `#${rep}`, key: k, members, since });
+    }
+  }
+  // Clear the dwell for any edge-cluster key that lost quorum, vanished, or was
+  // superseded by a mesh event this tick — else a stale `since` would let a
+  // re-formed cluster mature instantly (and the map would leak keys).
+  {
+    const stale: string[] = [];
+    for (const k of state.keys()) {
+      if (k.endsWith(EDGE_SUFFIX) && !edgeReps.has(Number(k.slice(0, -EDGE_SUFFIX.length)))) stale.push(k);
+    }
+    for (const k of stale) state.delete(k);
+  }
+  // Emit matured clusters and COLLAPSE their members' per-node RF faults under the
+  // cluster (mirrors the mesh subsumption) so the operator sees one shared cause,
+  // not N scattered cards. chatty-device is exempt (a flooding member is its own
+  // story), as is the head repeater (nodeId), which is never a member.
+  for (const { rep, repName, key: clusterKey, members, since } of edgeClusters) {
+    out.push({
+      kind: 'edge-cluster', nodeId: rep, members, severity: 'warn', sinceMs: since, basis: 'measured',
+      evidence: [
+        { label: 'shared repeater', value: `#${rep} ${repName}` },
+        { label: 'degraded downstream', value: `${members.length} node(s): ${members.map((m) => `#${m}`).join(', ')}` },
+      ],
+      narrative: `${members.length} nodes that all route through repeater #${rep} (${repName}) are degrading together while the rest of the mesh is healthy, and that repeater itself is not flagged — the shared dependency (its link, power, or placement) is the likely common cause, not each node individually. Check that repeater before touching the downstream devices.`,
+    });
+    for (const s of out) {
+      if (s.nodeId != null && s.kind !== 'chatty-device' && s.kind !== 'edge-cluster' && members.includes(s.nodeId)) {
+        s.subsumedBy = clusterKey;
+      }
     }
   }
 

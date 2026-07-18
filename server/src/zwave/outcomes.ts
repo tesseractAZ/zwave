@@ -225,7 +225,8 @@ function metricOf(kind: SymptomKind): RecoveryMetric {
       return 'rate'; // negotiated rate back to 100k
     default:
       // chatty-device, route-churn, ghost-suspect, controller-degraded,
-      // mesh-interference: not scorable by a per-node recovery window.
+      // edge-cluster, mesh-interference: not scorable by a single per-node
+      // recovery window (multi-node or mesh-scoped) → always unverifiable.
       return 'none';
   }
 }
