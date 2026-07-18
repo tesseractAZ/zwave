@@ -2,6 +2,8 @@
   "name": "zwave-tui-server",
   "version": "0.10.0",
   "private": true,
+  "author": "Eric Paschal <epaschal@outlook.com>",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
