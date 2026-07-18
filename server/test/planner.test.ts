@@ -163,6 +163,25 @@ test('mesh-interference: inferred vs measured split — inferred is unconfirmed 
   assert.ok(measured.candidates.some((c) => /flooding|chatty|reporting/i.test(c.rationale)), 'measured plan points at the flooder');
 });
 
+test('M5: efficacyFor is attached to EXECUTABLE candidates only (physical guidance is unscored)', () => {
+  const eff = { expectedEfficacy: 0.9, n: 6, baseRate: 0.2, beatsSelfHealing: true, ready: true };
+  const calls: string[] = [];
+  const ctx = { writeActions: true, efficacyFor: (k: SymptomKind, a: string) => { calls.push(`${k}:${a}`); return eff; } };
+  const p = planFor(sym('return-path-degraded', { nodeId: 7 }), node(7), ctx);
+  for (const c of p.candidates) {
+    if (c.action != null) assert.deepEqual(c.efficacy, eff, `executable "${c.title}" carries efficacy`);
+    else assert.ok(c.efficacy == null, `physical "${c.title}" has no efficacy`);
+  }
+  // Looked up per (symptom kind, action) — never for physical (null-action) rows.
+  assert.ok(calls.every((s) => s.startsWith('return-path-degraded:')));
+  assert.ok(calls.length >= 1 && !calls.some((s) => s.endsWith(':null')));
+});
+
+test('M5: with no efficacyFor in context, candidates carry no efficacy (advisory reads as before)', () => {
+  const p = planFor(sym('dead-flap', { nodeId: 7 }), node(7), ON);
+  assert.ok(p.candidates.every((c) => c.efficacy == null), 'no efficacy without a lookup');
+});
+
 test('planAll skips symptoms subsumed under a mesh event (their recommendation is the mesh event’s)', () => {
   const symptoms: Symptom[] = [
     sym('weak-signal', { nodeId: 7 }),

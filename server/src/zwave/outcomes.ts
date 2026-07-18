@@ -33,10 +33,13 @@
  *     not merely until minimum-attempts — and always renders with its n.
  */
 
-import type { ActionKind } from '../types';
+import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import type { ActionKind, Efficacy } from '../types';
 import type { SymptomKind } from './symptoms';
 import type { EvidenceSample } from './evidenceStore';
 import { bandOf, N_BANDS } from './baselines';
+
+export type { Efficacy };
 
 export type Verdict = 'improved' | 'no-change' | 'worse' | 'refused-misdiagnosis' | 'unverifiable';
 
@@ -69,18 +72,6 @@ interface Tally {
   ok: number; // decayed count that resolved `improved`
 }
 
-/** What the planner reads back for a candidate. */
-export interface Efficacy {
-  /** P(improved | action) − but null until it beats self-healing with enough n. */
-  expectedEfficacy: number | null;
-  /** Decayed episode count backing the estimate. */
-  n: number;
-  /** The kind's spontaneous-recovery base rate (control arm), for context. */
-  baseRate: number | null;
-  /** True once the action's success rate clears baseRate by the min effect size. */
-  beatsSelfHealing: boolean;
-}
-
 export interface OutcomeStoreOptions {
   /** Per-command timeout rate at/under which a node is considered recovered.
    *  Mirrors the detectors' release threshold so "resolved" means the same
@@ -93,27 +84,41 @@ export interface OutcomeStoreOptions {
   minEpisodes?: number;
   /** Per-episode exponential decay (older episodes fade). */
   decay?: number;
+  /** Persistent path on /data (atomic temp+rename). Absent ⇒ in-memory only. */
+  path?: string;
   log?: (msg: string) => void;
 }
 
 export interface OutcomeStore {
   /** Open an episode for a symptom that just appeared. Idempotent per key. */
   open(nodeId: number | null, kind: SymptomKind, onsetMs: number, before: WindowMetrics | null): void;
-  /** Attribute an operator action to the open episode on this node (if any). */
-  recordAction(nodeId: number | null, kind: SymptomKind, actionKind: ActionKind, refused: boolean, atMs: number): void;
+  /** Attribute an operator action to EVERY open episode on this node (the
+   *  operator picks an action for a node, not a specific symptom). First action
+   *  per episode wins the attribution. */
+  recordAction(nodeId: number | null, actionKind: ActionKind, refused: boolean, atMs: number): void;
   /** Close an episode: the symptom resolved. Computes + folds the verdict. */
   resolve(nodeId: number | null, kind: SymptomKind, resolvedMs: number, after: WindowMetrics | null): Episode | null;
   /** Drop an open episode without a verdict (e.g. node left the roster). */
   abandon(nodeId: number | null, kind: SymptomKind): void;
   /** Keys of currently-open episodes (`${nodeId}:${kind}`). */
   openKeys(): string[];
+  /** Currently-open episodes as (key, nodeId, kind) — for the caller's
+   *  confirmation-window resolution loop (no key-parsing needed). */
+  openEpisodes(): { key: string; nodeId: number | null; kind: SymptomKind }[];
   /** Spontaneous-recovery base rate for a kind (control arm), or null if n too low. */
   baseRate(kind: SymptomKind): number | null;
   /** Learned efficacy of an action against a kind, for the planner. */
   efficacyFor(kind: SymptomKind, action: ActionKind, band?: number): Efficacy;
   /** How many episodes of this kind ended `refused-misdiagnosis` (false positives). */
   falsePositives(kind: SymptomKind): number;
-  /** Serialize / restore (persistence is the caller's job). */
+  /** Load the learned arms from `path` (no-op if unset/missing/corrupt). */
+  load(): void;
+  /** Atomically persist the learned arms to `path` (no-op if unset). */
+  save(): void;
+  /** Wipe ALL state — open episodes and learned arms (a different network
+   *  invalidates the learned efficacy; mirrors baselines.reset()). */
+  reset(): void;
+  /** Pure serialize / restore (the fs wrappers above delegate to these). */
   toJSON(): unknown;
   loadJSON(raw: unknown): void;
 }
@@ -182,12 +187,15 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       open.set(k, { kind, nodeId, band: bandOf(onsetMs), onsetMs, before, action: null, resolvedMs: null, after: null, verdict: null });
     },
 
-    recordAction(nodeId, kind, actionKind, refused, atMs): void {
-      const ep = open.get(key(nodeId, kind));
-      if (!ep) return; // an action with no matching open symptom is not an episode datum
-      // First action wins the attribution — a later action in the same episode
-      // cannot cleanly be credited for the resolution (kept simple + honest).
-      if (ep.action == null) ep.action = { kind: actionKind, atMs, refused };
+    recordAction(nodeId, actionKind, refused, atMs): void {
+      // Attribute to EVERY open episode on this node (an action targets a node;
+      // any of its active symptoms could be the one it addresses). First action
+      // per episode wins — a later action can't cleanly be credited.
+      const prefix = `${nodeId ?? 'mesh'}:`;
+      for (const [k, ep] of open) {
+        if (!k.startsWith(prefix)) continue;
+        if (ep.action == null) ep.action = { kind: actionKind, atMs, refused };
+      }
     },
 
     resolve(nodeId, kind, resolvedMs, after): Episode | null {
@@ -223,6 +231,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       return [...open.keys()];
     },
 
+    openEpisodes(): { key: string; nodeId: number | null; kind: SymptomKind }[] {
+      return [...open.entries()].map(([k, ep]) => ({ key: k, nodeId: ep.nodeId, kind: ep.kind }));
+    },
+
     baseRate(kind): number | null {
       const t = control.get(kind);
       if (!t || t.n < cfg.minEpisodes) return null;
@@ -238,18 +250,45 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         const t = action.get(aKey(kind, act, b));
         if (t) { n += t.n; ok += t.ok; }
       }
-      if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, beatsSelfHealing: false };
+      if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, beatsSelfHealing: false, ready: false };
       const rate = ok / n;
       // Beats self-healing = clears the base rate (or a floor when base unknown)
       // by the minimum effect size. Until then expectedEfficacy stays null so
       // the planner renders "not distinguishable from self-healing".
       const bar = (base ?? 0) + cfg.minEffect;
       const beats = rate >= bar;
-      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, beatsSelfHealing: beats };
+      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, beatsSelfHealing: beats, ready: true };
     },
 
     falsePositives(kind): number {
       return fp.get(kind) ?? 0;
+    },
+
+    reset(): void {
+      open.clear(); control.clear(); action.clear(); fp.clear();
+    },
+
+    load(): void {
+      const path = opts.path;
+      if (!path || !existsSync(path)) return;
+      try {
+        this.loadJSON(JSON.parse(readFileSync(path, 'utf8')));
+        log(`outcomes: restored ${control.size} kind(s) + ${action.size} action arm(s)`);
+      } catch (e) {
+        log(`outcomes: load failed (${e instanceof Error ? e.message : String(e)}) — starting fresh`);
+      }
+    },
+
+    save(): void {
+      const path = opts.path;
+      if (!path) return;
+      try {
+        const tmp = `${path}.tmp`;
+        writeFileSync(tmp, JSON.stringify(this.toJSON()), 'utf8');
+        renameSync(tmp, path);
+      } catch (e) {
+        log(`outcomes: save failed (${e instanceof Error ? e.message : String(e)})`);
+      }
     },
 
     toJSON(): unknown {

@@ -429,6 +429,19 @@ after-window without fresh evidence (wedge, no traffic) yields
 
 ### 3.6 `outcomes.ts` (M5 — episodes, not just actions; DR)
 
+> **As-built (v0.16, advisory-only per the owner's decision).** The ledger is
+> `server/src/zwave/outcomes.ts` — a pure store wired into `runEngine`'s symptom
+> lifecycle: an episode OPENS when a non-subsumed symptom appears (a subsumed
+> one's fate belongs to the mesh event, so counting it would pollute the base
+> rate) and RESOLVES only after the symptom has stayed gone through a 10-min
+> confirmation window (a blink of improvement is not a recovery, and the dwell
+> lets the after-window settle past the transition). The "action arm" is
+> populated by operator type-CONFIRM actions via the ActionRunner's `onOutcome`
+> hook (attributed to every open episode on the acted node); NO engine-initiated
+> execution this milestone. `expectedEfficacy` feeds the planner (§3.4) and the
+> Remedy screen renders "✓ helped X% vs Y% self-heal (n)" or "≈ not
+> distinguishable from self-healing (n)" — never a claim while `n < min`.
+
 The ledger records **every symptom episode**, action taken or not — the
 no-action episodes are the control arm the learned layer cannot be honest
 without:

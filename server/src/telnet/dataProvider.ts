@@ -19,12 +19,15 @@
  */
 
 import type {
+  ActionKind,
   ControllerSnapshot,
   DataProvider,
+  Efficacy,
   HealthResult,
   LogEvent,
   NodeSnapshot,
   Symptom,
+  SymptomKind,
 } from '../types';
 import { scoreNode, DEFAULT_NOISE_FLOOR } from '../zwave/health';
 
@@ -62,6 +65,8 @@ export interface ZwaveDataSource {
   symptoms(): Symptom[];
   /** Engine enabled + baseline-readiness (for the Remedy empty state). REQUIRED. */
   engineStatus(): { enabled: boolean; ready: number; total: number };
+  /** M5 learned action efficacy (null when the ledger is off / no estimate). REQUIRED. */
+  efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
 }
 
 export interface CreateTuiDataProviderOptions {
@@ -202,6 +207,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     lastError: () => cachedError,
     symptoms: () => zwaveData.symptoms?.() ?? [],
     engineStatus: () => zwaveData.engineStatus?.() ?? { enabled: false, ready: 0, total: 0 },
+    efficacyFor: (kind, action) => zwaveData.efficacyFor?.(kind, action) ?? null,
   };
 
   return {

@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { rmSync } from 'node:fs';
 import { createOutcomeStore, windowMetrics, type WindowMetrics } from '../src/zwave/outcomes';
 import type { EvidenceSample } from '../src/zwave/evidenceStore';
 
@@ -40,7 +43,7 @@ test('action arm: expectedEfficacy stays NULL until the action beats self-healin
   // 4 action episodes that also improve — but they cannot BEAT a 100% base rate.
   for (let i = 10; i < 14; i++) {
     o.open(i, 'rtt-degraded', 1000, W(100, 20));
-    o.recordAction(i, 'rtt-degraded', 'refreshValues', false, 1500);
+    o.recordAction(i, 'refreshValues', false, 1500);
     o.resolve(i, 'rtt-degraded', 2000, W(100, 1));
   }
   const eff = o.efficacyFor('rtt-degraded', 'refreshValues');
@@ -58,7 +61,7 @@ test('action arm: efficacy is offered once the action clears the base rate + eff
   // Action arm: 4/4 improved after a ping → 100% ≫ 25% + 5%.
   for (let i = 10; i < 14; i++) {
     o.open(i, 'dead-flap', 1000, W(100, 40));
-    o.recordAction(i, 'dead-flap', 'ping', false, 1500);
+    o.recordAction(i, 'ping', false, 1500);
     o.resolve(i, 'dead-flap', 2000, W(100, 1));
   }
   const eff = o.efficacyFor('dead-flap', 'ping');
@@ -71,7 +74,7 @@ test('refused action → refused-misdiagnosis, keyed to the SYMPTOM, never count
   const o = store();
   for (let i = 0; i < 4; i++) {
     o.open(i, 'ghost-suspect', 1000, W(100, 40));
-    o.recordAction(i, 'ghost-suspect', 'removeFailed', true /* refused */, 1500);
+    o.recordAction(i, 'removeFailed', true /* refused */, 1500);
     const ep = o.resolve(i, 'ghost-suspect', 2000, W(100, 1));
     assert.equal(ep?.verdict, 'refused-misdiagnosis');
   }
@@ -127,10 +130,38 @@ test('open is idempotent per key; abandon drops without a verdict; openKeys trac
 
 test('an action with no matching open symptom is not an episode datum', () => {
   const o = store();
-  o.recordAction(9, 'dead-flap', 'ping', false, 1000); // no open episode
+  o.recordAction(9, 'ping', false, 1000); // no open episode
   o.open(9, 'dead-flap', 1100, W(100, 40));
   const ep = o.resolve(9, 'dead-flap', 2000, W(100, 1));
   assert.equal(ep?.action, null, 'the stray action was not attributed');
+});
+
+test('a node-scoped action attributes to ALL that node’s open episodes (not just one kind)', () => {
+  const o = store();
+  // Node 7 has TWO active symptoms; one operator ping targets the node.
+  o.open(7, 'return-path-degraded', 1000, W(100, 40));
+  o.open(7, 'rtt-degraded', 1000, W(100, 40));
+  o.open(8, 'dead-flap', 1000, W(100, 40)); // a different node — must NOT be touched
+  o.recordAction(7, 'ping', false, 1500);
+  // Both of node 7's episodes resolve improved → both credit ping.
+  o.resolve(7, 'return-path-degraded', 2000, W(100, 1));
+  o.resolve(7, 'rtt-degraded', 2000, W(100, 1));
+  // Node 8 resolves with NO action (the ping wasn't for it) → control arm.
+  o.resolve(8, 'dead-flap', 2000, W(100, 1));
+  assert.equal(o.efficacyFor('return-path-degraded', 'ping').n, 1, 'return-path episode credited ping');
+  assert.equal(o.efficacyFor('rtt-degraded', 'ping').n, 1, 'rtt episode credited ping');
+  assert.equal(o.efficacyFor('dead-flap', 'ping').n, 0, 'node 8 was NOT credited the ping');
+});
+
+test('openEpisodes exposes (key,nodeId,kind) for the confirmation-window resolution loop', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, W(100, 40));
+  o.open(null, 'mesh-interference', 1000, null);
+  const eps = o.openEpisodes().sort((a, b) => a.key.localeCompare(b.key));
+  assert.deepEqual(eps, [
+    { key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded' },
+    { key: 'mesh:mesh-interference', nodeId: null, kind: 'mesh-interference' },
+  ]);
 });
 
 test('persistence round-trips the learned arms and rejects a corrupt tally', () => {
@@ -144,6 +175,25 @@ test('persistence round-trips the learned arms and rejects a corrupt tally', () 
   const o3 = store();
   o3.loadJSON({ v: 1, control: [['dead-flap', { n: 2, ok: 9 }]], action: [], fp: [] });
   assert.equal(o3.baseRate('dead-flap'), null, 'garbage tally rejected');
+});
+
+test('fs load/save persists the learned arms atomically across a restart', () => {
+  const path = join(tmpdir(), `zwave-outcomes-test-${process.pid}.json`);
+  rmSync(path, { force: true });
+  try {
+    const a = createOutcomeStore({ path, minEpisodes: 4, decay: 0 });
+    for (let i = 0; i < 4; i++) { a.open(i, 'dead-flap', 1000, W(100, 40)); a.resolve(i, 'dead-flap', 2000, W(100, 1)); }
+    a.save();
+    const b = createOutcomeStore({ path, minEpisodes: 4, decay: 0 });
+    b.load();
+    assert.equal(b.baseRate('dead-flap'), a.baseRate('dead-flap'), 'base rate survived the fs round-trip');
+    // A store with no path never touches disk (in-memory only).
+    const mem = createOutcomeStore({ minEpisodes: 4, decay: 0 });
+    mem.save(); mem.load(); // no-ops, no throw
+    assert.equal(mem.baseRate('dead-flap'), null);
+  } finally {
+    rmSync(path, { force: true });
+  }
 });
 
 test('decay fades old episodes so a stale success cannot dominate forever', () => {
