@@ -6,8 +6,9 @@ learns each node's normal, and turns anomalies into grounded, ranked
 recommendations. Nothing is ever acted on automatically.
 
 It talks to the **Home Assistant Core WebSocket** (the node roster, live
-statistics, and — behind a typed confirmation — maintenance actions) and, strictly
-read-only, to the **Z-Wave JS driver WebSocket** for the real background-noise
+statistics, and — behind a typed confirmation — maintenance, device-control, and
+config-write actions) and, strictly read-only, to the **Z-Wave JS driver WebSocket**
+for the real background-noise
 floor and capability flags that HA does not expose. It persists a per-node
 evidence time-series, scores every node worst-health-first, detects mesh symptoms,
 and recommends fixes — across **eight screens**, over a telnet server and a
@@ -67,7 +68,7 @@ dismisses with `q` / `Esc`.
 | # | Screen | What it shows |
 | --- | --- | --- |
 | 1 | **Overview** | Live node table, worst-health-first, summary bar + per-node flags. |
-| 2 | **Detail** | Per-node dossier: identity, live link, LWR/NLWR routes, TX/RX reliability, battery, firmware. |
+| 2 | **Detail** | Scrollable per-node dossier: identity, live link, **live entity state** (is the light on? sensor values, lock state, climate mode…), the device's **Z-Wave configuration parameters**, LWR/NLWR routes, TX/RX reliability, battery, firmware. |
 | 3 | **Controller** | Node-1 radio health, background-RSSI noise floor, controller counters, rebuild progress. |
 | 4 | **Topology** | Hop-grouped route tree + repeater load + Long-Range star. |
 | 5 | **Heatmap** | Nodes by HA area, cells graded by SNR-margin bucket. |
@@ -105,15 +106,24 @@ problem · `L` high latency · `I` incomplete interview · `B` battery low ·
 ## Write actions & safety
 
 **Read-only by default.** **Enable Write Actions** is off, so the add-on only
-observes. Turn it on to unlock maintenance actions on the selected node. Press
-**`a`** to open the **Actions Menu**, which groups device actions (ping, refresh,
-re-interview, rebuild-routes, remove-failed) and mesh-wide ones, each badged
-**SAFE / CAUTION / DESTRUCTIVE**. Selecting one opens a modal that requires you to
-type the literal word **`CONFIRM`** before it runs (a bare `p` ping stays
-immediate). Every outcome is logged. The engine never executes anything itself —
-it only recommends. If you expose the LAN telnet port on an untrusted network,
-enable the optional **login gate** (plaintext or `scrypt:` passwords, with a
-per-peer backoff); the sidebar console is already HA-authenticated.
+observes. Turn it on to unlock actions on the selected node. Press **`a`** to open
+the **Actions Menu**, which groups:
+
+- **Mesh maintenance** — ping, refresh values, re-interview, rebuild-routes,
+  remove-failed — plus mesh-wide rebuild.
+- **Device controls** — turn a light / switch / fan **on · off · toggle**, **open
+  / close** a cover or garage door, **lock / unlock** a lock.
+- **Configuration** — edit a writeable Z-Wave parameter through a bounded value
+  picker (enum options or a min/max-checked number).
+
+Every row is badged **SAFE / CAUTION / DESTRUCTIVE** (unlocking a lock or opening a
+garage is DESTRUCTIVE), and selecting any of them opens a modal that requires you
+to type the literal word **`CONFIRM`** before it runs (only a bare `p` ping stays
+immediate). Every outcome is logged. The *engine* never executes anything itself —
+it only recommends; device control and config writes are **operator** actions, and
+are never fed to the learning ledger. If you expose the LAN telnet port on an
+untrusted network, enable the optional **login gate** (plaintext or `scrypt:`
+passwords, with a per-peer backoff); the sidebar console is already HA-authenticated.
 
 ## Install / deploy
 
@@ -138,7 +148,7 @@ release is a private, versioned record plus the downloadable manual. To cut one:
    subject — CI gates it).
 2. Push the tag at the merge commit:
    ```bash
-   git tag v0.21.0 <merge-sha> && git push origin v0.21.0
+   git tag v0.23.0 <merge-sha> && git push origin v0.23.0
    ```
 3. **`publish-release.yml`** (on the `vX.Y.Z` tag) runs the server tests, builds
    the printable manual (`.docx` + `.pdf`), and cuts a **private GitHub Release**
@@ -150,7 +160,7 @@ gate on every PR; `codeql.yml` runs the self-contained CodeQL security check.
 ## Local development
 
 - `server/` — TypeScript backend run directly with `tsx` (no build step).
-  `npm test` runs the suite (300+ node:test cases); `npm run typecheck` is the CI
+  `npm test` runs the suite (380+ node:test cases); `npm run typecheck` is the CI
   gate; `npm start` runs the server.
 - The browser console (`/console`) vendors xterm.js from `node_modules` — no CDN,
   so it works behind the Ingress token prefix.

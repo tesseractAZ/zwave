@@ -2,7 +2,7 @@
 
 This is the definitive technical reference for the **Z-Wave TUI** Home Assistant add-on: a telnet/xterm control-room TUI plus a learned, **advisory-only** remediation engine for a Z-Wave JS mesh. It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the screens and endpoints it produces, the configuration knobs that tune it, and its edge-case guards.
 
-The add-on is a Node/TypeScript server (`server/`) that talks to Home Assistant's Z-Wave JS integration over the HA Core WebSocket (the node roster, live statistics, and — gated behind a typed CONFIRM — mutating maintenance actions) and, read-only, to the Z-Wave JS **driver** WebSocket (the real background-RSSI noise floor and capability flags that HA does not expose). It persists a per-node evidence time-series on `/data`, learns each node's "normal", detects mesh symptoms, turns them into grounded recommendations, and learns which of those actually help — surfaced across eight terminal screens over a telnet server (`:2324`) and an xterm.js `/console` (HA ingress, `:8788`). **Nothing is ever executed automatically:** every mutating action goes through the operator's type-CONFIRM Actions Menu.
+The add-on is a Node/TypeScript server (`server/`) that talks to Home Assistant's Z-Wave JS integration over the HA Core WebSocket (the node roster, live statistics, and — gated behind a typed CONFIRM — mutating actions: mesh maintenance plus, as of v0.23, operator device control + config writes) and, read-only, to the Z-Wave JS **driver** WebSocket (the real background-RSSI noise floor and capability flags that HA does not expose). It persists a per-node evidence time-series on `/data`, learns each node's "normal", detects mesh symptoms, turns them into grounded recommendations, and learns which of those actually help — surfaced across eight terminal screens over a telnet server (`:2324`) and an xterm.js `/console` (HA ingress, `:8788`). **Nothing is ever executed automatically:** every mutating action goes through the operator's type-CONFIRM Actions Menu.
 
 > Every constant, threshold, formula, path, and config key below was written directly from the source. Where a value is a tunable default, that is noted. The engine's design rationale lives in `DESIGN.md` and its Z-Wave protocol research (with citations) in `RESEARCH.md`; for the install quick-start and option list, see `README.md` and the **Configuration, Deployment, Security & Operations** chapter.
 
@@ -62,7 +62,7 @@ before it (source: `server/src/index.ts:39-205`):
 | 2 | Z-Wave data layer | `createZwaveData` | Entry-id auto-discovery, registry join, `network_status` roster poll, live statistics subscriptions, the evidence store, and the M3–M6 engine. `zwaveData.start()` kicks the timers. |
 | 3 | Source bridge | plain object literal | Adapts `ZwaveData` → the `ZwaveDataSource` interface the provider consumes (`snapshot`, `controller`, `events`, `history`, `symptoms`, `engineStatus`, `efficacyFor`, `interference`, …). |
 | 4 | Shared data provider | `createTuiDataProvider` | The per-frame render cache both transports read; owns the fast `refreshMs` recompute timer. Returns `{ provider, stop }`. |
-| 4b | Action runner | `createActionRunner` | The mutating-action chokepoint (ping / refresh / re-interview / heal / rebuild / remove), gated by `config.writeActions`; outcomes fold into the M5 learning ledger via `onOutcome`. |
+| 4b | Action runner | `createActionRunner` | The mutating-action chokepoint (mesh maintenance: ping / refresh / re-interview / heal / rebuild / remove; **plus v0.23 operator device control + config writes: `controlEntity` / `setConfigParam`**), gated by `config.writeActions`; maintenance outcomes fold into the M5 ledger via `onOutcome` — device-control/config ops run `learn=false` and never do. |
 | 5 | Auth | `createAuth` + `createAuthPolicy` | CORS/ws-origin allow-list and the direct-LAN login gate. |
 | 6 | HTTP + ingress console | `Fastify` + `registerWsConsole` | The `/console` xterm.js page, `/console/ws` transport, `/`, `/api/version`, `/api/health`. |
 | 7 | Telnet transport | `startTelnetServer` | The raw-TCP TUI on `:2324`, opt-in via `telnet_enabled`. |
@@ -592,7 +592,7 @@ The mutating surface lives in `zwaveActions.ts` (`createActionRunner`) and is ga
 - **Ping** is not a `zwave_js/*` WS command — it is a **button entity press**. `pingEntityOf(nodeId)` resolves the node's discovered `button.*_ping` entity, and the action calls `call_service { domain: 'button', service: 'press', service_data: { entity_id } }` (zwaveActions.ts:68). It is treated as safe/idempotent. (The `zwave_js.ping` HA *service* is deprecated and returns nothing; the raw `invoke_cc_api` NOP-ping can mark a marginal node DEAD, so the button entity is the sanctioned path.)
 - **Heal / "rebuild routes"** is `zwave_js/rebuild_node_routes { device_id }` (zwaveActions.ts:76), with the network-wide `begin_rebuilding_routes { entry_id }` / `stop_rebuilding_routes { entry_id }` variants.
 
-Per RESEARCH.md §3.2, through today's HA-WS channel `rebuild_node_routes` and `begin_rebuilding_routes` are the *only* executable route remediations (active health checks, priority routes, neighbors, and background RSSI all require the driver-WS phase). Critically, **a route rebuild is never a runnable recommendation**: it cannot fix a physical link, it deletes manual priority routes, and it throws on Long-Range nodes — so the engine may *recommend* richly while its executable actions stay limited to ping / refresh / re-interview / rebuild / remove-failed, all routed through the human type-CONFIRM Actions Menu (the engine is advisory-only; nothing auto-executes).
+Per RESEARCH.md §3.2, through today's HA-WS channel `rebuild_node_routes` and `begin_rebuilding_routes` are the *only* executable route remediations (active health checks, priority routes, neighbors, and background RSSI all require the driver-WS phase). Critically, **a route rebuild is never a runnable recommendation**: it cannot fix a physical link, it deletes manual priority routes, and it throws on Long-Range nodes — so the engine may *recommend* richly while its executable **remediation** actions stay limited to ping / refresh / re-interview / rebuild / remove-failed, all routed through the human type-CONFIRM Actions Menu (the engine is advisory-only; nothing auto-executes). Operator device control + config writes (below) are a separate, non-remediation surface — also human-gated, never engine-initiated.
 
 **Device control + config writes (v0.23).** Beyond the seven mesh-maintenance verbs, the same gated runner exposes two *operator* device actions — surfaced in the Actions Menu (§3.2), never by the engine:
 
@@ -3421,9 +3421,12 @@ the Core WS/REST API (via `SUPERVISOR_TOKEN`) needed for `zwave_js/*` reads;
 false`; `host_network: false`.
 
 **Every mutation is human-gated, and the engine is advisory-only.** When write
-actions are enabled, each action (ping / refresh / re-interview / rebuild-routes /
-remove-failed) still requires the operator to open the Actions Menu and type the
-literal word **CONFIRM**. The learned engine **recommends but never executes** —
+actions are enabled, each action — mesh maintenance (ping / refresh / re-interview /
+rebuild-routes / remove-failed), **v0.23 device control** (on/off/toggle, open/close,
+lock/unlock), and **config writes** — still requires the operator to open the Actions
+Menu and type the literal word **CONFIRM** (only a bare `p` ping shortcut is
+immediate). Device control + config writes are operator ops, never engine
+remediation, so they are never attributed to the learning ledger. The learned engine **recommends but never executes** —
 the executor / `auto_remediation` / `auto_safe` tiers are *designed* (`DESIGN.md`
 §3.5) but **not built**; there is no automatic-remediation path in the shipped
 build. As a corollary of that design, a **route rebuild is never surfaced as a

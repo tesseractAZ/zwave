@@ -1,10 +1,12 @@
 # Security Policy
 
 The **Z-Wave TUI** is a Home Assistant add-on that monitors and (with an
-explicit opt-in) issues type-confirmed maintenance actions against a Z-Wave JS
-mesh. It handles no personal data and moves no money, but it can read the state
-of a home's Z-Wave devices and — when write actions are enabled — mutate the
-mesh, so its access is treated as privileged.
+explicit opt-in) issues type-confirmed actions against a Z-Wave JS mesh — mesh
+maintenance, plus (v0.23) operator **device control** (turning devices on/off,
+locking/unlocking, opening/closing) and **configuration writes**. It handles no
+personal data and moves no money, but it can read the state of a home's Z-Wave
+devices and — when write actions are enabled — actuate them and mutate the mesh,
+so its access is treated as privileged.
 
 ## Supported versions
 
@@ -24,10 +26,13 @@ basis.
 - **Read-only by default.** `write_actions_enabled` defaults **off** — a fresh
   install is a pure monitor and exposes no mutating control.
 - **Every mutating action is human-gated.** When write actions are enabled, each
-  one (ping / refresh / re-interview / rebuild-routes / remove-failed) still
-  requires the operator to open the Actions Menu and type the literal word
-  **CONFIRM**. The engine is **advisory-only**: it recommends, it never executes
-  — there is no automatic-remediation path in the shipped build.
+  one — mesh maintenance (ping / refresh / re-interview / rebuild-routes /
+  remove-failed), device control (on/off/toggle, open/close, lock/unlock), and
+  config writes — still requires the operator to open the Actions Menu and type
+  the literal word **CONFIRM** (only a bare `p` ping shortcut is immediate). The
+  *engine* is **advisory-only**: it recommends, it never executes — there is no
+  automatic-remediation path in the shipped build, and device control / config
+  writes are operator-initiated only.
 - **All mesh mutations ride the Home Assistant WebSocket** (authenticated with
   the Supervisor token). The separate, unauthenticated **driver WebSocket**
   (`ws://core-zwave-js:3000`) is used **strictly read-only**, behind a closed
