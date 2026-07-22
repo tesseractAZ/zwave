@@ -160,7 +160,7 @@ export function renderTopology(ctx: ScreenCtx): string[] {
     title: 'TOPOLOGY / ROUTES',
     rightStatus: rs,
     body,
-    keys: [['1-8', 'SCREENS'], ['Q', 'BACK']],
+    keys: [['1-8', 'SCREENS'], ['T', 'UNITS'], ['Q', 'BACK']], // Topology honours the dBm↔margin toggle
   });
 }
 

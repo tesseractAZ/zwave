@@ -28,6 +28,40 @@ const data: DataProvider = {
 const mkView = (cols: number, rows: number, selected = 5): ViewState => ({ screen: 'overview', cols, rows, selected, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', followTail: true, errorsOnly: false, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null } as ViewState);
 const ctx = (cols: number, rows: number, selected = 5): ScreenCtx => ({ view: mkView(cols, rows, selected), data, visibleNodes: nodes, filtering: false, actionsEnabled: true });
 
+const strip = (l: string): string => l.replace(/\x1b\[[0-9;]*m/g, '');
+
+test('signal cell guarded: DEAD → dash (no live margin); ROUTED → neutral grey; DIRECT → health-coloured', () => {
+  const deadN = node(2, { name: 'DeadNode', status: NodeStatus.Dead, statusLabel: 'dead', stats: stats({ rssi: -60 }) });
+  const routedN = node(3, { name: 'RoutedNode', stats: stats({ rssi: -60, lwr: { repeaters: [10], protocolDataRate: 3, rssi: -60, repeaterRSSI: [], routeFailedBetween: null } }) });
+  const directN = node(4, { name: 'DirectNode', stats: stats({ rssi: -60 }) }); // margin = -60 - (-92) = +32
+  const three = [directN, routedN, deadN];
+  const d: DataProvider = { ...data, nodes: () => three, nodeById: (id) => three.find((n) => n.nodeId === id), scoreFor: () => ({ score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] }) };
+  // Select the dead node (index 2) so Direct/Routed render in COLOURED form (the
+  // selected row uses inverse-video plain cells with no per-cell colour code).
+  const raw = renderOverview({ view: mkView(120, 20, 2), data: d, visibleNodes: three, filtering: false, actionsEnabled: true });
+  const rowOf = (name: string): string => raw.find((l) => strip(l).includes(name)) ?? '';
+  // DEAD: signal is a dash, never a live +NdB margin next to an unreachable status.
+  const deadRow = rowOf('DeadNode');
+  assert.ok(strip(deadRow).includes('—'), 'dead node signal is a dash');
+  assert.ok(!/[+-]\d+dB/.test(strip(deadRow)), 'dead node shows NO live margin value');
+  // DIRECT healthy node: margin is GREEN (\x1b[92m).
+  assert.match(rowOf('DirectNode'), /\x1b\[92m\+32dB/, 'direct node margin is health-green');
+  // ROUTED node: margin is neutral GREY (\x1b[90m), NOT green — it is a last-hop reading.
+  assert.match(rowOf('RoutedNode'), /\x1b\[90m\+32dB/, 'routed node margin is neutral grey');
+  assert.doesNotMatch(rowOf('RoutedNode'), /\x1b\[92m\+32dB/, 'routed node margin is NOT graded green');
+});
+
+test('narrow terminal (60-73 cols) drops rate/seen/batt so the FLAGS column is never clipped', () => {
+  for (const cols of [60, 68, 73]) {
+    const stripped = renderOverview(ctx(cols, 24)).map(strip);
+    assert.ok(stripped.some((l) => /\bFLAGS\b/.test(l)), `${cols} cols: FLAGS header present`);
+    assert.ok(!stripped.some((l) => /\bBATT\b/.test(l)), `${cols} cols: BATT dropped (narrow tier)`);
+    // Node 6 (all 9 flags) still shows its flag letters — never clipped off the row.
+    const row6 = stripped.find((l) => /\bNode 6\b/.test(l)) ?? '';
+    assert.ok(/D.*S.*W.*F.*R/.test(row6), `${cols} cols: node 6 flags D/S/W/F/R present, got "${row6.trim()}"`);
+  }
+});
+
 test('Overview holds EXACTLY view.rows lines within view.cols at every size (incl. the scrolling command bar)', () => {
   for (const [cols, rows] of [[40, 12], [72, 20], [80, 24], [100, 30], [120, 46], [200, 50]] as const) {
     const lines = renderOverview(ctx(cols, rows));

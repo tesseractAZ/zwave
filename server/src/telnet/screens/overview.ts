@@ -62,6 +62,7 @@ interface ColSpec {
 /** Extra diagnostic columns unlock as the terminal gets wider. */
 const MID_COLS = 104; // + RTT · TMO · TREND
 const WIDE_COLS = 140; // + ROUTE, wider name + trend
+const NARROW_COLS = 74; // below this, drop rate/seen/batt so FLAGS never clips
 
 /**
  * Build the active columns for this width. The fixed columns are sized to their
@@ -71,6 +72,12 @@ const WIDE_COLS = 140; // + ROUTE, wider name + trend
 function layout(W: number, mode: ViewState['signalDisplay']): ColSpec[] {
   const mid = W >= MID_COLS;
   const wide = W >= WIDE_COLS;
+  // Below NARROW_COLS the fixed columns + a readable name can't all fit, and the
+  // old flex-floor (name ≥ 14) overflowed the row so truncate() silently clipped
+  // FLAGS off the right edge — breaking the "never clip a flag" invariant. Drop
+  // the lowest-value columns (rate/seen/batt) in the narrow tier so the triage
+  // essentials (id · status · name · score · signal · flags) always fit.
+  const narrow = W < NARROW_COLS;
   const cols: ColSpec[] = [];
   const add = (key: ColKey, w: number, align: 'l' | 'r', header: string): void => {
     cols.push({ key, w, align, header });
@@ -87,9 +94,11 @@ function layout(W: number, mode: ViewState['signalDisplay']): ColSpec[] {
   }
   add('hop', 4, 'r', 'HOP');
   if (wide) add('route', 16, 'l', 'ROUTE');
-  add('rate', 5, 'r', 'RATE');
-  add('seen', 5, 'r', 'SEEN');
-  add('batt', 4, 'r', 'BATT');
+  if (!narrow) {
+    add('rate', 5, 'r', 'RATE');
+    add('seen', 5, 'r', 'SEEN');
+    add('batt', 4, 'r', 'BATT');
+  }
   add('flags', 9, 'l', 'FLAGS'); // FLAG_ORDER length — never clip a flag
   if (mid) add('trend', wide ? 16 : 8, 'l', 'TREND');
 
@@ -388,10 +397,20 @@ function barsPlain(frac: number, bars = 4): string {
  */
 function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDisplay']): GraphicCell {
   const rssi = n.stats.rssi;
-  if (rssi == null || RSSI_SENTINELS.has(rssi)) {
+  const dash = (): GraphicCell => {
     const label = padStart('—', 7);
     return { colored: '    ' + ' ' + c.grey(label), plain: '    ' + ' ' + label };
-  }
+  };
+  // A DEAD/UNKNOWN node's last RSSI is stale — it hasn't answered, so grading its
+  // cached reading as a live signal contradicts the ✕/'—' the same row shows
+  // (matches the heatmap's no-reading guard + the score's DEAD→0 gate).
+  const stale = n.status === NodeStatus.Dead || n.status === NodeStatus.Unknown;
+  if (rssi == null || RSSI_SENTINELS.has(rssi) || stale) return dash();
+  // For a ROUTED node, `stats.rssi` is the controller-measured ACK RSSI of the
+  // LAST hop (repeater→controller), NOT the device's own signal — health-colouring
+  // it "would be confidently wrong" (health.ts). Show it in neutral grey so it
+  // never masquerades as the device's signal band.
+  const routed = !n.isLongRange && (n.stats.lwr?.repeaters?.length ?? 0) > 0;
 
   let text: string;
   let colorFn: (s: string) => string;
@@ -411,7 +430,9 @@ function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDi
   // are already ≤ 7 ("-128dBm" / "+110dB").
   if (text.length > 7) text = text.slice(0, 7);
 
-  const colored = signalBars(frac, 4) + ' ' + padStart(colorFn(text), 7);
+  const bars = routed ? signalBars(frac, 4, c.grey) : signalBars(frac, 4);
+  const label = routed ? c.grey(text) : colorFn(text);
+  const colored = bars + ' ' + padStart(label, 7);
   const plain = barsPlain(frac, 4) + ' ' + padStart(text, 7);
   return { colored, plain }; // 4 + 1 + 7 = 12 visible
 }

@@ -134,25 +134,33 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       s.rtt == null ? c.grey('—') : rttColor(s.rtt)(`${Math.round(s.rtt)} ms`);
     body.push(twoCol('Status', statusVal, 'RTT', rttVal, inner));
 
-    // RSSI + SNR margin (rssi − noiseFloor). Sentinels read as no-signal.
-    const rssi = validRssi(s.rssi);
+    // RSSI + SNR margin (rssi − noiseFloor). Sentinels read as no-signal. A
+    // DEAD/UNKNOWN node's cached RSSI is stale (it hasn't answered) → '—', so the
+    // dossier never shows a strong signal beside an unreachable status. A ROUTED
+    // node's `stats.rssi` is the LAST-HOP (repeater→controller) ACK reading, not
+    // the device's own signal, so it is shown NEUTRAL grey rather than health-
+    // coloured — mirroring the score's refusal to grade it (health.ts).
+    const rssi = dead(n) ? null : validRssi(s.rssi);
+    const routed = !n.isLongRange && (s.lwr?.repeaters?.length ?? 0) > 0;
     let rssiVal: string;
     let marginVal: string;
     if (rssi == null) {
       rssiVal = c.grey('—');
       marginVal = c.grey('—');
     } else {
-      rssiVal = rssiColor(rssi)(`${rssi} dBm`);
       const m = rssi - noise;
-      marginVal =
-        marginColor(m)(`${m >= 0 ? '+' : ''}${m} dB`) +
-        (data.hasRealNoise() ? '' : c.grey(' est'));
+      const rc = routed ? c.grey : rssiColor(rssi);
+      const mc = routed ? c.grey : marginColor(m);
+      rssiVal = rc(`${rssi} dBm`) + (routed ? c.grey(' last-hop') : '');
+      marginVal = mc(`${m >= 0 ? '+' : ''}${m} dB`) + (data.hasRealNoise() ? '' : c.grey(' est'));
     }
     body.push(twoCol('RSSI', rssiVal, 'Margin', marginVal, inner));
 
     // Graphics: SNR-margin quality meter + RSSI/RTT trend sparklines. Each is a
     // droppable augment; the underlying numbers already live in the rows above.
-    if (rssi != null) pushG(PRIO.snr, snrRow(rssi - noise, data.hasRealNoise(), inner));
+    // Skip the live SNR meter for a routed node (its margin is last-hop, not the
+    // device's) — the historical trends below stay, being clearly past readings.
+    if (rssi != null && !routed) pushG(PRIO.snr, snrRow(rssi - noise, data.hasRealNoise(), inner));
     const hist = data.history(n.nodeId);
     const rssiHist = hist.rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
     const rttHist = hist.rtt.filter((v) => Number.isFinite(v) && v >= 0);
@@ -240,9 +248,9 @@ export function renderDetail(ctx: ScreenCtx): string[] {
 
   const st = statusColor(n.status)(n.statusLabel.toUpperCase());
   const sc = dead(n) ? c.grey('—') : scoreColor(health.score)(`${health.score} (${health.grade})`);
-  const keys: Array<readonly [string, string]> = ctx.actionsEnabled
-    ? [['A', 'ACTIONS'], ['⏎', 'LIST'], ['1-8', 'SCREENS'], ['Q', 'BACK']]
-    : [['A', 'ACTIONS'], ['1-8', 'SCREENS'], ['Q', 'BACK']];
+  // NOTE: no ['⏎','LIST'] — Enter is a no-op on Detail (Q/Esc back out), so the
+  // keycap would be a dead affordance. `j`/`k` browse to the adjacent node here.
+  const keys: Array<readonly [string, string]> = [['A', 'ACTIONS'], ['J/K', 'NODE'], ['1-8', 'SCREENS'], ['Q', 'BACK']];
   return frame(view, data, {
     title: `NODE #${n.nodeId} · ${n.name}`,
     rightStatus: st + c.grey(' · ') + c.grey('SCORE ') + sc,
