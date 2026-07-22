@@ -71,6 +71,7 @@ export function mkView(p: Partial<ViewState> = {}): ViewState {
     signalDisplay: 'margin',
     followTail: true,
     errorsOnly: false,
+    detailScroll: 0,
     logCursor: 0,
     logScroll: 0,
     logRange: 'all',
