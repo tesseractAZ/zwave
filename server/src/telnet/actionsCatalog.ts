@@ -49,8 +49,8 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
     label: 'Ping node',
     scope: 'device',
     impact: 'safe',
-    desc: 'Send a no-op ping to confirm the node is reachable right now.',
-    impactNote: 'Harmless — just probes reachability. No mesh disruption, no data change.',
+    desc: 'Send a reachability ping request to the node.',
+    impactNote: "Harmless — no mesh disruption, no data change. NOTE: HA does not return the ping's result, so a success here means the request was SENT, not that the node answered — watch the node's Status / Last-seen right after to see if it replied.",
     needsNode: true,
   },
   {
