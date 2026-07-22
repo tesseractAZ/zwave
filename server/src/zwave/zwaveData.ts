@@ -317,6 +317,8 @@ export interface ZwaveData {
   configParams(nodeId: number): ConfigParamsResult;
   /** v0.22: idempotently trigger a node's async config-param fetch. */
   requestConfigParams(nodeId: number): void;
+  /** v0.23: drop a node's cached config params after a write (forces re-fetch). */
+  invalidateConfigParams(nodeId: number): void;
   /** Stop polling and clear timers. */
   stop(): void;
 }
@@ -1776,6 +1778,13 @@ class ZwaveDataImpl implements ZwaveData {
     return this.configByNode.get(nodeId) ?? { status: 'idle', params: [] };
   }
 
+  /** v0.23: drop a node's cached config parameters so the next requestConfigParams
+   *  re-fetches — called after a successful set_config_parameter write. */
+  invalidateConfigParams(nodeId: number): void {
+    this.configByNode.delete(nodeId);
+    this.configFetchAt.delete(nodeId);
+  }
+
   /** v0.22: idempotently kick off a config-parameter fetch. No-op while loading,
    *  already-ready, or unsupported; errors retry after CONFIG_RETRY_MS. */
   requestConfigParams(nodeId: number): void {
@@ -2215,6 +2224,13 @@ export function mapConfigParams(raw: Record<string, RawConfigParam> | null | und
     const value = typeof p.value === 'number' ? p.value : null;
     const states = meta.states && typeof meta.states === 'object' ? meta.states : null;
     const valueLabel = value != null && states ? states[String(value)] ?? null : null;
+    // Enum options with sanitized labels (for the v0.23 value picker).
+    const statesSan = states
+      ? Object.fromEntries(Object.entries(states).map(([k, v]) => [k, sanitizeLabel(String(v))]))
+      : null;
+    // property addresses the parameter for set_config_parameter; prefer the raw
+    // field, else the key's last segment ("<node>-<cc>-<endpoint>-<property>").
+    const property = typeof p.property === 'number' ? p.property : Number(key.split('-').pop()) || 0;
     params.push({
       key,
       label: sanitizeLabel(String(meta.label ?? key)),
@@ -2224,6 +2240,10 @@ export function mapConfigParams(raw: Record<string, RawConfigParam> | null | und
       writeable: meta.writeable === true,
       min: typeof meta.min === 'number' ? meta.min : null,
       max: typeof meta.max === 'number' ? meta.max : null,
+      property,
+      propertyKey: typeof p.property_key === 'number' ? p.property_key : null,
+      endpoint: typeof p.endpoint === 'number' ? p.endpoint : 0,
+      states: statesSan,
     });
   }
   params.sort((a, b) => {

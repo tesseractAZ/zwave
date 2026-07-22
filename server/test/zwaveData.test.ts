@@ -159,3 +159,21 @@ test('mapConfigParams: an enum value with no matching state label stays null', (
   assert.equal(out[0].value, 9);
   assert.equal(out[0].valueLabel, null);
 });
+
+test('mapConfigParams carries set-addressing (property/property_key/endpoint) + enum states', () => {
+  const raw = {
+    '5-112-1-3-255': { property: 3, property_key: 255, endpoint: 1, value: 2, metadata: { label: 'Partial', writeable: true, states: { '0': 'Off', '2': 'Two' } } },
+  };
+  const out = mapConfigParams(raw);
+  assert.equal(out[0].property, 3);
+  assert.equal(out[0].propertyKey, 255);
+  assert.equal(out[0].endpoint, 1);
+  assert.deepEqual(out[0].states, { '0': 'Off', '2': 'Two' });
+});
+test('mapConfigParams defaults addressing when the raw omits it (property from key tail, endpoint 0)', () => {
+  const out = mapConfigParams({ '5-112-0-7': { value: 1, metadata: { label: 'X' } } });
+  assert.equal(out[0].property, 7, 'property falls back to the key tail');
+  assert.equal(out[0].propertyKey, null);
+  assert.equal(out[0].endpoint, 0);
+  assert.equal(out[0].states, null);
+});

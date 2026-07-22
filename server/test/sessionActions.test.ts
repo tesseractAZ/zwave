@@ -29,6 +29,8 @@ function mkActions(enabled = true) {
     enabled,
     ping: ok('ping'), refreshValues: ok('refresh'), reInterview: ok('reInterview'),
     healNode: ok('heal'), rebuildAll: ok('rebuildAll'), stopRebuild: ok('stopRebuild'), removeFailed: ok('remove'),
+    controlEntity: async (n, eid, verb) => { calls.push(`control:${n}:${eid}:${verb}`); return { ok: true, message: 'ok' }; },
+    setConfigParam: async (n, param, value) => { calls.push(`setParam:${n}:${param.property}:${value}`); return { ok: true, message: 'ok' }; },
   };
   return { runner, calls };
 }
