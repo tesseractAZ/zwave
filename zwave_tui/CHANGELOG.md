@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.21.0 — 2026-07-18
+
+**Accuracy + dead-command fixes** (from a novel 5-dimension adversarial audit of
+the whole TUI). Phase 1 of a larger per-device pass; the remaining phases add
+live entity state, config parameters, and device control/testing.
+
+- **Signal cell no longer lies for dead / routed nodes** (accuracy). The Overview
+  MARGIN/RSSI cell and the Detail LIVE LINK rows rendered a node's *cached* RSSI
+  as a live, health-coloured signal even for a **dead** node (a green "+32 dB"
+  beside its ✕) and for a **routed** node (whose `stats.rssi` is the last-hop
+  ACK reading, not the device's own). Now a dead/unknown node shows `—` (no live
+  reading), and a routed node's value is shown **neutral grey** with a `last-hop`
+  note — matching the guards the health score and heatmap already applied.
+- **Dead `[⏎] LIST` keycap removed from Detail.** It advertised an action Enter
+  never performed there; the command bar now shows the real `J/K NODE` browse
+  keys (Q/Esc still back out).
+- **Heatmap `[T] UNITS` removed; added to Topology.** The heatmap is dB-margin
+  only and ignored the toggle; Topology actually honours dBm↔margin but never
+  advertised it — now they match their behaviour.
+- **Ping copy is honest.** HA doesn't return a ping's result, so the action
+  no longer claims to "confirm reachability" — it says the request was *sent* and
+  to watch the node's Status/Last-seen for the reply (catalog + planner copy).
+- **FLAGS column never clips.** On 60–73-col terminals the name-flex floor
+  overflowed the row and silently cut the D/W/F/R triage flags off the right
+  edge; the narrow tier now drops rate/seen/batt instead so FLAGS always fits.
+
 ## 0.20.0 — 2026-07-17
 
 **Two engine enhancements (M3 + M6), shipped together.**

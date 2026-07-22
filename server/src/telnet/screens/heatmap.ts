@@ -98,7 +98,7 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
       c.grey('sorted worst-first'),
     ]),
     body,
-    keys: [['1-8', 'SCREENS'], ['T', 'UNITS'], ['Q', 'BACK']],
+    keys: [['1-8', 'SCREENS'], ['Q', 'BACK']], // no [T] UNITS: this map is dB-margin only (T has no effect here)
   });
 }
 

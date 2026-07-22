@@ -155,14 +155,14 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
 
     case 'dead-flap': {
       headline = 'Reachability runbook — a rebuild cannot repair an unreachable node';
-      candidates.push({ action: 'ping', title: 'Ping the node (confirm reachability)', rationale: 'A quick reachability probe. If it fails, the node is genuinely unreachable — the next steps are physical.', basis: 'source', cost: 'safe', blocked: gateExecutable(node, ctx, { probes: true }) });
+      candidates.push({ action: 'ping', title: 'Ping the node (reachability request)', rationale: "Sends a ping request. HA does not return the result, so watch the node's status/last-seen right after: if it stays dead/unchanged the node is genuinely unreachable and the next steps are physical.", basis: 'source', cost: 'safe', blocked: gateExecutable(node, ctx, { probes: true }) });
       candidates.push({ action: null, title: 'Power-cycle the device, then exclude/re-include if it persists', rationale: 'A flapping/dead node’s first fix is a physical power cycle. A route rebuild’s first step is to query the node — which a dead node cannot answer — so rebuild cannot help here.', basis: 'lore', cost: 'physical', blocked: null });
       break;
     }
 
     case 'quiet-node': {
       headline = 'Node is quiet — confirm reachability before assuming a fault';
-      candidates.push({ action: 'ping', title: 'Ping (consented reachability check)', rationale: 'The node hasn’t communicated in a while, but no traffic was attempted — silence is not proof of failure. A single consented ping confirms reachability. (It can mark a truly-marginal node dead, so it is not run automatically.)', basis: 'source', cost: 'caution', blocked: gateExecutable(node, ctx, { probes: true }) });
+      candidates.push({ action: 'ping', title: 'Ping (consented reachability check)', rationale: 'The node hasn’t communicated in a while, but no traffic was attempted — silence is not proof of failure. A single consented ping prompts it to respond; watch its status/last-seen for the result (the ping itself returns none). It can mark a truly-marginal node dead, so it is not run automatically.', basis: 'source', cost: 'caution', blocked: gateExecutable(node, ctx, { probes: true }) });
       // Always-available guidance so a quiet node never renders as a single
       // blocked ping with no next step (esp. write-actions off): silence is often
       // benign, and the physical checks below need no software action.
