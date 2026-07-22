@@ -104,6 +104,8 @@ async function main(): Promise<void> {
     log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
     // M5: feed operator-action outcomes into the learning ledger.
     onOutcome: (kind, nodeId, ok) => zwaveData.recordActionOutcome(kind, nodeId, ok),
+    // v0.23: after a config write, drop the stale cache so DETAIL re-fetches.
+    onConfigWritten: (nodeId) => zwaveData.invalidateConfigParams(nodeId),
     enabled: config.writeActions,
   });
   log(

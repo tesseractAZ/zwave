@@ -58,6 +58,11 @@ export interface ConfigParam {
   writeable: boolean;
   min: number | null;
   max: number | null;
+  // ── addressing + options for set_config_parameter (v0.23 writes) ──
+  property: number; // config-parameter number
+  propertyKey: number | null; // partial-parameter bitmask key, when present
+  endpoint: number; // device endpoint (0 = root)
+  states: Record<string, string> | null; // enum value→label options, when an enum
 }
 
 export type ConfigStatus = 'idle' | 'loading' | 'ready' | 'error' | 'unsupported';
@@ -373,7 +378,9 @@ export interface ActionResult {
   message: string;
 }
 
-/** The kinds of mutating action the TUI can request. */
+/** The kinds of mutating action the TUI can request. The first seven are
+ *  mesh-maintenance verbs (M5 remediation ledger tracks these); the last two are
+ *  v0.23 operator device-control ops (NOT remediation — never fed to the ledger). */
 export type ActionKind =
   | 'ping'
   | 'refreshValues'
@@ -381,7 +388,13 @@ export type ActionKind =
   | 'healNode'
   | 'rebuildAll'
   | 'stopRebuild'
-  | 'removeFailed';
+  | 'removeFailed'
+  | 'controlEntity'
+  | 'setConfigParam';
+
+/** A device-control verb (v0.23). Domain→service mapping lives in
+ *  `zwave/entityControl.ts`; this union is the vocabulary. */
+export type EntityVerb = 'on' | 'off' | 'toggle' | 'lock' | 'unlock' | 'open' | 'close';
 
 /**
  * Mutating-action surface (v0.3). Implemented by the data layer, passed to the
@@ -399,6 +412,12 @@ export interface ActionRunner {
   rebuildAll(): Promise<ActionResult>;
   stopRebuild(): Promise<ActionResult>;
   removeFailed(nodeId: number): Promise<ActionResult>;
+  /** v0.23: actuate a device entity (on/off/toggle/lock/unlock/open/close) via
+   *  call_service. `nodeId` is for logging/attribution only; the entity's domain
+   *  (from `entityId`) selects the service. */
+  controlEntity(nodeId: number, entityId: string, verb: EntityVerb): Promise<ActionResult>;
+  /** v0.23: write a Z-Wave configuration parameter (zwave_js/set_config_parameter). */
+  setConfigParam(nodeId: number, param: ConfigParam, value: number): Promise<ActionResult>;
 }
 
 /** Context handed to each screen renderer. */

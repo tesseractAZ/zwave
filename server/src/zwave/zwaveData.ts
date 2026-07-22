@@ -317,6 +317,8 @@ export interface ZwaveData {
   configParams(nodeId: number): ConfigParamsResult;
   /** v0.22: idempotently trigger a node's async config-param fetch. */
   requestConfigParams(nodeId: number): void;
+  /** v0.23: drop a node's cached config params after a write (forces re-fetch). */
+  invalidateConfigParams(nodeId: number): void;
   /** Stop polling and clear timers. */
   stop(): void;
 }
@@ -1776,6 +1778,13 @@ class ZwaveDataImpl implements ZwaveData {
     return this.configByNode.get(nodeId) ?? { status: 'idle', params: [] };
   }
 
+  /** v0.23: drop a node's cached config parameters so the next requestConfigParams
+   *  re-fetches — called after a successful set_config_parameter write. */
+  invalidateConfigParams(nodeId: number): void {
+    this.configByNode.delete(nodeId);
+    this.configFetchAt.delete(nodeId);
+  }
+
   /** v0.22: idempotently kick off a config-parameter fetch. No-op while loading,
    *  already-ready, or unsupported; errors retry after CONFIG_RETRY_MS. */
   requestConfigParams(nodeId: number): void {
@@ -2215,6 +2224,28 @@ export function mapConfigParams(raw: Record<string, RawConfigParam> | null | und
     const value = typeof p.value === 'number' ? p.value : null;
     const states = meta.states && typeof meta.states === 'object' ? meta.states : null;
     const valueLabel = value != null && states ? states[String(value)] ?? null : null;
+    // Enum options with sanitized labels (for the v0.23 value picker).
+    const statesSan = states
+      ? Object.fromEntries(Object.entries(states).map(([k, v]) => [k, sanitizeLabel(String(v))]))
+      : null;
+    // property + propertyKey address the parameter for set_config_parameter.
+    // Prefer the raw fields; else parse BY POSITION from the HA value-id key
+    // "<node>-<cc>-<endpoint>-<property>[-<propertyKey>]" — the property is the
+    // 4th segment (index 3), NOT the last, which for a partial param is the
+    // propertyKey (grabbing .pop() would address the wrong parameter).
+    const segs = key.split('-');
+    const property =
+      typeof p.property === 'number'
+        ? p.property
+        : segs.length >= 4 && Number.isFinite(Number(segs[3]))
+          ? Number(segs[3])
+          : Number(segs[segs.length - 1]) || 0;
+    const propertyKey =
+      typeof p.property_key === 'number'
+        ? p.property_key
+        : segs.length >= 5 && Number.isFinite(Number(segs[4]))
+          ? Number(segs[4])
+          : null;
     params.push({
       key,
       label: sanitizeLabel(String(meta.label ?? key)),
@@ -2224,6 +2255,10 @@ export function mapConfigParams(raw: Record<string, RawConfigParam> | null | und
       writeable: meta.writeable === true,
       min: typeof meta.min === 'number' ? meta.min : null,
       max: typeof meta.max === 'number' ? meta.max : null,
+      property,
+      propertyKey,
+      endpoint: typeof p.endpoint === 'number' ? p.endpoint : 0,
+      states: statesSan,
     });
   }
   params.sort((a, b) => {

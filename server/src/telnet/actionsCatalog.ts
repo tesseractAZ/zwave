@@ -19,10 +19,22 @@
  * stays immediate for muscle-memory; that path is separate.)
  */
 
-import type { ActionKind } from '../types';
+import type { ActionKind, ConfigParam, EntityLiveState, EntityVerb } from '../types';
+import { isHighStakes, verbLabel, verbsFor } from '../zwave/entityControl';
 
 export type ActionScope = 'device' | 'system';
 export type ActionImpact = 'safe' | 'caution' | 'destructive';
+
+/** Menu grouping — finer than scope so device MAINTENANCE (ping/heal/…) and
+ *  device CONTROL (on/off/lock/…) get their own labelled sections (v0.23). */
+export type MenuGroup = 'maintenance' | 'control' | 'config' | 'system';
+
+/** What a menu row does when confirmed. Catalog rows carry a kind; the v0.23
+ *  device rows carry the concrete entity/verb or config parameter to act on. */
+export type MenuPayload =
+  | { type: 'catalog'; kind: ActionKind }
+  | { type: 'entity'; entityId: string; entityName: string; domain: string; verb: EntityVerb }
+  | { type: 'config'; param: ConfigParam };
 
 export interface ActionDescriptor {
   kind: ActionKind;
@@ -122,9 +134,14 @@ export interface MenuContext {
   rebuilding: boolean;
 }
 
-/** One row in the built menu: a descriptor plus whether it's actionable now. */
+/** One row in the built menu: a descriptor plus whether it's actionable now.
+ *  For v0.23 device-control / config rows the `desc` is SYNTHETIC (built from the
+ *  entity/param) so the renderer + confirm box read it uniformly; `payload` says
+ *  what to actually do, and `group` places the row under its section heading. */
 export interface MenuItem {
   desc: ActionDescriptor;
+  group: MenuGroup;
+  payload: MenuPayload;
   /** Row is visible but not executable (with `reason`). */
   disabled: boolean;
   reason: string | null;
@@ -145,9 +162,97 @@ export function buildMenu(ctx: MenuContext): MenuItem[] {
     if (d.kind === 'stopRebuild' && !ctx.rebuilding) continue;
     if (d.kind === 'rebuildAll' && ctx.rebuilding) continue;
     const disabled = d.needsNode && !ctx.hasNode;
-    items.push({ desc: d, disabled, reason: disabled ? 'select a node first (Overview/Detail)' : null });
+    items.push({
+      desc: d,
+      group: d.scope === 'system' ? 'system' : 'maintenance',
+      payload: { type: 'catalog', kind: d.kind },
+      disabled,
+      reason: disabled ? 'select a node first (Overview/Detail)' : null,
+    });
   }
   return items;
+}
+
+/* ── v0.23 device-control + config-edit rows (synthetic descriptors) ──────── */
+
+function entityImpact(domain: string, verb: EntityVerb): ActionImpact {
+  if (isHighStakes(domain, verb)) return 'destructive'; // unlock, garage/cover open/toggle
+  if (domain === 'lock' || domain === 'cover') return 'caution'; // lock, close
+  return 'safe'; // routine light/switch/fan/siren on/off/toggle
+}
+
+function entityImpactNote(domain: string, verb: EntityVerb, entityName: string): string {
+  const base = `Actuates the physical device "${entityName}".`;
+  if (verb === 'unlock') return `${base} UNLOCKS the lock — the door becomes openable.`;
+  if (verb === 'lock') return `${base} Locks the door.`;
+  if (verb === 'open') return `${base} OPENS it (a garage door / cover will travel).`;
+  if (verb === 'close') return `${base} Closes it.`;
+  if (verb === 'toggle') return `${base} Flips its current state.`;
+  return `${base} No mesh disruption; recoverable — you can set it back.`;
+}
+
+/**
+ * Build the device-CONTROL rows for a node's entities. One row per (controllable
+ * entity, verb). Read-only entities (sensors, buttons, climate, …) contribute
+ * nothing. The current live state is appended to the "what it does" line so the
+ * operator sees, e.g., that a light is already off before turning it off.
+ */
+export function buildEntityRows(entities: EntityLiveState[]): MenuItem[] {
+  const rows: MenuItem[] = [];
+  for (const e of entities) {
+    const verbs = verbsFor(e.domain);
+    if (verbs.length === 0) continue;
+    for (const verb of verbs) {
+      const impact = entityImpact(e.domain, verb);
+      const stateNote = e.state != null && e.state !== 'unavailable' && e.state !== 'unknown' ? ` (now: ${e.state})` : '';
+      rows.push({
+        desc: {
+          kind: 'controlEntity',
+          label: `${verbLabel(verb)} · ${e.name}`,
+          scope: 'device',
+          impact,
+          desc: `${verbLabel(verb)} ${e.name}${stateNote}.`,
+          impactNote: entityImpactNote(e.domain, verb, e.name),
+          needsNode: true,
+        },
+        group: 'control',
+        payload: { type: 'entity', entityId: e.entityId, entityName: e.name, domain: e.domain, verb },
+        disabled: false,
+        reason: null,
+      });
+    }
+  }
+  return rows;
+}
+
+/**
+ * Build the CONFIG-edit rows — one per WRITEABLE parameter. Selecting a row opens
+ * the value picker (the session), then the type-CONFIRM. Non-writeable params
+ * are read-only in the dossier and never appear here.
+ */
+export function buildConfigRows(params: ConfigParam[]): MenuItem[] {
+  const rows: MenuItem[] = [];
+  for (const p of params) {
+    if (!p.writeable) continue;
+    const cur = p.value == null ? '—' : p.valueLabel ? `${p.value} (${p.valueLabel})` : `${p.value}${p.unit ? ' ' + p.unit : ''}`;
+    const range = p.states ? 'choose from a list' : p.min != null && p.max != null ? `${p.min}…${p.max}${p.unit ? ' ' + p.unit : ''}` : 'a number';
+    rows.push({
+      desc: {
+        kind: 'setConfigParam',
+        label: `Set · ${p.label}`,
+        scope: 'device',
+        impact: 'caution',
+        desc: `Edit "${p.label}" (now ${cur}; ${range}).`,
+        impactNote: 'Writes this Z-Wave configuration parameter to the device. Recoverable — you can set it back, but a wrong value can change how the device behaves.',
+        needsNode: true,
+      },
+      group: 'config',
+      payload: { type: 'config', param: p },
+      disabled: false,
+      reason: null,
+    });
+  }
+  return rows;
 }
 
 /** Clamp a menu cursor into range (empty menu → 0). */

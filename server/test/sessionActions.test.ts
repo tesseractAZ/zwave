@@ -29,6 +29,8 @@ function mkActions(enabled = true) {
     enabled,
     ping: ok('ping'), refreshValues: ok('refresh'), reInterview: ok('reInterview'),
     healNode: ok('heal'), rebuildAll: ok('rebuildAll'), stopRebuild: ok('stopRebuild'), removeFailed: ok('remove'),
+    controlEntity: async (n, eid, verb) => { calls.push(`control:${n}:${eid}:${verb}`); return { ok: true, message: 'ok' }; },
+    setConfigParam: async (n, param, value) => { calls.push(`setParam:${n}:${param.property}:${value}`); return { ok: true, message: 'ok' }; },
   };
   return { runner, calls };
 }
@@ -242,4 +244,151 @@ test('SECURITY: an armed CONFIRM does NOT survive an idle re-lock + re-login', a
   assert.deepEqual(calls, [], 'a half-armed destructive action must never survive the auth boundary');
   s.draw();
   assert.doesNotMatch(strip(last), /type CONFIRM to arm/i, 'no stale confirm after re-auth');
+});
+
+/* ── v0.23 device control + config writes through the Actions Menu ─────────── */
+
+import type { EntityLiveState, ConfigParam } from '../src/types';
+
+const light: EntityLiveState = { entityId: 'light.test', domain: 'light', name: 'Test Light', state: 'on', attrs: {} };
+const lock: EntityLiveState = { entityId: 'lock.front', domain: 'lock', name: 'Front Door', state: 'locked', attrs: {} };
+const enumParam: ConfigParam = { key: '5-112-0-3', label: 'LED Indicator', value: 2, valueLabel: 'Always off', unit: null, writeable: true, min: 0, max: 3, property: 3, propertyKey: null, endpoint: 0, states: { '0': 'On when off', '1': 'On when on', '2': 'Always off', '3': 'Always on' } };
+const numParam: ConfigParam = { key: '5-112-0-9', label: 'Ramp Rate', value: 20, valueLabel: null, unit: 'ms', writeable: true, min: 0, max: 99, property: 9, propertyKey: null, endpoint: 0, states: null };
+const roParam: ConfigParam = { key: '5-112-0-1', label: 'Read Only', value: 1, valueLabel: null, unit: null, writeable: false, min: 0, max: 1, property: 1, propertyKey: null, endpoint: 0, states: null };
+// Degenerate: writeable enum whose states map is EMPTY (malformed device metadata).
+const emptyEnumParam: ConfigParam = { key: '5-112-0-7', label: 'Bad Enum', value: 0, valueLabel: null, unit: null, writeable: true, min: 0, max: 5, property: 7, propertyKey: null, endpoint: 0, states: {} };
+// Writeable numeric with NO device-reported bounds.
+const noBoundsParam: ConfigParam = { key: '5-112-0-8', label: 'No Bounds', value: 0, valueLabel: null, unit: null, writeable: true, min: null, max: null, property: 8, propertyKey: null, endpoint: 0, states: null };
+
+function mkDeviceData(): DataProvider {
+  return { ...mkData(), entityStates: () => [light, lock], configParams: () => ({ status: 'ready', params: [enumParam, numParam, roParam, emptyEnumParam, noBoundsParam] }) };
+}
+const down = { type: 'arrow' as const, dir: 'down' as const };
+/** Drive the menu cursor down until the highlighted (▶) row contains `needle`. */
+function seek(s: TuiSession, last: () => string, needle: string): boolean {
+  for (let i = 0; i < 60; i++) {
+    const row = strip(last()).split('\n').find((l) => l.includes('▶'));
+    if (row && row.includes(needle)) return true;
+    s.feed([down]); s.draw();
+  }
+  return false;
+}
+
+test('menu offers DEVICE CONTROLS + CONFIGURATION groups for the node', () => {
+  const { runner } = mkActions();
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  const f = strip(last());
+  assert.match(f, /DEVICE CONTROLS/);
+  assert.match(f, /CONFIGURATION/);
+  assert.match(f, /Turn Off · Test Light/);
+  assert.match(f, /Unlock · Front Door/);
+  assert.match(f, /Set · LED Indicator/);
+  assert.doesNotMatch(f, /Read Only/, 'a non-writeable param is never offered for editing');
+});
+
+test('menu → Turn Off a light → CONFIRM executes controlEntity(off) exactly once', async () => {
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Turn Off · Test Light'), 'found the Turn Off row');
+  s.feed([enter]); s.draw(); // → CONFIRM box
+  assert.match(strip(last()), /type CONFIRM to arm/i);
+  typeConfirm(s);
+  await flush(); await flush();
+  assert.deepEqual(calls, ['control:5:light.test:off']);
+});
+
+test('menu → Unlock (high-stakes) still requires the typed CONFIRM', async () => {
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Unlock · Front Door'));
+  s.feed([enter]); s.draw();
+  const f = strip(last());
+  assert.match(f, /CONFIRM/);
+  assert.match(f, /UNLOCKS/i, 'the confirm box warns it unlocks the door');
+  typeConfirm(s);
+  await flush(); await flush();
+  assert.deepEqual(calls, ['control:5:lock.front:unlock']);
+});
+
+test('menu → Set an ENUM param → pick a value → CONFIRM writes it', async () => {
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Set · LED Indicator'));
+  s.feed([enter]); s.draw(); // → value picker (enum)
+  assert.match(strip(last()), /SET PARAMETER/);
+  assert.match(strip(last()), /Always off/); // current value present
+  // cursor starts on the current value (2 "Always off"); move up to value 0.
+  s.feed([{ type: 'arrow', dir: 'up' }, { type: 'arrow', dir: 'up' }]); s.draw();
+  s.feed([enter]); s.draw(); // choose → CONFIRM box
+  assert.match(strip(last()), /type CONFIRM to arm/i);
+  typeConfirm(s);
+  await flush(); await flush();
+  assert.deepEqual(calls, ['setParam:5:3:0']);
+});
+
+test('menu → Set a NUMERIC param → type a value → CONFIRM writes it; out-of-range is rejected', async () => {
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Set · Ramp Rate'));
+  s.feed([enter]); s.draw(); // → value picker (numeric)
+  // too big first → rejected with a hint, no CONFIRM
+  for (const ch of '500') s.feed([key(ch)]);
+  s.feed([enter]); s.draw();
+  assert.match(strip(last()), /SET PARAMETER/, 'still in the picker after an out-of-range value');
+  assert.match(strip(last()), /maximum/i);
+  // clear + type a valid 42
+  for (let i = 0; i < 3; i++) s.feed([key('\x7f')]);
+  for (const ch of '42') s.feed([key(ch)]);
+  s.feed([enter]); s.draw(); // → CONFIRM
+  typeConfirm(s);
+  await flush(); await flush();
+  assert.deepEqual(calls, ['setParam:5:9:42']);
+});
+
+test('device control is locked in read-only mode (no controlEntity/setConfigParam)', async () => {
+  const { runner, calls } = mkActions(false); // write actions disabled
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  assert.match(strip(last()), /READ-ONLY/);
+  seek(s, last, 'Turn Off · Test Light');
+  s.feed([enter]); s.draw();
+  await flush();
+  assert.deepEqual(calls, [], 'nothing actuates while read-only');
+});
+
+/* ── v0.23 hardening (adversarial-review defensive fixes) ─────────────────── */
+
+test('a writeable enum param with an EMPTY states map falls back to numeric entry (no crash on Enter)', async () => {
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Set · Bad Enum'));
+  s.feed([enter]); s.draw();
+  const f = strip(last());
+  assert.match(f, /new value/, 'degenerate enum uses the numeric picker, not an empty option list');
+  assert.doesNotMatch(f, /choose a value/);
+  for (const ch of '3') s.feed([key(ch)]);
+  s.feed([enter]); s.draw();
+  assert.match(strip(last()), /type CONFIRM to arm/i);
+  typeConfirm(s);
+  await flush(); await flush();
+  assert.deepEqual(calls, ['setParam:5:7:3']);
+});
+
+test('a numeric param with NO device bounds still rejects an absurd (out-of-int32) value', async () => {
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Set · No Bounds'));
+  s.feed([enter]); s.draw();
+  for (const ch of '99999999999') s.feed([key(ch)]);
+  s.feed([enter]); s.draw();
+  assert.match(strip(last()), /out of range/i, 'sanity floor rejects the absurd value');
+  await flush();
+  assert.deepEqual(calls, [], 'nothing written');
 });

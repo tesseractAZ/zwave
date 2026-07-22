@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.23.0 — 2026-07-21
+
+**Device control + configuration writes** (Phase 3 of the per-device pass — the
+"test the devices" ask). The TUI can now actuate devices and change their Z-Wave
+configuration, all behind the existing `write_actions_enabled` master switch AND
+the type-CONFIRM step. Nothing actuates in read-only mode.
+
+- **Device controls in the Actions Menu.** Open the menu (`a`) on a node and, below
+  the mesh-maintenance actions, a **DEVICE CONTROLS** group lists every controllable
+  entity with domain-appropriate verbs — lights/switches/fans **Turn On / Off /
+  Toggle**, covers/garage doors **Open / Close / Toggle**, locks **Lock / Unlock**.
+  Each row shows the device's live state ("now: on") and an impact badge; the
+  high-stakes ones (unlock a lock, open a garage) are flagged **DESTRUCTIVE** and,
+  like every menu action, require typing CONFIRM.
+- **Configuration writes.** A **CONFIGURATION** group lists the node's *writeable*
+  parameters. Selecting one opens a value picker — enum parameters offer their
+  named options (↑↓ to choose); numeric parameters accept a typed value bounded by
+  the parameter's min/max — then the usual CONFIRM box. On success the dossier's
+  CONFIG PARAMETERS section re-reads the device so the new value shows.
+- **Safety.** Device control and config writes are operator actions, never mesh
+  remediation — they are never attributed to the learning ledger. The service
+  mapping refuses any verb a domain doesn't support, so a bad call can't be formed.
+
 ## 0.22.0 — 2026-07-21
 
 **Per-device detail: live entity state + configuration parameters** (Phase 2 of

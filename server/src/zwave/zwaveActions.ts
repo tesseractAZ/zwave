@@ -14,7 +14,8 @@
  */
 
 import type { HaWsClient } from '../ha/haWsClient';
-import type { ActionRunner, ActionResult, ActionKind } from '../types';
+import type { ActionRunner, ActionResult, ActionKind, ConfigParam, EntityVerb } from '../types';
+import { resolveService, verbLabel } from './entityControl';
 
 export interface ActionRunnerOptions {
   client: HaWsClient;
@@ -29,6 +30,9 @@ export interface ActionRunnerOptions {
   /** M5: structured outcome hook — the outcome ledger attributes the action to
    *  its node's open episodes. Fired AFTER the action resolves. */
   onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean) => void;
+  /** v0.23: invalidate a node's cached config parameters after a successful write,
+   *  so the DETAIL screen re-fetches and shows the new value. */
+  onConfigWritten?: (nodeId: number) => void;
   enabled: boolean;
 }
 
@@ -46,19 +50,30 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     await o.client.send({ type, entry_id: entry });
   };
 
-  /** Run one action: gate → log start → execute → log + LEARN outcome → result. */
-  const run = async (kind: ActionKind, nodeId: number | null, verb: string, fn: () => Promise<void>): Promise<ActionResult> => {
+  /**
+   * Run one action: gate → log start → execute → log + (optionally) LEARN → result.
+   * `learn` is false for operator device-control ops (controlEntity/setConfigParam):
+   * toggling a light or setting a parameter is NOT a mesh remediation, so it must
+   * never be attributed to an open symptom episode in the M5 outcome ledger.
+   */
+  const run = async (
+    kind: ActionKind,
+    nodeId: number | null,
+    verb: string,
+    fn: () => Promise<void>,
+    learn = true,
+  ): Promise<ActionResult> => {
     if (!o.enabled) return { ok: false, message: 'write actions are disabled' };
     o.log('info', nodeId, `${verb} …`);
     try {
       await fn();
       o.log('info', nodeId, `${verb} → ok`);
-      o.onOutcome?.(kind, nodeId, true);
+      if (learn) o.onOutcome?.(kind, nodeId, true);
       return { ok: true, message: `${verb}: ok` };
     } catch (e) {
       const msg = errMsg(e);
       o.log('error', nodeId, `${verb} → failed: ${msg}`);
-      o.onOutcome?.(kind, nodeId, false);
+      if (learn) o.onOutcome?.(kind, nodeId, false);
       return { ok: false, message: msg };
     }
   };
@@ -77,5 +92,39 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     rebuildAll: () => run('rebuildAll', null, 'rebuild ALL routes', () => entryCmd('zwave_js/begin_rebuilding_routes')),
     stopRebuild: () => run('stopRebuild', null, 'stop rebuilding routes', () => entryCmd('zwave_js/stop_rebuilding_routes')),
     removeFailed: (n) => run('removeFailed', n, `remove failed node ${n}`, () => deviceCmd('zwave_js/remove_failed_node', n)),
+    controlEntity: (n, entityId, verb: EntityVerb) =>
+      run(
+        'controlEntity',
+        n,
+        `${verbLabel(verb).toLowerCase()} ${entityId}`,
+        async () => {
+          const domain = entityId.split('.')[0];
+          const svc = resolveService(domain, verb);
+          if (!svc) throw new Error(`cannot ${verb} a ${domain} entity`);
+          await o.client.send({ type: 'call_service', domain: svc.domain, service: svc.service, service_data: { entity_id: entityId } });
+        },
+        false, // operator device control — not a remediation, never learned
+      ),
+    setConfigParam: (n, param: ConfigParam, value: number) =>
+      run(
+        'setConfigParam',
+        n,
+        `set "${param.label}" = ${value}`,
+        async () => {
+          const dev = o.deviceIdOf(n);
+          if (!dev) throw new Error(`node ${n} has no device`);
+          const cmd: Record<string, unknown> = {
+            type: 'zwave_js/set_config_parameter',
+            device_id: dev,
+            property: param.property,
+            value,
+          };
+          if (param.propertyKey != null) cmd.property_key = param.propertyKey;
+          if (param.endpoint) cmd.endpoint = param.endpoint;
+          await o.client.send(cmd);
+          o.onConfigWritten?.(n); // drop the stale cache so DETAIL re-fetches the new value
+        },
+        false, // operator config write — not a remediation, never learned
+      ),
   };
 }
