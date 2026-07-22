@@ -1,25 +1,36 @@
 /**
- * NODE DETAIL — the per-node dossier overlay (v0.2, live statistics).
+ * NODE DETAIL — the per-node dossier (v0.22, scrollable full-screen).
  *
  * A full-frame card for the node the operator has selected on the Overview.
- * Five stacked sections inside a double-line border:
+ * Stacked sections, top to bottom:
  *
- *   header   [8] Kitchen Lamp — alive — 100 (A)          W F
- *   IDENTITY manufacturer/model · security · radio caps · power · area
- *   LIVE LINK status glyph + lastSeen · RTT · RSSI + SNR margin · response-timeout %
- *   ROUTES   LWR (and NLWR) repeater chains, per-hop RSSI, data rate, fails
- *   TRAFFIC  commands TX/RX, dropped TX/RX, response timeouts
+ *   header        [8] Kitchen Lamp — alive — 100 (A)          W F
+ *   IDENTITY      manufacturer/model · security · radio caps · power · area
+ *   LIVE LINK     status glyph + lastSeen · RTT · RSSI + SNR margin · timeout %
+ *   LIVE ENTITIES every HA entity on the node + its CURRENT state (v0.22)
+ *   CONFIG PARAMS the device's Z-Wave configuration parameters (v0.22)
+ *   ROUTES        LWR (and NLWR) repeater chains, per-hop RSSI, data rate, fails
+ *   TRAFFIC       commands TX/RX, dropped TX/RX, response timeouts
+ *
+ * The dossier is taller than a terminal, so it SCROLLS: `view.detailScroll` is
+ * the first visible body row. The renderer clamps it to the real range and
+ * writes the clamped value back (same sticky-window pattern the Log screen
+ * uses). `↑↓`/`j`/`k` scroll; `<`/`>` step to the adjacent node (top of its
+ * dossier). The flag legend is pinned at the very bottom, outside the scroll.
  *
  * Everything is coloured by the same health discipline the Overview uses:
- * green healthy, yellow weak, red failing, cyan asleep, grey no-data/mains.
- * The renderer is pure — it reads the cached DataProvider values the session
- * hands it and returns exactly view.rows lines, each ≤ view.cols wide.
+ * green healthy, yellow weak, red failing, cyan asleep/info, grey no-data/mains.
+ * The renderer is pure aside from the documented scroll write-back; it reads the
+ * cached DataProvider values and returns exactly view.rows lines ≤ view.cols.
  */
 
-import { BOX, c, lr, padEnd, truncate, visLen } from '../ansi';
+import { c, lr, padEnd, truncate, visLen } from '../ansi';
 import { gauge, meter, signalBars, sparkline } from '../gauges';
 import {
   NodeStatus,
+  type ConfigParam,
+  type ConfigParamsResult,
+  type EntityLiveState,
   type FirmwareInfo,
   type NodeSnapshot,
   type RouteStat,
@@ -65,23 +76,22 @@ export function renderDetail(ctx: ScreenCtx): string[] {
 
   const health = data.scoreFor(n.nodeId);
   const noise = data.noiseFloor();
-  const inner = W - 2; // space between the ║ borders
+  const inner = W - 2; // interior width (2 = the left/right gutter)
 
-  /* ── build the interior content rows (each a plain/coloured string) ──────── */
+  // Kick the lazy per-node config-parameter fetch (idempotent + throttled in the
+  // data layer). The result surfaces on a later frame via data.configParams().
+  data.requestConfigParams(n.nodeId);
+
+  /* ── build the full (unwindowed) interior content rows ───────────────────── */
   const body: string[] = [];
-  const sep = () => body.push(SEP); // marker, framed later
-  // A "graphic" row is an augment (gauge/sparkline/meter) that carries NO
-  // dossier value the operator can't already read from the text rows. It is
-  // tagged with GMARK + a priority byte so that, when the frame is too short,
-  // the least-important graphic is dropped BEFORE any real data (see the drop
-  // pass below). `s === null` means the graphic didn't fit its columns → skip.
-  const pushG = (prio: number, s: string | null): void => {
-    if (s != null) body.push(GMARK + String.fromCharCode(prio) + s);
+  const sep = () => body.push(SEP); // marker → a full-width rule when rendered
+  const pushG = (s: string | null): void => {
+    if (s != null) body.push(s); // graphic augment; null ⇒ didn't fit its columns
   };
 
   // Flagship graphic — a wide health gauge. The node's identity, status, and
-  // score now live in the title rule (chrome), so they aren't repeated here.
-  if (!dead(n)) pushG(PRIO.health, healthGauge(health.score, health.grade, inner));
+  // score live in the title rule (chrome), so they aren't repeated here.
+  if (!dead(n)) pushG(healthGauge(health.score, health.grade, inner));
   sep();
 
   // IDENTITY — device, security, radio capabilities, power, location.
@@ -112,7 +122,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     body.push(kv('Power', powerLabel(n), inner));
     // Battery gauge for battery-powered nodes (level% also shown in Power text).
     if (n.battery != null) {
-      pushG(PRIO.battery, batteryGauge(n.battery.level, n.battery.isLow, inner));
+      pushG(batteryGauge(n.battery.level, n.battery.isLow, inner));
     }
 
     const loc =
@@ -156,20 +166,18 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     }
     body.push(twoCol('RSSI', rssiVal, 'Margin', marginVal, inner));
 
-    // Graphics: SNR-margin quality meter + RSSI/RTT trend sparklines. Each is a
-    // droppable augment; the underlying numbers already live in the rows above.
-    // Skip the live SNR meter for a routed node (its margin is last-hop, not the
-    // device's) — the historical trends below stay, being clearly past readings.
-    if (rssi != null && !routed) pushG(PRIO.snr, snrRow(rssi - noise, data.hasRealNoise(), inner));
+    // Graphics: SNR-margin quality meter + RSSI/RTT trend sparklines. Skip the
+    // live SNR meter for a routed node (its margin is last-hop, not the device's);
+    // the historical trends below stay, being clearly past readings.
+    if (rssi != null && !routed) pushG(snrRow(rssi - noise, data.hasRealNoise(), inner));
     const hist = data.history(n.nodeId);
     const rssiHist = hist.rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
     const rttHist = hist.rtt.filter((v) => Number.isFinite(v) && v >= 0);
-    pushG(PRIO.rssiTrend, trendRow('Signal', rssiHist, 'dBm', lastColor(rssiHist, rssiColor), inner));
-    pushG(PRIO.rttTrend, trendRow('Latency', rttHist, 'ms', lastColor(rttHist, rttColor), inner));
-    // Long-horizon coarse RSSI trend (~2h, 1 pt/min). Shed first when space is
-    // tight; needs a few points before it says anything, and seeds from disk.
+    pushG(trendRow('Signal', rssiHist, 'dBm', lastColor(rssiHist, rssiColor), inner));
+    pushG(trendRow('Latency', rttHist, 'ms', lastColor(rttHist, rttColor), inner));
+    // Long-horizon coarse RSSI trend (~2h, 1 pt/min); needs a few points first.
     const longRssi = data.historyLong(n.nodeId).rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
-    if (longRssi.length >= 3) pushG(PRIO.rssiLong, trendRow('Sig 2h', longRssi, 'dBm', lastColor(longRssi, rssiColor), inner));
+    if (longRssi.length >= 3) pushG(trendRow('Sig 2h', longRssi, 'dBm', lastColor(longRssi, rssiColor), inner));
 
     // Response-timeout % via the SHARED responseTimeoutPct — the same figure the
     // Overview TMO column shows. Numerator is timeoutResponse (ACKed Get whose
@@ -182,16 +190,34 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         ? c.grey('— (no TX yet)')
         : dropColor(pct)(`${pct.toFixed(1)}%`) +
           c.grey(` (${timeouts} of ${s.commandsTX} tx)`);
-    // Augment the row with a low-good meter, right-aligned, but only when it
-    // fits WITHOUT crowding the real value text (lr would otherwise truncate it).
     if (pct != null) {
       const va = inner - 11;
-      // Force the fill color to the SAME dropColor() band as the % text so the
-      // bar can never read healthier (green) than the number it sits beside.
       const dm = meter(pct / 100, 8, { dir: 'lowGood', color: dropColor(pct) });
       if (va - visLen(dropVal) >= 10) dropVal = lr(dropVal, dm, va);
     }
     body.push(kv('Timeouts', dropVal, inner));
+  }
+  sep();
+
+  // LIVE ENTITIES — every HA entity on this node + its CURRENT state (v0.22).
+  {
+    const ents = [...data.entityStates(n.nodeId)].sort(
+      (a, b) => a.domain.localeCompare(b.domain) || a.name.localeCompare(b.name),
+    );
+    body.push(section('LIVE ENTITIES') + c.grey(`  ${ents.length}`));
+    if (ents.length === 0) {
+      body.push(note('no entities on this node', inner));
+    } else {
+      for (const e of ents) body.push(entityRow(e, inner));
+    }
+  }
+  sep();
+
+  // CONFIG PARAMETERS — the device's Z-Wave configuration values (v0.22).
+  {
+    const cfg = data.configParams(n.nodeId);
+    body.push(section('CONFIG PARAMETERS') + configCountTag(cfg));
+    for (const row of configRows(cfg, inner)) body.push(row);
   }
   sep();
 
@@ -200,14 +226,12 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   {
     const lwr = n.stats.lwr;
     if (n.isLongRange) {
-      // LR nodes talk straight to the controller — no mesh route to show.
       body.push(kv('LWR', c.blue('direct to controller (Long-Range star)'), inner));
     } else if (!lwr) {
       body.push(kv('LWR', c.grey('no route data yet'), inner));
     } else {
       pushRoute(body, 'LWR', lwr, inner);
     }
-    // NLWR only when the driver actually reports a fallback route.
     if (!n.isLongRange && n.stats.nlwr) {
       pushRoute(body, 'NLWR', n.stats.nlwr, inner);
     }
@@ -229,32 +253,43 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     body.push(truncate('  ' + line, inner));
   }
 
-  /* ── fit the body into the shared diagnostic-console frame ──────────────── */
-  // Height degradation: shed the least-important GRAPHIC rows (never dossier
-  // data) until the body fits. frame() reserves masthead + rule + command bar
-  // (3 rows); we reserve one more for the flag legend pinned at the bottom.
+  /* ── window the body into the scrollable content area ────────────────────── */
+  // frame() reserves masthead + rule + command bar (3 rows). We reserve one more
+  // for the flag legend pinned at the bottom, and scroll everything else.
   const bodyCap = Math.max(1, H - 3);
-  dropGraphicsToFit(body, Math.max(1, bodyCap - 1));
-  let cleaned = body.map(stripGMark).map((row) => (row === SEP ? c.grey('─'.repeat(W)) : row));
-  // The flag legend is the LAST body row. If the dossier still overflows after
-  // shedding graphics (a very short terminal), clip it with a "…more" marker so
-  // the legend survives instead of being the first casualty of frame()'s clamp.
-  if (cleaned.length > bodyCap - 1) {
-    cleaned = cleaned.slice(0, Math.max(0, bodyCap - 2));
-    cleaned.push(c.grey('  …more (taller terminal shows the full dossier)'));
-  }
-  while (cleaned.length < bodyCap - 1) cleaned.push('');
-  cleaned.push(flagLegend(health.flags, W));
+  const contentRows = Math.max(1, bodyCap - 1);
+  const rows = body.map((r) => (r === SEP ? c.grey('─'.repeat(W)) : r));
+  const total = rows.length;
+  const maxScroll = Math.max(0, total - contentRows);
+  let scroll = view.detailScroll ?? 0;
+  if (!Number.isFinite(scroll) || scroll < 0) scroll = 0;
+  if (scroll > maxScroll) scroll = maxScroll;
+  view.detailScroll = scroll; // write back the clamped offset (sticky-window pattern)
+
+  const windowRows = rows.slice(scroll, scroll + contentRows);
+  while (windowRows.length < contentRows) windowRows.push('');
+  windowRows.push(flagLegend(health.flags, W));
 
   const st = statusColor(n.status)(n.statusLabel.toUpperCase());
   const sc = dead(n) ? c.grey('—') : scoreColor(health.score)(`${health.score} (${health.grade})`);
-  // NOTE: no ['⏎','LIST'] — Enter is a no-op on Detail (Q/Esc back out), so the
-  // keycap would be a dead affordance. `j`/`k` browse to the adjacent node here.
-  const keys: Array<readonly [string, string]> = [['A', 'ACTIONS'], ['J/K', 'NODE'], ['1-8', 'SCREENS'], ['Q', 'BACK']];
+  // Scroll position rides in the title-rule status token when the dossier
+  // overflows — arrows show which directions have more content.
+  const scrollInfo =
+    total > contentRows
+      ? c.grey(' · ') +
+        c.cyan(`${scroll > 0 ? '▲' : ' '}${scroll < maxScroll ? '▼' : ' '} ${scroll + 1}–${Math.min(total, scroll + contentRows)}/${total}`)
+      : '';
+  const keys: Array<readonly [string, string]> = [
+    ['↑↓', 'SCROLL'],
+    ['< >', 'NODE'],
+    ['A', 'ACTIONS'],
+    ['1-8', 'SCREENS'],
+    ['Q', 'BACK'],
+  ];
   return frame(view, data, {
     title: `NODE #${n.nodeId} · ${n.name}`,
-    rightStatus: st + c.grey(' · ') + c.grey('SCORE ') + sc,
-    body: cleaned,
+    rightStatus: st + c.grey(' · ') + c.grey('SCORE ') + sc + scrollInfo,
+    body: windowRows,
     keys,
   });
 }
@@ -266,43 +301,186 @@ function flagLegend(flags: string[], W: number): string {
   return truncate(' ' + c.grey('FLAGS: ') + meanings, W);
 }
 
-/* ── graphic-row priority + height degradation ───────────────────────────── */
+/* ── LIVE ENTITIES (v0.22) ───────────────────────────────────────────────── */
 
-/** Marker byte prefixing an augment (graphic) body row: GMARK + priorityByte. */
-const GMARK = '\x01';
+/** Short, fixed-width domain tag; long HA domains are abbreviated so the entity
+ *  name column stays aligned. */
+const DOMAIN_ABBREV: Record<string, string> = {
+  binary_sensor: 'binary',
+  input_boolean: 'switch',
+  input_number: 'number',
+  input_select: 'select',
+  device_tracker: 'tracker',
+  media_player: 'media',
+};
 
-/** Higher number = shed sooner when the frame is too short. */
-const PRIO = {
-  health: 1, // flagship — kept longest
-  battery: 2,
-  snr: 3,
-  rssiTrend: 4,
-  rttTrend: 5,
-  rssiLong: 6, // long-horizon bonus — shed first
-} as const;
-
-/** Strip the GMARK+priority prefix so the row frames as ordinary content. */
-function stripGMark(l: string): string {
-  return l.charCodeAt(0) === 1 ? l.slice(2) : l;
+function domainTag(domain: string): string {
+  return DOMAIN_ABBREV[domain] ?? domain;
 }
 
-/** Remove the lowest-importance graphic rows until `body.length <= cap`. */
-function dropGraphicsToFit(body: string[], cap: number): void {
-  while (body.length > cap) {
-    let worstIdx = -1;
-    let worstPrio = -1;
-    for (let i = 0; i < body.length; i++) {
-      if (body[i].charCodeAt(0) === 1) {
-        const p = body[i].charCodeAt(1);
-        if (p > worstPrio) {
-          worstPrio = p;
-          worstIdx = i;
-        }
-      }
+/**
+ * One entity as a two-column row: `  <domain> <name>            <live state>`.
+ * The live-state value is protected — the name is truncated first so the state
+ * (the thing the operator is checking) always survives a narrow terminal.
+ */
+function entityRow(e: EntityLiveState, inner: number): string {
+  const value = formatEntityState(e);
+  const left = '  ' + c.grey(padEnd(domainTag(e.domain), 7)) + ' ' + c.white(e.name);
+  const leftBudget = Math.max(1, inner - visLen(value) - 1);
+  return lr(truncate(left, leftBudget), value, inner);
+}
+
+/**
+ * Format an entity's CURRENT state for display, per HA domain: on/off, dimmer
+ * %, sensor value+unit, climate mode/setpoint, cover position, lock state, …
+ * Pure + exported so the per-domain vocabulary is unit-testable without a mesh.
+ */
+export function formatEntityState(e: EntityLiveState): string {
+  const s = e.state;
+  if (s == null) return c.grey('—');
+  if (s === 'unavailable') return c.grey('unavailable');
+  if (s === 'unknown') return c.grey('unknown');
+  const a = e.attrs;
+  switch (e.domain) {
+    case 'light': {
+      if (s !== 'on') return c.grey(s);
+      const br = numAttr(a.brightness);
+      const pct = br != null ? c.grey(` · ${Math.round((br / 255) * 100)}%`) : '';
+      return c.green('on') + pct;
     }
-    if (worstIdx < 0) break; // only dossier rows left — frameToHeight marker handles it
-    body.splice(worstIdx, 1);
+    case 'switch':
+    case 'input_boolean':
+    case 'automation':
+      return s === 'on' ? c.green('on') : c.grey('off');
+    case 'fan': {
+      if (s !== 'on') return c.grey(s);
+      const p = numAttr(a.percentage);
+      return c.green('on') + (p != null ? c.grey(` · ${Math.round(p)}%`) : '');
+    }
+    case 'lock':
+      return s === 'locked' ? c.green('locked') : c.yellow(s); // unlocked / jammed
+    case 'cover': {
+      const pos = numAttr(a.current_position);
+      const posTxt = pos != null ? c.grey(` · ${Math.round(pos)}%`) : '';
+      const col = s === 'closed' ? c.green : s === 'open' ? c.yellow : c.cyan;
+      return col(s) + posTxt;
+    }
+    case 'binary_sensor':
+      return formatBinary(s, strAttr(a.device_class));
+    case 'sensor': {
+      const unit = strAttr(a.unit_of_measurement);
+      if (isNumericStr(s)) return c.white(s) + (unit ? c.grey(' ' + unit) : '');
+      return c.white(s); // enum / text sensor
+    }
+    case 'climate': {
+      if (s === 'off') return c.grey('off');
+      const cur = numAttr(a.current_temperature);
+      const set = numAttr(a.temperature);
+      const bits: string[] = [];
+      if (set != null) bits.push(`set ${set}°`);
+      if (cur != null) bits.push(`now ${cur}°`);
+      return c.cyan(s) + (bits.length ? c.grey(' · ' + bits.join(' · ')) : '');
+    }
+    case 'update':
+      return s === 'on' ? c.blue('update available') : c.grey('up to date');
+    case 'button':
+    case 'event': {
+      const age = ageOfTimestamp(s);
+      return age ? c.grey('last ' + age + ' ago') : c.grey(s);
+    }
+    default:
+      return c.white(s);
   }
+}
+
+/** binary_sensor state → a device-class-aware phrase (motion, door, leak, …). */
+function formatBinary(state: string, deviceClass: string | undefined): string {
+  const on = state === 'on';
+  switch (deviceClass) {
+    case 'motion':
+    case 'occupancy':
+    case 'presence':
+      return on ? c.yellow('detected') : c.grey('clear');
+    case 'door':
+    case 'window':
+    case 'garage_door':
+    case 'opening':
+      return on ? c.yellow('open') : c.green('closed');
+    case 'connectivity':
+      return on ? c.green('connected') : c.red('disconnected');
+    case 'moisture':
+      return on ? c.red('wet') : c.green('dry');
+    case 'smoke':
+    case 'gas':
+    case 'carbon_monoxide':
+      return on ? c.redB('DETECTED') : c.green('clear');
+    case 'problem':
+    case 'safety':
+      return on ? c.red('problem') : c.green('ok');
+    case 'tamper':
+      return on ? c.red('tamper') : c.grey('ok');
+    case 'battery':
+      return on ? c.red('low') : c.green('ok');
+    case 'lock':
+      return on ? c.yellow('unlocked') : c.green('locked');
+    default:
+      return on ? c.yellow('on') : c.grey('off');
+  }
+}
+
+/* ── CONFIG PARAMETERS (v0.22) ───────────────────────────────────────────── */
+
+/** A small count/status tag appended to the CONFIG PARAMETERS section header. */
+function configCountTag(cfg: ConfigParamsResult): string {
+  switch (cfg.status) {
+    case 'ready':
+      return c.grey(`  ${cfg.params.length}`);
+    case 'loading':
+    case 'idle':
+      return c.grey('  …');
+    case 'error':
+      return c.yellow('  !');
+    default:
+      return '';
+  }
+}
+
+/** The CONFIG PARAMETERS body rows for the node — a status line, or one row per
+ *  parameter once the (lazy) fetch has resolved. */
+function configRows(cfg: ConfigParamsResult, inner: number): string[] {
+  if (cfg.status === 'idle' || cfg.status === 'loading') {
+    return [note('loading configuration…', inner)];
+  }
+  if (cfg.status === 'error') {
+    return [note('configuration unavailable' + (cfg.error ? `: ${cfg.error}` : ''), inner, c.yellow)];
+  }
+  if (cfg.params.length === 0) {
+    return [note('no configurable parameters', inner)];
+  }
+  return cfg.params.map((p) => configParamRow(p, inner));
+}
+
+/**
+ * One config parameter as a two-column row: `  <label>   <value unit · meaning>`.
+ * The value (with its enum meaning) is protected; the label truncates first.
+ * Non-writeable parameters carry a dim `(ro)` marker.
+ */
+function configParamRow(p: ConfigParam, inner: number): string {
+  const valTxt =
+    p.value == null
+      ? c.grey('—')
+      : c.whiteB(String(p.value)) + (p.unit ? c.grey(' ' + p.unit) : '');
+  const enumTxt = p.valueLabel ? c.grey(' · ') + c.cyan(p.valueLabel) : '';
+  const value = valTxt + enumTxt;
+  const ro = p.writeable ? '' : c.grey(' (ro)');
+  const left = '  ' + c.white(p.label) + ro;
+  const leftBudget = Math.max(1, inner - visLen(value) - 1);
+  return lr(truncate(left, leftBudget), value, inner);
+}
+
+/** An indented, dim note line (empty-state / status inside a section). */
+function note(text: string, inner: number, color: (s: string) => string = c.grey): string {
+  return truncate('    ' + color(text), inner);
 }
 
 /* ── graphic builders (each returns an inner-width string, or null if it can't
@@ -399,9 +577,6 @@ function pushRoute(body: string[], label: string, route: RouteStat, inner: numbe
   if (rssi != null) bits.push(rssiColor(rssi)(`${rssi} dBm`));
 
   const tail = bits.length ? c.grey('  ·  ') + bits.join(c.grey(' · ')) : '';
-  // Per-hop signal bars augment the chain, but must never crowd out the tail
-  // (rate/route-rssi/⚠failed marker): if the barred chain + tail would overflow
-  // the value columns, fall back to the number-only chain first.
   let chain = routeChain(route, true);
   if (visLen(chain) + visLen(tail) > inner - 11) chain = routeChain(route, false);
   body.push(kv(label, chain + tail, inner));
@@ -430,17 +605,16 @@ function routeChain(route: RouteStat, bars: boolean): string {
 
 /* ── section / row builders (return the INNER content string) ────────────── */
 
-const SEP = '\x00SEP'; // sentinel: this body entry is a ╠──╣ rule, not content
+const SEP = '\x00SEP'; // sentinel: this body entry is a full-width rule, not content
 
 function section(title: string): string {
   return ' ' + c.cyanB(title);
 }
 
-/** Label + value row, label column fixed at 9 cols, indented 2. */
+/** Label + value row, label column fixed at 8 cols, indented 2. */
 function kv(k: string, v: string, inner: number): string {
   const labelCell = k ? c.label(k.padEnd(8)) : ' '.repeat(8);
   const left = '  ' + labelCell + ' ';
-  // Truncate the value so the row never exceeds the inner width.
   return truncate(left + v, inner);
 }
 
@@ -476,7 +650,6 @@ function powerLabel(n: NodeSnapshot): string {
   const isBattery = n.entities.some((e) => /_battery/i.test(e.entityId));
   return isBattery ? c.cyan('battery-powered') : c.grey('mains (AC)');
 }
-
 
 /* ── colour helpers (mirror the Overview health discipline) ──────────────── */
 
@@ -557,6 +730,28 @@ function validRssi(v: number | null | undefined): number | null {
 
 function dead(n: NodeSnapshot): boolean {
   return n.status === NodeStatus.Dead || n.status === NodeStatus.Unknown;
+}
+
+/** A finite numeric attribute value, or null (attrs are `unknown`-typed). */
+function numAttr(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/** A string attribute value, or undefined. */
+function strAttr(v: unknown): string | undefined {
+  return typeof v === 'string' ? v : undefined;
+}
+
+/** Does a state string read as a finite number (a numeric sensor reading)? */
+function isNumericStr(s: string): boolean {
+  return s.trim() !== '' && Number.isFinite(Number(s));
+}
+
+/** Relative age of an ISO-timestamp state (button/event last-fired), or null. */
+function ageOfTimestamp(s: string): string | null {
+  const t = Date.parse(s);
+  if (Number.isNaN(t)) return null;
+  return fmtAge(Date.now() - t);
 }
 
 function fmtAge(ms: number): string {

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.22.0 — 2026-07-21
+
+**Per-device detail: live entity state + configuration parameters** (Phase 2 of
+the per-device pass). The Node Detail screen becomes a scrollable, full-screen
+dossier that answers "what is this device doing right now, and how is it set up?"
+
+- **LIVE ENTITIES section.** Every Home Assistant entity on the node, joined with
+  its **current state** — a light's on/off + dimmer %, a sensor's value + unit, a
+  binary_sensor read through its device-class (motion → *detected*, door → *open*),
+  climate mode + setpoint/current temp, cover open/closed + position, lock state,
+  firmware-update availability, and a button/event's last-fired age. State is
+  seeded from `get_states` and kept live by the existing `state_changed`
+  subscription (attribute-only changes, like a dimmer level moving, update too).
+- **CONFIG PARAMETERS section.** The device's Z-Wave configuration values via
+  `zwave_js/get_config_parameters` (lazy per-node fetch, cached): each parameter's
+  label, current value + unit, and the **enum meaning** of that value (e.g.
+  `LED Indicator  2 · Always off`). Read-only parameters are marked `(ro)`.
+  Shows an honest *loading / unavailable / none* line while it resolves.
+- **The dossier scrolls.** It's now taller than a terminal, so `↑`/`↓`/`j`/`k`
+  scroll (page with `space`/`b`, `g`/`G` for top/bottom) and a `a–b/N` position
+  token rides in the title rule. Node stepping moves to `<`/`>` (unshifted `,`/`.`
+  aliases); the command bar advertises the real keys.
+
+This release is read-only: it surfaces state + configuration but changes nothing.
+Device control (turn on/off, set a parameter) lands next, behind the existing
+write-actions + type-CONFIRM safety gate.
+
 ## 0.21.0 — 2026-07-18
 
 **Accuracy + dead-command fixes** (from a novel 5-dimension adversarial audit of

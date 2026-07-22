@@ -87,3 +87,12 @@ test('numeric version attributes are coerced to strings', () => {
   const fw = aggregateFirmware([st('update.node5_firmware', 'off', { installed_version: 1.7, latest_version: 1.7 })], MAP);
   assert.equal(fw.get(5)!.current, '1.7');
 });
+
+test('firmware version strings are sanitized (device-reported, reach the Detail frame)', () => {
+  const fw = aggregateFirmware(
+    [st('update.node5_firmware', 'off', { installed_version: '1.7\n0\x1b[2J', latest_version: '1.70' })],
+    MAP,
+  );
+  const cur = fw.get(5)!.current!;
+  assert.ok(!/[\x00-\x1f]/.test(cur), 'control/ESC bytes stripped from installed_version');
+});
