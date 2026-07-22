@@ -122,7 +122,7 @@ test('formatEntityState: lock + update + unavailable/null', () => {
 
 test('Detail holds EXACTLY view.rows lines within view.cols at every size', () => {
   const entities = Array.from({ length: 8 }, (_, i) => ent({ entityId: `sensor.s${i}`, domain: 'sensor', name: `Sensor ${i}`, state: String(i), attrs: { unit_of_measurement: 'x' } }));
-  const params = Array.from({ length: 8 }, (_, i) => ({ key: `1-1-0-${i}`, label: `Param ${i}`, value: i, valueLabel: null, unit: null, writeable: true, min: 0, max: 10 }));
+  const params = Array.from({ length: 8 }, (_, i) => ({ key: `1-1-0-${i}`, label: `Param ${i}`, value: i, valueLabel: null, unit: null, writeable: true, min: 0, max: 10, property: i, propertyKey: null, endpoint: 0, states: null }));
   const { data, nodes } = mkData({ entityStates: entities, configParams: { status: 'ready', params } });
   for (const [cols, rows] of [[40, 12], [72, 20], [80, 24], [120, 46], [200, 50]] as const) {
     const lines = renderDetail(ctx(mkView(cols, rows), data, nodes));
@@ -143,7 +143,7 @@ test('Detail renders the LIVE ENTITIES section with formatted state', () => {
 });
 
 test('Detail renders CONFIG PARAMETERS with value + enum meaning', () => {
-  const params = [{ key: '3-112-0-16', label: 'Switch Mode', value: 2, valueLabel: 'Always off', unit: null, writeable: true, min: null, max: null }];
+  const params = [{ key: '3-112-0-16', label: 'Switch Mode', value: 2, valueLabel: 'Always off', unit: null, writeable: true, min: null, max: null, property: 16, propertyKey: null, endpoint: 0, states: { '0': 'On', '2': 'Always off' } }];
   const { data, nodes } = mkData({ configParams: { status: 'ready', params } });
   const out = renderDetail(ctx(mkView(100, 46), data, nodes)).map(strip).join('\n');
   assert.match(out, /CONFIG PARAMETERS/);
