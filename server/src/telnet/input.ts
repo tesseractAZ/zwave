@@ -251,6 +251,7 @@ function applyLogKey(view: ViewState, ev: InputEvent, data: DataProvider): KeyRe
     if (sel && sel.nodeId != null && data.nodeById(sel.nodeId)) {
       selectNodeById(view, data, sel.nodeId);
       view.screen = 'detail';
+      view.detailScroll = 0; // start the dossier at the top
       return REDRAW;
     }
     return NOOP;
@@ -293,6 +294,71 @@ function applyLogKey(view: ViewState, ev: InputEvent, data: DataProvider): KeyRe
 }
 
 /**
+ * Handle a key while the Node Detail screen is active. Owns the dossier scroll
+ * (`↑`/`↓`/`j`/`k`, page `space`/`b`, `g`/`G`) and node stepping (`<`/`>` and
+ * their unshifted `,`/`.` aliases). Returns a KeyResult when it owns the key, or
+ * `null` to let the generic handler run (screen switch, q/Esc, actions…).
+ */
+function applyDetailKey(view: ViewState, ev: InputEvent, data: DataProvider): KeyResult | null {
+  const page = Math.max(1, view.rows - 4); // ≈ one content-height page
+
+  if (ev.type === 'arrow') {
+    if (ev.dir === 'down') return scrollDetail(view, +1);
+    if (ev.dir === 'up') return scrollDetail(view, -1);
+    return NOOP; // left/right reserved on Detail
+  }
+  if (ev.type !== 'char') return null; // enter/escape/tab/ctrlc → generic
+
+  switch (ev.ch) {
+    case 'j':
+      return scrollDetail(view, +1);
+    case 'k':
+      return scrollDetail(view, -1);
+    case ' ': // page down
+      return scrollDetail(view, page);
+    case 'b': // page up
+      return scrollDetail(view, -page);
+    case 'g': // top
+      if ((view.detailScroll ?? 0) === 0) return NOOP;
+      view.detailScroll = 0;
+      return REDRAW;
+    case 'G': // bottom — the renderer clamps this to the real max
+      view.detailScroll = Number.MAX_SAFE_INTEGER;
+      return REDRAW;
+    case '<':
+    case ',':
+      return browseNode(view, data, -1);
+    case '>':
+    case '.':
+      return browseNode(view, data, +1);
+    default:
+      return null; // a/A, 1-9, q, c, e, y, f, t, p/i/h/R/x, '/', … → generic
+  }
+}
+
+/** Move the dossier scroll offset by `delta` rows (clamped ≥ 0; the renderer
+ *  clamps the upper bound and writes back the real value). */
+function scrollDetail(view: ViewState, delta: number): KeyResult {
+  const cur = view.detailScroll ?? 0;
+  const next = Math.max(0, cur + delta);
+  if (next === cur) return NOOP;
+  view.detailScroll = next;
+  return REDRAW;
+}
+
+/** Step the node cursor by `delta` and reset the dossier to the top of the new
+ *  node (so `<`/`>` browsing always lands you at the header). */
+function browseNode(view: ViewState, data: DataProvider, delta: number): KeyResult {
+  const len = visibleNodes(data, view).length;
+  if (len === 0) return NOOP;
+  const next = Math.max(0, Math.min(len - 1, view.selected + delta));
+  if (next === view.selected) return NOOP;
+  view.selected = next;
+  view.detailScroll = 0;
+  return REDRAW;
+}
+
+/**
  * Apply one input event to the session view-state.
  *
  * @param view  the per-session ViewState (mutated in place)
@@ -314,6 +380,14 @@ export function applyKey(
     if (r) return r;
   }
 
+  // The Detail screen owns vertical scroll (its dossier is taller than the
+  // frame) + node stepping. It claims arrows/j/k/</>; everything else (screen
+  // switch, q/Esc, a, …) falls through to the generic handler below.
+  if (view.screen === 'detail') {
+    const r = applyDetailKey(view, ev, data);
+    if (r) return r;
+  }
+
   // Escape → dismiss any overlay back to the Overview home.
   if (ev.type === 'escape') {
     if (view.screen !== 'overview') {
@@ -328,6 +402,7 @@ export function applyKey(
     if (visibleNodes(data, view).length === 0) return NOOP;
     if (view.screen !== 'detail') {
       view.screen = 'detail';
+      view.detailScroll = 0; // start the dossier at the top
       return REDRAW;
     }
     return NOOP;

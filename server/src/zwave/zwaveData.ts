@@ -44,6 +44,9 @@ import {
   type LogKind,
   type ActionKind,
   type InterferenceView,
+  type EntityLiveState,
+  type ConfigParam,
+  type ConfigParamsResult,
 } from '../types';
 import { createHistoryStore, type HistoryStore, type HistoryMap } from './historyStore';
 import {
@@ -151,6 +154,9 @@ export function mapStateChanged(
  *  × 120 ≈ a 2-hour trend. Shared with the store's `coarseMax`. */
 const COARSE_MAX = 120;
 const COARSE_INTERVAL_MS = 60_000;
+/** v0.22: min gap before a FAILED config-param fetch is retried, so a Detail
+ *  screen that re-requests every frame can't hammer a flaky device. */
+const CONFIG_RETRY_MS = 15_000;
 
 /* ─── raw HA response shapes (only the fields we read) ──────────────────── */
 
@@ -305,6 +311,12 @@ export interface ZwaveData {
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
   /** M6: interference view (noise floor, serial health, diurnal heatmap). */
   interference(): InterferenceView;
+  /** v0.22: a node's entities joined with their current live state (DETAIL). */
+  entityStates(nodeId: number): EntityLiveState[];
+  /** v0.22: cached config-parameter result for a node (DETAIL). */
+  configParams(nodeId: number): ConfigParamsResult;
+  /** v0.22: idempotently trigger a node's async config-param fetch. */
+  requestConfigParams(nodeId: number): void;
   /** Stop polling and clear timers. */
   stop(): void;
 }
@@ -513,6 +525,17 @@ class ZwaveDataImpl implements ZwaveData {
   private updateEntityToNode = new Map<string, number>();
   /** Firmware-update status per node, from get_states of the update entities. */
   private firmwareByNode = new Map<number, FirmwareInfo>();
+  /** v0.22: LIVE state per entity_id (state string + selected attributes),
+   *  seeded from get_states and kept fresh by the state_changed subscription.
+   *  Read by entityStates(node) — the DETAIL screen's live entity list. */
+  private stateByEntityId = new Map<string, { state: string; attrs: Record<string, unknown> }>();
+  /** v0.22: lazy per-node config-parameter cache (zwave_js/get_config_parameters).
+   *  Keyed by node id; absent = never requested. A fetch flips it through
+   *  loading → ready|error|unsupported so the DETAIL screen can show progress. */
+  private configByNode = new Map<number, ConfigParamsResult>();
+  /** v0.22: epoch ms of the last config-param fetch attempt per node — throttles
+   *  error retries so a Detail screen that re-requests every frame can't hammer. */
+  private configFetchAt = new Map<number, number>();
   /** Epoch ms of the last statistics event (node or controller) — freeze/health probe. */
   private lastStatsAt: number | null = null;
   /** Node status from the previous poll — diffed to log alive/dead/wake events. */
@@ -1093,6 +1116,11 @@ class ZwaveDataImpl implements ZwaveData {
         this.statsByNode.clear();
         this.batteryByNode.clear();
         this.firmwareByNode.clear();
+        // v0.22 live-state + config caches are keyed by the OLD network's
+        // entity_ids / node ids — drop them so a re-discovered mesh starts clean.
+        this.stateByEntityId.clear();
+        this.configByNode.clear();
+        this.configFetchAt.clear();
         // Force a clean reconnect so the old (still-open-socket) subscriptions —
         // controller/node stats, state_changed, notifications — are RELEASED
         // (handleClose clears the event handlers) before onReady re-subscribes.
@@ -1218,6 +1246,10 @@ class ZwaveDataImpl implements ZwaveData {
         this.histLongByNode.clear();
         this.coarseAccum.clear();
         this.firmwareByNode.clear();
+        // v0.22 live-state + config caches belong to the OLD network's entities.
+        this.stateByEntityId.clear();
+        this.configByNode.clear();
+        this.configFetchAt.clear();
         // Evidence accumulators are node-id-keyed too.
         this.flapAccum.clear();
         this.routeChangeAccum.clear();
@@ -1363,6 +1395,18 @@ class ZwaveDataImpl implements ZwaveData {
     this.deviceIdToNodeId = deviceIdToNodeId;
     this.entitiesByDeviceId = entitiesByDeviceId;
     this.entityCount = count;
+    // v0.22: prune live-state/config caches to what the fresh registry still
+    // knows, so entities/nodes removed from the mesh can't leak memory across
+    // registry reloads (surviving entries are kept — no Detail flicker).
+    for (const eid of this.stateByEntityId.keys()) {
+      if (!this.entityIndex.has(eid)) this.stateByEntityId.delete(eid);
+    }
+    for (const nid of this.configByNode.keys()) {
+      if (!deviceByNodeId.has(nid)) {
+        this.configByNode.delete(nid);
+        this.configFetchAt.delete(nid);
+      }
+    }
   }
 
   private buildNode(raw: RawNode): NodeSnapshot {
@@ -1611,6 +1655,11 @@ class ZwaveDataImpl implements ZwaveData {
   /** Map an HA `state_changed` event → a `value` activity-log entry (tracked
    *  zwave entities only). Ignores no-op churn and throttles numeric telemetry. */
   private onStateChanged(ev: unknown): void {
+    // (1) Keep the LIVE-state cache fresh for tracked entities — done FIRST and
+    // unconditionally, so attribute-only changes (a dimmer level moving while
+    // state stays "on") and throttled/no-op sensor updates still refresh Detail.
+    this.updateLiveState(ev);
+    // (2) The value-log mapping (throttled, skips no-op transitions).
     const m = mapStateChanged(ev, this.entityIndex, Date.now(), this.lastValueAt);
     if (!m) return;
     this.pushEvent('net', 'info', 'value', m.nodeId, m.text, {
@@ -1620,6 +1669,18 @@ class ZwaveDataImpl implements ZwaveData {
       oldState: m.oldState,
       newState: m.newState,
     });
+  }
+
+  /** Refresh {@link stateByEntityId} from a raw `state_changed` event, for tracked
+   *  mesh entities only. Drops removals (new_state null) so the last known good
+   *  state lingers rather than vanishing mid-frame. */
+  private updateLiveState(ev: unknown): void {
+    const d = (ev as { data?: { entity_id?: string; new_state?: { state?: string; attributes?: Record<string, unknown> } | null } } | null)?.data;
+    const eid = d?.entity_id;
+    if (!eid || !this.entityIndex.has(eid)) return;
+    const ns = d?.new_state;
+    if (!ns || typeof ns.state !== 'string') return; // removal / malformed — keep prior
+    this.stateByEntityId.set(eid, { state: ns.state, attrs: pickDisplayAttrs(ns.attributes) });
   }
 
   /** Map a `zwave_js_notification` event → a `notification` log entry (defensive:
@@ -1640,7 +1701,9 @@ class ZwaveDataImpl implements ZwaveData {
    * as the battery poll (called after each registry (re)load / on reconnect).
    */
   private async fetchEntityStates(): Promise<void> {
-    if (this.batteryEntityToNode.size === 0 && this.updateEntityToNode.size === 0) return;
+    // entityIndex ⊇ (battery ∪ update ∪ every other tracked mesh entity); an
+    // empty index means the registry hasn't loaded yet — nothing to seed.
+    if (this.entityIndex.size === 0) return;
     try {
       const states = await this.client.send<RawEntityState[]>({ type: 'get_states' });
       for (const s of states) {
@@ -1649,11 +1712,66 @@ class ZwaveDataImpl implements ZwaveData {
           const lvl = Number(s.state);
           if (Number.isFinite(lvl)) this.batteryByNode.set(bNode, Math.round(lvl));
         }
+        // Seed the LIVE-state cache for every tracked mesh entity (v0.22). The
+        // state_changed subscription keeps it fresh after this; this pass fills
+        // in everything that isn't currently transitioning.
+        if (this.entityIndex.has(s.entity_id)) {
+          this.stateByEntityId.set(s.entity_id, { state: s.state, attrs: pickDisplayAttrs(s.attributes) });
+        }
       }
       // Rebuilt fresh each pass (a node may have >1 firmware target — aggregated).
       this.firmwareByNode = aggregateFirmware(states, this.updateEntityToNode);
     } catch (e) {
       this.log(`entity states fetch failed: ${errMsg(e)}`);
+    }
+  }
+
+  /** v0.22: a node's entities joined with their current live state. Order follows
+   *  the registry entity order; entities with no state yet read `state: null`. */
+  entityStates(nodeId: number): EntityLiveState[] {
+    const devId = this.deviceIdOf(nodeId);
+    const ents = devId ? this.entitiesByDeviceId.get(devId) ?? [] : [];
+    return ents.map((e) => {
+      const live = this.stateByEntityId.get(e.entityId);
+      return {
+        entityId: e.entityId,
+        domain: e.domain,
+        name: e.name ?? e.entityId,
+        state: live ? live.state : null,
+        attrs: live ? live.attrs : {},
+      };
+    });
+  }
+
+  /** v0.22: cached config-parameter result for a node (idle until first request). */
+  configParams(nodeId: number): ConfigParamsResult {
+    return this.configByNode.get(nodeId) ?? { status: 'idle', params: [] };
+  }
+
+  /** v0.22: idempotently kick off a config-parameter fetch. No-op while loading,
+   *  already-ready, or unsupported; errors retry after CONFIG_RETRY_MS. */
+  requestConfigParams(nodeId: number): void {
+    const cur = this.configByNode.get(nodeId);
+    if (cur && (cur.status === 'loading' || cur.status === 'ready' || cur.status === 'unsupported')) return;
+    if (cur?.status === 'error' && Date.now() - (this.configFetchAt.get(nodeId) ?? 0) < CONFIG_RETRY_MS) return;
+    void this.fetchConfigParams(nodeId);
+  }
+
+  /** Async body of {@link requestConfigParams}. Fire-and-forget; never throws. */
+  private async fetchConfigParams(nodeId: number): Promise<void> {
+    const devId = this.deviceIdOf(nodeId);
+    this.configFetchAt.set(nodeId, Date.now());
+    if (!devId) {
+      this.configByNode.set(nodeId, { status: 'unsupported', params: [], error: 'no HA device for this node' });
+      return;
+    }
+    this.configByNode.set(nodeId, { status: 'loading', params: [] });
+    try {
+      const raw = await this.client.send<Record<string, RawConfigParam>>({ type: 'zwave_js/get_config_parameters', device_id: devId });
+      this.configByNode.set(nodeId, { status: 'ready', params: mapConfigParams(raw) });
+    } catch (e) {
+      this.configByNode.set(nodeId, { status: 'error', params: [], error: errMsg(e) });
+      this.log(`config params fetch failed for node ${nodeId}: ${errMsg(e)}`);
     }
   }
 
@@ -1990,6 +2108,89 @@ export function aggregateFirmware(
   }
   return fw;
 }
+/** Attributes the DETAIL screen may format per-domain (light dimmer level,
+ *  climate temps, cover position, sensor unit/class …). Everything else in an
+ *  HA state's `attributes` blob (icons, colour arrays, supported_features
+ *  bitmasks) is dropped so the live-state cache stays small and predictable. */
+const DISPLAY_ATTR_KEYS = [
+  'brightness', // light dimmer, 0..255
+  'color_mode',
+  'current_temperature', // climate
+  'temperature', // climate setpoint (single)
+  'target_temp_high',
+  'target_temp_low',
+  'hvac_action',
+  'current_humidity',
+  'fan_mode',
+  'preset_mode',
+  'current_position', // cover, 0..100
+  'is_closed',
+  'unit_of_measurement', // sensor
+  'device_class', // sensor / binary_sensor / cover semantics
+  'friendly_name',
+] as const;
+
+/** Keep only the display-relevant attributes from a raw HA `attributes` blob.
+ *  Pure + exported so the whitelist is unit-testable. Returns a fresh object
+ *  (never aliases the source) with only present keys. */
+export function pickDisplayAttrs(attrs: Record<string, unknown> | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!attrs) return out;
+  for (const k of DISPLAY_ATTR_KEYS) {
+    if (attrs[k] !== undefined) out[k] = attrs[k];
+  }
+  return out;
+}
+
+/** Raw shape of one entry in a `zwave_js/get_config_parameters` response. */
+interface RawConfigParam {
+  property?: number;
+  property_key?: number | null;
+  endpoint?: number;
+  value?: unknown;
+  metadata?: {
+    label?: string;
+    type?: string;
+    unit?: string | null;
+    writeable?: boolean;
+    min?: number | null;
+    max?: number | null;
+    states?: Record<string, string> | null;
+  };
+}
+
+/** Map a raw `zwave_js/get_config_parameters` object → a sorted, display-ready
+ *  {@link ConfigParam}[]. Pure + exported for unit testing. Params are sorted by
+ *  the numeric `property` (then key) so the DETAIL list is stable; the current
+ *  value's enum label is resolved from `metadata.states` when present. */
+export function mapConfigParams(raw: Record<string, RawConfigParam> | null | undefined): ConfigParam[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const params: ConfigParam[] = [];
+  for (const [key, p] of Object.entries(raw)) {
+    if (!p || typeof p !== 'object') continue;
+    const meta = p.metadata ?? {};
+    const value = typeof p.value === 'number' ? p.value : null;
+    const states = meta.states && typeof meta.states === 'object' ? meta.states : null;
+    const valueLabel = value != null && states ? states[String(value)] ?? null : null;
+    params.push({
+      key,
+      label: sanitizeLabel(String(meta.label ?? key)),
+      value,
+      valueLabel: valueLabel != null ? sanitizeLabel(valueLabel) : null,
+      unit: meta.unit ? sanitizeLabel(String(meta.unit)) : null,
+      writeable: meta.writeable === true,
+      min: typeof meta.min === 'number' ? meta.min : null,
+      max: typeof meta.max === 'number' ? meta.max : null,
+    });
+  }
+  params.sort((a, b) => {
+    const pa = typeof raw[a.key]?.property === 'number' ? (raw[a.key]!.property as number) : 0;
+    const pb = typeof raw[b.key]?.property === 'number' ? (raw[b.key]!.property as number) : 0;
+    return pa - pb || a.key.localeCompare(b.key);
+  });
+  return params;
+}
+
 /** Stable key of a route's repeater chain, for change detection. */
 function routeKey(r: RouteStat | null): string {
   return r ? r.repeaters.join('>') : '';

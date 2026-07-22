@@ -18,13 +18,20 @@ const data: DataProvider = {
   nodes: () => [node], nodeById: () => node, controller: () => null, events: () => [],
   scoreFor: () => score, noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }),
   historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0, ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }), efficacyFor: () => null, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
+  entityStates: () => [], configParams: () => ({ status: 'ready', params: [] }), requestConfigParams: () => {},
 };
 const mkView = (screen: ViewState['screen'] = 'overview'): ViewState => ({
   screen, cols: 100, rows: 30, selected: 0, scroll: 0, filter: '',
   sortKey: 'health', signalDisplay: 'margin', followTail: true, errorsOnly: false,
-  logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null,
+  detailScroll: 0, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null,
 });
 const char = (ch: string) => ({ type: 'char' as const, ch });
+
+/** A 3-node roster for Detail node-stepping tests. */
+function mkMultiNodeData(): DataProvider {
+  const nodes: NodeSnapshot[] = [3, 4, 5].map((id) => ({ ...node, nodeId: id, deviceId: 'd' + id, name: 'Node ' + id }));
+  return { ...data, nodes: () => nodes, nodeById: (id) => nodes.find((n) => n.nodeId === id) };
+}
 
 test('number keys 1-6 select the right screen', () => {
   const v = mkView();
@@ -72,4 +79,62 @@ test('read-only action keys are no-ops in v0.1', () => {
     assert.ok(!r.quit && !r.redraw, `${k} should be a no-op`);
     assert.equal(v.screen, 'overview');
   }
+});
+
+/* ── Detail screen: dossier scroll + node stepping (v0.22) ─────────────────── */
+
+test('Detail: j/k and arrows scroll the dossier (NOT the node selection)', () => {
+  const v = mkView('detail');
+  v.selected = 0;
+  applyKey(v, char('j'), data);
+  assert.equal(v.detailScroll, 1, 'j scrolls down');
+  assert.equal(v.selected, 0, 'j does NOT move node selection on Detail');
+  applyKey(v, { type: 'arrow', dir: 'down' }, data);
+  assert.equal(v.detailScroll, 2, 'arrow-down scrolls');
+  applyKey(v, char('k'), data);
+  assert.equal(v.detailScroll, 1, 'k scrolls up');
+  // never below zero
+  applyKey(v, char('k'), data);
+  applyKey(v, char('k'), data);
+  assert.equal(v.detailScroll, 0, 'scroll clamps at 0');
+});
+
+test('Detail: < and > step to the adjacent node and reset the scroll to the top', () => {
+  const md = mkMultiNodeData();
+  const v = mkView('detail');
+  v.selected = 0;
+  v.detailScroll = 7;
+  applyKey(v, char('>'), md);
+  assert.equal(v.selected, 1, '> advances the node');
+  assert.equal(v.detailScroll, 0, 'new node starts at the top');
+  applyKey(v, char('<'), md);
+  assert.equal(v.selected, 0, '< steps back');
+  // unshifted aliases , and . work too
+  applyKey(v, char('.'), md);
+  assert.equal(v.selected, 1, '. is an alias for >');
+  applyKey(v, char(','), md);
+  assert.equal(v.selected, 0, ', is an alias for <');
+});
+
+test('Detail: g jumps to top, G requests the bottom (renderer clamps)', () => {
+  const v = mkView('detail');
+  v.detailScroll = 5;
+  applyKey(v, char('g'), data);
+  assert.equal(v.detailScroll, 0, 'g → top');
+  applyKey(v, char('G'), data);
+  assert.ok(v.detailScroll > 0, 'G requests a large offset the renderer will clamp');
+});
+
+test('Detail: Enter into Detail resets the scroll to the top', () => {
+  const v = mkView('overview');
+  v.detailScroll = 20;
+  applyKey(v, { type: 'enter' }, data);
+  assert.equal(v.screen, 'detail');
+  assert.equal(v.detailScroll, 0, 'drilling in starts at the top');
+});
+
+test('Detail: number/letter screen switches still work (not swallowed by scroll)', () => {
+  const v = mkView('detail');
+  applyKey(v, char('1'), data);
+  assert.equal(v.screen, 'overview', 'screen switch falls through to the generic handler');
 });
