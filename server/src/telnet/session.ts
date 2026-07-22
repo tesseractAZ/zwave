@@ -19,15 +19,15 @@
  * own: byte parsing, connection lifecycle, and any protocol negotiation.
  */
 
-import type { DataProvider, NodeSnapshot, ScreenCtx, ViewState, ActionRunner, ActionKind } from '../types';
+import type { DataProvider, NodeSnapshot, ScreenCtx, ViewState, ActionRunner, ActionKind, ConfigParam, EntityVerb } from '../types';
 import { applyKey, clampSelection, filteredEvents, syncLogCursor, visibleNodes } from './input';
 import type { InputEvent } from './input';
 import { renderScreen } from './screens/index';
 import { renderLogin } from './screens/login';
 import { centeredNotice } from './screens/overview';
-import { buildMenu, clampMenuIndex, describeAction, CONFIRM_WORD } from './actionsCatalog';
+import { buildMenu, buildEntityRows, buildConfigRows, clampMenuIndex, describeAction, CONFIRM_WORD } from './actionsCatalog';
 import type { MenuItem, ActionImpact } from './actionsCatalog';
-import { renderActionsMenu, renderTypeConfirm } from './screens/actionsMenu';
+import { renderActionsMenu, renderTypeConfirm, renderParamEdit } from './screens/actionsMenu';
 import { c } from './ansi';
 import type { AuthPolicy } from '../auth/loginPolicy';
 import {
@@ -84,6 +84,22 @@ interface PendingAction {
   impact: ActionImpact; // drives the confirm colour + wording
   desc: string; // what it does (one line)
   impactNote: string; // the consequence (shown in the confirm box)
+  // v0.23 payloads — set for the device-control / config-write kinds only.
+  entityId?: string;
+  verb?: EntityVerb;
+  param?: ConfigParam;
+  value?: number;
+}
+
+/** The transient config value-picker state (between menu-select and CONFIRM). */
+interface ParamEdit {
+  nodeId: number;
+  param: ConfigParam;
+  /** enum options (value+label) when the param is an enum, else null. */
+  options: Array<{ value: number; label: string }> | null;
+  optionIndex: number; // cursor over enum options
+  draft: string; // typed digits for a numeric param
+  error: string | null; // validation hint
 }
 
 /**
@@ -134,6 +150,8 @@ export class TuiSession {
   private readonly actions?: ActionRunner;
   /** A mutating action awaiting the typed-CONFIRM (null = not confirming). */
   private pendingAction: PendingAction | null = null;
+  /** v0.23 config value-picker, shown between menu-select and CONFIRM (null = off). */
+  private paramEdit: ParamEdit | null = null;
   /** What the operator has typed so far toward CONFIRM (type-to-arm modal). */
   private confirmBuffer = '';
   /** The confirm was launched from the Actions Menu → reopen it on cancel. */
@@ -220,6 +238,7 @@ export class TuiSession {
    *  recalled, and its outcome card is simply hidden behind the login screen. */
   private resetActionState(): void {
     this.pendingAction = null;
+    this.paramEdit = null;
     this.confirmBuffer = '';
     this.confirmFromMenu = false;
     this.menuOpen = false;
@@ -380,6 +399,13 @@ export class TuiSession {
       // An action is in flight — swallow keys until it resolves.
       if (this.actionInFlight) continue;
 
+      // The config value-picker (v0.23) owns keys until a value is chosen/cancelled.
+      if (this.paramEdit != null) {
+        this.handleParamEditKey(ev);
+        dirty = true;
+        continue;
+      }
+
       // A pending action awaits the typed CONFIRM.
       if (this.pendingAction != null) {
         this.handleTypeConfirmKey(ev);
@@ -523,10 +549,19 @@ export class TuiSession {
    *  row (or the target) out from under the cursor before the operator selects. */
   private openMenu(): void {
     this.menuTarget = this.actionTargetNode() ?? null;
-    this.menuSnapshot = buildMenu({
+    const items = buildMenu({
       hasNode: this.menuTarget != null,
       rebuilding: this.data.controller()?.isRebuildingRoutes ?? false,
     });
+    // v0.23: append device-control + config-edit rows for the target node. These
+    // are frozen at open time (same snapshot discipline as the catalog rows).
+    if (this.menuTarget) {
+      const nodeId = this.menuTarget.nodeId;
+      this.data.requestConfigParams(nodeId); // warm the cache for next time
+      items.push(...buildEntityRows(this.data.entityStates(nodeId)));
+      items.push(...buildConfigRows(this.data.configParams(nodeId).params));
+    }
+    this.menuSnapshot = items;
     this.menuIndex = 0;
     this.menuOpen = true;
   }
@@ -573,9 +608,138 @@ export class TuiSession {
     }
     if (item.disabled) return; // the reason is shown inline on the row
     const node = this.menuTarget ?? undefined; // frozen at open time
-    this.closeMenu();
-    this.confirmFromMenu = true;
-    this.beginAction(item.desc.kind, false, node); // menu always requires the typed CONFIRM
+    const p = item.payload;
+    if (p.type === 'catalog') {
+      this.closeMenu();
+      this.confirmFromMenu = true;
+      this.beginAction(p.kind, false, node); // menu always requires the typed CONFIRM
+    } else if (p.type === 'entity' && node) {
+      this.closeMenu();
+      this.confirmFromMenu = true;
+      this.beginEntityAction(node, item, p.entityId, p.verb);
+    } else if (p.type === 'config' && node) {
+      this.closeMenu();
+      this.confirmFromMenu = true;
+      this.openParamEdit(node.nodeId, p.param);
+    }
+  }
+
+  /** Arm the type-CONFIRM for a device-control action (frozen entity + verb). */
+  private beginEntityAction(node: NodeSnapshot, item: MenuItem, entityId: string, verb: EntityVerb): void {
+    this.pendingAction = {
+      kind: 'controlEntity',
+      nodeId: node.nodeId,
+      label: `${item.desc.label} — #${node.nodeId} ${node.name}`,
+      target: `${entityId} · #${node.nodeId} ${node.name}`,
+      impact: item.desc.impact,
+      desc: item.desc.desc,
+      impactNote: item.desc.impactNote,
+      entityId,
+      verb,
+    };
+    this.confirmBuffer = '';
+  }
+
+  /* ── config value picker (v0.23) ─────────────────────────────────────────── */
+
+  /** Open the value picker for a writeable config parameter. */
+  private openParamEdit(nodeId: number, param: ConfigParam): void {
+    const options = param.states
+      ? Object.entries(param.states)
+          .map(([v, label]) => ({ value: Number(v), label }))
+          .filter((o) => Number.isFinite(o.value))
+          .sort((a, b) => a.value - b.value)
+      : null;
+    // Start the enum cursor on the current value when it is one of the options.
+    let optionIndex = 0;
+    if (options && param.value != null) {
+      const at = options.findIndex((o) => o.value === param.value);
+      if (at >= 0) optionIndex = at;
+    }
+    this.paramEdit = { nodeId, param, options, optionIndex, draft: '', error: null };
+  }
+
+  /** Keystrokes for the config value picker. Enum → ↑↓ choose; numeric → type
+   *  digits (bounded by min/max). Enter proceeds to the CONFIRM box; Esc → menu. */
+  private handleParamEditKey(ev: InputEvent): void {
+    const pe = this.paramEdit;
+    if (!pe) return;
+    if (ev.type === 'escape') {
+      this.paramEdit = null;
+      if (this.confirmFromMenu) {
+        this.confirmFromMenu = false;
+        this.openMenu();
+      }
+      return;
+    }
+    if (pe.options) {
+      // Enum mode — move the cursor / pick.
+      const move = (d: number) => {
+        pe.optionIndex = Math.min(pe.options!.length - 1, Math.max(0, pe.optionIndex + d));
+      };
+      if (ev.type === 'arrow' && ev.dir === 'down') return move(1);
+      if (ev.type === 'arrow' && ev.dir === 'up') return move(-1);
+      if (ev.type === 'char' && ev.ch === 'j') return move(1);
+      if (ev.type === 'char' && ev.ch === 'k') return move(-1);
+      if (ev.type === 'enter') this.commitParamEdit(pe.options[pe.optionIndex].value);
+      return;
+    }
+    // Numeric mode.
+    if (ev.type === 'enter') {
+      const v = Number(pe.draft);
+      if (pe.draft === '' || pe.draft === '-' || !Number.isFinite(v)) {
+        pe.error = 'enter a whole number';
+        return;
+      }
+      if (pe.param.min != null && v < pe.param.min) {
+        pe.error = `below the minimum (${pe.param.min})`;
+        return;
+      }
+      if (pe.param.max != null && v > pe.param.max) {
+        pe.error = `above the maximum (${pe.param.max})`;
+        return;
+      }
+      this.commitParamEdit(Math.trunc(v));
+      return;
+    }
+    if (ev.type === 'char') {
+      const ch = ev.ch;
+      if (ch === '\x7f' || ch === '\b') {
+        pe.draft = pe.draft.slice(0, -1);
+        pe.error = null;
+        return;
+      }
+      // Digits, plus a leading minus for signed parameters.
+      if ((ch >= '0' && ch <= '9') || (ch === '-' && pe.draft === '')) {
+        if (pe.draft.length < 11) pe.draft += ch;
+        pe.error = null;
+      }
+    }
+  }
+
+  /** A value was chosen in the picker → arm the type-CONFIRM for the write. */
+  private commitParamEdit(value: number): void {
+    const pe = this.paramEdit;
+    if (!pe) return;
+    const node = this.data.nodeById(pe.nodeId);
+    const nodeName = node?.name ?? `#${pe.nodeId}`;
+    const enumLabel = pe.param.states?.[String(value)];
+    const shown = enumLabel ? `${value} (${enumLabel})` : `${value}${pe.param.unit ? ' ' + pe.param.unit : ''}`;
+    this.paramEdit = null;
+    this.pendingAction = {
+      kind: 'setConfigParam',
+      nodeId: pe.nodeId,
+      label: `Set "${pe.param.label}" = ${shown} — #${pe.nodeId} ${nodeName}`,
+      target: `#${pe.nodeId} ${nodeName} · parameter ${pe.param.property}`,
+      impact: 'caution',
+      desc: `Write "${pe.param.label}" = ${shown}.`,
+      impactNote:
+        'Writes this Z-Wave configuration parameter to the device. Recoverable — you can set it back, but a wrong value can change how the device behaves.',
+      param: pe.param,
+      value,
+    };
+    this.confirmBuffer = '';
+    // confirmFromMenu stays true so Esc at the CONFIRM box returns to the menu.
   }
 
   /* ── type-CONFIRM modal (v0.9) ───────────────────────────────────────────── */
@@ -639,6 +803,8 @@ export class TuiSession {
         case 'rebuildAll': res = await a.rebuildAll(); break;
         case 'stopRebuild': res = await a.stopRebuild(); break;
         case 'removeFailed': res = await a.removeFailed(action.nodeId!); break;
+        case 'controlEntity': res = await a.controlEntity(action.nodeId!, action.entityId!, action.verb!); break;
+        case 'setConfigParam': res = await a.setConfigParam(action.nodeId!, action.param!, action.value!); break;
         default: res = { ok: false, message: 'unknown action' };
       }
     } catch (e) {
@@ -664,6 +830,27 @@ export class TuiSession {
         denied: this.mode === 'denied',
         deniedMsg: this.deniedMsg,
         checking: this.verifying,
+      });
+    }
+    // Config value picker (v0.23) — shown between menu-select and the CONFIRM box.
+    if (this.paramEdit != null) {
+      const pe = this.paramEdit;
+      const cur = pe.param.value == null
+        ? '—'
+        : pe.param.valueLabel
+          ? `${pe.param.value} (${pe.param.valueLabel})`
+          : `${pe.param.value}${pe.param.unit ? ' ' + pe.param.unit : ''}`;
+      return renderParamEdit(this.view, {
+        label: pe.param.label,
+        current: cur,
+        isEnum: pe.options != null,
+        options: pe.options ?? undefined,
+        optionIndex: pe.optionIndex,
+        draft: pe.draft,
+        min: pe.param.min,
+        max: pe.param.max,
+        unit: pe.param.unit,
+        error: pe.error,
       });
     }
     // Action modals: type-CONFIRM → working → outcome → menu (v0.3 / v0.9).

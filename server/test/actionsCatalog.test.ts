@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import {
   ACTION_CATALOG,
   buildMenu,
+  buildEntityRows,
+  buildConfigRows,
   clampMenuIndex,
   describeAction,
   CONFIRM_WORD,
   type ActionImpact,
 } from '../src/telnet/actionsCatalog';
+import type { ConfigParam, EntityLiveState } from '../src/types';
 import type { ActionKind } from '../src/types';
 
 const KINDS: ActionKind[] = ['ping', 'refreshValues', 'reInterview', 'healNode', 'rebuildAll', 'stopRebuild', 'removeFailed'];
@@ -70,4 +73,46 @@ test('clampMenuIndex bounds into range; empty → 0', () => {
 
 test('CONFIRM_WORD is the exact string "CONFIRM"', () => {
   assert.equal(CONFIRM_WORD, 'CONFIRM');
+});
+
+/* ── v0.23 device-control + config menu builders ──────────────────────────── */
+
+const ent = (over: Partial<EntityLiveState> = {}): EntityLiveState =>
+  ({ entityId: 'light.k', domain: 'light', name: 'Kitchen', state: 'on', attrs: {}, ...over });
+const cp = (over: Partial<ConfigParam> = {}): ConfigParam =>
+  ({ key: '5-112-0-3', label: 'LED', value: 2, valueLabel: 'Off', unit: null, writeable: true, min: 0, max: 3, property: 3, propertyKey: null, endpoint: 0, states: null, ...over });
+
+test('buildEntityRows: one row per (controllable entity, verb); read-only domains produce none', () => {
+  const rows = buildEntityRows([
+    ent({ domain: 'light', name: 'Kitchen' }),
+    ent({ entityId: 'lock.f', domain: 'lock', name: 'Front' }),
+    ent({ entityId: 'sensor.p', domain: 'sensor', name: 'Power', state: '42' }), // read-only
+    ent({ entityId: 'binary_sensor.m', domain: 'binary_sensor', name: 'Motion' }), // read-only
+  ]);
+  const labels = rows.map((r) => r.desc.label);
+  assert.deepEqual(labels, ['Turn On · Kitchen', 'Turn Off · Kitchen', 'Toggle · Kitchen', 'Lock · Front', 'Unlock · Front']);
+  assert.ok(rows.every((r) => r.group === 'control' && r.payload.type === 'entity'));
+  // high-stakes unlock is flagged destructive; routine light ops are safe
+  const unlock = rows.find((r) => r.desc.label === 'Unlock · Front')!;
+  assert.equal(unlock.desc.impact, 'destructive');
+  assert.equal(rows.find((r) => r.desc.label === 'Turn On · Kitchen')!.desc.impact, 'safe');
+});
+
+test('buildEntityRows: the live state is surfaced in the row description', () => {
+  const rows = buildEntityRows([ent({ domain: 'light', name: 'Kitchen', state: 'off' })]);
+  assert.match(rows[0].desc.desc, /now: off/);
+});
+
+test('buildConfigRows: only WRITEABLE params; payload carries the param', () => {
+  const rows = buildConfigRows([
+    cp({ label: 'LED', writeable: true, property: 3 }),
+    cp({ key: '5-112-0-1', label: 'RO', writeable: false, property: 1 }),
+    cp({ key: '5-112-0-9', label: 'Ramp', writeable: true, property: 9, states: null, min: 0, max: 99, unit: 'ms', value: 20, valueLabel: null }),
+  ]);
+  assert.deepEqual(rows.map((r) => r.desc.label), ['Set · LED', 'Set · Ramp']);
+  assert.ok(rows.every((r) => r.group === 'config' && r.desc.kind === 'setConfigParam'));
+  const p = rows[0].payload;
+  assert.equal(p.type === 'config' && p.param.property, 3);
+  // the description mentions the current value + the range/enum hint
+  assert.match(rows[1].desc.desc, /0…99 ms/);
 });

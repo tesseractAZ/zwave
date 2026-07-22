@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderActionsMenu, renderTypeConfirm } from '../src/telnet/screens/actionsMenu';
-import { buildMenu } from '../src/telnet/actionsCatalog';
+import { renderActionsMenu, renderTypeConfirm, renderParamEdit } from '../src/telnet/screens/actionsMenu';
+import { buildMenu, buildEntityRows, buildConfigRows } from '../src/telnet/actionsCatalog';
+import type { ConfigParam, EntityLiveState } from '../src/types';
 import { visLen } from '../src/telnet/ansi';
 import type { ViewState } from '../src/types';
 
@@ -60,5 +61,31 @@ test('renderTypeConfirm honours the contract for every impact + buffer state', (
         assertContract(lines, cols, rows, `confirm ${cols}x${rows} ${impact} buf="${buffer}"`);
       }
     }
+  }
+});
+
+/* ── v0.23: a long menu (device controls + config) + the value picker ─────── */
+
+const manyEntities: EntityLiveState[] = Array.from({ length: 6 }, (_, i) =>
+  ({ entityId: `light.l${i}`, domain: 'light', name: `Light Number ${i}`, state: i % 2 ? 'on' : 'off', attrs: {} }));
+const manyParams: ConfigParam[] = Array.from({ length: 8 }, (_, i) =>
+  ({ key: `5-112-0-${i}`, label: `Parameter ${i}`, value: i, valueLabel: null, unit: null, writeable: true, min: 0, max: 99, property: i, propertyKey: null, endpoint: 0, states: null }));
+
+test('renderActionsMenu holds the contract with a LONG menu (control + config rows) at every size + cursor', () => {
+  const items = [...buildMenu({ hasNode: true, rebuilding: false }), ...buildEntityRows(manyEntities), ...buildConfigRows(manyParams)];
+  for (const [cols, rows] of SIZES) {
+    for (const index of [0, 6, Math.floor(items.length / 2), items.length - 1]) {
+      const lines = renderActionsMenu(view(cols, rows), { items, index, targetLabel: '#16 Kitchen', locked: false });
+      assertContract(lines, cols, rows, `long-menu ${cols}x${rows} i=${index}`);
+    }
+  }
+});
+
+test('renderParamEdit honours the contract for enum + numeric modes', () => {
+  for (const [cols, rows] of SIZES) {
+    const enumOpts = { label: 'LED Indicator', current: '2 (Always off)', isEnum: true, options: [{ value: 0, label: 'On when off' }, { value: 1, label: 'On when on' }, { value: 2, label: 'Always off' }], optionIndex: 2, error: null };
+    assertContract(renderParamEdit(view(cols, rows), enumOpts), cols, rows, `paramEdit enum ${cols}x${rows}`);
+    const numOpts = { label: 'Ramp Rate', current: '20 ms', isEnum: false, draft: '4', min: 0, max: 99, unit: 'ms', error: 'above the maximum (99)' };
+    assertContract(renderParamEdit(view(cols, rows), numOpts), cols, rows, `paramEdit num ${cols}x${rows}`);
   }
 });
