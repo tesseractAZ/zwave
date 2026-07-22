@@ -80,6 +80,9 @@ async function main(): Promise<void> {
     engineStatus: () => zwaveData.engineStatus(),
     efficacyFor: (kind, action) => zwaveData.efficacyFor(kind, action),
     interference: () => zwaveData.interference(),
+    entityStates: (n) => zwaveData.entityStates(n),
+    configParams: (n) => zwaveData.configParams(n),
+    requestConfigParams: (n) => zwaveData.requestConfigParams(n),
   };
 
   // 4) Shared, timer-refreshed render cache both transports read.

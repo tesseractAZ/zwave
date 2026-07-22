@@ -176,6 +176,7 @@ export class TuiSession {
       signalDisplay: opts.signalDisplay ?? 'margin',
       followTail: true,
       errorsOnly: false,
+      detailScroll: 0,
       logCursor: 0,
       logScroll: 0,
       logRange: 'all',

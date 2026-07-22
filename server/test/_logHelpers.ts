@@ -71,6 +71,7 @@ export function mkView(p: Partial<ViewState> = {}): ViewState {
     signalDisplay: 'margin',
     followTail: true,
     errorsOnly: false,
+    detailScroll: 0,
     logCursor: 0,
     logScroll: 0,
     logRange: 'all',
@@ -103,5 +104,6 @@ export function mockData(opts: { events?: LogEvent[]; nodes?: NodeSnapshot[] } =
     lastUpdated: () => NOW,
     ready: () => true,
     lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }), efficacyFor: () => null, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
+  entityStates: () => [], configParams: () => ({ status: 'ready', params: [] }), requestConfigParams: () => {},
   };
 }

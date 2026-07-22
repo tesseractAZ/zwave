@@ -20,9 +20,11 @@
 
 import type {
   ActionKind,
+  ConfigParamsResult,
   ControllerSnapshot,
   DataProvider,
   Efficacy,
+  EntityLiveState,
   HealthResult,
   InterferenceView,
   LogEvent,
@@ -70,6 +72,12 @@ export interface ZwaveDataSource {
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
   /** M6 interference view (noise floor + serial health + diurnal heatmap). REQUIRED. */
   interference(): InterferenceView;
+  /** v0.22: a node's entities joined with current live state (DETAIL). REQUIRED. */
+  entityStates(nodeId: number): EntityLiveState[];
+  /** v0.22: cached config-parameter result for a node (DETAIL). REQUIRED. */
+  configParams(nodeId: number): ConfigParamsResult;
+  /** v0.22: idempotently trigger a node's async config-param fetch. REQUIRED. */
+  requestConfigParams(nodeId: number): void;
 }
 
 export interface CreateTuiDataProviderOptions {
@@ -212,6 +220,9 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     engineStatus: () => zwaveData.engineStatus?.() ?? { enabled: false, ready: 0, total: 0 },
     efficacyFor: (kind, action) => zwaveData.efficacyFor?.(kind, action) ?? null,
     interference: () => zwaveData.interference(),
+    entityStates: (n) => zwaveData.entityStates(n),
+    configParams: (n) => zwaveData.configParams(n),
+    requestConfigParams: (n) => zwaveData.requestConfigParams(n),
   };
 
   return {

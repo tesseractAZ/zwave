@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { statsNodeId, mapRouteRaw, statsCounters, isFreshSample } from '../src/zwave/zwaveData';
+import { statsNodeId, mapRouteRaw, statsCounters, isFreshSample, pickDisplayAttrs, mapConfigParams } from '../src/zwave/zwaveData';
 
 // ── statsNodeId: the casing bug that froze all live stats ──────────────────
 // HA delivers the INITIAL on-subscribe event with `nodeId` (camelCase) but every
@@ -92,4 +92,70 @@ test('isFreshSample: no stats event since last sample (same lastSeen) is NOT fre
 });
 test('isFreshSample: the first-ever sample (no signature) is NOT fresh — it is a replay', () => {
   assert.equal(isFreshSample(undefined, sigStats()), false);
+});
+
+// ── pickDisplayAttrs (v0.22): whitelist the display-relevant HA attributes ──
+test('pickDisplayAttrs keeps only whitelisted keys and drops the rest', () => {
+  const out = pickDisplayAttrs({
+    brightness: 128,
+    percentage: 40, // fan speed — MUST be kept (formatEntityState renders it)
+    current_temperature: 72,
+    unit_of_measurement: '°F',
+    supported_features: 3, // dropped
+    hs_color: [30, 50], // dropped
+    icon: 'mdi:foo', // dropped
+  });
+  assert.deepEqual(out, { brightness: 128, percentage: 40, current_temperature: 72, unit_of_measurement: '°F' });
+});
+test('pickDisplayAttrs sanitizes device-controlled STRING attrs (control/ANSI bytes) but not numbers', () => {
+  const out = pickDisplayAttrs({ unit_of_measurement: 'W\x1b[2J', device_class: 'mo\ntion', brightness: 200 });
+  assert.ok(!/[\x00-\x1f]/.test(String(out.unit_of_measurement)), 'ESC/control stripped from unit');
+  assert.ok(!/[\x00-\x1f]/.test(String(out.device_class)), 'newline stripped from device_class');
+  assert.equal(out.brightness, 200, 'numeric attr passes through untouched');
+});
+test('pickDisplayAttrs returns a fresh object (never aliases the source) + handles undefined', () => {
+  const src = { brightness: 10 };
+  const out = pickDisplayAttrs(src);
+  assert.notEqual(out, src);
+  out.brightness = 999;
+  assert.equal(src.brightness, 10, 'source not mutated');
+  assert.deepEqual(pickDisplayAttrs(undefined), {});
+});
+
+// ── mapConfigParams (v0.22): raw get_config_parameters → sorted ConfigParam[] ──
+test('mapConfigParams sorts by property, resolves enum labels, and reads min/max/unit', () => {
+  const raw = {
+    '3-112-0-16': { property: 16, value: 2, metadata: { label: 'Switch Mode', writeable: true, states: { '0': 'Off', '1': 'On', '2': 'Always off' } } },
+    '3-112-0-3': { property: 3, value: 1500, metadata: { label: 'Dim Duration', writeable: true, unit: 'ms', min: 0, max: 10000 } },
+  };
+  const out = mapConfigParams(raw);
+  assert.equal(out.length, 2);
+  // sorted by numeric `property` (3 before 16), NOT by the key string.
+  assert.equal(out[0].key, '3-112-0-3');
+  assert.equal(out[0].label, 'Dim Duration');
+  assert.equal(out[0].value, 1500);
+  assert.equal(out[0].unit, 'ms');
+  assert.equal(out[0].min, 0);
+  assert.equal(out[0].max, 10000);
+  assert.equal(out[0].valueLabel, null, 'non-enum param has no value label');
+  // the enum param resolves its current value to the matching state label.
+  assert.equal(out[1].key, '3-112-0-16');
+  assert.equal(out[1].value, 2);
+  assert.equal(out[1].valueLabel, 'Always off');
+  assert.equal(out[1].writeable, true);
+});
+test('mapConfigParams is defensive: null raw → [], missing metadata/non-writeable/value defaults', () => {
+  assert.deepEqual(mapConfigParams(null), []);
+  assert.deepEqual(mapConfigParams(undefined), []);
+  const out = mapConfigParams({ '1-1-0-1': { property: 1, metadata: {} } });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].value, null, 'absent value → null');
+  assert.equal(out[0].valueLabel, null);
+  assert.equal(out[0].writeable, false, 'writeable defaults to false');
+  assert.equal(out[0].label, '1-1-0-1', 'label falls back to the key');
+});
+test('mapConfigParams: an enum value with no matching state label stays null', () => {
+  const out = mapConfigParams({ '1-1-0-1': { property: 1, value: 9, metadata: { label: 'X', states: { '0': 'zero' } } } });
+  assert.equal(out[0].value, 9);
+  assert.equal(out[0].valueLabel, null);
 });

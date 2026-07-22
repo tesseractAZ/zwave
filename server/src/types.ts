@@ -36,6 +36,38 @@ export interface NodeEntity {
   state?: string;
 }
 
+/** A node entity joined with its CURRENT live state (Detail entity list, v0.22).
+ *  `state` is null when the entity is unavailable/unknown or not yet fetched;
+ *  `attrs` carries the handful of attributes the renderer formats per-domain
+ *  (brightness, current_temperature, unit_of_measurement, current_position …). */
+export interface EntityLiveState {
+  entityId: string;
+  domain: string;
+  name: string;
+  state: string | null;
+  attrs: Record<string, unknown>;
+}
+
+/** One Z-Wave device configuration parameter (zwave_js/get_config_parameters). */
+export interface ConfigParam {
+  key: string; // stable HA param key, e.g. "3-112-0-3"
+  label: string; // metadata.label
+  value: number | null; // current value
+  valueLabel: string | null; // enum label for `value`, when the param is an enum
+  unit: string | null;
+  writeable: boolean;
+  min: number | null;
+  max: number | null;
+}
+
+export type ConfigStatus = 'idle' | 'loading' | 'ready' | 'error' | 'unsupported';
+/** Result of a per-node config-parameter fetch (lazy, cached). */
+export interface ConfigParamsResult {
+  status: ConfigStatus;
+  params: ConfigParam[];
+  error?: string;
+}
+
 /** Live routing statistics for one route (LWR or NLWR). */
 export interface RouteStat {
   repeaters: number[]; // node ids of repeaters in the route (empty = direct)
@@ -210,6 +242,17 @@ export interface DataProvider {
    *  serial-link health, the diurnal timeout-rate heatmap, and the current
    *  correlated-degradation state. Read by the INTERFERENCE screen. */
   interference(): InterferenceView;
+  /** v0.22: a node's entities joined with their CURRENT live state (light on/off,
+   *  sensor readings, dimmer level …). Read by the DETAIL screen. Empty when the
+   *  node has no entities or states haven't loaded yet. */
+  entityStates(nodeId: number): EntityLiveState[];
+  /** v0.22: the node's Z-Wave configuration parameters (lazy per-node fetch;
+   *  status reflects idle/loading/ready/error/unsupported). Read by DETAIL. */
+  configParams(nodeId: number): ConfigParamsResult;
+  /** v0.22: idempotently trigger the (async) config-parameter fetch for a node —
+   *  the DETAIL screen calls this when a node is shown; the result surfaces via
+   *  configParams() on a later frame. No-op if already loading/loaded. */
+  requestConfigParams(nodeId: number): void;
 }
 
 /** M6 interference-watch view — a pre-computed summary the INTERFERENCE screen
@@ -303,6 +346,8 @@ export interface ViewState {
   signalDisplay: 'margin' | 'dbm';
   followTail: boolean; // log screen
   errorsOnly: boolean; // log screen
+  // ── Detail screen: dossier scroll offset (v0.22) ──
+  detailScroll: number; // index of the first visible dossier row (renderer clamps + writes back)
   // ── Log screen navigation (independent of the node cursor) ──
   logCursor: number; // DERIVED index into the FILTERED event list (0 = newest)
   logScroll: number; // index of the first visible event row (sticky window)
