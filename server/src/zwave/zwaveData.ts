@@ -2228,9 +2228,24 @@ export function mapConfigParams(raw: Record<string, RawConfigParam> | null | und
     const statesSan = states
       ? Object.fromEntries(Object.entries(states).map(([k, v]) => [k, sanitizeLabel(String(v))]))
       : null;
-    // property addresses the parameter for set_config_parameter; prefer the raw
-    // field, else the key's last segment ("<node>-<cc>-<endpoint>-<property>").
-    const property = typeof p.property === 'number' ? p.property : Number(key.split('-').pop()) || 0;
+    // property + propertyKey address the parameter for set_config_parameter.
+    // Prefer the raw fields; else parse BY POSITION from the HA value-id key
+    // "<node>-<cc>-<endpoint>-<property>[-<propertyKey>]" — the property is the
+    // 4th segment (index 3), NOT the last, which for a partial param is the
+    // propertyKey (grabbing .pop() would address the wrong parameter).
+    const segs = key.split('-');
+    const property =
+      typeof p.property === 'number'
+        ? p.property
+        : segs.length >= 4 && Number.isFinite(Number(segs[3]))
+          ? Number(segs[3])
+          : Number(segs[segs.length - 1]) || 0;
+    const propertyKey =
+      typeof p.property_key === 'number'
+        ? p.property_key
+        : segs.length >= 5 && Number.isFinite(Number(segs[4]))
+          ? Number(segs[4])
+          : null;
     params.push({
       key,
       label: sanitizeLabel(String(meta.label ?? key)),
@@ -2241,7 +2256,7 @@ export function mapConfigParams(raw: Record<string, RawConfigParam> | null | und
       min: typeof meta.min === 'number' ? meta.min : null,
       max: typeof meta.max === 'number' ? meta.max : null,
       property,
-      propertyKey: typeof p.property_key === 'number' ? p.property_key : null,
+      propertyKey,
       endpoint: typeof p.endpoint === 'number' ? p.endpoint : 0,
       states: statesSan,
     });

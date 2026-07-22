@@ -89,3 +89,10 @@ test('renderParamEdit honours the contract for enum + numeric modes', () => {
     assertContract(renderParamEdit(view(cols, rows), numOpts), cols, rows, `paramEdit num ${cols}x${rows}`);
   }
 });
+
+test('renderParamEdit keeps the footer visible for a many-option enum on the 60x16 minimum terminal', () => {
+  const options = Array.from({ length: 12 }, (_, i) => ({ value: i, label: `Option number ${i}` }));
+  const lines = renderParamEdit(view(60, 16), { label: 'Big Enum', current: '0', isEnum: true, options, optionIndex: 6, error: null });
+  const text = lines.map((l) => l.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')).join('\n');
+  assert.match(text, /continue/, 'the ⏎ continue footer is not clipped off a short terminal');
+});

@@ -644,12 +644,17 @@ export class TuiSession {
 
   /** Open the value picker for a writeable config parameter. */
   private openParamEdit(nodeId: number, param: ConfigParam): void {
-    const options = param.states
+    const parsed = param.states
       ? Object.entries(param.states)
           .map(([v, label]) => ({ value: Number(v), label }))
           .filter((o) => Number.isFinite(o.value))
           .sort((a, b) => a.value - b.value)
       : null;
+    // A present-but-empty (or all-non-numeric-keys) states map yields NO valid
+    // options — fall back to numeric entry rather than an empty enum picker that
+    // would dereference options[0] on Enter (defensive: malformed device metadata
+    // must not crash the session).
+    const options = parsed && parsed.length > 0 ? parsed : null;
     // Start the enum cursor on the current value when it is one of the options.
     let optionIndex = 0;
     if (options && param.value != null) {
@@ -697,6 +702,13 @@ export class TuiSession {
       }
       if (pe.param.max != null && v > pe.param.max) {
         pe.error = `above the maximum (${pe.param.max})`;
+        return;
+      }
+      // Sanity floor when the device reports no bounds: a Z-Wave config value is
+      // at most a 4-byte int, so refuse anything outside signed-32-bit rather than
+      // sending an absurd number the device would reject or misinterpret.
+      if (!Number.isSafeInteger(v) || Math.abs(v) > 0x7fffffff) {
+        pe.error = 'value out of range';
         return;
       }
       this.commitParamEdit(Math.trunc(v));

@@ -171,8 +171,11 @@ export function renderParamEdit(view: ViewState, o: ParamEditOpts): string[] {
   if (o.isEnum && o.options) {
     body.push(c.grey('choose a value:'));
     const idx = o.optionIndex ?? 0;
-    // Window the options so a long enum list stays on screen (cap ~8 rows).
-    const cap = 8;
+    // Window the options so a long enum list stays on screen. Size the window to
+    // the terminal height (reserve ~10 rows for the box chrome + fixed body +
+    // footer) so the "⏎ continue" footer + bottom border never clip on a short
+    // (60x16 minimum) terminal.
+    const cap = Math.max(1, Math.min(8, view.rows - 10));
     let start = 0;
     if (o.options.length > cap) start = Math.min(Math.max(0, idx - (cap >> 1)), o.options.length - cap);
     for (let i = start; i < Math.min(o.options.length, start + cap); i++) {

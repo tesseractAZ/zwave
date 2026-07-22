@@ -255,9 +255,13 @@ const lock: EntityLiveState = { entityId: 'lock.front', domain: 'lock', name: 'F
 const enumParam: ConfigParam = { key: '5-112-0-3', label: 'LED Indicator', value: 2, valueLabel: 'Always off', unit: null, writeable: true, min: 0, max: 3, property: 3, propertyKey: null, endpoint: 0, states: { '0': 'On when off', '1': 'On when on', '2': 'Always off', '3': 'Always on' } };
 const numParam: ConfigParam = { key: '5-112-0-9', label: 'Ramp Rate', value: 20, valueLabel: null, unit: 'ms', writeable: true, min: 0, max: 99, property: 9, propertyKey: null, endpoint: 0, states: null };
 const roParam: ConfigParam = { key: '5-112-0-1', label: 'Read Only', value: 1, valueLabel: null, unit: null, writeable: false, min: 0, max: 1, property: 1, propertyKey: null, endpoint: 0, states: null };
+// Degenerate: writeable enum whose states map is EMPTY (malformed device metadata).
+const emptyEnumParam: ConfigParam = { key: '5-112-0-7', label: 'Bad Enum', value: 0, valueLabel: null, unit: null, writeable: true, min: 0, max: 5, property: 7, propertyKey: null, endpoint: 0, states: {} };
+// Writeable numeric with NO device-reported bounds.
+const noBoundsParam: ConfigParam = { key: '5-112-0-8', label: 'No Bounds', value: 0, valueLabel: null, unit: null, writeable: true, min: null, max: null, property: 8, propertyKey: null, endpoint: 0, states: null };
 
 function mkDeviceData(): DataProvider {
-  return { ...mkData(), entityStates: () => [light, lock], configParams: () => ({ status: 'ready', params: [enumParam, numParam, roParam] }) };
+  return { ...mkData(), entityStates: () => [light, lock], configParams: () => ({ status: 'ready', params: [enumParam, numParam, roParam, emptyEnumParam, noBoundsParam] }) };
 }
 const down = { type: 'arrow' as const, dir: 'down' as const };
 /** Drive the menu cursor down until the highlighted (▶) row contains `needle`. */
@@ -355,4 +359,36 @@ test('device control is locked in read-only mode (no controlEntity/setConfigPara
   s.feed([enter]); s.draw();
   await flush();
   assert.deepEqual(calls, [], 'nothing actuates while read-only');
+});
+
+/* ── v0.23 hardening (adversarial-review defensive fixes) ─────────────────── */
+
+test('a writeable enum param with an EMPTY states map falls back to numeric entry (no crash on Enter)', async () => {
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Set · Bad Enum'));
+  s.feed([enter]); s.draw();
+  const f = strip(last());
+  assert.match(f, /new value/, 'degenerate enum uses the numeric picker, not an empty option list');
+  assert.doesNotMatch(f, /choose a value/);
+  for (const ch of '3') s.feed([key(ch)]);
+  s.feed([enter]); s.draw();
+  assert.match(strip(last()), /type CONFIRM to arm/i);
+  typeConfirm(s);
+  await flush(); await flush();
+  assert.deepEqual(calls, ['setParam:5:7:3']);
+});
+
+test('a numeric param with NO device bounds still rejects an absurd (out-of-int32) value', async () => {
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner, mkDeviceData());
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Set · No Bounds'));
+  s.feed([enter]); s.draw();
+  for (const ch of '99999999999') s.feed([key(ch)]);
+  s.feed([enter]); s.draw();
+  assert.match(strip(last()), /out of range/i, 'sanity floor rejects the absurd value');
+  await flush();
+  assert.deepEqual(calls, [], 'nothing written');
 });
