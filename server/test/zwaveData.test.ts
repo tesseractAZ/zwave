@@ -98,13 +98,20 @@ test('isFreshSample: the first-ever sample (no signature) is NOT fresh — it is
 test('pickDisplayAttrs keeps only whitelisted keys and drops the rest', () => {
   const out = pickDisplayAttrs({
     brightness: 128,
+    percentage: 40, // fan speed — MUST be kept (formatEntityState renders it)
     current_temperature: 72,
     unit_of_measurement: '°F',
     supported_features: 3, // dropped
     hs_color: [30, 50], // dropped
     icon: 'mdi:foo', // dropped
   });
-  assert.deepEqual(out, { brightness: 128, current_temperature: 72, unit_of_measurement: '°F' });
+  assert.deepEqual(out, { brightness: 128, percentage: 40, current_temperature: 72, unit_of_measurement: '°F' });
+});
+test('pickDisplayAttrs sanitizes device-controlled STRING attrs (control/ANSI bytes) but not numbers', () => {
+  const out = pickDisplayAttrs({ unit_of_measurement: 'W\x1b[2J', device_class: 'mo\ntion', brightness: 200 });
+  assert.ok(!/[\x00-\x1f]/.test(String(out.unit_of_measurement)), 'ESC/control stripped from unit');
+  assert.ok(!/[\x00-\x1f]/.test(String(out.device_class)), 'newline stripped from device_class');
+  assert.equal(out.brightness, 200, 'numeric attr passes through untouched');
 });
 test('pickDisplayAttrs returns a fresh object (never aliases the source) + handles undefined', () => {
   const src = { brightness: 10 };

@@ -1206,6 +1206,19 @@ class ZwaveDataImpl implements ZwaveData {
           this.coarseAccum.delete(id);
           this.batteryByNode.delete(id);
           this.firmwareByNode.delete(id);
+          // v0.22 config cache is node-id-keyed too — a reused id would otherwise
+          // keep serving the DEPARTED device's parameters (the 'ready' state is
+          // terminal, never re-fetched), and buildRegistryMaps' prune can't help
+          // because the reused id IS present in the new registry.
+          this.configByNode.delete(id);
+          this.configFetchAt.delete(id);
+          // Live-state is entity-id-keyed (new devices mint new entity_ids, so no
+          // cross-device aliasing), but drop the departed device's entries so they
+          // don't linger if the registry never reloads.
+          const depDev = this.deviceByNodeId.get(id);
+          if (depDev) {
+            for (const e of this.entitiesByDeviceId.get(depDev.id) ?? []) this.stateByEntityId.delete(e.entityId);
+          }
           this.flapAccum.delete(id);
           this.routeChangeAccum.delete(id);
           this.subStatus.delete(id);
@@ -1680,7 +1693,11 @@ class ZwaveDataImpl implements ZwaveData {
     if (!eid || !this.entityIndex.has(eid)) return;
     const ns = d?.new_state;
     if (!ns || typeof ns.state !== 'string') return; // removal / malformed — keep prior
-    this.stateByEntityId.set(eid, { state: ns.state, attrs: pickDisplayAttrs(ns.attributes) });
+    // Sanitize the device-controlled state string before it can reach a TUI frame
+    // (strips control/ESC bytes + folds wide chars — same boundary as the value
+    // log, notifications, and device names; an un-sanitized state could inject a
+    // newline/ANSI and corrupt the exact-rows frame).
+    this.stateByEntityId.set(eid, { state: sanitizeLabel(ns.state), attrs: pickDisplayAttrs(ns.attributes) });
   }
 
   /** Map a `zwave_js_notification` event → a `notification` log entry (defensive:
@@ -1716,7 +1733,7 @@ class ZwaveDataImpl implements ZwaveData {
         // state_changed subscription keeps it fresh after this; this pass fills
         // in everything that isn't currently transitioning.
         if (this.entityIndex.has(s.entity_id)) {
-          this.stateByEntityId.set(s.entity_id, { state: s.state, attrs: pickDisplayAttrs(s.attributes) });
+          this.stateByEntityId.set(s.entity_id, { state: sanitizeLabel(s.state), attrs: pickDisplayAttrs(s.attributes) });
         }
       }
       // Rebuilt fresh each pass (a node may have >1 firmware target — aggregated).
@@ -2114,6 +2131,7 @@ export function aggregateFirmware(
  *  bitmasks) is dropped so the live-state cache stays small and predictable. */
 const DISPLAY_ATTR_KEYS = [
   'brightness', // light dimmer, 0..255
+  'percentage', // fan speed, 0..100
   'color_mode',
   'current_temperature', // climate
   'temperature', // climate setpoint (single)
@@ -2137,7 +2155,12 @@ export function pickDisplayAttrs(attrs: Record<string, unknown> | undefined): Re
   const out: Record<string, unknown> = {};
   if (!attrs) return out;
   for (const k of DISPLAY_ATTR_KEYS) {
-    if (attrs[k] !== undefined) out[k] = attrs[k];
+    const v = attrs[k];
+    if (v === undefined) continue;
+    // String attrs (unit, device_class, friendly_name, hvac_action …) are device-
+    // controlled and reach a TUI frame — sanitize at this boundary (same rule as
+    // every other HA-string path). Numbers/booleans pass through untouched.
+    out[k] = typeof v === 'string' ? sanitizeLabel(v) : v;
   }
   return out;
 }

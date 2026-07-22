@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderDetail, formatEntityState } from '../src/telnet/screens/detail';
+import { pickDisplayAttrs } from '../src/zwave/zwaveData';
 import { visLen } from '../src/telnet/ansi';
 import { NodeStatus } from '../src/types';
 import type {
@@ -80,6 +81,12 @@ test('formatEntityState: switch/fan', () => {
   assert.equal(strip(formatEntityState(ent({ domain: 'switch', state: 'on' }))), 'on');
   assert.equal(strip(formatEntityState(ent({ domain: 'switch', state: 'off' }))), 'off');
   assert.equal(strip(formatEntityState(ent({ domain: 'fan', state: 'on', attrs: { percentage: 66 } }))), 'on · 66%');
+});
+test('fan speed survives the data-layer whitelist end-to-end (regression: percentage was stripped)', () => {
+  // The bug: pickDisplayAttrs dropped `percentage`, so the fan branch always saw
+  // undefined and rendered bare "on". Feed a fan's raw attrs THROUGH the whitelist.
+  const cached = pickDisplayAttrs({ percentage: 40, supported_features: 48 });
+  assert.equal(strip(formatEntityState(ent({ domain: 'fan', state: 'on', attrs: cached }))), 'on · 40%');
 });
 test('formatEntityState: binary_sensor is device-class aware', () => {
   assert.equal(strip(formatEntityState(ent({ domain: 'binary_sensor', state: 'on', attrs: { device_class: 'motion' } }))), 'detected');
