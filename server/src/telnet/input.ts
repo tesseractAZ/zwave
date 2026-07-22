@@ -427,6 +427,10 @@ export function applyKey(
     if (idx < SCREENS.length) {
       if (view.screen !== SCREENS[idx]) {
         view.screen = SCREENS[idx];
+        // Entering Detail via its screen number starts the dossier at the top,
+        // matching the Enter / log-jump / node-step entry paths (a stale offset
+        // from a previous, taller node would otherwise open mid-dossier).
+        if (SCREENS[idx] === 'detail') view.detailScroll = 0;
         return REDRAW;
       }
       return NOOP;

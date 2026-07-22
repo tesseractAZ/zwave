@@ -1404,18 +1404,29 @@ class ZwaveDataImpl implements ZwaveData {
       }
     }
 
+    const oldDeviceByNodeId = this.deviceByNodeId; // captured BEFORE overwrite (device-change eviction)
     this.deviceByNodeId = deviceByNodeId;
     this.deviceIdToNodeId = deviceIdToNodeId;
     this.entitiesByDeviceId = entitiesByDeviceId;
     this.entityCount = count;
-    // v0.22: prune live-state/config caches to what the fresh registry still
-    // knows, so entities/nodes removed from the mesh can't leak memory across
-    // registry reloads (surviving entries are kept — no Detail flicker).
+    // v0.22: prune live-state to what the fresh registry still knows, so entities
+    // removed from the mesh can't leak memory across registry reloads (surviving
+    // entries are kept — no Detail flicker).
     for (const eid of this.stateByEntityId.keys()) {
       if (!this.entityIndex.has(eid)) this.stateByEntityId.delete(eid);
     }
+    // v0.22: evict the node-id-keyed config cache whenever a node's backing HA
+    // device_id CHANGES — not just when the node departs. This is the robust
+    // close for node-id reuse (replace_failed_node / fast exclude→include keeps
+    // the id but swaps the device: A→B) AND for a node that had no device at
+    // first Detail view and later gained one (null→present) — a stale 'ready' or
+    // terminal 'unsupported' entry would otherwise serve the wrong device or stay
+    // stuck forever (both confirmed by adversarial review). Absent→null is a
+    // change too, so this also subsumes the plain removed-node prune.
     for (const nid of this.configByNode.keys()) {
-      if (!deviceByNodeId.has(nid)) {
+      const oldDevId = oldDeviceByNodeId.get(nid)?.id ?? null;
+      const newDevId = deviceByNodeId.get(nid)?.id ?? null;
+      if (oldDevId !== newDevId) {
         this.configByNode.delete(nid);
         this.configFetchAt.delete(nid);
       }
@@ -2079,6 +2090,13 @@ function strOrNull(x: unknown): string | null {
   return null;
 }
 
+/** strOrNull + sanitizeLabel, for device-reported strings that reach a TUI frame
+ *  (firmware versions). Strips control/ESC bytes + folds wide chars; null stays null. */
+function sanitizeStrOrNull(x: unknown): string | null {
+  const s = strOrNull(x);
+  return s == null ? null : sanitizeLabel(s);
+}
+
 /** Minimal shape of a get_states entry we read (battery level, firmware update). */
 export interface RawEntityState {
   entity_id: string;
@@ -2107,8 +2125,10 @@ export function aggregateFirmware(
     const on = s.state === 'on';
     const inProg = a.in_progress === true;
     const pct = typeof a.update_percentage === 'number' ? a.update_percentage : null;
-    const cur = strOrNull(a.installed_version);
-    const lat = strOrNull(a.latest_version);
+    // installed_version/latest_version are device-reported and reach the Detail
+    // IDENTITY frame — sanitize them like every other HA-string display path.
+    const cur = sanitizeStrOrNull(a.installed_version);
+    const lat = sanitizeStrOrNull(a.latest_version);
     const acc: FirmwareInfo =
       fw.get(nodeId) ?? { current: null, latest: null, updateAvailable: false, inProgress: false, progressPct: null, targets: 0 };
     acc.targets += 1;

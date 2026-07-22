@@ -138,3 +138,11 @@ test('Detail: number/letter screen switches still work (not swallowed by scroll)
   applyKey(v, char('1'), data);
   assert.equal(v.screen, 'overview', 'screen switch falls through to the generic handler');
 });
+
+test('entering Detail via its screen number (2) resets the scroll to the top', () => {
+  const v = mkView('overview');
+  v.detailScroll = 15; // stale offset from a previous, taller node
+  applyKey(v, char('2'), data);
+  assert.equal(v.screen, 'detail', "'2' selects the Detail screen");
+  assert.equal(v.detailScroll, 0, 'stale offset cleared so the dossier opens at the top');
+});
