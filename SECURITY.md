@@ -10,16 +10,19 @@ so its access is treated as privileged.
 
 ## Supported versions
 
-This is a single-tenant, privately-hosted add-on: only the latest released
-version is supported. Update to the current version before reporting an issue.
+Only the **latest released version** is supported. Update to the current release
+before reporting an issue.
 
 ## Reporting a vulnerability
 
-Report privately to the maintainer (**192581158+tesseractAZ@users.noreply.github.com**) — please do not
-open a public issue for a security matter. Include the version, a description,
-and a reproduction if you have one. Since the repository is private and
-single-tenant, there is no bug-bounty; reports are handled on a best-effort
-basis.
+Please report security issues **privately** through GitHub's private vulnerability
+reporting — open the repository's [**Security → Report a vulnerability**](https://github.com/tesseractAZ/zwave/security/advisories/new)
+form. Do **not** open a public issue for a security matter.
+
+Include the add-on version, a description, and a reproduction if you have one.
+This is a small, single-maintainer hobby project: there is no bug-bounty and no
+SLA, and reports are handled on a best-effort basis — but they are read and taken
+seriously.
 
 ## Security posture (what the add-on already does)
 

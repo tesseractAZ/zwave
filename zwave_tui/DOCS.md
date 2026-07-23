@@ -3345,17 +3345,16 @@ be PID 1 — mandatory for any add-on on the official HA base images.
 
 ### 12.6 The LOCAL add-on deploy model (as actually operated)
 
-The repository is *equipped* as a public "Model A" store add-on — `config.yaml`
-carries an `image:` line (`ghcr.io/tesseractaz/{arch}-zwave-tui`),
-`repository.yaml` advertises the store, and a three-workflow release pipeline
-(§12.7) can push prebuilt GHCR images. That path is documented in `README.md` for
-anyone installing from the store.
+The repository is published as a Home Assistant **add-on repository** —
+`repository.yaml` advertises the store entry, and `config.yaml` deliberately ships
+**no `image:` key**, so Supervisor builds the add-on from this repo's `Dockerfile`
+on the user's own host. That is the path documented in `README.md` for anyone
+installing it.
 
-The owner, however, runs it as a **local add-on** (slug `local_zwave_tui`)
-deployed straight to the Pi. Because an add-on manifest with an `image:` key tells
-Supervisor to *pull* a prebuilt image, the deploy flow **flattens the repo into
-the local add-on folder and strips the `image:` line from `config.yaml`** — with
-no `image:`, Supervisor builds the container locally from the `Dockerfile`. The
+The maintainer additionally runs it as a **local add-on** (slug `local_zwave_tui`)
+deployed straight to the Pi for fast iteration. That deploy flow **flattens the
+repo into the local add-on folder**; since `config.yaml` carries no `image:` key,
+Supervisor builds the container locally from the `Dockerfile` either way. The
 operational recipe (with its hard-won gotchas):
 
 1. **Typecheck first** — `npm run typecheck` in `server/` (there is no compile
@@ -3368,45 +3367,35 @@ operational recipe (with its hard-won gotchas):
      rebuild at the same `version:`, call `…/rebuild` instead. (`version:` only
      bumps between releases, so intra-version iteration must use `rebuild`.)
 
-This local path is why the store artifacts (`repository.yaml`, the `image:`
-line, GHCR) exist but are not the live update mechanism — the `repository.yaml`
-comment describes the store's "Update button pulls the new prebuilt GHCR image"
-workflow, which the local deploy deliberately bypasses.
+The add-on ships **no `image:` key**, so *both* install paths build from source on
+the host: adding this repository to the Home Assistant store lets Supervisor build
+and manage the add-on natively (the normal user path), while the local-folder path
+in §12.6 is the maintainer's fast-iteration route. No container registry is
+involved in either.
 
-### 12.7 Release pipeline and the NO-PUBLISH convention
+### 12.7 Release pipeline
 
-Three workflows *can* relay a public release end-to-end:
+Three workflows guard and publish the project:
 
-1. **`release.yml`** (`workflow_dispatch`) — bumps `version:` in `config.yaml`,
-   prepends a `## X.Y.Z — DATE` section to `CHANGELOG.md`, opens an auto-merge
-   `release/vX.Y.Z` PR.
-2. **`tag-release.yml`** (push to `main`) — creates the `vX.Y.Z` tag and dispatches
-   the image build, **gated on the commit subject**:
-   ```yaml
-   if: startsWith(github.event.head_commit.message, 'Release v')
-   ```
-3. **`images.yml`** (on the `vX.Y.Z` tag) — builds `aarch64` + `amd64` natively,
-   pushes to `ghcr.io/tesseractaz/{arch}-zwave-tui`, and cuts a GitHub Release.
+1. **`ci.yml`** (every push + PR — the required gate) — type-checks and runs the
+   full server test suite (`tsc --noEmit -p tsconfig.test.json`, which covers the
+   test tree too), smoke-builds the add-on container (amd64), and builds the
+   printable manual, failing the PR if `DOCS.md` stops converting cleanly.
+2. **`codeql.yml`** — a self-contained CodeQL security analysis.
+3. **`publish-release.yml`** (on a `vX.Y.Z` **tag** push) — re-runs the tests,
+   builds the manual (`.docx` via pandoc + `.pdf` via LibreOffice), and cuts a
+   GitHub Release using that version's `CHANGELOG.md` section as the notes, with
+   the manual attached.
 
-Because this is a private, single-tenant, locally-deployed add-on, the operating
-rule is **NO-PUBLISH**: a squash-merge subject **must start `vX.Y…` and must
-never start `Release v`.** Naming merges `vX.Y.Z: …` deliberately keeps
-`tag-release.yml`'s `startsWith('Release v')` gate from firing, so **no tag, no
-image build, and no GitHub Release are ever produced** — the code lands on `main`
-and is deployed by the local path in §12.6 instead. The git history confirms the
-convention holds for every merge:
+Cutting a release is therefore: merge the `version:` bump + the new CHANGELOG
+section to `main`, then push the tag at the merge commit:
 
-```
-ee9f3cd v0.17.0: interference-watch screen (M6) (#21)
-47de19a v0.16.0: outcome-learning loop (M5) — advisory-only (#20)
-55cb3c3 v0.15.0: remediation planner (M4) — advisory Remedy surface (#19)
-…
-93d2bb8 v0.2: live statistics + the five detail screens (#3)
+```bash
+git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z
 ```
 
-The always-on gates are `ci.yml` (typecheck + docker smoke build — required on
-every PR) and the self-contained `codeql.yml` security check. Green tests plus
-adversarial multi-agent review are the merge gate.
+No container image is published — the add-on is built from source on the user's
+host (§12.6). Green tests plus adversarial multi-agent review are the merge gate.
 
 ### 12.8 Security posture
 
