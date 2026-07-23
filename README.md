@@ -14,6 +14,8 @@ evidence time-series, scores every node worst-health-first, detects mesh symptom
 and recommends fixes — across **eight screens**, over a telnet server and a
 browser console.
 
+![The Overview screen: a live node table sorted worst-health-first, with per-node health scores, SNR margin, RTT, timeout rate, hop count, data rate and triage flags](docs/screenshots/overview.svg)
+
 **One engine, two front doors:**
 
 - **Telnet** on port `2324` — a full-screen terminal on your LAN.
@@ -81,6 +83,38 @@ Interference are shortcuts too). On Overview: `j`/`k` move, `Enter` detail, `/`
 filter, `s` sort, `t` margin↔dBm. `a` opens the **Actions Menu**; `p` pings the
 selected node (gated); `q` quits.
 
+**Detail** is the per-node dossier — it scrolls, and answers both *"what is this
+device doing right now?"* and *"how is it configured?"*:
+
+![The Detail screen scrolled to its LIVE ENTITIES and CONFIG PARAMETERS sections: a motion sensor reading detected, a light on at 70 percent, a power sensor at 38.4 W, and five Z-Wave configuration parameters with their decoded enum meanings](docs/screenshots/detail.svg)
+
+<details>
+<summary><b>The other six screens</b> — Controller, Topology, Heatmap, Log, Remedy, Interference</summary>
+
+#### Controller — radio health, noise floor, counters
+![Controller screen](docs/screenshots/controller.svg)
+
+#### Topology — hop-grouped route tree
+![Topology screen](docs/screenshots/topology.svg)
+
+#### Heatmap — nodes by area, graded by SNR margin
+![Heatmap screen](docs/screenshots/heatmap.svg)
+
+#### Log — driver events, value changes, command outcomes
+![Log screen](docs/screenshots/log.svg)
+
+#### Remedy — diagnoses and ranked recommendations
+![Remedy screen](docs/screenshots/remedy.svg)
+
+#### Interference — noise floor, serial health, diurnal heatmap
+![Interference screen](docs/screenshots/interference.svg)
+
+</details>
+
+> Screenshots are generated from a **synthetic demo mesh** by
+> [`server/scripts/gen-screenshots.mts`](./server/scripts/gen-screenshots.mts) —
+> regenerate them with `cd server && npx tsx scripts/gen-screenshots.mts`.
+
 Full keybinding and screen documentation is in
 [`zwave_tui/DOCS.md`](./zwave_tui/DOCS.md) — the complete System & Engine
 Reference (also attached to each [release](https://github.com/tesseractAZ/zwave/releases)
@@ -115,6 +149,8 @@ the **Actions Menu**, which groups:
   / close** a cover or garage door, **lock / unlock** a lock.
 - **Configuration** — edit a writeable Z-Wave parameter through a bounded value
   picker (enum options or a min/max-checked number).
+
+![The Actions Menu showing three groups: mesh maintenance and system-wide actions, DEVICE CONTROLS with on/off/toggle, lock/unlock and open/close rows each showing the device's current state, and CONFIGURATION rows for editing writeable Z-Wave parameters. Unlocking a lock and opening a garage door are badged DESTRUCTIVE](docs/screenshots/actions-menu.svg)
 
 Every row is badged **SAFE / CAUTION / DESTRUCTIVE** (unlocking a lock or opening a
 garage is DESTRUCTIVE), and selecting any of them opens a modal that requires you
