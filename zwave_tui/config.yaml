@@ -6,10 +6,12 @@ url: https://github.com/tesseractAZ/zwave
 arch:
   - aarch64
   - amd64
-# Pre-built multi-arch images on GHCR — built and pushed by
-# .github/workflows/images.yml. HA Supervisor substitutes {arch} with the
-# host's CPU arch (aarch64, amd64, …). Owner segment MUST be lowercase.
-image: ghcr.io/tesseractaz/{arch}-zwave-tui
+# NO `image:` key, on purpose. This add-on is built FROM SOURCE on your own Home
+# Assistant host — Supervisor runs the Dockerfile locally — so anyone can install
+# it straight from this repository with no container registry involved. The first
+# install takes a few minutes while the server's dependencies build; updates after
+# that are quick. (A future release may publish pre-built multi-arch images to
+# skip the on-device build.)
 startup: services
 boot: auto
 stage: experimental

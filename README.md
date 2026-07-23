@@ -125,23 +125,41 @@ are never fed to the learning ledger. If you expose the LAN telnet port on an
 untrusted network, enable the optional **login gate** (plaintext or `scrypt:`
 passwords, with a per-peer backoff); the sidebar console is already HA-authenticated.
 
-## Install / deploy
+## Install
 
-This is a **private, single-tenant** add-on installed as a **local add-on**: its
-files live under `/addons/zwave_tui` on the Home Assistant host and Supervisor
-builds it **on-device** from the `Dockerfile` — no image is pulled from a
-registry. No configuration is required for a normal install: the add-on
-auto-discovers your `zwave_js` entry.
+**Requires** Home Assistant OS or Supervised, with the **Z-Wave JS** integration
+already set up.
 
-Deploy = stage the add-on files to `/addons/zwave_tui` on the HA host (the
-`image:` line is stripped so Supervisor builds locally), then reload the store and
-install/rebuild the `local_zwave_tui` add-on. Once running, open the **Z-Wave TUI**
-sidebar item, or for LAN telnet: `nc <homeassistant-IP> 2324`.
+1. In Home Assistant: **Settings → Add-ons → Add-on Store → ⋮ → Repositories**,
+   and add this repository:
+   ```
+   https://github.com/tesseractAZ/zwave
+   ```
+2. Install **Z-Wave TUI** from the store. There is **no prebuilt image** — Supervisor
+   builds the add-on on your own device from the `Dockerfile`, so the **first install
+   takes a few minutes** (later updates are quicker). Nothing is pulled from a
+   container registry.
+3. Start it. **No configuration is required:** the add-on auto-discovers your
+   `zwave_js` config entry and builds the node roster from the device/entity
+   registries.
+4. Open **Z-Wave TUI** in the HA sidebar, or connect over LAN telnet:
+   ```bash
+   nc <homeassistant-ip> 2324
+   ```
+
+Optional: turn on **Enable Write Actions** to unlock the gated actions (see
+[Write actions & safety](#write-actions--safety)), and the **login gate** if you
+expose the telnet port on a network you don't fully trust.
+
+> **Developing against a clone?** You can also run it as a *local* add-on: copy the
+> add-on files to `/addons/zwave_tui` on the HA host, reload the store, and install
+> `local_zwave_tui`. That's the workflow the maintainer uses for fast iteration.
 
 ## Releasing a new version
 
-This add-on deploys by **local build** and publishes **no** container image. A
-release is a private, versioned record plus the downloadable manual. To cut one:
+*(Maintainer notes.)* This add-on is built from source and publishes **no**
+container image. A release is a versioned record plus the downloadable manual.
+To cut one:
 
 1. Bump `version:` in `zwave_tui/config.yaml` and add a `## X.Y.Z — DATE` section
    to `zwave_tui/CHANGELOG.md`, then merge that to `main` (a normal `vX.Y…` PR
@@ -151,7 +169,7 @@ release is a private, versioned record plus the downloadable manual. To cut one:
    git tag v0.23.0 <merge-sha> && git push origin v0.23.0
    ```
 3. **`publish-release.yml`** (on the `vX.Y.Z` tag) runs the server tests, builds
-   the printable manual (`.docx` + `.pdf`), and cuts a **private GitHub Release**
+   the printable manual (`.docx` + `.pdf`), and cuts a **GitHub Release**
    with the CHANGELOG notes and the manual attached. No GHCR image is pushed.
 
 `ci.yml` (typecheck + tests + docs build + docker smoke build) is the required

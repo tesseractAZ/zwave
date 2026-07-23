@@ -2,7 +2,7 @@
   "name": "zwave-tui-server",
   "version": "0.10.0",
   "private": true,
-  "author": "Eric Paschal <epaschal@outlook.com>",
+  "author": "Eric Paschal (https://github.com/tesseractAZ)",
   "license": "MIT",
   "type": "module",
   "scripts": {
