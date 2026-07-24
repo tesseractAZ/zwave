@@ -6,7 +6,7 @@
  * transports never echo raw input.
  */
 
-import { c, BOX, center, padEnd } from '../ansi';
+import { c, BOX, center, padEnd, truncate } from '../ansi';
 
 export interface LoginViewOptions {
   cols: number;
@@ -40,8 +40,34 @@ function wrapText(s: string, width: number): string[] {
   return out.length ? out : [''];
 }
 
+/**
+ * Sub-20-column fallback: no box, just the prompt and the field, hard-clipped.
+ * Ugly, but it never exceeds the terminal and still says what it wants.
+ */
+function narrowLogin(o: LoginViewOptions): string[] {
+  const W = Math.max(1, o.cols);
+  const pass = o.stage === 'pass';
+  const shown = pass ? '•'.repeat(Math.min(o.passwordLen, 8)) : o.username;
+  const rows = [
+    truncate(c.cyanB('Z-WAVE TUI'), W),
+    truncate(c.grey(pass ? 'password:' : 'user:'), W),
+    truncate(c.white(shown) + c.yellowB('▏'), W),
+    ...(o.error ? [truncate(c.red(o.error), W)] : []),
+    ...(o.denied ? [truncate(c.redB('locked'), W)] : []),
+  ];
+  const out = rows.slice(0, o.rows);
+  while (out.length < o.rows) out.push('');
+  return out;
+}
+
 export function renderLogin(o: LoginViewOptions): string[] {
-  const W = Math.max(20, o.cols);
+  // The layout wants at least 20 columns for a legible box, but the CONTRACT is
+  // unconditional: never emit a line wider than the caller's terminal. The old
+  // `Math.max(20, o.cols)` floored the layout and then emitted 18-column rows
+  // into an 8-column terminal, which wraps and smears the frame — on the one
+  // screen that takes a password. Below the floor, degrade to plain text.
+  if (o.cols < 20) return narrowLogin(o);
+  const W = o.cols;
   const boxW = Math.min(54, W - 4);
   const innerW = boxW - 2;
   const brow = (s: string): string => BOX.v + padEnd(' ' + s, innerW) + BOX.v;
@@ -82,5 +108,10 @@ export function renderLogin(o: LoginViewOptions): string[] {
   const out: string[] = [];
   for (let i = 0; i < topBlank; i++) out.push('');
   out.push(...framed);
+  // PAD as well as slice. Every other render path returns EXACTLY `rows` lines;
+  // this one only trimmed, so a short box left the caller to decide what the
+  // remaining rows contain — the one screen where stale bytes from a previous
+  // frame could linger is the one that takes a password.
+  while (out.length < o.rows) out.push('');
   return out.slice(0, o.rows);
 }

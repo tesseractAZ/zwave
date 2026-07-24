@@ -71,7 +71,15 @@ const RSSI_SENTINELS = new Set([125, 126, 127]);
 export const DEFAULT_NOISE_FLOOR = -95;
 
 /** SNR margin (dB) below which the Signal lane raises the W flag. */
-const WEAK_MARGIN_DB = 7;
+/**
+ * SNR margin below which a node raises the `W` (weak signal) flag.
+ *
+ * EXPORTED because bands.ts derives its red cut from it: a red margin on any
+ * screen must mean the same node carries a W flag. They were independent
+ * numbers (7 here, 10 there) and drifted, so 7-9 dB rendered red while the
+ * health model called it fine.
+ */
+export const WEAK_MARGIN_DB = 7;
 
 /** Margin window mapped onto [0,1]. The W threshold (7 dB) lands at the midpoint. */
 const SIGNAL_MARGIN_LO = 0;

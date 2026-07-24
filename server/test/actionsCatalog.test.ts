@@ -34,34 +34,75 @@ test('impact classification: ping safe, rebuildAll + removeFailed destructive', 
   assert.equal(describeAction('removeFailed')!.impact, 'destructive');
 });
 
-test('buildMenu with a node + idle: device actions enabled, rebuildAll shown, stopRebuild hidden', () => {
-  const items = buildMenu({ hasNode: true, rebuilding: false });
+test('buildMenu with a node + idle: device actions enabled, no mesh-wide rows', () => {
+  const items = buildMenu({ scope: 'device', hasNode: true, rebuilding: false });
+  assert.ok(items.length > 0, 'device menu is empty');
+  assert.ok(items.every((i) => !i.disabled), 'device actions enabled with a node');
+  // The mesh-wide rows moved to the network menu; see the two scope tests below.
   const kinds = items.map((i) => i.desc.kind);
-  assert.ok(kinds.includes('rebuildAll'), 'rebuildAll shown while idle');
-  assert.ok(!kinds.includes('stopRebuild'), 'stopRebuild hidden while idle');
-  assert.ok(items.filter((i) => i.desc.scope === 'device').every((i) => !i.disabled), 'device actions enabled with a node');
+  assert.ok(!kinds.includes('rebuildAll') && !kinds.includes('stopRebuild'),
+    'a mesh-wide action is still in the device menu');
 });
 
-test('buildMenu while rebuilding: stopRebuild shown, rebuildAll hidden (mutually exclusive)', () => {
-  const kinds = buildMenu({ hasNode: true, rebuilding: true }).map((i) => i.desc.kind);
-  assert.ok(kinds.includes('stopRebuild'), 'stopRebuild shown while rebuilding');
-  assert.ok(!kinds.includes('rebuildAll'), 'rebuildAll hidden while rebuilding');
+test('the NETWORK menu honours the rebuild/stop mutual exclusion', () => {
+  const idle = buildMenu({ scope: 'network', hasNode: false, rebuilding: false }).map((i) => i.desc.kind);
+  assert.ok(idle.includes('rebuildAll'), 'rebuildAll offered while idle');
+  assert.ok(!idle.includes('stopRebuild'), 'stopRebuild hidden while idle');
+
+  const busy = buildMenu({ scope: 'network', hasNode: false, rebuilding: true }).map((i) => i.desc.kind);
+  assert.ok(busy.includes('stopRebuild'), 'stopRebuild shown while rebuilding');
+  assert.ok(!busy.includes('rebuildAll'), 'rebuildAll hidden while rebuilding');
 });
 
-test('buildMenu with no node: device actions present but DISABLED with a reason; system unaffected', () => {
-  const items = buildMenu({ hasNode: false, rebuilding: false });
-  const device = items.filter((i) => i.desc.scope === 'device');
-  assert.ok(device.length > 0);
-  assert.ok(device.every((i) => i.disabled && i.reason), 'device actions disabled + reasoned without a node');
-  const system = items.filter((i) => i.desc.scope === 'system');
-  assert.ok(system.every((i) => !i.disabled), 'system actions never need a node');
+test('the DEVICE menu contains NO mesh-wide action, at any context', () => {
+  // The whole point of the split: a menu headed "target #8 Kitchen Lamp" must
+  // never offer an action whose blast radius is all 39 nodes.
+  for (const hasNode of [true, false]) {
+    for (const rebuilding of [true, false]) {
+      const items = buildMenu({ scope: 'device', hasNode, rebuilding });
+      assert.ok(items.length > 0, `device menu is empty (hasNode=${hasNode})`);
+      assert.ok(items.every((i) => i.desc.scope === 'device'),
+        `a system-scoped row leaked into the device menu: ${items.filter((i) => i.desc.scope !== 'device').map((i) => i.desc.kind).join(',')}`);
+      assert.ok(items.every((i) => i.desc.needsNode),
+        'a device-menu row does not act on the selected node');
+    }
+  }
 });
 
-test('menu is ordered device-first then system', () => {
-  const items = buildMenu({ hasNode: true, rebuilding: false });
-  const firstSystem = items.findIndex((i) => i.desc.scope === 'system');
-  const lastDevice = items.map((i) => i.desc.scope).lastIndexOf('device');
-  assert.ok(firstSystem > lastDevice, 'all device rows precede system rows');
+test('the NETWORK menu contains NO device action, at any context', () => {
+  for (const hasNode of [true, false]) {
+    for (const rebuilding of [true, false]) {
+      const items = buildMenu({ scope: 'network', hasNode, rebuilding });
+      assert.ok(items.length > 0, 'network menu is empty');
+      assert.ok(items.every((i) => i.desc.scope === 'system'),
+        `a device row leaked into the network menu: ${items.filter((i) => i.desc.scope !== 'system').map((i) => i.desc.kind).join(',')}`);
+      // Mesh-wide actions never need a node, so they are never disabled for
+      // want of one — the network screen has no node cursor.
+      assert.ok(items.every((i) => !i.desc.needsNode && !i.disabled),
+        'a network action was gated on a node selection');
+    }
+  }
+});
+
+test('every catalog action appears in exactly one of the two menus', () => {
+  // No action may be stranded (unreachable) or duplicated (two blast radii).
+  const ctx = { hasNode: true, rebuilding: false } as const;
+  const device = buildMenu({ scope: 'device', ...ctx }).map((i) => i.desc.kind);
+  const network = buildMenu({ scope: 'network', ...ctx }).map((i) => i.desc.kind);
+  const busy = buildMenu({ scope: 'network', hasNode: true, rebuilding: true }).map((i) => i.desc.kind);
+  const reachable = new Set([...device, ...network, ...busy]);
+  for (const d of ACTION_CATALOG) {
+    assert.ok(reachable.has(d.kind), `${d.kind} is not reachable from any menu`);
+  }
+  for (const k of device) {
+    assert.ok(!network.includes(k) && !busy.includes(k), `${k} appears in both menus`);
+  }
+});
+
+test('buildMenu with no node: device actions present but DISABLED with a reason', () => {
+  const items = buildMenu({ scope: 'device', hasNode: false, rebuilding: false });
+  assert.ok(items.length > 0);
+  assert.ok(items.every((i) => i.disabled && i.reason), 'device actions disabled + reasoned without a node');
 });
 
 test('clampMenuIndex bounds into range; empty → 0', () => {

@@ -20,12 +20,14 @@
  */
 
 import type { DataProvider, NodeSnapshot, ScreenCtx, ViewState, ActionRunner, ActionKind, ConfigParam, EntityVerb } from '../types';
-import { applyKey, clampSelection, filteredEvents, syncLogCursor, visibleNodes } from './input';
+import { applyKey, clampSelection, filteredEvents, syncLogCursor, syncRemedyCursor, visibleNodes } from './input';
 import type { InputEvent } from './input';
 import { renderScreen } from './screens/index';
 import { renderLogin } from './screens/login';
 import { centeredNotice } from './screens/overview';
+import { sortedSymptoms, symptomKey } from './screens/remedy';
 import { buildMenu, buildEntityRows, buildConfigRows, clampMenuIndex, describeAction, CONFIRM_WORD } from './actionsCatalog';
+import type { MenuScope } from './actionsCatalog';
 import type { MenuItem, ActionImpact } from './actionsCatalog';
 import { renderActionsMenu, renderTypeConfirm, renderParamEdit } from './screens/actionsMenu';
 import { c } from './ansi';
@@ -160,11 +162,15 @@ export class TuiSession {
   private actionInFlight = false;
   /** Transient outcome card ("✓/✗ …"), dismissed by the next keypress. */
   private actionNotice: string | null = null;
+  /** Optional second line under a notice (kept short so the box still fits). */
+  private actionNoticeDetail: string | null = null;
   /** Label of the action currently in flight (for the "working" card). */
   private actionRunningLabel = '';
   /* ── actions menu (v0.9) ─────────────────────────────────────────────────── */
   /** True while the Actions Menu overlay is open. */
   private menuOpen = false;
+  /** Which menu is open — device-scoped or mesh-wide (frozen at open time). */
+  private menuScope: MenuScope = 'device';
   /** Cursor index into the FROZEN menu snapshot. */
   private menuIndex = 0;
   /** The menu is a point-in-time snapshot taken when it opens, so streaming
@@ -195,6 +201,9 @@ export class TuiSession {
       followTail: true,
       errorsOnly: false,
       detailScroll: 0,
+      remedyCursor: 0,
+      remedyAnchorId: null,
+      topologyScroll: 0,
       logCursor: 0,
       logScroll: 0,
       logRange: 'all',
@@ -245,6 +254,11 @@ export class TuiSession {
     this.menuTarget = null;
     this.menuSnapshot = [];
     this.actionNotice = null;
+    // The detail line is part of the notice; leaving it set let a stale second
+    // line reappear under the NEXT notice, attributing one action's explanation
+    // to a different one. (This edit was clobbered once by a concurrent harness
+    // restore — see the single-runner lock in scripts/mutation-check.mjs.)
+    this.actionNoticeDetail = null;
   }
 
   /**
@@ -416,6 +430,7 @@ export class TuiSession {
       // A finished-action outcome card is up — any key dismisses it.
       if (this.actionNotice != null) {
         this.actionNotice = null;
+        this.actionNoticeDetail = null;
         dirty = true;
         continue;
       }
@@ -501,7 +516,35 @@ export class TuiSession {
       const ev = list[this.view.logCursor];
       return ev?.nodeId != null ? this.data.nodeById(ev.nodeId) : undefined;
     }
-    return visibleNodes(this.data, this.view)[this.view.selected];
+    // REMEDY names a specific node on every card and offers runnable
+    // recommendations for it. Falling through to the Overview cursor meant
+    // pressing `p` on a "dead-flap #83" card silently pinged whatever node
+    // happened to be selected on a screen the operator was not looking at —
+    // and `p` is the one action that runs with no CONFIRM box.
+    if (this.view.screen === 'remedy') {
+      const list = sortedSymptoms(this.data.symptoms());
+      syncRemedyCursor(this.view, list);
+      // Resolve by ANCHOR, falling back to the index only when the anchored
+      // symptom is gone. The list is re-sorted every engine poll, so an index
+      // alone can silently re-aim this at a different node between the frame
+      // the operator read and the key they pressed.
+      const anchored = this.view.remedyAnchorId != null
+        ? list.find((x) => symptomKey(x) === this.view.remedyAnchorId)
+        : undefined;
+      const sym = anchored ?? list[this.view.remedyCursor];
+      return sym?.nodeId != null ? this.data.nodeById(sym.nodeId) : undefined;
+    }
+    // Screens that show a per-node CURSOR: the Overview's ▶ row and the Detail
+    // dossier both make the target visible.
+    if (this.view.screen === 'overview' || this.view.screen === 'detail') {
+      return visibleNodes(this.data, this.view)[this.view.selected];
+    }
+    // Everything else (Topology, Heatmap, Controller, Interference) is an
+    // AGGREGATE view with no node cursor on screen. Falling through to the
+    // Overview selection meant `p` acted on a node the operator could not see
+    // and had not chosen — the same defect fixed on Remedy, and `p` is the one
+    // action that runs with no CONFIRM box. Refuse instead of guessing.
+    return undefined;
   }
 
   /** Route a shortcut action key to a request. Returns true if consumed. */
@@ -528,7 +571,31 @@ export class TuiSession {
     // Device actions use the EXPLICIT node when supplied (the menu passes its
     // frozen target); shortcuts pass none and resolve the live selection.
     const tgt = d.needsNode ? (node ?? this.actionTargetNode()) : undefined;
-    if (d.needsNode && !tgt) return false;
+    if (d.needsNode && !tgt) {
+      // Say WHY, ON SCREEN. `this.log()` only reaches the add-on's server log,
+      // which the operator at the terminal never sees — so a refusal there is
+      // indistinguishable from a dead key. Use the same notice card the
+      // read-only refusal uses.
+      //
+      // The reason must be TRUE for the screen. Log and Remedy DO carry a
+      // per-node cursor; when they fail to resolve a target it is because the
+      // card under it is mesh-scoped (a mesh-interference symptom, a
+      // controller event) — telling that operator to "pick a node on the
+      // Overview" is a false explanation that sends them to the wrong screen.
+      const cursorScreen =
+        this.view.screen === 'overview' || this.view.screen === 'detail' ||
+        this.view.screen === 'log' || this.view.screen === 'remedy';
+      this.actionNotice = `✗  ${d.label}: no target node`;
+      this.actionNoticeDetail = cursorScreen
+        ? 'The item under the cursor is not tied to a single node — move to one that is.'
+        : 'This screen has no node cursor · pick a node on the Overview (1) or Detail (2)';
+      this.log(`${this.actionNotice} — ${this.actionNoticeDetail}`);
+      // TRUE = consumed. Returning false let the key fall through to applyKey,
+      // which logged a contradictory "enable write_actions_enabled" line while
+      // write actions were ENABLED — and skipped the redraw, so the notice card
+      // never reached the wire on the keypress that produced it.
+      return true;
+    }
     const nodeId = tgt?.nodeId ?? null;
     const label = d.needsNode ? `${d.label} — #${nodeId} ${tgt!.name}` : d.label;
     const target = d.needsNode ? `#${nodeId} ${tgt!.name}` : `whole mesh (${this.data.nodes().length} nodes)`;
@@ -547,15 +614,58 @@ export class TuiSession {
   /** Open the menu, FREEZING the target node + item list at this instant so that
    *  streaming Log events or a rebuild starting/stopping mid-menu can't move a
    *  row (or the target) out from under the cursor before the operator selects. */
-  private openMenu(): void {
-    this.menuTarget = this.actionTargetNode() ?? null;
+  /**
+   * Which menu `a` opens on the current screen.
+   *
+   * The Controller screen IS the network view ("CONTROLLER & NETWORK"), so it
+   * owns the mesh-wide actions. Screens with a node cursor own the device ones.
+   * Everywhere else there is nothing unambiguous to act on.
+   */
+  private menuScopeForScreen(): MenuScope | null {
+    if (this.view.screen === 'overview' || this.view.screen === 'detail') return 'device';
+    if (this.view.screen === 'remedy' || this.view.screen === 'log') return 'device'; // both carry a per-node cursor
+    if (this.view.screen === 'controller') return 'network';
+    return null;
+  }
+
+  /**
+   * Open the menu. `reopen` is the scope to RESTORE when coming back from a
+   * cancelled confirm or value picker: those paths must return the operator to
+   * the menu they were in, not re-derive one from the screen. (Re-deriving
+   * happens to agree today because the modals swallow every key, so the screen
+   * cannot change underneath them — but that is an accident of the dispatch
+   * order, not a guarantee, and this is exactly the "second consumer" coupling
+   * that has bitten this codebase repeatedly.)
+   */
+  private openMenu(reopen?: MenuScope): void {
+    const scope = reopen ?? this.menuScopeForScreen();
+    if (scope == null) {
+      // Say where the actions live rather than opening an empty or mis-scoped
+      // menu. (Rendered on screen — the server log is not visible from here.)
+      this.actionNotice = '✗  No actions on this screen';
+      this.actionNoticeDetail = 'Device actions: Overview (1) or Detail (2) · Network actions: Controller (3)';
+      this.log(`${this.actionNotice} — ${this.actionNoticeDetail}`);
+      return;
+    }
+    this.menuScope = scope;
+    // A network menu has no device target, and must not inherit one: showing
+    // "target #8 Kitchen Lamp" above a mesh-wide action is the exact confusion
+    // this split exists to remove.
+    //
+    // DEFENSIVE, and knowingly untestable today: no network-scoped screen has a
+    // node cursor, so actionTargetNode() already returns undefined here. The
+    // invariant that makes this so is pinned in sessionActions.test.ts, which
+    // fails the moment the guard becomes load-bearing.
+    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;
     const items = buildMenu({
+      scope,
       hasNode: this.menuTarget != null,
+      cursorScreen: this.view.screen === 'log' || this.view.screen === 'remedy',
       rebuilding: this.data.controller()?.isRebuildingRoutes ?? false,
     });
     // v0.23: append device-control + config-edit rows for the target node. These
     // are frozen at open time (same snapshot discipline as the catalog rows).
-    if (this.menuTarget) {
+    if (scope === 'device' && this.menuTarget) {
       const nodeId = this.menuTarget.nodeId;
       this.data.requestConfigParams(nodeId); // warm the cache for next time
       items.push(...buildEntityRows(this.data.entityStates(nodeId)));
@@ -604,6 +714,7 @@ export class TuiSession {
       // explicit so a keypress isn't silently ignored.
       this.closeMenu();
       this.actionNotice = '✗  Read-only — set write_actions_enabled in the add-on config to unlock actions.';
+      this.actionNoticeDetail = null; // never inherit a previous notice's second line
       return;
     }
     if (item.disabled) return; // the reason is shown inline on the row
@@ -673,7 +784,7 @@ export class TuiSession {
       this.paramEdit = null;
       if (this.confirmFromMenu) {
         this.confirmFromMenu = false;
-        this.openMenu();
+        this.openMenu(this.menuScope);
       }
       return;
     }
@@ -794,7 +905,7 @@ export class TuiSession {
     this.confirmBuffer = '';
     if (this.confirmFromMenu) {
       this.confirmFromMenu = false;
-      this.openMenu();
+      this.openMenu(this.menuScope);
     }
   }
 
@@ -824,6 +935,7 @@ export class TuiSession {
     }
     this.actionInFlight = false;
     this.actionNotice = res.ok ? `✓  ${action.label}` : `✗  ${res.message}`;
+    this.actionNoticeDetail = null;
     this.lastFrameHash = '';
     this.draw();
   }
@@ -882,13 +994,19 @@ export class TuiSession {
     }
     if (this.actionNotice != null) {
       const ok = this.actionNotice.startsWith('✓');
-      return centeredNotice(this.view, 'RESULT', [(ok ? c.green : c.red)(this.actionNotice), '', c.grey('press any key to continue · see the Log screen for history')]);
+      return centeredNotice(this.view, 'RESULT', [
+        (ok ? c.green : c.red)(this.actionNotice),
+        ...(this.actionNoticeDetail ? ['', c.grey(this.actionNoticeDetail)] : []),
+        '',
+        c.grey('press any key to continue'),
+      ]);
     }
     if (this.menuOpen) {
       this.menuIndex = clampMenuIndex(this.menuIndex, this.menuSnapshot.length);
       return renderActionsMenu(this.view, {
         items: this.menuSnapshot,
         index: this.menuIndex,
+        scope: this.menuScope,
         targetLabel: this.menuTarget ? `#${this.menuTarget.nodeId} ${this.menuTarget.name}` : null,
         locked: !this.actions?.enabled,
       });

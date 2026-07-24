@@ -126,10 +126,30 @@ export function describeAction(kind: ActionKind): ActionDescriptor | undefined {
   return ACTION_CATALOG.find((d) => d.kind === kind);
 }
 
+/**
+ * Which menu is being built.
+ *
+ * The two are kept apart because a single mixed menu was dishonest: its header
+ * read "target #8 Kitchen Lamp" and then listed "Rebuild ALL routes" — an
+ * action that touches all 39 nodes and has nothing to do with the node named
+ * above it. One menu, one scope, one blast radius.
+ */
+export type MenuScope = 'device' | 'network';
+
 /** Context that shapes which rows the menu shows and which are actionable. */
 export interface MenuContext {
+  /** Which menu to build — device-scoped, or mesh-wide. */
+  scope: MenuScope;
   /** A target node is selected (device actions need one). */
   hasNode: boolean;
+  /**
+   * True when the screen HAS a per-node cursor (Overview/Detail/Log/Remedy).
+   * The reason a device action is unavailable differs: on those screens the
+   * card under the cursor is mesh-scoped, so "pick a node on the Overview"
+   * is a false explanation that sends the operator to the wrong screen. The
+   * shortcut-key path already distinguishes these; this is its second consumer.
+   */
+  cursorScreen?: boolean;
   /** A network route rebuild is currently in progress (controller flag). */
   rebuilding: boolean;
 }
@@ -148,8 +168,11 @@ export interface MenuItem {
 }
 
 /**
- * Build the ordered, context-aware menu.
+ * Build the ordered, context-aware menu for ONE scope.
  *
+ * - The DEVICE menu offers only actions bounded by the selected node. The
+ *   NETWORK menu offers only mesh-wide ones. Mixing them put an action with a
+ *   39-node blast radius directly under a header naming a single device.
  * - `rebuildAll` and `stopRebuild` are mutually exclusive: show the START while
  *   idle, the STOP while a rebuild runs. This mirrors the real controller state
  *   so the menu never offers an action that would no-op.
@@ -157,8 +180,10 @@ export interface MenuItem {
  *   DISABLED with a reason when no node is selected — rather than vanishing.
  */
 export function buildMenu(ctx: MenuContext): MenuItem[] {
+  const want: ActionScope = ctx.scope === 'network' ? 'system' : 'device';
   const items: MenuItem[] = [];
   for (const d of ACTION_CATALOG) {
+    if (d.scope !== want) continue;
     if (d.kind === 'stopRebuild' && !ctx.rebuilding) continue;
     if (d.kind === 'rebuildAll' && ctx.rebuilding) continue;
     const disabled = d.needsNode && !ctx.hasNode;
@@ -167,7 +192,11 @@ export function buildMenu(ctx: MenuContext): MenuItem[] {
       group: d.scope === 'system' ? 'system' : 'maintenance',
       payload: { type: 'catalog', kind: d.kind },
       disabled,
-      reason: disabled ? 'select a node first (Overview/Detail)' : null,
+      reason: disabled
+        ? (ctx.cursorScreen
+            ? 'the item under the cursor is not tied to a single node'
+            : 'select a node first (Overview/Detail)')
+        : null,
     });
   }
   return items;

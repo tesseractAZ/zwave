@@ -43,6 +43,7 @@ import {
 } from '../../types';
 import { centeredNotice } from './overview';
 import { frame } from '../chrome';
+import { rssiColor, marginColor } from '../bands';
 
 /** A colour wrapper (matches the ansi `c.*` span helpers / gauges ColorFn). */
 type ColorFn = (s: string) => string;
@@ -68,7 +69,7 @@ export function renderTopology(ctx: ScreenCtx): string[] {
     return centeredNotice(view, 'TOPOLOGY / ROUTES', [
       c.grey('Loading route topology…'),
       ...(err ? ['', c.red(truncate(err, Math.min(W - 8, 60)))] : []),
-    ]);
+    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   // End nodes only (the controller is node 1 — it has no route to itself).
@@ -76,10 +77,11 @@ export function renderTopology(ctx: ScreenCtx): string[] {
   if (endNodes.length === 0) {
     return centeredNotice(view, 'TOPOLOGY / ROUTES', [
       c.grey('No end nodes in the mesh yet'),
-    ]);
+    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   const noise = data.noiseFloor();
+  const hasRealNoise = data.hasRealNoise();
   const nameBudget = Math.max(6, Math.min(18, W - 40));
 
   /* ── bucket every node by hop count ──────────────────────────────────── */
@@ -116,17 +118,17 @@ export function renderTopology(ctx: ScreenCtx): string[] {
   for (const hops of hopKeys) {
     const list = byHop.get(hops)!.sort((a, b) => a.nodeId - b.nodeId);
     tree.push(groupHeader(view, hopLabel(hops), list.length));
-    for (const n of list) tree.push(nodeLine(view, n, n.stats.lwr, noise, nameBudget, showBars));
+    for (const n of list) tree.push(nodeLine(view, n, n.stats.lwr, noise, nameBudget, showBars, hasRealNoise));
   }
   if (lrNodes.length) {
     lrNodes.sort((a, b) => a.nodeId - b.nodeId);
     tree.push(groupHeader(view, 'Long-Range (direct to controller)', lrNodes.length));
-    for (const n of lrNodes) tree.push(nodeLine(view, n, n.stats.lwr, noise, nameBudget, showBars));
+    for (const n of lrNodes) tree.push(nodeLine(view, n, n.stats.lwr, noise, nameBudget, showBars, hasRealNoise));
   }
   if (pending.length) {
     pending.sort((a, b) => a.nodeId - b.nodeId);
     tree.push(groupHeader(view, 'Route pending', pending.length));
-    for (const n of pending) tree.push(nodeLine(view, n, null, noise, nameBudget, showBars));
+    for (const n of pending) tree.push(nodeLine(view, n, null, noise, nameBudget, showBars, hasRealNoise));
   }
 
   /* ── assemble the body: [histogram] + windowed tree + repeater panel ──── */
@@ -143,10 +145,22 @@ export function renderTopology(ctx: ScreenCtx): string[] {
   if (tree.length <= treeCap) {
     body.push(...tree);
     while (body.length < histLines.length + treeCap) body.push('');
+    view.topologyScroll = 0;
   } else {
-    const shown = treeCap - 1; // reserve the last row for the overflow note
-    for (let i = 0; i < shown; i++) body.push(tree[i]);
-    body.push(c.grey(`  …${tree.length - shown} more (taller terminal shows all)`));
+    // The tree SCROLLS. It is ordered shallowest-first, so a fixed window from
+    // index 0 always kept the (many, healthy) direct rows and always cut the
+    // deep-hop, Long-Range and route-pending groups — exactly the anomalies
+    // this screen exists to show. Worse, the old "taller terminal shows all"
+    // note was false: 39 nodes need ~45 lines and rows clamp well below that.
+    const shown = treeCap - 1; // reserve the last row for the position note
+    const maxScroll = Math.max(0, tree.length - shown);
+    const scroll = Math.max(0, Math.min(view.topologyScroll ?? 0, maxScroll));
+    view.topologyScroll = scroll; // clamp + write back (detail.ts's pattern)
+    for (let i = scroll; i < scroll + shown && i < tree.length; i++) body.push(tree[i]);
+    const above = scroll;
+    const below = Math.max(0, tree.length - scroll - shown);
+    const where = above > 0 ? `▴${above} ▾${below}` : `▾ ${below}`;
+    body.push(c.grey(`  ${where} more · ↑↓ scroll · ${scroll + 1}–${Math.min(tree.length, scroll + shown)}/${tree.length}`));
   }
   body.push(...panel);
 
@@ -160,7 +174,8 @@ export function renderTopology(ctx: ScreenCtx): string[] {
     title: 'TOPOLOGY / ROUTES',
     rightStatus: rs,
     body,
-    keys: [['1-8', 'SCREENS'], ['T', 'UNITS'], ['Q', 'BACK']], // Topology honours the dBm↔margin toggle
+    // Topology honours the dBm↔margin toggle, and now scrolls its route tree.
+    keys: [['↑↓', 'SCROLL'], ['1-8', 'SCREENS'], ['T', 'UNITS', 1], ['Q', 'BACK']],
   });
 }
 
@@ -236,13 +251,32 @@ function nodeLine(
   noise: number,
   nameBudget: number,
   showBars: boolean,
+  hasRealNoise: boolean,
 ): string {
-  const dead = n.status === NodeStatus.Dead;
-  const idColor = dead ? c.grey : n.isLongRange ? c.blue : c.white;
-  const nameColor = dead ? c.grey : c.white;
+  // A DEAD/UNKNOWN node's route telemetry is the last reading taken BEFORE it
+  // stopped answering. Rendering it live-green put a healthy rate and a full
+  // 4-bar signal on a node that is not there. ASLEEP is a normal, expected
+  // state — it gets its own cyan marker rather than looking identical to alive.
+  const isDead = n.status === NodeStatus.Dead;
+  const isUnknown = n.status === NodeStatus.Unknown;
+  // Both mean "this telemetry is not live", but they are different claims:
+  // Unknown is "never contacted / not reported", not "confirmed unreachable".
+  // Marking them identically contradicted the Overview, which keeps them apart.
+  const stale = isDead || isUnknown;
+  const asleep = n.status === NodeStatus.Asleep;
+  const mark = isDead ? c.red('✕') : isUnknown ? c.grey('○') : asleep ? c.cyan('◐') : c.green('●');
+  const idColor = stale ? c.grey : n.isLongRange ? c.blue : c.white;
+  const nameColor = stale ? c.grey : asleep ? c.cyan : c.white;
+
+  // On a MULTI-HOP route `lwr.rssi` is the last hop's (repeater→controller) ACK
+  // reading — it describes that repeater's link, not this device's. Grading it
+  // as the node's own signal made a distant, weakly-heard node look strong.
+  const routed = !n.isLongRange && (lwr?.repeaters.length ?? 0) > 0;
 
   const left =
-    '  ' +
+    ' ' +
+    mark +
+    ' ' +
     idColor(`n${n.nodeId}`) +
     ' ' +
     nameColor(truncate(n.name, nameBudget)) +
@@ -252,8 +286,8 @@ function nodeLine(
     chainStr(n, lwr);
   // signalBars(4) drawn from the same LWR margin the numeric cell reports, so
   // the glyph and the number always agree; dropped on narrow terminals.
-  const bars = showBars ? routeSignalBars(view, lwr, noise) + ' ' : '';
-  const right = rateCell(lwr) + '  ' + bars + signalCell(view, lwr, noise);
+  const bars = showBars ? routeSignalBars(view, lwr, noise, stale || routed) + ' ' : '';
+  const right = rateCell(lwr, stale) + '  ' + bars + signalCell(view, lwr, noise, stale, routed, hasRealNoise);
   return lr(left, right, view.cols);
 }
 
@@ -263,7 +297,7 @@ function nodeLine(
  * up with the numeric margin thresholds (≥17dB green · 5-16 yellow · <5 red).
  * No usable reading → dim placeholder bars (keeps the column aligned).
  */
-function routeSignalBars(view: ViewState, lwr: RouteStat | null, noise: number): string {
+function routeSignalBars(view: ViewState, lwr: RouteStat | null, noise: number, neutral = false): string {
   const rssi = lwr?.rssi ?? null;
   if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('▁▃▅▇');
   const margin = rssi - noise;
@@ -274,7 +308,7 @@ function routeSignalBars(view: ViewState, lwr: RouteStat | null, noise: number):
   else frac = 0.1; // ~0 bars
   // Color the bars with the SAME band the numeric cell uses, so glyph and number
   // agree in BOTH margin and dBm display modes.
-  const color = view.signalDisplay === 'dbm' ? rssiColor(rssi) : marginColor(margin);
+  const color = neutral ? c.grey : view.signalDisplay === 'dbm' ? rssiColor(rssi) : marginColor(margin);
   return signalBars(frac, 4, color);
 }
 
@@ -293,32 +327,36 @@ function chainStr(n: NodeSnapshot, lwr: RouteStat | null): string {
   return s;
 }
 
-function rateCell(lwr: RouteStat | null): string {
+function rateCell(lwr: RouteStat | null, stale = false): string {
   const dr = lwr?.protocolDataRate ?? null;
   if (dr == null) return c.grey('—');
-  const label = DATA_RATE_LABEL[dr] ?? '?';
-  const color = dr >= 4 ? c.blue : dr >= 3 ? c.green : dr === 2 ? c.yellow : c.red;
-  return color(label);
+  // An unrecognised rate is UNKNOWN, not a Long-Range link — blue is reserved
+  // for LR and made an unmapped code read as the fastest tier on the mesh.
+  const known = DATA_RATE_LABEL[dr];
+  if (known == null) return c.grey('?');
+  const color = stale ? c.grey : dr >= 4 ? c.blue : dr >= 3 ? c.green : dr === 2 ? c.yellow : c.red;
+  return color(known);
 }
 
-function signalCell(view: ViewState, lwr: RouteStat | null, noise: number): string {
+function signalCell(
+  view: ViewState,
+  lwr: RouteStat | null,
+  noise: number,
+  stale = false,
+  routed = false,
+  hasRealNoise = true,
+): string {
   const rssi = lwr?.rssi ?? null;
   if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('—');
-  if (view.signalDisplay === 'dbm') return rssiColor(rssi)(`${rssi}dBm`);
+  const neutral = stale || routed;
+  if (view.signalDisplay === 'dbm') {
+    return (neutral ? c.grey : rssiColor(rssi))(`${rssi}dBm`);
+  }
   const margin = rssi - noise; // margin above the noise floor
-  return marginColor(margin)(`${margin >= 0 ? '+' : ''}${margin}dB`);
-}
-
-function rssiColor(rssi: number): (s: string) => string {
-  if (rssi >= -70) return c.green;
-  if (rssi >= -88) return c.yellow;
-  return c.red;
-}
-
-function marginColor(margin: number): (s: string) => string {
-  if (margin >= 17) return c.green;
-  if (margin >= 5) return c.yellow;
-  return c.red;
+  // `est` marks a margin measured against the ASSUMED noise floor rather than a
+  // real one read from the driver — without it an estimate reads as a reading.
+  const est = hasRealNoise ? '' : c.grey(' est');
+  return (neutral ? c.grey : marginColor(margin))(`${margin >= 0 ? '+' : ''}${margin}dB`) + est;
 }
 
 /* ── repeater-load panel (single-point-of-failure indicator) ─────────────── */

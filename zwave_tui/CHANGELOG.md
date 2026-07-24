@@ -1,5 +1,366 @@
 # Changelog
 
+## 0.24.0 — 2026-07-23
+
+### Actions are scoped to what you are looking at
+
+The Actions Menu mixed two blast radii under one header. It read
+`ACTIONS · target #8 Kitchen Lamp` and then listed **Rebuild ALL routes** — an
+action that touches every node in the mesh — directly beneath the name of a
+single device. Same defect family as the rest of this release: the screen said
+one thing and meant another.
+
+- **`a` on Overview / Detail / Remedy / Log opens DEVICE ACTIONS**, headed with
+  the target node and containing only actions bounded by it: maintenance (ping,
+  refresh, re-interview, rebuild *this node's* routes, remove-failed), DEVICE
+  CONTROLS, and CONFIGURATION.
+- **`a` on Controller opens NETWORK ACTIONS**, headed `whole mesh` with no
+  device target, containing the mesh-wide operations (rebuild all routes / stop
+  a running rebuild). The Controller screen is already the network view, and its
+  command bar now advertises `[A] NETWORK ACTIONS`.
+- **Anywhere else `a` names where the actions live** instead of opening an empty
+  or mis-scoped menu.
+
+Tests assert the separation in both directions — no mesh-wide row can appear in a
+device menu and no device row in the network menu, in any context — plus that
+every catalog action stays reachable from exactly one menu, so nothing is
+stranded or duplicated.
+
+## (earlier in 0.24.0) — 2026-07-22
+
+**Render-honesty pass.** A full audit of every screen and overlay — 11 surfaces
+plus 4 cross-cutting sweeps — found that the TUI's failure mode under a narrow
+or short terminal was not "degrade gracefully" but "degrade into something that
+looks like a different, wrong reading". This release fixes that class of defect
+wherever it appeared.
+
+### Controls never lie about themselves
+
+- **The command bar fits whole keycaps.** It used to cut at the character level,
+  so at the default 80-column terminal the Overview rendered a dangling `[` where
+  `[T] UNITS` should be and dropped `[Q] EXIT` entirely — the exit key, invisible.
+  The bar now tightens its gutter, then sheds whole caps worst-first, and
+  discloses the count as `+N`. `[Q]` and `[1-8]` are protected and survive to the
+  narrowest width. Same fix on the Log, Detail and Topology bars.
+- **The uppercase keycaps are actually bound.** `[S] SORT`, `[T] UNITS`,
+  `[D] DATE` and `[O] ERRORS` were advertised in uppercase but only the lowercase
+  key was handled, so pressing exactly what the bar printed did nothing.
+- **`o` no longer reaches across screens.** It toggled the Log's errors-only
+  filter from *any* screen, so an idle press on the Overview silently hid events
+  on a screen the operator was not looking at. It is now scoped to the Log.
+- **`/` cannot start an invisible filter capture.** Off the Overview there is no
+  prompt and no echo, yet the capture swallowed every subsequent keystroke —
+  including the `[Q] BACK` the operator pressed to escape, which could strand
+  them on a chromeless notice box. `/` is now a no-op outside the Overview.
+- **Empty states keep their chrome.** "No nodes", "no node selected",
+  "controller not loaded" and the loading cards drew as a bare centred box with
+  no command bar and no way out. They now carry an exit bar and, where a filter
+  caused the emptiness, say so.
+
+### Measurements are not invented
+
+- **Counters are compacted, not clipped.** A seven-figure controller frame count
+  was character-truncated into a five-figure number that looked exact and was
+  wrong by two orders of magnitude. Large counters now render `1.2M`.
+- **Telemetry fields and values survive.** `fieldStrip` drops whole fields with a
+  `+N` marker instead of slicing a value (`NOISE -9` read as a real measurement);
+  `lr()` now shortens the label and keeps the value; `titleRule` shortens the
+  title and keeps its right-hand status token.
+- **A dead node stops looking healthy.** Overview, Topology and the Heatmap
+  painted a `✕ dead` node's last-known RTT, data rate and signal in full health
+  green. Those readings are history, so they now render neutral. Asleep nodes get
+  their own marker instead of being indistinguishable from alive ones.
+- **A repeater's link no longer grades the device behind it.** On a multi-hop
+  route the reported RSSI is the *last hop's* ACK — the repeater's signal, not the
+  node's. It was health-coloured on Topology and, worse, set the grade for a whole
+  Heatmap area. It is now shown neutral, excluded from area min/mean, and the
+  area's node count reads `4/12n` so the denominator is visible.
+- **An assumed noise floor is labelled.** With no real floor from the driver the
+  SNR margin is computed against an assumed −95 dBm. Overview now heads the column
+  `MARGIN~` and reports `NOISE −95 dBm assumed`; the Heatmap says
+  `margins estimated`; Topology marks each reading `est`.
+- **The reliability bar fills with reliability.** It was filled with the *error*
+  fraction, so a flawless link drained the bar to empty. Its denominator also
+  double-counted errors already included in the message totals.
+- **Sparklines scale to what they draw.** Auto-scaling ran over the whole series
+  while only the last `width` samples were plotted, so a spike that had long
+  scrolled off flattened the visible trend to a dead line. A perfectly steady
+  braille sparkline also rendered red (critical) purely for being flat.
+- **Gauges reserve saturation for the endpoints.** `meter()` rounded, so 94% read
+  as complete and 5% as nothing; a signal below an eighth of a bar rendered
+  identically to no signal at all.
+- **Overflowing screens say so.** `frame()` silently discarded body rows that did
+  not fit — the Interference screen's correlated-degradation block and the
+  Controller's network-health roll-up could vanish, reading as "nothing to
+  report". Overflow now states how many lines are hidden.
+
+### Navigation reaches what the screen promises
+
+- **Remedy actions target the symptom you are looking at.** Remedy names a node
+  on every card and offers runnable recommendations for it, but `a` and `p` fell
+  through to the *Overview* cursor — so pressing `p` on a "dead-flap #83" card
+  pinged whatever unrelated node happened to be selected on another screen, with
+  no CONFIRM box (`p` is the one immediate action). Remedy now has its own
+  symptom cursor (`↑↓`/`j`/`k`), it is drawn with a `▶` marker, it is what the
+  action keys target, and `[↑↓] SYMPTOM` / `[A] ACTIONS` are advertised.
+- **Remedy ranks actionable cards first.** A subsumed symptom renders without a
+  recommendation because its owning mesh event carries the fix — but mesh
+  interference is always `warn` while the `dead-flap` symptoms under it are
+  always `crit`, so severity-only ranking floated four recommendation-less
+  criticals above the one actionable card and pushed *that* card into "1 more
+  symptom not shown". Plan-owners now sort first.
+- **The Topology route tree scrolls.** It is ordered shallowest-first and was
+  windowed from index 0, so on a real mesh it always kept the many healthy
+  "direct" rows and always cut the deep-hop, Long-Range and route-pending
+  groups — precisely the anomalies the screen exists to show — with no key bound
+  to reach them. It now scrolls (`↑↓`/`j`/`k`, space/`b`, `g`/`G`) and reports
+  its position. The old "taller terminal shows all" hint was false: 39 nodes need
+  roughly 45 lines.
+
+### Consistency
+
+- **One value, one colour.** Every screen carried its own copy of the RTT,
+  timeout-rate, RSSI, SNR-margin and noise-floor thresholds, and the copies had
+  drifted: 600 ms RTT was yellow on the Overview and red on the Detail dossier; a
+  4% timeout rate was yellow on one and green on the other. All of them now come
+  from a single `bands.ts`.
+- **Overview scrolling sticks.** The clamped window was never written back, so
+  the cursor snapped to the bottom row on every redraw. The scroll counter also
+  reported the window *size* (which never changed) rather than the position — it
+  now reads `(12–28/39)`.
+
+### Robustness
+
+- **Log event text is sanitized at the sink.** Action-failure text is built from
+  whatever a Home Assistant service call throws; a newline in it split one log row
+  into two and broke the exact-rows render contract.
+- **Width maths ignores control bytes.** `visLen`/`truncate` counted them as
+  visible columns and passed them through to the wire.
+
+### Caught by the adversarial review of this release
+
+An adversarial review of the diff above found 19 confirmed defects — most of them
+introduced *by* it. They are fixed here, and the fixes are mutation-tested.
+
+- **The reliability denominator change was a regression, and is reverted.**
+  zwave-js's `messagesTX` counts messages *successfully sent*; NAK, CAN, the
+  timeouts and the dropped counters are **disjoint** failure tallies, not a
+  subset of it. Dividing failures by successes yields *odds*, not a rate — it
+  overstated every value and could exceed 100%, which the newly added `clamp01`
+  was silently hiding. The denominator is once again successes + failures. A
+  link with failures and no successes now reads 100%, and an idle link reports
+  `— no frames yet` instead of a full green bar labelled "0.0% errors".
+- **`[Esc] CLEAR` was itself a false keycap.** The new empty-roster card
+  advertised it, but Esc only cleared a filter *during* the `/` capture — after
+  Enter it was inert. Esc now clears a committed filter on the Overview.
+- **`/` could still start an invisible capture.** The new guard tested the
+  screen, but the Overview renders a centred card (with no prompt) while the
+  roster is loading. `/` is now refused there, and the empty-roster card — where
+  `/` is still legal — echoes the capture with a caret and an apply/cancel hint.
+- **Uppercase `[O]` skipped the Log's cursor reset** that lowercase `o` performs,
+  so the filter changed under a stale selection. Both now take one path.
+- **`Unknown` is no longer painted as `dead`** on the Heatmap and Topology.
+  Unknown means "not yet contacted" and is also the fallback when HA omits a
+  status; the Overview always kept them apart, so two screens disagreed with a
+  third. Unknown now has its own `○`.
+- **The selected Overview row showed fewer signal bars** than the same node
+  unselected: the weak-signal floor was added to `signalBars` but not to its
+  plain, inverse-video twin. Both now share one `litBars()`.
+- **Signal bars and their number could disagree** — the glyph used a
+  two-threshold ramp while the label had moved to the four-band `marginColor`,
+  so between 5 and 10 dB yellow bars sat beside a red number. The glyph is now
+  coloured by the label's own band function.
+- **The heat legend silently lost its newest key.** It gained two entries but
+  kept a width budget encoding the old fixed cost, so `✕ dead` was always
+  clipped. The legend now fits itself, dropping whole keys before it will cut a
+  label in half.
+
+**Five of the release's own tests were weak, and are rewritten.** The band test
+compared a value to itself; the dead-node test put the node on the *selected*
+row, which renders without colour at all, so it could not fail for any
+implementation; the two `signalBars` assertions were byte-identical and admitted
+a "light every bar" mutant; the `fieldStrip` assertion never fired. Each now pins
+exact thresholds, lit-bar counts and whole-field output, and carries a control
+assertion proving the fixture reaches the code path under test. The Controller
+and Heatmap renderers had **no** coverage at all and now have eleven cases.
+
+### And by the round-2 review of those fixes
+
+A second adversarial pass over the round-1 fixes confirmed 29 more — again mostly
+self-inflicted. The pattern repeated exactly: **splitting `dead` from `unknown`
+fixed the glyphs but broke a second consumer of the same field**, so an area with
+two dead nodes and one unknown one sank from the top of the worst-first map to
+below every healthy area. Also fixed: the heat legend searched ramp-width before
+key count, so at the stock 80-column terminal it dropped `✕ dead` while leaving
+seven columns unused; its ramp was coloured by a different band function than the
+cells it explains, and never drew the map's most alarming colour at all; dead and
+unknown cells sank to the tail of each area's strip, making them the first marks
+discarded on overflow; `timeoutCallback` — a failure counter HA does forward —
+was dropped at the data boundary, so a callback-timeout wedge rendered as a full
+green bar; the capture card replaced the reason the roster was empty instead of
+joining it, and blamed a whitespace-only filter that excludes nothing; `Esc
+cancel` named an action Esc does not perform; and `Unknown` had no bucket in the
+Controller roll-up or the Overview mesh percentage, so nodes the controller has
+never heard from counted as healthy.
+
+Five more tests were too weak to catch their own fix.
+
+### And by the round-3 review of *those* fixes
+
+**Correction.** The round-2 notes above claimed the suite was "verified by
+mutation — reverting each fix individually makes a named test fail". That was
+not true: three of the `unknown`-accounting fixes had no test at all and reverted
+with the suite green. The claim was made from having mutation-tested *some* of
+the release, not all of it. Every fix in v0.24 has now actually been checked this
+way, one at a time.
+
+Round 3 confirmed 39 more findings. The recurring failure repeated a third time,
+one layer further out: the heatmap's "area where nothing answers" predicate had
+been keyed on `dead`, then on `dead || unknown` — and a single **asleep** or
+**routed** node still flipped it false and sank the mesh's only dead room to the
+bottom of a map labelled *sorted worst-first*. It is now an explicit four-tier
+rank rather than a boolean, so a state nobody anticipated cannot silently rescue
+an area. Also fixed:
+
+- The `timeout cb` counter was **wired to `timeoutACK`** — it displayed another
+  field's value under its own label.
+- At 60 columns `messages TX` / `messages RX` both clipped to `messages`, so two
+  cells showed different numbers under the same label. Labels are responsive now.
+- The Controller's link tallies dropped every node whose route had not resolved,
+  so a second line that reads as a partition did not sum either.
+- A `timeoutCallback` HA never sent was summed as zero. Unreported is not zero;
+  the rate now says `(partial)`.
+- `p` — the one action that runs with **no CONFIRM box** — still targeted the
+  invisible Overview cursor from Topology, Heatmap, Controller and Interference.
+  Node actions are refused on screens with no node cursor, and the refusal is
+  shown **on screen** (the previous message went only to the server log, which
+  the operator at the terminal never sees).
+- The legend shed `✕ dead` first because keys are dropped from the end and it was
+  last; the mean-margin meter, the Detail per-hop bars and the Controller's noise
+  gauges were each coloured by a different band function than the number beside
+  them; `+25dBest` had no separator; and the title rule advertised a
+  whitespace-only filter as active.
+
+### And by the round-4 review — including a correction about these notes
+
+**The mutation-verification claim in these notes was wrong twice.** Round 2 said
+"verified by mutation"; round 3 corrected that and then asserted "every v0.24 fix
+has now actually been checked, one at a time". That was also false — nine fixes
+reverted with the whole suite green, among them the Remedy action-targeting fix,
+which is the one that stops `p` (no CONFIRM box) acting on an invisible node.
+Both times the claim was written from having checked *that round's* fixes and
+then generalised to the release.
+
+So the claim is no longer written by hand. **`server/scripts/mutation-check.mjs`**
+is committed: one entry per behavioural fix, each reverting it and requiring the
+suite to go red. Anything that survives is reported as an untested fix; anything
+whose anchor has moved reports `MISSING`, because that means the file has drifted
+from the code it claims to check. Two entries are labelled `equivalent` with a
+written reason — they cannot be killed under the current design, and the
+invariant that makes them equivalent is itself pinned by a test.
+
+Round 4 confirmed 73 findings. The live defects it caught:
+
+- **The Detail dossier was the FOURTH consumer** of "a dead node's telemetry is
+  history". Overview, Topology and the Heatmap all got it; the one screen you
+  open to diagnose a dead node did not, so it reported `RTT 20 ms`, `Timeouts
+  0.0%` and a green route two rows above its own `RSSI —`.
+- **The action refusal never reached the terminal.** It returned "not handled",
+  so the key fell through and both suppressed the redraw and logged *"enable
+  write_actions_enabled"* while write actions were enabled. It also gave a false
+  reason on Log and Remedy, which *do* have cursors — the real cause there is
+  that the card under the cursor is mesh-scoped.
+- **REMEDY printed "advisory only; nothing is acted on"** on a screen whose own
+  command bar runs actions. The true claim is about the engine, and now says so.
+- The Controller's `margin ref` gauge missed the noise-band fix; at 60 columns a
+  controller **with** a SIS and one **without** rendered byte-identically; the
+  Heatmap's `NODES` counted a different population than the Overview's `NODES`
+  (now `DEVICES`); and `renderLogin` was the only render path that could return
+  fewer than `rows` lines.
+
+One reviewer finding was **rejected**: the Interference diurnal ramp was said to
+contradict the shared timeout band. It does not — that cell is a mesh-wide
+*hourly aggregate*, where 5% is severe, not one node's lifetime percentage. The
+distinction is now documented rather than unified away.
+
+**431 → 469 tests**, and the fixtures that could not distinguish a broken
+implementation were rebuilt around values that actually discriminate — several
+tests were passing only because the correct and broken code agreed at the exact
+number chosen (`meter` needed 0.96/0.04, not 0.94/0.05; the μ-meter needed +9 dB,
+the one margin where the two colour functions disagree).
+
+### And by the round-5 review, which attacked the harness itself
+
+Round 5 was pointed at the thing now backing every claim: a clean run over an
+INCOMPLETE or DISHONEST list is still misleading. It confirmed 75 findings, and
+the most valuable were about the harness.
+
+**Four entries were killing by failing to compile.** A mutant that breaks the
+build makes every test file fail to *load*, so the suite goes red for a reason
+unrelated to the behaviour the entry names — a vacuous check inside the tool
+built to eliminate vacuous checks. The harness now **typechecks the mutant
+first** and reports `INVALID` if it does not compile. (Reviewers found one;
+the gate found four. Two needed care: TypeScript narrows a naive mutant to
+`never`, so a bare `null` and an unconditional early `return` both break the
+build for reasons that have nothing to do with behaviour.)
+
+**Ten fixes had no entry at all**, including three changed files — Interference,
+login and Log — with no coverage whatsoever. So the previously published
+"47 killed / 0 survived" was overstated in both directions at once.
+
+Three more integrity holes, all fixed:
+
+- **No baseline check.** On an already-red suite every entry would report
+  `killed` and the run would exit 0 — the count was compatible with a suite that
+  never passes. There is a gate now.
+- **The signal handlers could never fire.** The loop is synchronous, so
+  `execFileSync` blocks the event loop for the whole run; they were decoration.
+  Removed, with a comment saying so. A crash-recovery sidecar written *before*
+  each mutation is the real mechanism, and it survives SIGKILL.
+- **Two concurrent runs corrupted each other** — one restored what the other had
+  just mutated. The sidecar now records the owning PID and a second run refuses.
+
+Also: a mistyped `--only` reported a clean run over zero entries, and a killed
+`equivalent` entry was silently counted as an ordinary kill instead of flagging
+that its label had gone stale.
+
+### Live defects round 5 found
+
+- **The heatmap cell sort was descending.** Introduced with the rank tiers in
+  round 3, and directly contrary to the comment above it: since the strip
+  truncates its tail, overflow dropped exactly the weak links the sort exists to
+  preserve. A room with thirty strong nodes and one at −93 dBm hid the −93.
+- **The Remedy cursor was an unanchored index.** The engine re-sorts its symptom
+  list every poll, so between the frame the operator read and the key they
+  pressed, a different node could slide into that slot — re-aiming `p`, which
+  runs with **no CONFIRM box**. It now anchors to the symptom's `(nodeId, kind)`
+  identity, written back by the renderer from the card it actually drew.
+- **The dead-node rule had a fifth consumer**: `pushRoute` threaded its `stale`
+  flag into the rate and route RSSI but never passed it to `routeChain`, so a
+  dead node's per-hop readings stayed green inside a row greyed around them.
+- **A never-contacted node reported "RF health nominal"** — no measurements
+  means no flags, and the empty-flag branch read that absence as health, under a
+  title rule saying `UNKNOWN · SCORE —`.
+- **`renderLogin` floored its layout at 20 columns** and emitted 18-column rows
+  into an 8-column terminal. It now degrades to plain text below the floor.
+- **The margin band and the `W` flag had drifted apart** — 7–9 dB rendered red
+  on three screens while the score and the flag legend called it fine. Rather
+  than pick a new number, `bands.ts` now **derives** its red cut from
+  `health.ts`'s `WEAK_MARGIN_DB`, so the two cannot diverge again.
+
+Plus: the Actions Menu was a second consumer of the refusal explanation and
+still sent Log/Remedy operators to the wrong screen; `actionNoticeDetail`
+survived `resetActionState`, so one action's explanation could reappear under
+another's; and Detail banded raw RTT while the Overview banded the rounded
+value, so one reading could print `100 ms` in two colours.
+
+Reproduce the current state with `node scripts/mutation-check.mjs`. It prints
+its own verdict; the number is not copied here by hand, because twice a
+hand-copied claim about this exact thing turned out to be false.
+
+Width sweeps from 60 to 200 columns assert that no screen ever ends a row
+mid-keycap or loses its exit key.
+
 ## 0.23.0 — 2026-07-21
 
 **Device control + configuration writes** (Phase 3 of the per-device pass — the

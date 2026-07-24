@@ -17,7 +17,7 @@
 
 import { c, lr, padEnd, truncate, visLen } from '../ansi';
 import type { ViewState } from '../../types';
-import type { ActionImpact, MenuGroup, MenuItem } from '../actionsCatalog';
+import type { ActionImpact, MenuGroup, MenuItem, MenuScope } from '../actionsCatalog';
 import { CONFIRM_WORD } from '../actionsCatalog';
 import { centeredNotice } from './overview';
 
@@ -41,6 +41,8 @@ export interface ActionsMenuOpts {
   items: MenuItem[];
   /** Cursor index into `items`. */
   index: number;
+  /** Device-scoped or mesh-wide — decides the title and the target line. */
+  scope: MenuScope;
   /** Human label for the current device-action target ("#16 Kitchen") or null. */
   targetLabel: string | null;
   /** write_actions_enabled — false = read-only, actions are locked. */
@@ -52,15 +54,21 @@ const LABEL_W = 28; // action-label column (wide enough for "Turn Off · <entity
 export function renderActionsMenu(view: ViewState, opts: ActionsMenuOpts): string[] {
   const W = view.cols;
   const H = view.rows;
-  const { items, index, targetLabel, locked } = opts;
+  const { items, index, targetLabel, locked, scope } = opts;
 
   const out: string[] = [];
 
   // Header: title · target on the left, mode badge on the right. Reserve the
   // badge width first so a long target can never truncate the ARMED/READ-ONLY
   // flag off the end on a narrow terminal.
-  const title = c.cyanB('ACTIONS');
-  const tgt = targetLabel ? c.grey(' · target ') + c.white(targetLabel) : c.grey(' · no node selected');
+  // NAME THE BLAST RADIUS. A menu headed only "ACTIONS" gave no clue whether a
+  // row would touch one device or all 39 — and the mixed menu it replaced put
+  // both under a header naming a single node.
+  const network = scope === 'network';
+  const title = c.cyanB(network ? 'NETWORK ACTIONS' : 'DEVICE ACTIONS');
+  const tgt = network
+    ? c.grey(' · whole mesh')
+    : targetLabel ? c.grey(' · target ') + c.white(targetLabel) : c.grey(' · no node selected');
   const badge = locked ? c.yellowB('READ-ONLY') : c.greenB('ARMED');
   const headerLeft = truncate(title + tgt, Math.max(0, W - visLen(badge) - 1));
   out.push(truncate(lr(headerLeft, badge, W), W));
@@ -127,14 +135,17 @@ function badgeWord(impact: ActionImpact): string {
 
 function groupHeading(g: MenuGroup): string {
   switch (g) {
+    // "MAINTENANCE", not "DEVICE ACTIONS": the menu TITLE already says whose
+    // actions these are, and repeating it made the heading pure noise while
+    // saying nothing about what distinguishes this group from the two below.
     case 'maintenance':
-      return 'DEVICE ACTIONS';
+      return 'MAINTENANCE';
     case 'control':
       return 'DEVICE CONTROLS';
     case 'config':
       return 'CONFIGURATION';
     case 'system':
-      return 'SYSTEM-WIDE';
+      return 'MESH-WIDE';
   }
 }
 

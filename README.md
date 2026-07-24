@@ -80,8 +80,9 @@ dismisses with `q` / `Esc`.
 
 **Keys.** `1`–`8` jump to a screen (`c` Controller, `e` Log, `y` Remedy, `f`
 Interference are shortcuts too). On Overview: `j`/`k` move, `Enter` detail, `/`
-filter, `s` sort, `t` margin↔dBm. `a` opens the **Actions Menu**; `p` pings the
-selected node (gated); `q` quits.
+filter, `s` sort, `t` margin↔dBm. `a` opens the **Actions Menu** for the selected
+node (on the Controller screen it opens the **mesh-wide** actions instead);
+`p` pings the selected node (gated); `q` quits.
 
 **Detail** is the per-node dossier — it scrolls, and answers both *"what is this
 device doing right now?"* and *"how is it configured?"*:
@@ -141,16 +142,24 @@ problem · `L` high latency · `I` incomplete interview · `B` battery low ·
 
 **Read-only by default.** **Enable Write Actions** is off, so the add-on only
 observes. Turn it on to unlock actions on the selected node. Press **`a`** to open
-the **Actions Menu**, which groups:
+the **Actions Menu**. It is **scoped to what you are looking at** — on the Overview or
+Detail it offers only actions bounded by the selected node, and groups:
 
-- **Mesh maintenance** — ping, refresh values, re-interview, rebuild-routes,
-  remove-failed — plus mesh-wide rebuild.
+- **Maintenance** — ping, refresh values, re-interview, rebuild *this node's*
+  routes, remove-failed.
 - **Device controls** — turn a light / switch / fan **on · off · toggle**, **open
   / close** a cover or garage door, **lock / unlock** a lock.
 - **Configuration** — edit a writeable Z-Wave parameter through a bounded value
   picker (enum options or a min/max-checked number).
 
-![The Actions Menu showing three groups: mesh maintenance and system-wide actions, DEVICE CONTROLS with on/off/toggle, lock/unlock and open/close rows each showing the device's current state, and CONFIGURATION rows for editing writeable Z-Wave parameters. Unlocking a lock and opening a garage door are badged DESTRUCTIVE](docs/screenshots/actions-menu.svg)
+![The DEVICE ACTIONS menu, headed with the target node, showing three groups: MAINTENANCE with ping, refresh values, re-interview, rebuild node routes and remove failed node; DEVICE CONTROLS with on/off/toggle rows each showing the device's current state; and CONFIGURATION rows for editing writeable Z-Wave parameters. Unlocking a lock and opening a garage door are badged DESTRUCTIVE](docs/screenshots/actions-menu.svg)
+
+**Mesh-wide actions live on the Controller screen**, not in a device's menu.
+Press `a` there for **NETWORK ACTIONS** — rebuild all routes, or stop a rebuild
+in progress. Keeping them apart means a menu headed *"target #8 Kitchen Lamp"*
+can never offer you an action that touches all 39 nodes.
+
+![The NETWORK ACTIONS menu, headed "whole mesh" with no device target, listing the mesh-wide operations under a MESH-WIDE group heading: Rebuild ALL routes, badged DESTRUCTIVE](docs/screenshots/network-actions.svg)
 
 Every row is badged **SAFE / CAUTION / DESTRUCTIVE** (unlocking a lock or opening a
 garage is DESTRUCTIVE), and selecting any of them opens a modal that requires you
@@ -214,8 +223,16 @@ gate on every PR; `codeql.yml` runs the self-contained CodeQL security check.
 ## Local development
 
 - `server/` — TypeScript backend run directly with `tsx` (no build step).
-  `npm test` runs the suite (380+ node:test cases); `npm run typecheck` is the CI
+  `npm test` runs the suite (460+ node:test cases); `npm run typecheck` is the CI
   gate; `npm start` runs the server.
+- `node scripts/mutation-check.mjs` reverts each behavioural fix one at a time
+  and requires the suite to go red. A green suite proves the tests run; this
+  proves they would *notice*. It refuses to draw a conclusion it has not earned:
+  `SURVIVED` is a fix no test protects, `MISSING` means the script has drifted
+  from the code, and `INVALID` is a mutant that does not compile — a broken build
+  makes every test fail to load, so counting it as a kill would prove nothing.
+  It also checks the suite is green before it starts (on an already-red tree
+  every mutant would falsely report `killed`) and refuses to run twice at once.
 - The browser console (`/console`) vendors xterm.js from `node_modules` — no CDN,
   so it works behind the Ingress token prefix.
 

@@ -23,7 +23,8 @@ const data: DataProvider = {
 const mkView = (screen: ViewState['screen'] = 'overview'): ViewState => ({
   screen, cols: 100, rows: 30, selected: 0, scroll: 0, filter: '',
   sortKey: 'health', signalDisplay: 'margin', followTail: true, errorsOnly: false,
-  detailScroll: 0, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null,
+  detailScroll: 0, remedyCursor: 0, remedyAnchorId: null, topologyScroll: 0,
+  logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null,
 });
 const char = (ch: string) => ({ type: 'char' as const, ch });
 

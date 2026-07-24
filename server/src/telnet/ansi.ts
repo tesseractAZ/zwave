@@ -74,20 +74,28 @@ export const BOX = {
 };
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
+// C0 controls + DEL. After the SGR codes above are accounted for, anything left
+// in this range occupies no column but WILL wreck the frame (a stray \n splits
+// one row into two, \r rewinds it, \b eats a cell). Width math must not count
+// them, and truncate() drops them so they can never reach the wire.
+const CTL_RE = /[\x00-\x1f\x7f]/g;
+const IS_CTL = /[\x00-\x1f\x7f]/; // non-global: safe for single-character tests
 
 /** On-screen column count of a string, ignoring ANSI escape codes. */
 export function visLen(s: string): number {
-  return s.replace(ANSI_RE, '').length;
+  return s.replace(ANSI_RE, '').replace(CTL_RE, '').length;
 }
 
 /** Truncate to a visible width, keeping ANSI codes intact and resetting at the cut. */
 export function truncate(s: string, width: number): string {
   if (width <= 0) return '';
-  if (visLen(s) <= width) return s;
+  // Fast path: already fits and carries no frame-breaking control noise.
+  if (visLen(s) <= width && !IS_CTL.test(s.replace(ANSI_RE, ''))) return s;
   let out = '';
   let vis = 0;
   let i = 0;
-  while (i < s.length && vis < width) {
+  let clipped = false;
+  while (i < s.length) {
     if (s[i] === ESC) {
       const m = s.slice(i).match(/^\x1b\[[0-9;]*m/);
       if (m) {
@@ -96,11 +104,14 @@ export function truncate(s: string, width: number): string {
         continue;
       }
     }
+    // Zero-width control noise: drop it rather than let it break the row.
+    if (IS_CTL.test(s[i])) { i++; continue; }
+    if (vis >= width) { clipped = true; break; }
     out += s[i];
     vis++;
     i++;
   }
-  return out + RESET;
+  return clipped ? out + RESET : out;
 }
 
 /** Pad (or truncate) to an exact visible width, content left-aligned. */
@@ -125,16 +136,18 @@ export function center(s: string, width: number): string {
   return ' '.repeat(left) + s + ' '.repeat(width - len - left);
 }
 
-/** Left content + right content with the gap stretched between them. */
+/**
+ * Left content + right content with the gap stretched between them.
+ *
+ * When the two cannot both fit, the RIGHT side is kept whole and the LEFT is
+ * shortened. The right operand is nearly always the live one — a value, a
+ * status, a count — while the left is a static label the operator can infer.
+ * (The old behaviour clipped the right operand away entirely.)
+ */
 export function lr(left: string, right: string, width: number): string {
   const gap = width - visLen(left) - visLen(right);
-  if (gap < 1) return truncate(left + ' ' + right, width);
-  return left + ' '.repeat(gap) + right;
-}
-
-/** A horizontal meter: filled blocks + empty blocks, coloured by fill fraction. */
-export function bar(frac: number, width: number, color: keyof typeof c = 'green'): string {
-  const f = Math.max(0, Math.min(1, Number.isFinite(frac) ? frac : 0));
-  const filled = Math.round(f * width);
-  return c[color]('█'.repeat(filled)) + c.grey('░'.repeat(Math.max(0, width - filled)));
+  if (gap >= 1) return left + ' '.repeat(gap) + right;
+  const rw = visLen(right);
+  if (rw >= width) return truncate(right, width);
+  return truncate(left, Math.max(0, width - rw - 1)) + ' ' + right;
 }

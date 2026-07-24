@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="902" height="424" viewBox="0 0 902 424" role="img" aria-label="NETWORK ACTIONS — the mesh-wide operations, kept out of any single device’s menu">
+<title>NETWORK ACTIONS — the mesh-wide operations, kept out of any single device’s menu</title>
+<rect width="902" height="424" rx="8" fill="#0d1117"/>
+<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="14" xml:space="preserve">
+<text x="14" y="27.0" textLength="873.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"><tspan fill="#39c5cf" font-weight="700">NETWORK ACTIONS</tspan><tspan fill="#7d8590"> · whole mesh</tspan><tspan fill="#e6edf3">                                                                       </tspan><tspan fill="#3fb950" font-weight="700">ARMED</tspan></text>
+<text x="14" y="45.0" textLength="873.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"><tspan fill="#7d8590">────────────────────────────────────────────────────────────────────────────────────────────────────────</tspan></text>
+<text x="14" y="63.0" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"><tspan fill="#7d8590">MESH-WIDE</tspan></text>
+<text x="14" y="81.0" textLength="798.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve"><tspan fill="#39c5cf" font-weight="700">▶</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#e6edf3">Rebuild ALL routes          </tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#ff7b72" font-weight="700">[DESTRUCTIVE]</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#7d8590">Rebuild mesh routes for every node in the network.</tspan></text>
+<text x="14" y="405.0" textLength="873.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"><tspan fill="#39c5cf" font-weight="700">↑↓</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#7d8590">move</tspan><tspan fill="#7d8590"> · </tspan><tspan fill="#39c5cf" font-weight="700">⏎</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#7d8590">select</tspan><tspan fill="#7d8590"> · </tspan><tspan fill="#39c5cf" font-weight="700">Esc</tspan><tspan fill="#e6edf3"> </tspan><tspan fill="#7d8590">close</tspan><tspan fill="#e6edf3">                                                                  </tspan><tspan fill="#7d8590">1 action</tspan></text>
+</g>
+</svg>

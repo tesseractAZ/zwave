@@ -46,12 +46,16 @@ export function sparkline(values: number[], width: number, opts: { min?: number;
   const vals = values.filter((v) => Number.isFinite(v));
   if (vals.length === 0) return c.grey('·'.repeat(width));
 
-  const lo = opts.min ?? Math.min(...vals);
-  const hi = opts.max ?? Math.max(...vals);
-  const span = hi - lo || 1;
-
   // Most recent `width` samples; older ones scroll off the left.
   const recent = vals.slice(-width);
+
+  // Auto-scale over what is actually DRAWN, not the whole series. Scaling to
+  // off-screen samples flattens the visible trend against an invisible extreme:
+  // a 40-minute noise-floor rise rendered as a dead-flat line because one spike
+  // hours earlier — long since scrolled off — still owned the top of the range.
+  const lo = opts.min ?? Math.min(...recent);
+  const hi = opts.max ?? Math.max(...recent);
+  const span = hi - lo || 1;
   // A flat (all-equal) series reads as "steady" — a mid-height grey line rather
   // than a red row of lowest blocks (which the relative-scale default would give).
   const flat = hi === lo;
@@ -65,12 +69,29 @@ export function sparkline(values: number[], width: number, opts: { min?: number;
 }
 
 /**
+ * How many of `bars` glyphs are lit for a 0..1 fraction.
+ *
+ * Exported so the Overview's PLAIN (inverse-video, SGR-free) twin of this cell
+ * can share it. The two forms are contracted to be the same shape, and when
+ * only the coloured one got the weak-signal floor the selected row silently
+ * showed fewer bars than the identical node one row above.
+ *
+ * A present-but-weak signal must never render identically to NO signal:
+ * Math.round put everything under 1/(2·bars) at zero lit bars, so a node barely
+ * holding a link looked exactly like one that is not there at all.
+ */
+export function litBars(frac: number, bars = 4): number {
+  const f = clamp01(frac);
+  return f <= 0 ? 0 : Math.max(1, Math.round(f * bars));
+}
+
+/**
  * WiFi-style signal strength — `bars` ascending glyphs; the lit fraction is
  * colored (by strength), the rest dim. Fixed width = `bars`.
  */
 export function signalBars(frac: number, bars = 4, colorOverride?: ColorFn): string {
   const f = clamp01(frac);
-  const lit = Math.round(f * bars);
+  const lit = litBars(f, bars);
   // Divisor guarded so bars<=1 can't produce a NaN glyph index ("undefined").
   const glyphs = bars === 4
     ? ['▁', '▃', '▅', '▇']
@@ -88,7 +109,11 @@ export function signalBars(frac: number, bars = 4, colorOverride?: ColorFn): str
 export function meter(frac: number, width: number, opts: { color?: ColorFn; dir?: 'highGood' | 'lowGood' } = {}): string {
   if (width <= 0) return '';
   const f = clamp01(frac);
-  const filled = Math.round(f * width);
+  // Saturation is reserved for the real endpoints: a completely full bar means
+  // 100% and a completely empty one means 0%. Plain rounding rendered 0.94 as
+  // full and 0.05 as empty, so "nearly there" and "barely started" were
+  // indistinguishable from "done" and "nothing".
+  const filled = f >= 1 ? width : f <= 0 ? 0 : Math.min(width - 1, Math.max(1, Math.round(f * width)));
   const colorFrac = opts.dir === 'lowGood' ? 1 - f : f;
   const color = opts.color ?? zoneColor(colorFrac);
   return color('█'.repeat(filled)) + c.grey('░'.repeat(Math.max(0, width - filled)));
@@ -119,11 +144,14 @@ export function brailleSparkline(values: number[], width: number, opts: { min?: 
   if (width <= 0) return '';
   const vals = values.filter((v) => Number.isFinite(v));
   if (vals.length === 0) return c.grey('·'.repeat(width));
-  const lo = opts.min ?? Math.min(...vals);
-  const hi = opts.max ?? Math.max(...vals);
-  const span = hi - lo || 1;
   const recent = vals.slice(-(width * 2));
-  const level = (v: number): number => Math.min(3, Math.max(0, Math.round(((v - lo) / span) * 3))); // 0..3 (4 dot rows)
+  // Scale to the drawn window (see sparkline) — not to samples already off-screen.
+  const lo = opts.min ?? Math.min(...recent);
+  const hi = opts.max ?? Math.max(...recent);
+  const span = hi - lo || 1;
+  const flat = hi === lo;
+  const level = (v: number): number =>
+    flat ? 1 : Math.min(3, Math.max(0, Math.round(((v - lo) / span) * 3))); // 0..3 (4 dot rows)
   // Braille dot bits: left column = dots 1,2,3,7 (0x01,0x02,0x04,0x40),
   // right column = dots 4,5,6,8 (0x08,0x10,0x20,0x80). Fill bottom-up to level.
   // LEFT/RIGHT are ordered bottom→top (index 0 = the bottom dot), so filling
@@ -143,12 +171,16 @@ export function brailleSparkline(values: number[], width: number, opts: { min?: 
     cells.push(String.fromCharCode(0x2800 + bits));
   }
   const pad = width - cells.length;
-  const color = opts.color ?? zoneColor((recent[recent.length - 1] - lo) / span);
+  // A perfectly steady series is "steady", not "at the bottom of its range":
+  // with hi===lo the normalised position is 0, which zoneColor paints RED — a
+  // flat, healthy trend used to alarm purely because it was flat.
+  const color = opts.color ?? (flat ? c.grey : zoneColor((recent[recent.length - 1] - lo) / span));
   return (pad > 0 ? c.grey('·'.repeat(pad)) : '') + color(cells.slice(-width).join(''));
 }
 
-/** ms → compact elapsed: "45s" / "3m12s" / "1h05m". */
+/** ms → compact elapsed: "45s" / "3m12s" / "1h05m". Non-finite → "—". */
 export function fmtElapsed(ms: number): string {
+  if (!Number.isFinite(ms)) return '—';
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
@@ -160,5 +192,7 @@ export function fmtElapsed(ms: number): string {
 const SPIN_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
 /** A braille spinner glyph for the given epoch-ms (advances at the redraw rate). */
 export function spinner(nowMs: number): string {
-  return SPIN_FRAMES[Math.floor(nowMs / 120) % SPIN_FRAMES.length];
+  if (!Number.isFinite(nowMs)) return SPIN_FRAMES[0];
+  const i = Math.floor(nowMs / 120) % SPIN_FRAMES.length;
+  return SPIN_FRAMES[i < 0 ? i + SPIN_FRAMES.length : i];
 }

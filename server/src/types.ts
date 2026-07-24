@@ -154,6 +154,10 @@ export interface ControllerSnapshot {
     CAN: number;
     timeoutACK: number;
     timeoutResponse: number; // note: driver misspells the raw key 'timout_response'
+    // Nullable: HA forwards `timeout_callback` (RESEARCH §1.5), but treating a
+    // missing one as a malformed event would reject the WHOLE statistics
+    // payload and freeze every counter on this screen.
+    timeoutCallback: number | null;
   } | null;
 }
 
@@ -353,6 +357,15 @@ export interface ViewState {
   errorsOnly: boolean; // log screen
   // ── Detail screen: dossier scroll offset (v0.22) ──
   detailScroll: number; // index of the first visible dossier row (renderer clamps + writes back)
+  remedyCursor: number; // selected symptom card on REMEDY — this is the ACTION TARGET there
+  /**
+   * Identity of the symptom under the Remedy cursor, so a re-sort between
+   * frames cannot slide the cursor onto a different node. A bare index aims
+   * `p` — which runs with no CONFIRM box — at whatever now occupies that slot.
+   * Null = follow the top card. (Same discipline as `logAnchorSeq`.)
+   */
+  remedyAnchorId: string | null;
+  topologyScroll: number; // index of the first visible route-tree row (renderer clamps + writes back)
   // ── Log screen navigation (independent of the node cursor) ──
   logCursor: number; // DERIVED index into the FILTERED event list (0 = newest)
   logScroll: number; // index of the first visible event row (sticky window)

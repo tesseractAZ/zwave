@@ -101,7 +101,7 @@ test('M4: on a screen too short for all symptoms, the worst survive and the over
 
   // Which severities got a rendered header, in render order?
   const RANK: Record<string, number> = { CRIT: 0, WARN: 1, WATCH: 2 };
-  const shownSev = plain.map((l) => (l.match(/^(CRIT|WARN|WATCH)\b/) ?? [])[1]).filter(Boolean) as string[];
+  const shownSev = plain.map((l) => (l.match(/^\s*(?:▶\s*)?(CRIT|WARN|WATCH)\b/) ?? [])[1]).filter(Boolean) as string[];
   assert.ok(shownSev.length >= 1 && shownSev.length < syms.length, 'some but not all symptoms shown');
   // Worst-first: render order is non-decreasing in severity rank (no watch before a crit).
   for (let i = 1; i < shownSev.length; i++) {
