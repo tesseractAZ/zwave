@@ -34,6 +34,7 @@ import {
 } from '../../types';
 import { centeredNotice } from './overview';
 import { frame } from '../chrome';
+import { noiseColor } from '../bands';
 
 type ColorFn = (s: string) => string;
 
@@ -48,7 +49,7 @@ export function renderController(ctx: ScreenCtx): string[] {
   if (!ctrl) {
     return centeredNotice(view, 'CONTROLLER & NETWORK', [
       c.grey('Controller not loaded yet…'),
-    ]);
+    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   // Build the screen as a title line followed by four section blocks; adaptive
@@ -82,7 +83,9 @@ export function renderController(ctx: ScreenCtx): string[] {
     title: 'CONTROLLER & NETWORK',
     rightStatus: c.grey(`NODE ${ctrl.nodeId} · `) + c.white(model),
     body,
-    keys: [['1-8', 'SCREENS'], ['Q', 'BACK']],
+    // The Controller screen IS the network view, so it owns the mesh-wide
+    // actions — `a` here opens NETWORK ACTIONS, not the device menu.
+    keys: [['A', 'NETWORK ACTIONS', 1], ['1-8', 'SCREENS'], ['Q', 'BACK']],
   });
 }
 
@@ -107,10 +110,15 @@ function identityBlock(ctrl: ControllerSnapshot, W: number): string[] {
         (W >= 72 ? c.grey(` (${ctrl.homeId >>> 0})`) : '')
       : c.grey('—');
 
+  // COMPACT FORMS at the narrow floor. grid2() hard-truncates each half, and at
+  // 60 columns the SIS term fell off the end entirely — so a controller WITH a
+  // SIS and one WITHOUT rendered byte-identically. A shorter spelling keeps the
+  // distinction rather than silently dropping it.
+  const tight = W < 72;
   const roles = [
-    ctrl.isPrimary ? c.green('primary') : c.yellow('secondary'),
-    ctrl.isSUC ? c.green('SUC') : c.grey('no SUC'),
-    ctrl.isSISPresent ? c.green('SIS') : c.grey('no SIS'),
+    ctrl.isPrimary ? c.green(tight ? 'pri' : 'primary') : c.yellow(tight ? 'sec' : 'secondary'),
+    ctrl.isSUC ? c.green('SUC') : c.grey(tight ? '!SUC' : 'no SUC'),
+    ctrl.isSISPresent ? c.green('SIS') : c.grey(tight ? '!SIS' : 'no SIS'),
   ].join(c.grey(' · '));
 
   const rebuild = ctrl.isRebuildingRoutes
@@ -168,25 +176,43 @@ function indeterminateBar(width: number): string {
 
 function trafficBlock(ctrl: ControllerSnapshot, W: number): string[] {
   const st = ctrl.statistics;
-  const cell = (label: string, v: number | null, err: boolean) =>
-    statCell(label, counter(v, err), Math.floor(W / 4));
+  const cellW = Math.floor(W / 4);
+  // RESPONSIVE LABELS. lr() protects the value and shortens the label, which is
+  // right — but at 60 columns that clipped "messages TX"/"messages RX" to two
+  // cells both reading "messages" with different numbers beside them. A short
+  // form that still carries the distinguishing part is used when the cell is
+  // too narrow for the long one.
+  const cell = (label: string, short: string, v: number | null, err: boolean) => {
+    const value = counter(v, err);
+    const text = visLen(label) + visLen(value) + 1 <= cellW - 1 ? label : short;
+    return statCell(text, value, cellW);
+  };
 
   const row1 = [
-    cell('messages TX', st ? st.messagesTX : null, false),
-    cell('messages RX', st ? st.messagesRX : null, false),
-    cell('dropped TX', st ? st.messagesDroppedTX : null, true),
-    cell('dropped RX', st ? st.messagesDroppedRX : null, true),
+    cell('messages TX', 'msgs TX', st ? st.messagesTX : null, false),
+    cell('messages RX', 'msgs RX', st ? st.messagesRX : null, false),
+    cell('dropped TX', 'drop TX', st ? st.messagesDroppedTX : null, true),
+    cell('dropped RX', 'drop RX', st ? st.messagesDroppedRX : null, true),
   ].join('');
 
   const row2 = [
-    cell('NAK', st ? st.NAK : null, true),
-    cell('CAN', st ? st.CAN : null, true),
-    cell('timeout ACK', st ? st.timeoutACK : null, true),
-    cell('timeout resp', st ? st.timeoutResponse : null, true),
+    cell('NAK', 'NAK', st ? st.NAK : null, true),
+    cell('CAN', 'CAN', st ? st.CAN : null, true),
+    cell('timeout ACK', 'tmo ACK', st ? st.timeoutACK : null, true),
+    cell('timeout cb', 'tmo cb', st ? st.timeoutCallback : null, true),
   ].join('');
 
-  const label = st ? 'TRAFFIC' : 'TRAFFIC (not reported)';
-  const lines = [head(label, W), row1, row2];
+  const row3 = [
+    // Labelled to say what it is: a NODE reply timeout that the controller
+    // reports, not a fault on the serial link — so it is deliberately absent
+    // from the reliability rate below.
+    cell('node reply tmo', 'node tmo', st ? st.timeoutResponse : null, true),
+  ].join('');
+
+  // Name what these actually count: frames on the host↔stick serial link, not
+  // mesh traffic. Read as "TRAFFIC" they were mistaken for RF activity.
+  const label = st ? 'CONTROLLER FRAMES (host↔stick, lifetime)' : 'CONTROLLER FRAMES (not reported)';
+  const lines = [head(label, W), row1, row2, row3];
 
   // Small reliability indicator: fraction of all frames that errored
   // (dropped + NAK/CAN + timeouts) vs total messages. Low is good.
@@ -199,21 +225,55 @@ function trafficHealthLine(
   st: NonNullable<ControllerSnapshot['statistics']>,
   W: number,
 ): string {
+  // DENOMINATOR = successes + failures.
+  //
+  // zwave-js's ControllerStatistics counters are DISJOINT: `messagesTX` counts
+  // messages *successfully sent*, and messagesDropped/NAK/CAN/timeoutACK/
+  // timeoutResponse are separate failure tallies — not a subset of it. So the
+  // total number of attempts is successes + failures, and dividing failures by
+  // successes alone yields ODDS, not a rate: it overstates every value and can
+  // exceed 100%. (v0.24 briefly made that mistake on the theory that the totals
+  // already included the errors. They do not.)
   const messages = st.messagesTX + st.messagesRX;
+  // TRUE SERIAL FAULTS only. This block is labelled host↔stick, so its
+  // reliability must describe that link. `timeoutResponse` is the controller
+  // waiting on a NODE — a mesh symptom that merely surfaces in controller
+  // statistics — and interference.ts already excludes it from the serial band
+  // for exactly this reason. Folding it in here made the two screens disagree
+  // about what a serial fault is. It is still shown as its own counter above.
   const errors =
     st.messagesDroppedTX +
     st.messagesDroppedRX +
     st.NAK +
     st.CAN +
     st.timeoutACK +
-    st.timeoutResponse;
+    // A callback timeout IS host↔stick (the controller never called back), so
+    // it belongs here — and omitting it let a pure callback-timeout wedge, a
+    // classic sick stick, render as a full green bar reading 0.0% errors.
+    (st.timeoutCallback ?? 0);
   const denom = messages + errors;
-  const frac = denom > 0 ? errors / denom : 0;
+
+  // Nothing has crossed the serial link yet: there is no rate to report, and a
+  // full green bar reading "0.0% errors" would assert a perfect link on no
+  // evidence at all.
+  if (denom === 0) {
+    return c.grey('reliability ') + c.grey('— no frames yet');
+  }
+
+  const frac = clamp01(errors / denom);
   const pct = frac * 100;
-  const pctStr = pct > 0 && pct < 1 ? pct.toFixed(2) : pct.toFixed(1);
+  // A counter HA did not report is NOT a zero. Summing null as 0 let the bar
+  // claim a rate it cannot actually compute, so the gap is disclosed.
+  const partial = st.timeoutCallback == null ? c.grey(' (partial)') : '';
+  // Never round a nonzero error rate down to a flat "0.00%" — a rate that small
+  // is still not none, and the counters beside it show a nonzero total.
+  const pctStr = pct === 0 ? '0.0' : pct < 0.01 ? '<0.01' : pct < 1 ? pct.toFixed(2) : pct.toFixed(1);
   const label = errColor(frac)(`${pctStr}% errors`);
   const barW = Math.max(6, Math.min(20, W - 34));
-  return c.grey('reliability ') + gauge(frac, barW, label, { dir: 'lowGood' });
+  // The bar is labelled "reliability", so it must FILL with the success rate.
+  // Filling it with the error fraction drained the bar to empty on a perfect
+  // link — the exact inverse of what the label promised.
+  return c.grey('reliability ') + gauge(1 - frac, barW, label, { color: errColor(frac) }) + partial;
 }
 
 function errColor(frac: number): ColorFn {
@@ -227,11 +287,27 @@ function statCell(label: string, value: string, cellW: number): string {
   return padEnd(lr(c.grey(label), value, Math.max(1, cellW - 1)), cellW);
 }
 
+/**
+ * Compact a large counter: 12345 → "12345", 1234567 → "1.2M".
+ *
+ * Lifetime frame counters reach seven figures, and a character-clipped
+ * `1234567` renders as `12345` — a number that looks exact and is wrong by two
+ * orders of magnitude. An explicit k/M/G suffix is approximate but says so.
+ */
+function fmtCount(v: number): string {
+  if (!Number.isFinite(v)) return '—';
+  const a = Math.abs(v);
+  if (a < 100_000) return String(v);
+  if (a < 1_000_000) return `${Math.round(v / 1000)}k`;
+  if (a < 1_000_000_000) return `${(v / 1_000_000).toFixed(a < 10_000_000 ? 1 : 0)}M`;
+  return `${(v / 1_000_000_000).toFixed(1)}G`;
+}
+
 /** Format a counter — mains white for volume, yellow when an error count is nonzero. */
 function counter(v: number | null, err: boolean): string {
   if (v == null) return c.grey('—');
-  if (!err) return c.whiteB(String(v));
-  return v > 0 ? c.yellow(String(v)) : c.grey('0');
+  if (!err) return c.whiteB(fmtCount(v));
+  return v > 0 ? c.yellow(fmtCount(v)) : c.grey('0');
 }
 
 /* ── BACKGROUND RSSI ───────────────────────────────────────────────────── */
@@ -250,7 +326,11 @@ function backgroundBlock(
     const tokens = ctrl.backgroundRSSI.map(
       (r, i) =>
         c.grey(`ch${i} `) +
-        gauge(noiseQuietFrac(r), chBarW, noiseColor(r)(`${r}dBm`)),
+        // Fill AND colour from the same reading: gauge()'s default zoneColor
+        // grades the quietness fraction on a different ramp than the label's
+        // noiseColor, so a noisy channel drew a reassuring bar beside a red
+        // number. One value, one colour (bands.ts).
+        gauge(noiseQuietFrac(r), chBarW, noiseColor(r)(`${r}dBm`), { color: noiseColor(r) }),
     );
     lines.push(...packTokens(tokens, W, 2));
   } else {
@@ -267,7 +347,11 @@ function backgroundBlock(
   const refBarW = Math.max(6, Math.min(14, W - 40));
   lines.push(
     c.grey('margin ref ') +
-      gauge(noiseQuietFrac(noise), refBarW, noiseColor(noise)(`${noise}dBm`)) +
+      // Fill AND label from the same band function. gauge()'s default zoneColor
+      // grades quietness on an unrelated ramp, so a noisy floor drew a
+      // reassuring bar beside its own red number — the same defect fixed on the
+      // per-channel gauges above, missed on this one.
+      gauge(noiseQuietFrac(noise), refBarW, noiseColor(noise)(`${noise}dBm`), { color: noiseColor(noise) }) +
       tag,
   );
 
@@ -303,12 +387,6 @@ function packTokens(tokens: string[], W: number, gapN: number): string[] {
   return lines;
 }
 
-function noiseColor(noise: number): (s: string) => string {
-  if (noise >= -75) return c.red;
-  if (noise >= -85) return c.yellow;
-  return c.grey;
-}
-
 /* ── NETWORK HEALTH DISTRIBUTION ───────────────────────────────────────── */
 
 const GRADES = ['A', 'B', 'C', 'D', 'F'] as const;
@@ -327,9 +405,11 @@ function healthBlock(ctx: ScreenCtx, W: number): string[] {
   let alive = 0;
   let dead = 0;
   let asleep = 0;
+  let unknown = 0;
   let direct = 0;
   let routed = 0;
   let longRange = 0;
+  let pending = 0;
   let scoreSum = 0;
 
   for (const n of members) {
@@ -341,12 +421,16 @@ function healthBlock(ctx: ScreenCtx, W: number): string[] {
     if (n.status === NodeStatus.Alive || n.status === NodeStatus.Awake) alive++;
     else if (n.status === NodeStatus.Dead) dead++;
     else if (n.status === NodeStatus.Asleep) asleep++;
+    // Unknown had no bucket, so the line below read as a PARTITION that did not
+    // add up: nodes the controller has never heard from simply vanished, and a
+    // reassuring grey "0 dead" sat beside them.
+    else unknown++;
 
     if (n.isLongRange) longRange++;
     else if (n.stats.lwr) {
       if (n.stats.lwr.repeaters.length > 0) routed++;
       else direct++;
-    }
+    } else pending++; // no route resolved yet — counted, not dropped
   }
 
   const total = members.length;
@@ -386,7 +470,10 @@ function healthBlock(ctx: ScreenCtx, W: number): string[] {
     c.grey(' · ') +
     (dead > 0 ? c.redB(`${dead} dead`) : c.grey('0 dead')) +
     c.grey(' · ') +
-    (asleep > 0 ? c.cyan(`${asleep} asleep`) : c.grey('0 asleep'));
+    (asleep > 0 ? c.cyan(`${asleep} asleep`) : c.grey('0 asleep')) +
+    // Only shown when nonzero: on a healthy mesh it is noise, but when it is
+    // nonzero the tallies must still sum to the total.
+    (unknown > 0 ? c.grey(' · ') + c.yellow(`${unknown} unknown`) : '');
 
   const linkLine =
     c.grey('links ') +
@@ -394,7 +481,11 @@ function healthBlock(ctx: ScreenCtx, W: number): string[] {
     c.grey(' · ') +
     c.white(`${routed} routed`) +
     c.grey(' · ') +
-    (longRange > 0 ? c.blue(`${longRange} LR`) : c.grey('0 LR'));
+    (longRange > 0 ? c.blue(`${longRange} LR`) : c.grey('0 LR')) +
+    // These read as a partition of the member nodes, so a node whose route has
+    // not resolved yet must be counted rather than silently dropped — the
+    // tallies did not sum to the total beside them.
+    (pending > 0 ? c.grey(' · ') + c.yellow(`${pending} no route`) : '');
 
   return [
     head(`NETWORK HEALTH (${total})`, W),

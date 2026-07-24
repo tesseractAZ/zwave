@@ -37,8 +37,9 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
-import { frame } from '../chrome';
+import { frame, type Keycap } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
+import { rssiColor, marginColor, rttColor, timeoutPctColor } from '../bands';
 
 /** Driver RSSI sentinels (not-available / saturated / no-signal) — never real dBm. */
 const RSSI_SENTINELS = new Set([127, 126, 125]);
@@ -66,12 +67,18 @@ export function renderDetail(ctx: ScreenCtx): string[] {
 
   // Guard: nothing selected (empty roster / out-of-range index).
   const n = visibleNodes[view.selected];
-  if (!n) {
-    return centeredNotice(view, 'NODE DETAIL', [c.grey('[no node selected]')]);
-  }
-  // Guard against a pathologically small frame the box couldn't fit into.
+  // Guard against a pathologically small frame the box couldn't fit into. This
+  // runs FIRST: below ~6 rows there is no room for a command bar either.
   if (W < 24 || H < 6) {
-    return centeredNotice(view, 'NODE DETAIL', [c.grey('terminal too small')]);
+    return centeredNotice(view, 'NODE DETAIL', [c.grey(n ? 'terminal too small' : '[no node selected]')]);
+  }
+  if (!n) {
+    // Name the REASON. A filter committed on the Overview can empty the roster,
+    // and the bare "[no node selected]" card gave no hint that a filter was why.
+    const why = view.filter
+      ? `No node matches “${view.filter}”`
+      : 'No node selected — pick one on the Overview';
+    return centeredNotice(view, 'NODE DETAIL', [c.grey(why)], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   const health = data.scoreFor(n.nodeId);
@@ -140,8 +147,19 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     const glyph = statusGlyph(n.status);
     const seen = s.lastSeen != null ? c.grey(`seen ${fmtAge(Date.now() - s.lastSeen)} ago`) : c.grey('never seen');
     const statusVal = glyph.color(glyph.ch + ' ' + n.statusLabel) + c.grey('  ') + seen;
+    // A DEAD/UNKNOWN node's cached RTT is the last reading BEFORE it stopped
+    // answering. Overview, Topology and the Heatmap all grey their stale RF
+    // cells; this dossier — the one screen you open to diagnose a dead node —
+    // was the fourth consumer of that rule and never got it, so it reported
+    // `RTT 20 ms` in health green two rows above its own `RSSI —`.
+    // Band the DISPLAYED value, not the raw one. The driver reports fractional
+    // milliseconds; the Overview rounds before banding, so 99.6 ms printed
+    // "100 ms" in two different colours on two screens for one reading.
+    const rttShown = s.rtt == null ? null : Math.round(s.rtt);
     const rttVal =
-      s.rtt == null ? c.grey('—') : rttColor(s.rtt)(`${Math.round(s.rtt)} ms`);
+      rttShown == null ? c.grey('—')
+        : dead(n) ? c.grey(`${rttShown} ms`)
+        : rttColor(rttShown)(`${rttShown} ms`);
     body.push(twoCol('Status', statusVal, 'RTT', rttVal, inner));
 
     // RSSI + SNR margin (rssi − noiseFloor). Sentinels read as no-signal. A
@@ -185,14 +203,16 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     // counters live honestly in the TRAFFIC section below.
     const pct = responseTimeoutPct(s);
     const timeouts = Math.min(s.timeoutResponse, s.commandsTX);
+    // Same rule, and the SHARED band (this had a fourth private copy of the
+    // timeout thresholds — 5/15 — that bands.ts was meant to retire).
+    const tmoColor = dead(n) ? c.grey : timeoutPctColor(pct ?? 0);
     let dropVal =
       pct == null
         ? c.grey('— (no TX yet)')
-        : dropColor(pct)(`${pct.toFixed(1)}%`) +
-          c.grey(` (${timeouts} of ${s.commandsTX} tx)`);
+        : tmoColor(`${pct.toFixed(1)}%`) + c.grey(` (${timeouts} of ${s.commandsTX} tx)`);
     if (pct != null) {
       const va = inner - 11;
-      const dm = meter(pct / 100, 8, { dir: 'lowGood', color: dropColor(pct) });
+      const dm = meter(pct / 100, 8, { dir: 'lowGood', color: tmoColor });
       if (va - visLen(dropVal) >= 10) dropVal = lr(dropVal, dm, va);
     }
     body.push(kv('Timeouts', dropVal, inner));
@@ -230,10 +250,10 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     } else if (!lwr) {
       body.push(kv('LWR', c.grey('no route data yet'), inner));
     } else {
-      pushRoute(body, 'LWR', lwr, inner);
+      pushRoute(body, 'LWR', lwr, inner, dead(n));
     }
     if (!n.isLongRange && n.stats.nlwr) {
-      pushRoute(body, 'NLWR', n.stats.nlwr, inner);
+      pushRoute(body, 'NLWR', n.stats.nlwr, inner, dead(n));
     }
   }
   sep();
@@ -268,7 +288,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
 
   const windowRows = rows.slice(scroll, scroll + contentRows);
   while (windowRows.length < contentRows) windowRows.push('');
-  windowRows.push(flagLegend(health.flags, W));
+  windowRows.push(flagLegend(health.flags, W, health.state));
 
   const st = statusColor(n.status)(n.statusLabel.toUpperCase());
   const sc = dead(n) ? c.grey('—') : scoreColor(health.score)(`${health.score} (${health.grade})`);
@@ -279,10 +299,10 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       ? c.grey(' · ') +
         c.cyan(`${scroll > 0 ? '▲' : ' '}${scroll < maxScroll ? '▼' : ' '} ${scroll + 1}–${Math.min(total, scroll + contentRows)}/${total}`)
       : '';
-  const keys: Array<readonly [string, string]> = [
+  const keys: Keycap[] = [
     ['↑↓', 'SCROLL'],
-    ['< >', 'NODE'],
-    ['A', 'ACTIONS'],
+    ['< >', 'NODE', 2],
+    ['A', 'ACTIONS', 1],
     ['1-8', 'SCREENS'],
     ['Q', 'BACK'],
   ];
@@ -295,8 +315,15 @@ export function renderDetail(ctx: ScreenCtx): string[] {
 }
 
 /** Per-node flag legend, pinned at the bottom of the Detail body. */
-function flagLegend(flags: string[], W: number): string {
-  if (!flags.length) return c.grey(' RF health nominal');
+function flagLegend(flags: string[], W: number, state?: string): string {
+  if (!flags.length) {
+    // A node the controller has never contacted raises NO flags — it has no
+    // measurements to raise them from — so "nominal" asserted health from an
+    // absence, directly under a title rule reading UNKNOWN · SCORE —.
+    if (state === 'unknown') return c.grey(' no measurements yet — nothing to assess');
+    if (state === 'dead') return c.grey(' unreachable — the readings above are its last, not current');
+    return c.grey(' RF health nominal');
+  }
   const meanings = flags.map((f) => flagColor([f])(f) + c.grey(' ' + (FLAG_MEANING[f] ?? '?'))).join(c.grey(' · '));
   return truncate(' ' + c.grey('FLAGS: ') + meanings, W);
 }
@@ -562,7 +589,7 @@ function rssiStrength(dbm: number): number {
  * a route-failed marker. The failed marker is placed first after the chain so a
  * narrow-terminal truncation can never drop it before the (advisory) rate/rssi.
  */
-function pushRoute(body: string[], label: string, route: RouteStat, inner: number): void {
+function pushRoute(body: string[], label: string, route: RouteStat, inner: number, stale = false): void {
   const bits: string[] = [];
   if (route.routeFailedBetween) {
     const [a, b] = route.routeFailedBetween;
@@ -571,13 +598,13 @@ function pushRoute(body: string[], label: string, route: RouteStat, inner: numbe
   const rate = route.protocolDataRate;
   if (rate != null) {
     const rl = DATA_RATE_LABEL[rate] ?? '?';
-    bits.push((rate >= 3 ? c.green : rate === 2 ? c.yellow : c.red)(rl));
+    bits.push((stale ? c.grey : rate >= 3 ? c.green : rate === 2 ? c.yellow : c.red)(rl));
   }
   const rssi = validRssi(route.rssi);
-  if (rssi != null) bits.push(rssiColor(rssi)(`${rssi} dBm`));
+  if (rssi != null) bits.push((stale ? c.grey : rssiColor(rssi))(`${rssi} dBm`));
 
   const tail = bits.length ? c.grey('  ·  ') + bits.join(c.grey(' · ')) : '';
-  let chain = routeChain(route, true);
+  let chain = routeChain(route, true, stale);
   if (visLen(chain) + visLen(tail) > inner - 11) chain = routeChain(route, false);
   body.push(kv(label, chain + tail, inner));
 }
@@ -587,15 +614,22 @@ function pushRoute(body: string[], label: string, route: RouteStat, inner: numbe
  * repeaterRSSI[] hop reading and (when `bars`) a WiFi-style signal-strength
  * glyph derived from that reading. Empty repeaters ⇒ a direct link.
  */
-function routeChain(route: RouteStat, bars: boolean): string {
+function routeChain(route: RouteStat, bars: boolean, stale = false): string {
   const reps = Array.isArray(route.repeaters) ? route.repeaters : [];
   const arrow = c.grey(' ← ');
   const parts: string[] = [c.grey('controller')];
   reps.forEach((r, i) => {
     const hop = route.repeaterRSSI?.[i];
     const valid = hop != null && Number.isFinite(hop) && !RSSI_SENTINELS.has(hop);
-    const ann = valid ? c.grey('(') + rssiColor(hop!)(`${hop}`) + c.grey(')') : '';
-    const sig = bars && valid ? signalBars(rssiStrength(hop!), 3) : '';
+    // Same stale rule as the rate + route RSSI in the row above: pushRoute
+    // threaded `stale` in but never passed it here, so a dead node's PER-HOP
+    // readings stayed health-green inside a row already greyed around them.
+    const hopColor = stale ? c.grey : rssiColor(hop!);
+    const ann = valid ? c.grey('(') + hopColor(`${hop}`) + c.grey(')') : '';
+    // Coloured by the SAME band function as the dBm printed immediately before
+    // it — signalBars' default zoneColor is a coarser, unrelated ramp, so the
+    // glyph and the number beside it could disagree about the same hop.
+    const sig = bars && valid ? signalBars(rssiStrength(hop!), 3, hopColor) : '';
     parts.push(c.white('n' + r) + ann + sig);
   });
   parts.push(c.whiteB('node'));
@@ -685,30 +719,6 @@ function statusColor(status: NodeStatus): (s: string) => string {
 function scoreColor(score: number): (s: string) => string {
   if (score >= 80) return c.green;
   if (score >= 40) return c.yellow;
-  return c.red;
-}
-
-function rssiColor(rssi: number): (s: string) => string {
-  if (rssi >= -70) return c.green;
-  if (rssi >= -88) return c.yellow;
-  return c.red;
-}
-
-function marginColor(margin: number): (s: string) => string {
-  if (margin >= 17) return c.green;
-  if (margin >= 5) return c.yellow;
-  return c.red;
-}
-
-function rttColor(rtt: number): (s: string) => string {
-  if (rtt <= 100) return c.green;
-  if (rtt <= 500) return c.yellow;
-  return c.red;
-}
-
-function dropColor(pct: number): (s: string) => string {
-  if (pct < 5) return c.green;
-  if (pct < 15) return c.yellow;
   return c.red;
 }
 

@@ -178,7 +178,7 @@ test('coarse buckets roll over at the bucket boundary and prune past the horizon
 
 test('controller samples run through the same delta + reset guards', () => {
   const s = mkStore(freshPath());
-  const ctrl = (over = {}) => ({ messagesTX: 1000, messagesRX: 900, messagesDroppedTX: 1, messagesDroppedRX: 0, NAK: 5, CAN: 2, timeoutACK: 1, timeoutResponse: 3, ...over });
+  const ctrl = (over = {}) => ({ messagesTX: 1000, messagesRX: 900, messagesDroppedTX: 1, messagesDroppedRX: 0, NAK: 5, CAN: 2, timeoutACK: 1, timeoutCallback: 0, timeoutResponse: 3, ...over });
   const a = s.recordController(ctrl(), true, FIXED);
   assert.equal(a.dNak, null, 'first sample: no baseline');
   const b = s.recordController(ctrl({ messagesTX: 1100, NAK: 9 }), true, FIXED + TICK);
@@ -221,8 +221,8 @@ test('save → load round-trips EVERY column with null fidelity (fine, coarse, c
   s.record(6, stats({ commandsTX: 100, timeoutResponse: 5, rssi: 127, rtt: null, lwr: null }), NodeStatus.Asleep, { fresh: false }, FIXED);
   // Sample 2: valid deltas, real values, hopped route, events.
   s.record(6, stats({ commandsTX: 140, timeoutResponse: 9, commandsDroppedTX: 2, commandsRX: 130, rssi: -64, rtt: 45.67, lwr: { repeaters: [7, 9], protocolDataRate: 1, rssi: -70, repeaterRSSI: [], routeFailedBetween: null } }), NodeStatus.Alive, { flaps: 1, routeChanges: 2, fresh: true }, FIXED + TICK);
-  s.recordController({ messagesTX: 10, messagesRX: 9, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutResponse: 0 }, true, FIXED);
-  s.recordController({ messagesTX: 25, messagesRX: 20, messagesDroppedTX: 1, messagesDroppedRX: 0, NAK: 2, CAN: 1, timeoutACK: 0, timeoutResponse: 3 }, true, FIXED + TICK);
+  s.recordController({ messagesTX: 10, messagesRX: 9, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutCallback: 0, timeoutResponse: 0 }, true, FIXED);
+  s.recordController({ messagesTX: 25, messagesRX: 20, messagesDroppedTX: 1, messagesDroppedRX: 0, NAK: 2, CAN: 1, timeoutACK: 0, timeoutCallback: 0, timeoutResponse: 3 }, true, FIXED + TICK);
   s.recordRouteFailure(6, [7, 9], FIXED);
   s.save();
   const s2 = mkStore(path);
@@ -273,7 +273,7 @@ test('load rejects a wrong-schema file', () => {
 test('controller noise-floor coarse tier round-trips (mean/min/max), fresh-only leading-run floor, no-bg samples skipped', () => {
   const path = freshPath();
   const s = mkStore(path);
-  const cstat = (over = {}) => ({ messagesTX: 1000, messagesRX: 900, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutResponse: 0, ...over });
+  const cstat = (over = {}) => ({ messagesTX: 1000, messagesRX: 900, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutCallback: 0, timeoutResponse: 0, ...over });
   // Two bg readings in the same 30-min bucket. A trailing null ends the driver's
   // leading channel run → each per-sample floor = median of the run.
   s.recordController(cstat(), true, FIXED, [-100, -102, null, null]); // floor = median(-100,-102) = -101
@@ -301,7 +301,7 @@ test('a pre-tier v2 file (no controllerCoarse key) loads with an empty controlle
 test('the controller noise-floor tier survives BOOT-GRACE (multi-day history is not wiped by a power blip)', () => {
   const path = freshPath();
   const writer = mkStore(path);
-  writer.recordController({ messagesTX: 1000, messagesRX: 900, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutResponse: 0 }, true, FIXED, [-100, -102, null, null]);
+  writer.recordController({ messagesTX: 1000, messagesRX: 900, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutCallback: 0, timeoutResponse: 0 }, true, FIXED, [-100, -102, null, null]);
   writer.save();
   const booting = createEvidenceStore({ path, cadenceMs: TICK, now: () => FIXED + 60_000, uptimeMs: () => 5_000, bootGraceMs: 180_000 });
   booting.load();

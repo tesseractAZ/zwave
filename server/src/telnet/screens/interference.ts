@@ -21,6 +21,7 @@
 
 import { c, truncate, padStart } from '../ansi';
 import { sparkline, heatCell } from '../gauges';
+import { noiseColor, timeoutPctColor } from '../bands';
 import type { ScreenCtx, InterferenceView } from '../../types';
 import { frame } from '../chrome';
 
@@ -86,7 +87,13 @@ export function renderInterference(ctx: ScreenCtx): string[] {
     const chans = iv.noise.channels
       .map((v, i) => c.grey(`ch${i} `) + (v == null ? c.grey('—') : c.white(padStart(dbm(v), 4))))
       .join('  ');
-    push('  ' + chans + c.grey('   median ') + nc(`${dbm(iv.noise.floor)} dBm`) + '  ' + nc('● ' + iv.noise.band));
+    // The NUMBER is coloured by the shared dBm bands (bands.ts) so the same
+    // reading looks the same here as on the Overview, Controller and Heatmap —
+    // it previously took the engine's BAND colour, which made a quiet -95 dBm
+    // floor render green here and grey everywhere else. The band badge keeps
+    // its own colour: it is the engine's classification, a different claim.
+    const floorC = iv.noise.floor == null ? c.grey : noiseColor(iv.noise.floor);
+    push('  ' + chans + c.grey('   median ') + floorC(`${dbm(iv.noise.floor)} dBm`) + '  ' + nc('● ' + iv.noise.band));
     // Fixed −110..−80 dBm scale so a flat quiet floor reads FLAT+LOW and a real
     // rise visibly climbs — an auto-scaled spark would amplify ±1 dB jitter into
     // fake spikes.
@@ -182,6 +189,17 @@ function hourAxis(): string {
 }
 
 /** Colour a rate for the worst-hour label, matching the heat gradient. */
+/**
+ * Colour for an hourly timeout RATE.
+ *
+ * DELIBERATELY NOT the shared `timeoutPctColor`. That band grades ONE NODE's
+ * lifetime timeout percentage; this grades a MESH-WIDE hourly aggregate —
+ * every node's timeouts over every node's TX in that hour. A 5% hour across the
+ * whole mesh is already severe, well before the per-node band would call 5%
+ * anything but acceptable, so sharing the ramp would desensitise the aggregate
+ * exactly where it matters. Different population, different scale (HEAT_MAX),
+ * and the axis legend states the scale it is drawn on.
+ */
 function heatColorFor(rate: number): ColorFn {
   const f = rate / HEAT_MAX;
   if (f >= 0.75) return c.redB;

@@ -377,6 +377,20 @@ function sanitizeLabel(s: string): string {
     .slice(0, 48);
 }
 
+/**
+ * Sanitize log-event text. Same control-byte and wide-glyph discipline as
+ * `sanitizeLabel`, but with a length cap sized for a sentence rather than a
+ * name — the Log's detail pane wraps long text across several rows, so it does
+ * not need to be as short as a table cell.
+ */
+export function sanitizeEventText(s: string): string {
+  return s
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
+    .replace(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\ud800-\udfff]/g, '?')
+    .slice(0, 300);
+}
+
 /** All-null stats — v0.1 has no live statistics subscription yet. */
 function emptyStats(): NodeStats {
   return {
@@ -1521,7 +1535,24 @@ class ZwaveDataImpl implements ZwaveData {
   ): void {
     // `seq` is a monotonic id (newest = highest) so the Log screen can anchor its
     // selection to an event identity that survives new events prepending.
-    this.logRing.unshift({ seq: this.logSeq++, ts: Date.now(), source, severity, kind, nodeId, text, ...extra });
+    //
+    // EVERY event text is sanitized here, at the single boundary they all pass
+    // through. Most already were, but action-failure text is built from the
+    // error a Home Assistant service call throws — which can carry a device- or
+    // integration-supplied string. A newline in it would split one log row into
+    // two and break the exact-`view.rows` render contract; an ESC would inject
+    // ANSI into the frame. Sanitizing at the sink covers every present and
+    // future caller rather than each one remembering.
+    this.logRing.unshift({
+      seq: this.logSeq++,
+      ts: Date.now(),
+      source,
+      severity,
+      kind,
+      nodeId,
+      text: sanitizeEventText(text),
+      ...extra,
+    });
     if (this.logRing.length > LOG_MAX) this.logRing.length = LOG_MAX;
   }
 
@@ -1940,6 +1971,8 @@ class ZwaveDataImpl implements ZwaveData {
     const can = num(e.can);
     const tAck = num(e.timeout_ack);
     const tRes = num(e.timout_response) ?? num(e.timeout_response);
+    // Optional — absence must not reject the event (see the type's comment).
+    const tCb = num(e.timeout_callback);
     if (msgTx == null || msgRx == null || msgDropTx == null || msgDropRx == null ||
         nak == null || can == null || tAck == null || tRes == null) {
       this.log('controller: malformed statistics event (non-numeric counters) — ignored');
@@ -1955,6 +1988,7 @@ class ZwaveDataImpl implements ZwaveData {
       CAN: Math.trunc(can),
       timeoutACK: Math.trunc(tAck),
       timeoutResponse: Math.trunc(tRes),
+      timeoutCallback: tCb == null ? null : Math.trunc(tCb),
     };
   }
 

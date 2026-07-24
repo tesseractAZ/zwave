@@ -23,6 +23,8 @@ import { LOG_RANGE_ORDER, SCREENS } from '../types';
 // the transports + session import their event shape from one navigation home.
 export type { InputEvent } from '../types';
 import type { InputEvent } from '../types';
+import { sortedSymptoms, symptomKey } from './screens/remedy';
+import type { Symptom } from '../zwave/symptoms';
 
 /** Result of dispatching one key. */
 export interface KeyResult {
@@ -272,13 +274,15 @@ function applyLogKey(view: ViewState, ev: InputEvent, data: DataProvider): KeyRe
       return setLogCursor(view, list, 0);
     case 'G': // jump to oldest
       return setLogCursor(view, list, list.length - 1);
-    case 'o': // severity filter (errors only) — reset to newest + follow
+    case 'o':
+    case 'O': // severity filter (errors only) — reset to newest + follow
       view.errorsOnly = !view.errorsOnly;
       view.logCursor = 0;
       view.logScroll = 0;
       view.logAnchorSeq = null;
       return REDRAW;
-    case 'd': { // cycle the date-range filter — reset to newest + follow
+    case 'd':
+    case 'D': { // cycle the date-range filter — reset to newest + follow
       const i = LOG_RANGE_ORDER.indexOf(view.logRange);
       view.logRange = LOG_RANGE_ORDER[(i + 1) % LOG_RANGE_ORDER.length];
       view.logCursor = 0;
@@ -299,6 +303,112 @@ function applyLogKey(view: ViewState, ev: InputEvent, data: DataProvider): KeyRe
  * their unshifted `,`/`.` aliases). Returns a KeyResult when it owns the key, or
  * `null` to let the generic handler run (screen switch, q/Esc, actions…).
  */
+/**
+ * Handle a key on the TOPOLOGY screen: scroll the route tree. The renderer
+ * clamps `topologyScroll` and writes the real value back, so `G` can simply
+ * ask for "the end" without this handler knowing the tree's length.
+ */
+function applyTopologyKey(view: ViewState, ev: InputEvent): KeyResult | null {
+  const page = Math.max(1, view.rows - 6);
+  const move = (delta: number): KeyResult => {
+    const cur = view.topologyScroll ?? 0;
+    const next = Math.max(0, cur + delta);
+    if (next === cur) return NOOP;
+    view.topologyScroll = next;
+    return REDRAW;
+  };
+  if (ev.type === 'arrow') {
+    if (ev.dir === 'down') return move(+1);
+    if (ev.dir === 'up') return move(-1);
+    return NOOP;
+  }
+  if (ev.type !== 'char') return null;
+  switch (ev.ch) {
+    case 'j': return move(+1);
+    case 'k': return move(-1);
+    case ' ': return move(page);
+    case 'b': return move(-page);
+    case 'g':
+      if ((view.topologyScroll ?? 0) === 0) return NOOP;
+      view.topologyScroll = 0;
+      return REDRAW;
+    case 'G':
+      view.topologyScroll = Number.MAX_SAFE_INTEGER;
+      return REDRAW;
+    case '/': return NOOP; // no filter prompt here — swallow it
+    default: return null;
+  }
+}
+
+/**
+ * Clamp the REMEDY cursor into the current symptom list.
+ *
+ * Symptoms appear and disappear between engine polls, so a stored index can
+ * outlive the card it pointed at — and on REMEDY that index selects the ACTION
+ * TARGET, so a stale one would aim a command at the wrong node.
+ */
+export function syncRemedyCursor(view: ViewState, list: readonly Symptom[]): void {
+  if (list.length === 0) {
+    view.remedyCursor = 0;
+    view.remedyAnchorId = null;
+    return;
+  }
+  // ANCHOR WINS. The engine re-sorts this list on every poll, so re-deriving
+  // the cursor from a stored index alone would slide it onto whatever now sits
+  // in that slot — and on this screen the cursor aims `p`, which runs with no
+  // CONFIRM box. Follow the identity; fall back to the clamped index only when
+  // the symptom it named has resolved and left the list.
+  if (view.remedyAnchorId != null) {
+    const at = list.findIndex((x) => symptomKey(x) === view.remedyAnchorId);
+    if (at >= 0) {
+      view.remedyCursor = at;
+      return;
+    }
+    view.remedyAnchorId = null; // it is gone — fall through to the index
+  }
+  view.remedyCursor = Math.max(0, Math.min(view.remedyCursor ?? 0, list.length - 1));
+  // ADOPT on first resolve. Without this the opening frame has no anchor, so a
+  // re-sort before the operator's first keypress would still slide the target —
+  // which is the whole defect. What you see on the first frame is what `p` acts
+  // on, until you deliberately move.
+  const at = list[view.remedyCursor];
+  if (at) view.remedyAnchorId = symptomKey(at);
+}
+
+/**
+ * Handle a key on the REMEDY screen: move the symptom cursor. Everything else
+ * (screen switch, q/Esc, the action shortcuts) falls through to the generic
+ * handler, which now targets the SELECTED symptom's node.
+ */
+function applyRemedyKey(view: ViewState, ev: InputEvent, data: DataProvider): KeyResult | null {
+  const list = sortedSymptoms(data.symptoms());
+  const count = list.length;
+  const move = (delta: number): KeyResult => {
+    if (count === 0) return NOOP;
+    const next = Math.max(0, Math.min((view.remedyCursor ?? 0) + delta, count - 1));
+    if (next === (view.remedyCursor ?? 0)) return NOOP;
+    view.remedyCursor = next;
+    // Re-anchor on every deliberate move: the operator has just chosen THIS
+    // card, so that identity is what the cursor should follow from here.
+    view.remedyAnchorId = list[next] ? symptomKey(list[next]) : null;
+    return REDRAW;
+  };
+  if (ev.type === 'arrow') {
+    if (ev.dir === 'down') return move(+1);
+    if (ev.dir === 'up') return move(-1);
+    return NOOP;
+  }
+  if (ev.type !== 'char') return null;
+  switch (ev.ch) {
+    case 'j': return move(+1);
+    case 'k': return move(-1);
+    case 'g': return move(-count);
+    case 'G': return move(count);
+    case '/': return NOOP; // no filter prompt here — swallow it
+    default: return null;
+  }
+}
+
 function applyDetailKey(view: ViewState, ev: InputEvent, data: DataProvider): KeyResult | null {
   const page = Math.max(1, view.rows - 4); // ≈ one content-height page
 
@@ -331,8 +441,10 @@ function applyDetailKey(view: ViewState, ev: InputEvent, data: DataProvider): Ke
     case '>':
     case '.':
       return browseNode(view, data, +1);
+    case '/': // no filter prompt on the dossier — swallow it (Log's precedent)
+      return NOOP;
     default:
-      return null; // a/A, 1-9, q, c, e, y, f, t, p/i/h/R/x, '/', … → generic
+      return null; // a/A, 1-9, q, c, e, y, f, t, p/i/h/R/x, … → generic
   }
 }
 
@@ -388,10 +500,35 @@ export function applyKey(
     if (r) return r;
   }
 
+  // TOPOLOGY owns its route-tree scroll (the tree is taller than the frame on
+  // any real mesh). Everything it does not claim falls through.
+  if (view.screen === 'topology') {
+    const r = applyTopologyKey(view, ev);
+    if (r) return r;
+  }
+
+  // REMEDY owns a symptom cursor, because that cursor is what the action keys
+  // target on this screen. Everything it does not claim falls through.
+  if (view.screen === 'remedy') {
+    const r = applyRemedyKey(view, ev, data);
+    if (r) return r;
+  }
+
   // Escape → dismiss any overlay back to the Overview home.
   if (ev.type === 'escape') {
     if (view.screen !== 'overview') {
       view.screen = 'overview';
+      return REDRAW;
+    }
+    // On the Overview home, Esc CLEARS a committed filter. Esc previously only
+    // cleared one during the `/` capture, so once the operator pressed Enter the
+    // key went inert — and the empty-roster card advertises `[Esc] CLEAR`, which
+    // made that card's own escape route a lie. (The card is the one place this
+    // strands you: with every node filtered out there is nothing to select.)
+    if (view.filter) {
+      view.filter = '';
+      view.selected = 0;
+      view.scroll = 0;
       return REDRAW;
     }
     return NOOP;
@@ -482,9 +619,23 @@ export function applyKey(
       }
       return NOOP;
     case '/':
-      // Hand control to the session's filter-capture loop.
+      // Filter capture is only ever VISIBLE on the Overview — that screen owns
+      // the prompt, the live echo and the [/] FILTER keycap. Starting a capture
+      // from a screen with no prompt swallowed every subsequent keystroke with
+      // nothing on the frame to say so, including the [Q] the operator was
+      // pressing to escape. Elsewhere it is a no-op (the Log's precedent).
+      //
+      // The SCREEN is not sufficient: while the roster is still loading the
+      // Overview renders a centred "Connecting…" card and never builds the
+      // title rule that shows the prompt, so a capture there is just as
+      // invisible — and that card's only keycap is the [Q] it would swallow.
+      if (view.screen !== 'overview' || !data.ready()) return NOOP;
       return { redraw: true, filter: 'start' };
-    case 's': {
+    // `s`/`S` and `t`/`T` are advertised as UPPERCASE keycaps ([S] SORT,
+    // [T] UNITS), so both cases must work — binding only the lowercase made
+    // the printed keycap a lie for anyone who took it literally.
+    case 's':
+    case 'S': {
       const i = SORT_ORDER.indexOf(view.sortKey);
       view.sortKey = SORT_ORDER[(i + 1) % SORT_ORDER.length];
       view.selected = 0;
@@ -492,12 +643,17 @@ export function applyKey(
       return REDRAW;
     }
     case 't':
+    case 'T':
       view.signalDisplay = view.signalDisplay === 'margin' ? 'dbm' : 'margin';
       return REDRAW;
     // ── Log-screen errors-only filter (the stream always auto-follows). ──
     case 'o':
-      view.errorsOnly = !view.errorsOnly;
-      return REDRAW;
+    case 'O':
+      // The Log owns this key (applyLogKey, which also resets the cursor and
+      // anchor). Reaching here means we are NOT on the Log, and toggling that
+      // screen's filter from another one silently hid events the operator would
+      // only discover on arriving there.
+      return NOOP;
     // ── mutating actions — handled by the session ONLY when write_actions is
     //    enabled (it intercepts these before applyKey). If we reach here, write
     //    actions are off, so they are recognized but no-op with a hint. ────────

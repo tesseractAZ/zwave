@@ -55,7 +55,7 @@ function costTag(cost: PlanCandidate['cost']): string {
   }
 }
 
-function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, efficacyFor: (kind: SymptomKind, action: ActionKind) => Efficacy | null): string[] {
+function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, efficacyFor: (kind: SymptomKind, action: ActionKind) => Efficacy | null, selected = false): string[] {
   const rows: string[] = [];
   const who = sym.nodeId != null ? c.cyan(`#${sym.nodeId} ${nameOf(sym.nodeId)}`) : c.blue('MESH');
   // Compact basis GLYPH placed right after severity so it survives truncation at
@@ -65,10 +65,13 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
   const subsumed = sym.subsumedBy
     ? c.grey(sym.subsumedBy.endsWith(':edge-cluster') ? ' · under edge cluster' : ' · under mesh event')
     : '';
-  // Header: severity · basis-glyph · kind · who · dwell age.
+  // Header: cursor · severity · basis-glyph · kind · who · dwell age.
+  // The cursor is not decoration — on REMEDY it selects the ACTION TARGET, so
+  // the operator must be able to see which node `a`/`p` will act on.
+  const cur = selected ? c.cyanB('▶ ') : '  ';
   rows.push(
     truncate(
-      `${SEV_TAG[sym.severity]} ${glyph} ${c.white(sym.kind)}  ${who}  ${c.grey(ago(sym.sinceMs, now) + subsumed)}`,
+      `${cur}${SEV_TAG[sym.severity]} ${glyph} ${c.white(sym.kind)}  ${who}  ${c.grey(ago(sym.sinceMs, now) + subsumed)}`,
       W,
     ),
   );
@@ -115,12 +118,47 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
   return rows;
 }
 
-/** Render order: worst first (crit → warn → watch), newest-breaching as tiebreak,
- *  so a low-severity watch can never bury a critical off the bottom of a
- *  no-scroll screen. */
+/**
+ * Render order: PLAN-OWNERS first, then worst-first (crit → warn → watch), then
+ * newest-breaching.
+ *
+ * The plan-owner rule is load-bearing. A symptom that has been *subsumed* by a
+ * mesh-wide or controller-level event renders WITHOUT a recommendation — the
+ * owning event carries the fix. But a mesh-interference event is always `warn`
+ * while the per-node `dead-flap` symptoms beneath it are always `crit`, so
+ * ranking on severity alone floated four recommendation-less criticals above
+ * the one card that could actually be acted on, and pushed that card into
+ * "1 more symptom not shown". The operator saw four criticals, zero
+ * recommendations, and a pointer to an event that was not on the screen.
+ *
+ * A subsumed symptom is by definition not the thing to act on, so it never
+ * displaces the event that owns its remedy.
+ */
 const SEV_RANK: Record<Symptom['severity'], number> = { crit: 0, warn: 1, watch: 2 };
 function bySeverity(a: Symptom, b: Symptom): number {
-  return SEV_RANK[a.severity] - SEV_RANK[b.severity] || b.sinceMs - a.sinceMs;
+  return (
+    (a.subsumedBy ? 1 : 0) - (b.subsumedBy ? 1 : 0) ||
+    SEV_RANK[a.severity] - SEV_RANK[b.severity] ||
+    b.sinceMs - a.sinceMs
+  );
+}
+
+/**
+ * The single ordering used by BOTH the renderer and the cursor/action target.
+ * They must never disagree: the operator acts on the card they can see, so an
+ * index into a differently-sorted list would target the wrong node.
+ */
+/**
+ * Stable identity for a symptom. `Symptom` carries no id — its identity IS the
+ * (nodeId, kind) dwell key the detector keys on, and that survives the re-sort
+ * the engine performs on every poll.
+ */
+export function symptomKey(s: Symptom): string {
+  return `${s.nodeId ?? 'mesh'}:${s.kind}`;
+}
+
+export function sortedSymptoms(symptoms: readonly Symptom[]): Symptom[] {
+  return [...symptoms].sort(bySeverity);
 }
 
 /** Naive word-wrap on plain text (narratives carry no ANSI). */
@@ -182,12 +220,45 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     // worst-first and stop before overflowing — an honest footer beats silently
     // dropping a critical off the bottom.
     const bodyCap = Math.max(0, view.rows - 3);
-    const sorted = [...symptoms].sort(bySeverity);
-    let used = body.length; // summary + spacer already pushed
+    const sorted = sortedSymptoms(symptoms);
+    // Keep the CURSOR on screen. The cursor picks the action target, so a card
+    // the operator cannot see must never be the thing `a`/`p` would act on.
+    // Resolve by ANCHOR first: the engine re-sorts this list on every poll, and
+    // a bare index would slide the cursor onto whatever now occupies that slot.
+    const anchored = view.remedyAnchorId != null
+      ? sorted.findIndex((x) => symptomKey(x) === view.remedyAnchorId)
+      : -1;
+    const cursor = anchored >= 0
+      ? anchored
+      : Math.max(0, Math.min(view.remedyCursor ?? 0, sorted.length - 1));
+    view.remedyCursor = cursor;
+    // Re-anchor to the card actually DRAWN. This is the load-bearing write-back:
+    // it makes "what you see" and "what `p` acts on" the same symptom, and `p`
+    // is the one action that executes with no CONFIRM box.
+    view.remedyAnchorId = sorted[cursor] ? symptomKey(sorted[cursor]) : null;
+    const headerRows = body.length; // summary + spacer already pushed
+
+    // Smallest window start that both fits and contains the cursor.
+    let start = 0;
+    for (;;) {
+      let used = headerRows;
+      let last = start - 1;
+      for (let i = start; i < sorted.length; i++) {
+        const len = symptomBlock(sorted[i], now, W, nameOf, ctx.actionsEnabled === true, nodeOf, efficacyFor, i === cursor).length;
+        const reserve = i < sorted.length - 1 ? 1 : 0;
+        if (used + len > bodyCap - reserve && i > start) break;
+        used += len;
+        last = i;
+      }
+      if (last >= cursor || start >= cursor) break;
+      start += 1;
+    }
+
+    let used = headerRows;
     let shown = 0;
-    for (const sym of sorted) {
-      const blk = symptomBlock(sym, now, W, nameOf, ctx.actionsEnabled === true, nodeOf, efficacyFor);
-      const remaining = sorted.length - shown;
+    for (let i = start; i < sorted.length; i++) {
+      const blk = symptomBlock(sorted[i], now, W, nameOf, ctx.actionsEnabled === true, nodeOf, efficacyFor, i === cursor);
+      const remaining = sorted.length - start - shown;
       // Reserve one line for the "N more" footer whenever blocks remain unshown.
       const reserve = remaining > 1 ? 1 : 0;
       if (used + blk.length > bodyCap - reserve && shown > 0) break;
@@ -195,12 +266,18 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       used += blk.length;
       shown += 1;
     }
-    if (shown < sorted.length) {
+    const hidden = sorted.length - shown;
+    if (hidden > 0) {
       // Guarantee the footer is the LAST visible body line even in the degenerate
       // case where a single oversized block already filled the screen: trim the
       // body so footer lands within frame()'s bodyCap, never silently dropped.
       if (body.length > bodyCap - 1) body.length = Math.max(0, bodyCap - 1);
-      body.push(truncate(c.yellow(`  ▾ ${sorted.length - shown} more symptom${sorted.length - shown === 1 ? '' : 's'} not shown`) + c.grey(' — worst are listed first; widen/heighten the terminal to see all'), W));
+      const above = start;
+      const below = hidden - above;
+      // Keep the familiar one-sided form when nothing is scrolled off the TOP;
+      // only show the two-sided count once the cursor has moved down the list.
+      const where = above > 0 ? `▴${above} ▾${below}` : `▾ ${below}`;
+      body.push(truncate(c.yellow(`  ${where} more symptom${hidden === 1 ? '' : 's'} not shown`) + c.grey(' — actionable first, then worst; ↑↓ to reach them'), W));
     }
   }
 
@@ -210,6 +287,8 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     rightStatus: right,
     body,
     keys: [
+      ['↑↓', 'SYMPTOM'],
+      ['A', 'ACTIONS', 1],
       ['1-8', 'SCREENS'],
       ['Q', 'BACK'],
     ],
@@ -222,5 +301,8 @@ function summaryLine(crit: number, warn: number, total: number): string {
   if (warn) bits.push(c.yellow(`${warn} warning`));
   const watch = total - crit - warn;
   if (watch) bits.push(c.grey(`${watch} watch`));
-  return bits.join(c.grey(' · ')) + c.grey('  —  advisory only; nothing is acted on');
+  // "nothing is acted on" was false ON THIS SCREEN: its own command bar
+  // advertises [A] ACTIONS and `p` fires a ping immediately. The true claim is
+  // about the ENGINE — it recommends and never executes; the operator does.
+  return bits.join(c.grey(' · ')) + c.grey('  —  the engine only recommends; you run the actions');
 }

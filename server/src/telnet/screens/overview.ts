@@ -34,9 +34,10 @@ import {
   truncate,
   visLen,
 } from '../ansi';
-import { masthead, titleRule, fieldStrip, field, commandBar, linkState } from '../chrome';
+import { masthead, titleRule, fieldStrip, field, commandBar, linkState, type Keycap } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
-import { meter, signalBars, sparkline, vblock, fmtElapsed, spinner } from '../gauges';
+import { noiseColor, rssiColor, marginColor, rttColor, timeoutPctColor } from '../bands';
+import { meter, signalBars, litBars, sparkline, vblock, fmtElapsed, spinner } from '../gauges';
 import {
   NodeStatus,
   type DataProvider,
@@ -69,7 +70,7 @@ const NARROW_COLS = 74; // below this, drop rate/seen/batt so FLAGS never clips
  * content; the NODE name column then FLEXES to absorb all remaining width, so
  * the table always fills the terminal instead of stranding the right half.
  */
-function layout(W: number, mode: ViewState['signalDisplay']): ColSpec[] {
+function layout(W: number, mode: ViewState['signalDisplay'], realNoise = true): ColSpec[] {
   const mid = W >= MID_COLS;
   const wide = W >= WIDE_COLS;
   // Below NARROW_COLS the fixed columns + a readable name can't all fit, and the
@@ -87,7 +88,10 @@ function layout(W: number, mode: ViewState['signalDisplay']): ColSpec[] {
   add('status', 2, 'l', 'ST');
   add('name', 16, 'l', 'NODE'); // flexed below
   add('score', 4, 'r', 'SCR');
-  add('signal', 12, 'r', mode === 'dbm' ? 'RSSI' : 'MARGIN');
+  // `MARGIN~` marks a column computed against the ASSUMED noise floor. Every
+  // value in it is then an estimate, and one tilde in the header says so once
+  // rather than repeating "est" on all 39 rows.
+  add('signal', 12, 'r', mode === 'dbm' ? 'RSSI' : realNoise ? 'MARGIN' : 'MARGIN~');
   if (mid) {
     add('rtt', 6, 'r', 'RTT');
     add('tmo', 5, 'r', 'TMO');
@@ -124,16 +128,38 @@ export function renderOverview(ctx: ScreenCtx): string[] {
     return centeredNotice(view, 'Z-WAVE TUI', [
       c.grey('Connecting to Home Assistant…'),
       ...(err ? ['', c.red(truncate(err, Math.min(W - 8, 60)))] : []),
-    ]);
+    ], [['Q', 'EXIT']]);
   }
   if (visibleNodes.length === 0) {
-    const msg = view.filter
+    // `/` is still legal here (it is how the operator edits the filter that
+    // emptied the roster), so this card MUST render the capture state — a
+    // capture with no echo swallows every later keystroke, including the [Q]
+    // on this very command bar, with nothing on screen to explain it.
+    // `filter.trim()` matches what visibleNodes() actually applies — a
+    // whitespace-only filter narrows nothing, so blaming it for an empty
+    // roster (and offering to CLEAR it) would be a fabricated explanation.
+    const active = view.filter.trim() !== '';
+    const reason = c.grey(active
       ? `No nodes match “${view.filter}”`
-      : 'No Z-Wave nodes discovered yet';
-    return centeredNotice(view, 'NO NODES', [c.grey(msg)]);
+      : 'No Z-Wave nodes discovered yet');
+    // The capture is drawn IN ADDITION to the reason, never instead of it: with
+    // a genuinely empty mesh, replacing it left the operator editing a filter
+    // that was not responsible for anything.
+    const body = ctx.filtering
+      // Esc "clear", not "cancel": capture is not a transaction — it edits
+      // view.filter in place and Esc discards the whole filter. The keycap one
+      // row below says CLEAR, and the two must not disagree.
+      ? [reason, '', c.grey('FILTER ') + c.yellow(`“${view.filter}”`) + c.yellowB('▏'), c.grey('⏎ apply · Esc clear')]
+      : [reason];
+    // Esc is offered explicitly: with every node filtered out this card is the
+    // whole screen, and clearing the filter is the only way back to a roster.
+    const keys: Keycap[] = active || ctx.filtering
+      ? [['/', 'FILTER'], ['Esc', 'CLEAR'], ['1-8', 'SCREENS'], ['Q', 'EXIT']]
+      : [['/', 'FILTER'], ['1-8', 'SCREENS'], ['Q', 'EXIT']];
+    return centeredNotice(view, 'NO NODES', body, keys);
   }
 
-  const cols = layout(W, view.signalDisplay);
+  const cols = layout(W, view.signalDisplay, data.hasRealNoise());
 
   const out: string[] = [];
   // Chrome: masthead · titled rule · telemetry strip · column header.
@@ -146,6 +172,10 @@ export function renderOverview(ctx: ScreenCtx): string[] {
   // above + 1 command bar below).
   const cap = Math.max(1, H - 5);
   const start = windowStart(view.selected, view.scroll, visibleNodes.length, cap);
+  // Write the clamped window back (the Log screen's logScroll pattern). Without
+  // this the roster re-derives `start` from a stale scroll on every redraw, so
+  // paging never sticks and the cursor snaps back to the bottom row.
+  view.scroll = start;
   const end = Math.min(visibleNodes.length, start + cap);
   const noise = data.noiseFloor();
 
@@ -161,13 +191,17 @@ export function renderOverview(ctx: ScreenCtx): string[] {
   // Pad the body so the command bar lands on the last row.
   while (out.length < H - 1) out.push('');
 
-  const more = end < visibleNodes.length || start > 0 ? ` (${end - start}/${visibleNodes.length})` : '';
-  // The scroll counter is concatenated AFTER commandBar()'s own truncate, so the
-  // combined line must be re-clipped to W or it overruns the primary screen.
+  // POSITION, not window size: `(12–28/39)` says where you are in the roster.
+  // The old `(end-start)/total` reported how many rows happened to fit, which
+  // never changed as you scrolled and so told the operator nothing.
+  const more = end < visibleNodes.length || start > 0 ? ` (${start + 1}–${end}/${visibleNodes.length})` : '';
+  const moreTok = more ? c.grey(more) : '';
+  // Reserve the counter's columns so commandBar drops WHOLE keycaps to make
+  // room, instead of the bar and counter fighting over the same last row.
   out.push(truncate(commandBar(view, [
-    ['1-8', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS'],
-    ['/', 'FILTER'], ['S', 'SORT'], ['T', 'UNITS'], ['Q', 'EXIT'],
-  ]) + (more ? c.grey(more) : ''), W));
+    ['1-8', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS', 1],
+    ['/', 'FILTER', 2], ['S', 'SORT', 3], ['T', 'UNITS', 4], ['Q', 'EXIT'],
+  ], visLen(moreTok)) + moreTok, W));
   // Defensive clamp — the session guarantees rows >= 16, but never overrun.
   return out.slice(0, H);
 }
@@ -175,6 +209,13 @@ export function renderOverview(ctx: ScreenCtx): string[] {
 /** The far-right status token on the OVERVIEW rule: rebuild / filter / stale. */
 function rightStatus(ctx: ScreenCtx): string {
   const { data, view } = ctx;
+  // An ACTIVE filter capture outranks everything: it is the only cue that the
+  // operator's keystrokes are being swallowed into a filter rather than acted
+  // on. Burying it under a rebuild spinner or a stale-roster warning left them
+  // typing into an invisible field.
+  if (ctx.filtering) {
+    return c.grey('FILTER ') + c.yellow(`“${view.filter}”`) + c.yellowB('▏');
+  }
   const err = data.lastError();
   const lu = data.lastUpdated();
   const ageMs = lu != null ? Math.max(0, Date.now() - lu) : null;
@@ -186,7 +227,9 @@ function rightStatus(ctx: ScreenCtx): string {
     const el = ctrl.rebuildStartedAt != null ? ' ' + fmtElapsed(Date.now() - ctrl.rebuildStartedAt) : '';
     return c.cyanB(`${spinner(Date.now())} REBUILDING ROUTES${el}`);
   }
-  if (ctx.filtering || view.filter) {
+  // `.trim()`, matching visibleNodes() and the empty-roster card: a
+  // whitespace-only filter narrows nothing and must not be advertised as live.
+  if (ctx.filtering || view.filter.trim()) {
     return c.grey('FILTER ') + c.yellow(`“${view.filter}”`) + (ctx.filtering ? c.yellowB('▏') : '');
   }
   return '';
@@ -202,14 +245,21 @@ function telemetryStrip(ctx: ScreenCtx): string {
   let dead = 0;
   let asleep = 0;
   let flaky = 0;
+  let unknown = 0;
   for (const n of all) {
     if (n.status === NodeStatus.Alive || n.status === NodeStatus.Awake) online++;
     else if (n.status === NodeStatus.Dead) dead++;
     else if (n.status === NodeStatus.Asleep) asleep++;
+    else if (n.status === NodeStatus.Unknown) unknown++;
     if (data.scoreFor(n.nodeId).state === 'flaky') flaky++;
   }
   const noise = data.noiseFloor();
-  const meshFrac = all.length > 0 ? Math.max(0, all.length - dead - flaky) / all.length : 0;
+  // Unknown nodes counted as healthy here: health.ts gives them the state
+  // 'unknown' (not 'flaky') and only NodeStatus.Dead subtracts, so a node the
+  // controller has never heard from inflated the mesh percentage.
+  const meshFrac = all.length > 0
+    ? Math.max(0, all.length - dead - flaky - unknown) / all.length
+    : 0;
 
   const fields = [
     field('NODES', String(all.length), c.whiteB),
@@ -217,16 +267,17 @@ function telemetryStrip(ctx: ScreenCtx): string {
     field('DEAD', String(dead), dead > 0 ? c.redB : c.grey),
     field('ASLEEP', String(asleep), asleep > 0 ? c.cyan : c.grey),
     field('FLAKY', String(flaky), flaky > 0 ? c.yellow : c.grey),
-    field('NOISE', data.hasRealNoise() ? `${noise} dBm` : '—', data.hasRealNoise() ? noiseColor(noise) : c.grey),
+    ...(unknown > 0 ? [field('UNKNOWN', String(unknown), c.yellow)] : []),
+    // Showing '—' hid the fact that the MARGIN column is still being computed
+    // — against the assumed floor. Name the assumption instead of hiding it.
+    field(
+      'NOISE',
+      data.hasRealNoise() ? `${noise} dBm` : `${noise} dBm assumed`,
+      data.hasRealNoise() ? noiseColor(noise) : c.grey,
+    ),
     c.grey('MESH ') + meter(meshFrac, 8) + c.grey(` ${Math.round(meshFrac * 100)}%`),
   ];
   return fieldStrip(view, fields);
-}
-
-function noiseColor(noise: number): (s: string) => string {
-  if (noise >= -75) return c.red;
-  if (noise >= -85) return c.yellow;
-  return c.grey;
 }
 
 /* ── header ────────────────────────────────────────────────────────────── */
@@ -265,22 +316,31 @@ function nodeRow(
   // Coloured form (normal rows) and plain form (the inverse-video selected row —
   // no embedded SGR/RESET can survive the invert), keyed so the responsive
   // column set drives both without positional drift.
+  // A DEAD/UNKNOWN node's RF cells are the LAST READING BEFORE it stopped
+  // answering — they are history, not health. Painting them with the live
+  // health ramp put a full-green signal, RTT and rate next to a red `✕ dead`
+  // marker, which reads as "this node is fine". Stale telemetry goes neutral
+  // grey; the cells that legitimately describe a dead node (status, seen,
+  // battery, flags) keep their own colour, because they are what explains it.
+  const staleRf = isDead ? c.grey : null;
+  const rf = (color: (s: string) => string, t: string): string => (staleRf ?? color)(t);
+
   const colored: Record<ColKey, string> = {
     cursor: ' ',
     id: idColor(n)(String(n.nodeId)),
     status: g.color(g.ch),
     name: n.status === NodeStatus.Dead ? c.grey(truncate(n.name, nameW)) : truncate(n.name, nameW),
     score: score.colored,
-    signal: sig.colored,
-    rtt: rtt.color(rtt.t),
-    tmo: tmo.color(tmo.t),
-    hop: hop.color(hop.t),
-    route: route.color(route.t),
-    rate: rate.color(rate.t),
+    signal: staleRf ? staleRf(sig.plain) : sig.colored,
+    rtt: rf(rtt.color, rtt.t),
+    tmo: rf(tmo.color, tmo.t),
+    hop: rf(hop.color, hop.t),
+    route: rf(route.color, route.t),
+    rate: rf(rate.color, rate.t),
     seen: seen.color(seen.t),
     batt: bat.color(bat.t),
     flags: flags.color(flags.t),
-    trend: trend.colored,
+    trend: staleRf ? staleRf(trend.plain) : trend.colored,
   };
   if (selected) {
     const plain: Record<ColKey, string> = {
@@ -383,7 +443,9 @@ function bandFrac(v: number, yellow: number, green: number): number {
 /** Plain (uncoloured) ascending bars — lit glyphs then spaces — for the
  *  inverse-video selected row, so level still reads without any SGR. */
 function barsPlain(frac: number, bars = 4): string {
-  const lit = Math.round(clamp01(frac) * bars);
+  // Shares litBars() with signalBars so the plain and coloured forms can never
+  // disagree on how many bars a given signal lights.
+  const lit = litBars(frac, bars);
   let out = '';
   for (let i = 0; i < bars; i++) out += i < lit ? BAR_GLYPHS[i] : ' ';
   return out; // width = bars
@@ -430,23 +492,14 @@ function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDi
   // are already ≤ 7 ("-128dBm" / "+110dB").
   if (text.length > 7) text = text.slice(0, 7);
 
-  const bars = routed ? signalBars(frac, 4, c.grey) : signalBars(frac, 4);
+  // Colour the glyph with the LABEL's band function, not signalBars' internal
+  // zoneColor: `frac` is a coarse 2-threshold ramp while marginColor now has
+  // four bands, so between 5 and 10 dB the bars read yellow beside a red number.
+  const bars = signalBars(frac, 4, routed ? c.grey : colorFn);
   const label = routed ? c.grey(text) : colorFn(text);
   const colored = bars + ' ' + padStart(label, 7);
   const plain = barsPlain(frac, 4) + ' ' + padStart(text, 7);
   return { colored, plain }; // 4 + 1 + 7 = 12 visible
-}
-
-function rssiColor(rssi: number): (s: string) => string {
-  if (rssi >= -70) return c.green;
-  if (rssi >= -88) return c.yellow;
-  return c.red;
-}
-
-function marginColor(margin: number): (s: string) => string {
-  if (margin >= 17) return c.green;
-  if (margin >= 5) return c.yellow;
-  return c.red;
 }
 
 /* ── rssi micro-sparkline (mid+ terminals) ─────────────────────────────── */
@@ -477,8 +530,7 @@ function rttCell(n: NodeSnapshot): Cell {
   if (rtt == null || rtt < 0) return { t: '—', color: c.grey };
   const r = Math.round(rtt);
   const t = r >= 1000 ? `${(r / 1000).toFixed(1)}s` : `${r}ms`;
-  const color = r < 100 ? c.green : r < 500 ? c.white : r < 1000 ? c.yellow : c.red;
-  return { t, color };
+  return { t, color: rttColor(r) };
 }
 
 /** Response-timeout rate (shared with Detail via responseTimeoutPct). This is
@@ -488,8 +540,7 @@ function timeoutCell(n: NodeSnapshot): Cell {
   const pct = responseTimeoutPct(n.stats);
   if (pct == null) return { t: '—', color: c.grey };
   const t = `${pct >= 10 ? Math.round(pct) : Number(pct.toFixed(1))}%`;
-  const color = pct < 1 ? c.green : pct < 3 ? c.white : pct < 8 ? c.yellow : c.red;
-  return { t, color };
+  return { t, color: timeoutPctColor(pct) };
 }
 
 /** Last-working-route hop chain, compacted to fit. Direct → 'direct'. */
@@ -587,7 +638,12 @@ function flagsCell(flags: string[]): Cell {
  * heatmap/log) so they all share one look. Returns exactly `view.rows` lines,
  * each no wider than `view.cols`.
  */
-export function centeredNotice(view: ViewState, title: string, bodyLines: string[]): string[] {
+export function centeredNotice(
+  view: ViewState,
+  title: string,
+  bodyLines: string[],
+  keys?: ReadonlyArray<Keycap>,
+): string[] {
   const W = view.cols;
   const H = view.rows;
 
@@ -605,12 +661,17 @@ export function centeredNotice(view: ViewState, title: string, bodyLines: string
   boxLines.push(c.cyan(BOX.bl + BOX.h.repeat(inner) + BOX.br));
 
   const leftPad = ' '.repeat(Math.max(0, Math.floor((W - boxW) / 2)));
-  const topPad = Math.max(0, Math.floor((H - boxLines.length) / 2));
+  // A notice that occupies the WHOLE screen must still say how to leave it.
+  // Without a command bar the empty states were dead ends: the box named no
+  // key, and the [Q] the operator reached for had never been advertised.
+  const reserve = keys ? 1 : 0;
+  const topPad = Math.max(0, Math.floor((H - reserve - boxLines.length) / 2));
 
   const out: string[] = [];
   for (let i = 0; i < topPad; i++) out.push('');
   for (const line of boxLines) out.push(truncate(leftPad + line, W));
-  while (out.length < H) out.push('');
+  while (out.length < H - reserve) out.push('');
+  if (keys) out.push(commandBar(view, keys));
   return out.slice(0, H);
 }
 

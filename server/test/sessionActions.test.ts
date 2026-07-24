@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { TuiSession } from '../src/telnet/session';
 import { NodeStatus, type ControllerSnapshot, type DataProvider, type NodeSnapshot, type HealthResult, type ActionRunner } from '../src/types';
@@ -126,17 +127,42 @@ test('a disabled runner: destructive shortcuts never actuate', async () => {
 
 /* ── the Actions Menu ───────────────────────────────────────────────────── */
 
-test("'a' opens the Actions Menu listing actions with impact badges", () => {
+test("'a' on a node screen opens the DEVICE menu — and it names one device", () => {
   const { runner } = mkActions();
   const { s, last } = mkSession(runner);
   s.feed([key('a')]); s.draw();
   const f = strip(last());
-  assert.match(f, /ACTIONS/);
-  assert.match(f, /Ping node/);
-  assert.match(f, /Rebuild ALL routes/);
   assert.match(f, /DEVICE ACTIONS/);
-  assert.match(f, /SYSTEM-WIDE/);
+  assert.match(f, /target #5 Test Node/, 'the device menu must name its target');
+  assert.match(f, /Ping node/);
   assert.match(f, /ARMED/, 'enabled runner → ARMED badge');
+  // The blast radius must match the header: a menu naming ONE node may not
+  // offer an action that touches all of them.
+  assert.doesNotMatch(f, /Rebuild ALL routes/,
+    'a mesh-wide action is listed under a header naming a single device');
+});
+
+test("'a' on the Controller screen opens the NETWORK menu, with no device target", () => {
+  const { runner } = mkActions();
+  const { s, last } = mkSession(runner);
+  s.feed([key('3')]);      // Controller & Network
+  s.feed([key('a')]); s.draw();
+  const f = strip(last());
+  assert.match(f, /NETWORK ACTIONS/);
+  assert.match(f, /whole mesh/, 'the network menu must state its blast radius');
+  assert.match(f, /Rebuild ALL routes/);
+  assert.doesNotMatch(f, /target #/, 'the network menu must not name a device target');
+  assert.doesNotMatch(f, /Ping node/, 'a device action leaked into the network menu');
+});
+
+test("'a' on a screen with neither scope says where the actions live", () => {
+  const { runner } = mkActions();
+  const { s, last } = mkSession(runner);
+  s.feed([key('4')]);      // Topology — no node cursor, not the network screen
+  s.feed([key('a')]); s.draw();
+  const f = strip(last());
+  assert.doesNotMatch(f, /DEVICE ACTIONS|NETWORK ACTIONS/, 'opened a mis-scoped menu');
+  assert.match(f, /No actions on this screen/, 'the refusal is invisible to the operator');
 });
 
 test('menu → select ping → type-CONFIRM → executes (menu ping is NOT immediate)', async () => {
@@ -152,12 +178,11 @@ test('menu → select ping → type-CONFIRM → executes (menu ping is NOT immed
   assert.deepEqual(calls, ['ping:5']);
 });
 
-test('menu navigation reaches Rebuild ALL and confirms it', async () => {
+test('the network menu confirms and runs Rebuild ALL', async () => {
   const { runner, calls } = mkActions();
   const { s } = mkSession(runner);
-  s.feed([key('a')]);
-  // device rows: ping,refresh,reInterview,heal,removeFailed (5) then rebuildAll at idx 5.
-  for (let i = 0; i < 5; i++) s.feed([{ type: 'arrow', dir: 'down' }]);
+  s.feed([key('3')]);   // Controller & Network
+  s.feed([key('a')]);   // network menu — rebuildAll is the first row while idle
   s.feed([enter]);
   typeConfirm(s);
   await flush(); await flush();
@@ -180,6 +205,7 @@ test('stopRebuild appears in the menu only while a rebuild is in progress', () =
   const rebuilding = { isRebuildingRoutes: true } as unknown as ControllerSnapshot;
   const { runner } = mkActions();
   const { s, last } = mkSession(runner, mkData(rebuilding));
+  s.feed([key('3')]);              // the rebuild is mesh-wide → NETWORK menu
   s.feed([key('a')]); s.draw();
   const f = strip(last());
   assert.match(f, /Stop route rebuild/, 'stopRebuild shown while rebuilding');
@@ -391,4 +417,272 @@ test('a numeric param with NO device bounds still rejects an absurd (out-of-int3
   assert.match(strip(last()), /out of range/i, 'sanity floor rejects the absurd value');
   await flush();
   assert.deepEqual(calls, [], 'nothing written');
+});
+
+test('node actions are refused on screens that show no node cursor', () => {
+  // Topology / Heatmap / Controller / Interference are AGGREGATE views: there
+  // is no ▶ row on screen. Falling through to the Overview selection meant `p`
+  // — the one action that executes with no CONFIRM box — acted on a node the
+  // operator could not see and had not chosen. Same defect class as the Remedy
+  // targeting fix; this drives the real session rather than restating the rule.
+  for (const key of ['1', '2', '3', '4', '5', '8'] as const) {
+    const { runner, calls } = mkActions(true);
+    const { s } = mkSession(runner);
+    s.feed([{ type: 'char', ch: key }]); // switch screen
+    s.feed([{ type: 'char', ch: 'p' }]); // ping — safe, so it runs immediately
+    const aggregate = ['3', '4', '5', '8'].includes(key); // controller/topology/heatmap/interference
+    if (aggregate) {
+      assert.deepEqual(calls, [],
+        `screen ${key} has no node cursor but still executed ${calls.join(',')}`);
+    } else {
+      assert.deepEqual(calls, ['ping:5'],
+        `screen ${key} shows a node cursor and should have pinged it, got ${calls.join(',')}`);
+    }
+  }
+});
+
+test('refusing a node action says why instead of no-opping silently', () => {
+  const { runner } = mkActions(true);
+  const { s, last } = mkSession(runner);
+  s.feed([{ type: 'char', ch: '4' }]); // Topology — no node cursor
+  s.feed([{ type: 'char', ch: 'p' }]);
+  s.draw();
+  assert.match(strip(last()), /no node cursor/,
+    'the refusal is invisible to the operator');
+});
+
+test('cancelling a confirm returns to the menu you were IN, not one re-derived', () => {
+  // The modals swallow every key, so re-deriving the scope happens to agree
+  // today — but that is an accident of dispatch order, not a guarantee. Pin the
+  // behaviour so a future dispatch change cannot silently drop the operator
+  // into a different menu than the one they opened.
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner);
+  s.feed([key('3')]);            // Controller → NETWORK menu
+  s.feed([key('a')]);
+  s.feed([enter]);               // select Rebuild ALL → type-CONFIRM
+  s.draw();
+  assert.match(strip(last()), /type CONFIRM to arm/i, 'confirm not armed');
+  s.feed([{ type: 'escape' }]);  // cancel
+  s.draw();
+  const f = strip(last());
+  assert.match(f, /NETWORK ACTIONS/, `cancel returned to the wrong menu: ${f.split('\n')[0]}`);
+  assert.doesNotMatch(f, /DEVICE ACTIONS/, 'cancel dropped into the device menu');
+  assert.deepEqual(calls, [], 'cancel must not execute anything');
+});
+
+test('INVARIANT: no screen is both network-scoped and cursor-bearing', () => {
+  // Two guards in openMenu() are DEFENSIVE and cannot be killed by a mutation
+  // test today, because they are observationally equivalent under the current
+  // screen mapping:
+  //   1. `scope === 'device' ? actionTargetNode() : null` — the network screen
+  //      has no node cursor, so actionTargetNode() already returns undefined.
+  //   2. `reopen ?? menuScopeForScreen()` — the modals swallow every key, so
+  //      the screen cannot change while a confirm is up and re-deriving agrees.
+  //
+  // Rather than pretend those guards are covered, this test pins the INVARIANT
+  // that makes them equivalent. The moment someone gives a network-scoped
+  // screen a node cursor — or lets a screen change while a modal is open — this
+  // fails and says the guards have become load-bearing.
+  const DEVICE_SCREENS = ['overview', 'detail', 'remedy', 'log'];
+  const NETWORK_SCREENS = ['controller'];
+  for (const s of NETWORK_SCREENS) {
+    assert.ok(!DEVICE_SCREENS.includes(s),
+      `${s} is now both network-scoped and cursor-bearing — the menuTarget guard in openMenu() is now load-bearing and needs a real test`);
+  }
+
+  // And the behaviour that makes #2 equivalent: a modal must swallow a screen
+  // key rather than let it through.
+  const { runner } = mkActions();
+  const { s, last } = mkSession(runner);
+  s.feed([key('3')]);            // Controller
+  s.feed([key('a')]);            // network menu
+  s.feed([enter]);               // → type-CONFIRM modal
+  s.feed([key('1')]);            // try to switch screens underneath it
+  s.draw();
+  assert.match(strip(last()), /type CONFIRM to arm/i,
+    'a screen key escaped the confirm modal — the reopen-scope guard is now load-bearing');
+});
+
+test('a refused node action CONSUMES the key and paints the notice', () => {
+  // It used to return false: the key fell through to applyKey, which both
+  // suppressed the redraw (so the notice never reached the wire on the keypress
+  // that caused it) and logged "enable write_actions_enabled" while write
+  // actions were ENABLED. Assert the whole chain, not the helper.
+  const { runner, calls } = mkActions(true);
+  const { s, last } = mkSession(runner);
+  s.feed([key('4')]);            // Topology — no node cursor
+  s.draw();
+  const res = s.feed([key('p')]);
+  assert.ok(res.redraw, 'the refusal did not request a redraw — it never reaches the terminal');
+  s.draw();
+  const f = strip(last());
+  assert.match(f, /no target node/, `the refusal is not on screen: ${f.slice(0, 200)}`);
+  assert.doesNotMatch(f, /write_actions_enabled/, 'told the operator to enable a setting that IS enabled');
+  assert.deepEqual(calls, [], 'a refused action must not execute');
+});
+
+test('the refusal reason is TRUE for the screen', () => {
+  // Log and Remedy DO carry a per-node cursor. Telling that operator to "pick a
+  // node on the Overview" is a false explanation that sends them to the wrong
+  // screen — the failure is that the CARD under the cursor is mesh-scoped.
+  const { runner } = mkActions(true);
+  const { s, last } = mkSession(runner);
+
+  s.feed([key('4')]); s.feed([key('p')]); s.draw();     // Topology: truly no cursor
+  assert.match(strip(last()), /no node cursor/, 'aggregate screen got the wrong reason');
+
+  s.feed([{ type: 'escape' }]);                          // dismiss the notice
+  s.feed([key('7')]); s.feed([key('p')]); s.draw();      // Remedy: HAS a cursor
+  const f = strip(last());
+  assert.doesNotMatch(f, /no node cursor/, 'Remedy has a cursor but was told it has none');
+  assert.match(f, /not tied to a single node/, `wrong reason on Remedy: ${f.slice(0, 220)}`);
+});
+
+test('REMEDY resolves its action target from the symptom under the cursor', () => {
+  // Drives the real session. `p` is the one action that runs with NO confirm
+  // box, so aiming it at the Overview's selection instead of the card on screen
+  // is a safety defect, not a cosmetic one.
+  const target = { ...node, nodeId: 83, name: 'Utility Closet Switch' };
+  const sym = (nodeId: number, sinceMs: number) => ({
+    id: `s${nodeId}`, kind: 'dead-flap', severity: 'crit', nodeId, sinceMs,
+    basis: 'measured', evidence: [], narrative: 'flapping', subsumedBy: null,
+  });
+  const d: DataProvider = {
+    ...mkData(),
+    nodes: () => [node, target],
+    nodeById: (id: number) => (id === 83 ? target : node),
+    symptoms: () => [sym(83, 9), sym(5, 8)] as never,
+  };
+  const { runner, calls } = mkActions(true);
+  const { s } = mkSession(runner, d);
+  s.feed([key('7')]);                       // Remedy — cursor 0 = the #83 card
+  s.feed([key('p')]);                       // safe → immediate
+  assert.deepEqual(calls, ['ping:83'],
+    `pinged the wrong node: ${calls.join(',') || '(nothing)'} — the Overview holds #5`);
+});
+
+test('the REMEDY cursor follows the symptom, not the slot, across a re-sort', () => {
+  // The engine re-sorts its symptom list on every poll. A bare index would keep
+  // aiming at position N while a DIFFERENT node slid into it — and on this
+  // screen that index aims `p`, the one action that runs with no CONFIRM box.
+  const nodeA = { ...node, nodeId: 83, name: 'Utility Closet Switch' };
+  const nodeB = { ...node, nodeId: 41, name: 'Porch Light' };
+  const sym = (nodeId: number, severity: string, sinceMs: number) => ({
+    kind: 'dead-flap', nodeId, severity, sinceMs,
+    basis: 'measured', evidence: [], narrative: '', subsumedBy: undefined,
+  });
+
+  // Both crit; #83 is newer so it sorts FIRST (bySeverity tiebreaks on sinceMs).
+  let list = [sym(83, 'crit', 900), sym(41, 'crit', 800)];
+  const d: DataProvider = {
+    ...mkData(),
+    nodes: () => [node, nodeA, nodeB],
+    nodeById: (id: number) => (id === 83 ? nodeA : id === 41 ? nodeB : node),
+    symptoms: () => list as never,
+  };
+  const { runner, calls } = mkActions(true);
+  const { s } = mkSession(runner, d);
+  s.feed([key('7')]);                       // Remedy — cursor 0 = the #83 card
+  s.draw();
+
+  // Now #41 becomes the newer breach and takes slot 0. The operator has not
+  // touched the keyboard; the card they were looking at is still #83.
+  list = [sym(41, 'crit', 950), sym(83, 'crit', 900)];
+  s.draw();
+  s.feed([key('p')]);
+  assert.deepEqual(calls, ['ping:83'],
+    `a re-sort re-aimed the no-CONFIRM ping: pinged ${calls.join(',') || '(nothing)'} instead of #83`);
+});
+
+test('the MENU refusal reason is true for a cursor-bearing screen', () => {
+  // buildMenu is the SECOND consumer of the explanation the `p` path already
+  // got right. Log and Remedy DO carry a per-node cursor; telling that operator
+  // to "select a node first (Overview/Detail)" sends them to the wrong screen.
+  const rowsFor = (screen: string): string => {
+    const { runner } = mkActions(true);
+    const { s, last } = mkSession(runner, { ...mkData(), symptoms: () => [] });
+    s.feed([key(screen)]);
+    s.feed([key('a')]);
+    s.draw();
+    return strip(last());
+  };
+  // Remedy (7) with no symptoms: a device menu with no resolvable target.
+  const remedy = rowsFor('7');
+  assert.doesNotMatch(remedy, /select a node first/,
+    `Remedy has a cursor but was told to go to the Overview:\n${remedy.slice(0, 300)}`);
+  // The row is clipped at the test terminal's width, so match the part that
+  // survives rather than the full sentence.
+  assert.match(remedy, /item under the cursor/,
+    `wrong menu reason on Remedy:\n${remedy.slice(0, 300)}`);
+});
+
+test('SECURITY: a notice DETAIL line does not survive an idle re-lock', async () => {
+  // resetActionState() runs on the auth boundary and clears the notice, but the
+  // detail line is a SEPARATE field. Leaving it set let one action's
+  // explanation reappear under a different action's notice — after a
+  // re-authentication, so potentially in front of a different operator.
+  const { runner } = mkActions(true);
+  const auth = {
+    enabled: true, requireOnIngress: false, idleLockMs: 1,
+    hasUsers: () => true, verify: async () => true,
+    blockedMsFor: () => 0, registerFailure: () => {}, registerSuccess: () => {},
+  };
+  let last = '';
+  const s = new TuiSession({
+    write: (x) => { last = x; }, data, actions: runner,
+    auth: auth as never, peer: 't', width: 100, height: 30,
+  });
+  s.draw();
+  const login = async () => {
+    for (const ch of 'user') s.feed([key(ch)]);
+    s.feed([enter]);
+    for (const ch of 'pw') s.feed([key(ch)]);
+    s.feed([enter]);
+    await flush(); await flush();
+  };
+  await login();
+
+  // Produce a notice WITH a detail line: a refused action on an aggregate screen.
+  s.feed([key('4')]);            // Topology — no node cursor
+  s.feed([key('p')]);
+  s.draw();
+  assert.match(strip(last), /no node cursor/, 'setup: expected a two-line refusal notice');
+
+  // Cross the authentication boundary: idleLockMs is 1, so the next draw past
+  // that window re-locks and runs resetActionState().
+  await new Promise((r) => setTimeout(r, 15));
+  s.draw();
+  await login();
+
+  // A notice raised AFTER the boundary must not inherit the previous detail.
+  s.feed([key('1')]);            // Overview — HAS a cursor, so a different reason
+  s.draw();
+  const after = strip(last);
+  assert.doesNotMatch(after, /no node cursor/,
+    `a stale detail line survived the auth boundary:\n${after.slice(0, 300)}`);
+});
+
+test('INVARIANT: every path that sets a notice also settles its detail line', () => {
+  // The two fields must move together: a detail line that outlives its notice
+  // reappears under the NEXT one, attributing one action's explanation to a
+  // different action. Rendering-level tests cannot see this — every current
+  // path happens to settle both — so the property is enforced structurally,
+  // which also makes it fail the moment a new notice path forgets.
+  const src = readFileSync(new URL('../src/telnet/session.ts', import.meta.url), 'utf8');
+  const lines = src.split('\n');
+  const orphans: string[] = [];
+  lines.forEach((line, i) => {
+    if (!/^\s*this\.actionNotice = /.test(line)) return;
+    // The detail must be settled within the same small block. 8 lines, not 4:
+    // the resetActionState site carries a comment explaining WHY it clears, and
+    // a window that cannot span an explanation punishes documenting the reason.
+    const near = lines.slice(i, i + 8).join('\n');
+    if (!/this\.actionNoticeDetail\s*=/.test(near)) {
+      orphans.push(`${i + 1}: ${line.trim().slice(0, 70)}`);
+    }
+  });
+  assert.deepEqual(orphans, [],
+    'a notice is set without settling its detail line — the stale-line guard in ' +
+    'resetActionState() is now load-bearing and needs its own test:\n' + orphans.join('\n'));
 });

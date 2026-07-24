@@ -29,13 +29,14 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
+import { noiseColor, marginColor } from '../bands';
 import { frame, fieldStrip, field } from '../chrome';
 
 /* ── layout constants ──────────────────────────────────────────────────── */
 
 const LABEL_W = 16; // area-name column
 const WORST_W = 6; // "↓+11dB" worst-margin field
-const COUNT_W = 4; // "38n" node-count field
+const COUNT_W = 7; // "4/38n" graded/total node-count field
 const MEAN_BAR = 5; // mean-margin meter bar width (→ "μ[█████]" = 8 cells)
 const NODE_W = 12; // worst-node name column
 const MIN_CELLS = 3; // keep at least this much heat-strip space before adding widgets
@@ -64,7 +65,7 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
     return centeredNotice(view, 'SIGNAL HEATMAP', [
       c.grey('Connecting to Home Assistant…'),
       ...(err ? ['', c.red(truncate(err, Math.min(W - 8, 60)))] : []),
-    ]);
+    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   const noise = data.noiseFloor();
@@ -72,7 +73,7 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
   if (areas.length === 0) {
     return centeredNotice(view, 'SIGNAL HEATMAP', [
       c.grey('No Z-Wave nodes discovered yet'),
-    ]);
+    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   const totalNodes = areas.reduce((s, a) => s + a.nodeCount, 0);
@@ -93,8 +94,18 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
     title: 'SIGNAL HEATMAP',
     telemetry: fieldStrip(view, [
       field('AREAS', String(areas.length)),
-      field('NODES', String(totalNodes)),
-      field('NOISE', data.hasRealNoise() ? `${noise} dBm` : '—'),
+      // The Overview's NODES counts the whole roster; this map deliberately
+      // excludes the controller (it has no route-in RSSI to grade). Name the
+      // difference rather than showing a smaller number under the same label.
+      field('DEVICES', String(totalNodes)),
+      field(
+        'NOISE',
+        data.hasRealNoise() ? `${noise} dBm` : `${noise} dBm assumed`,
+        data.hasRealNoise() ? noiseColor(noise) : c.grey,
+      ),
+      // The whole map is margins over that floor — if it is assumed, every
+      // cell and every area grade on this screen is an estimate.
+      ...(data.hasRealNoise() ? [] : [c.yellow('margins estimated')]),
       c.grey('sorted worst-first'),
     ]),
     body,
@@ -107,14 +118,24 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
 interface AreaCell {
   name: string;
   margin: number | null; // dB over noise floor, or null = no reading
+  /** True when `margin` came from a LAST-HOP repeater ACK, not this node's own link. */
+  routed: boolean;
+  /** Confirmed unreachable (NodeStatus.Dead). */
+  dead: boolean;
+  /** Never contacted / status not reported — NOT the same as confirmed dead. */
+  unknown: boolean;
 }
 
 interface AreaInfo {
   label: string;
   cells: AreaCell[]; // sorted worst-first; no-reading cells sink to the end
   nodeCount: number;
-  minMargin: number | null; // worst real reading in the area
-  meanMargin: number | null; // mean of real readings
+  /** Nodes contributing a DIRECT reading — the honest denominator for min/mean. */
+  gradedCount: number;
+  deadCount: number;
+
+  minMargin: number | null; // worst direct reading in the area
+  meanMargin: number | null; // mean of direct readings
   worstName: string | null; // node behind minMargin
 }
 
@@ -130,40 +151,103 @@ function nodeMargin(n: NodeSnapshot, noise: number): number | null {
   return Math.round(rssi - noise);
 }
 
+/**
+ * True when this node reaches the controller THROUGH a repeater. Its
+ * `stats.rssi` is then the last hop's (repeater→controller) ACK reading — a
+ * measurement of the repeater's link, not of this device's. It is still worth
+ * drawing, but it must not grade the node or the area it sits in.
+ */
+function isRouted(n: NodeSnapshot): boolean {
+  return !n.isLongRange && (n.stats.lwr?.repeaters?.length ?? 0) > 0;
+}
+
 function groupByArea(nodes: NodeSnapshot[], noise: number): AreaInfo[] {
   const groups = new Map<string, AreaCell[]>();
   for (const n of nodes) {
     if (n.isController) continue; // the controller has no route-in RSSI
     const key = n.area ?? NO_AREA;
     const list = groups.get(key) ?? [];
-    list.push({ name: n.name, margin: nodeMargin(n, noise) });
+    list.push({
+      name: n.name,
+      margin: nodeMargin(n, noise),
+      routed: isRouted(n),
+      // Dead and Unknown are DIFFERENT claims. Unknown is also the fallback
+      // whenever HA omits a status (zwaveData: `raw.status ?? Unknown`), so
+      // painting it "✕ dead" asserts an unreachable node on no evidence — and
+      // the Overview, which keeps them apart, would then disagree.
+      dead: n.status === NodeStatus.Dead,
+      unknown: n.status === NodeStatus.Unknown,
+    });
     groups.set(key, list);
   }
 
   const areas: AreaInfo[] = [];
   for (const [key, cells] of groups) {
     // Sort each area's cells worst-first so the weakest links survive an
-    // overflow truncation; no-reading cells sink to the end.
+    // overflow truncation.
+    //
+    // Dead and Unknown nodes carry NO margin, so ranking on margin alone sank
+    // them to the end — and renderCells() truncates the TAIL. On any area with
+    // more nodes than cell columns the ✕ and ○ marks were therefore the FIRST
+    // thing discarded while every healthy full block was kept, so a room with
+    // dead devices rendered as solid green. Rank by severity of state first.
+    const rank = (x: AreaCell): number =>
+      x.dead ? 0 : x.unknown ? 1 : x.margin == null ? 3 : 2;
     cells.sort((a, b) => {
-      if (a.margin == null) return b.margin == null ? 0 : 1;
-      if (b.margin == null) return -1;
+      const ra = rank(a);
+      const rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      if (a.margin == null || b.margin == null) return 0;
+      // ASCENDING — weakest first. renderCells() truncates the TAIL, and this
+      // whole sort exists so the weak links survive that truncation. It was
+      // written descending when the rank tiers were added, which silently made
+      // the `+N` overflow drop exactly the cells the operator needs to see.
       return a.margin - b.margin;
     });
-    const reals = cells.filter((x) => x.margin != null) as { name: string; margin: number }[];
+    // Only DIRECT readings grade the area. A routed node's last-hop margin
+    // describes its repeater, so letting it set the min/mean made a whole area
+    // read "strong" on the strength of a link none of its devices actually use.
+    const reals = cells.filter((x) => x.margin != null && !x.routed) as { name: string; margin: number }[];
     const mean =
       reals.length ? Math.round(reals.reduce((s, x) => s + x.margin, 0) / reals.length) : null;
     areas.push({
       label: key === NO_AREA ? '(no area)' : prettyArea(key),
       cells,
       nodeCount: cells.length,
-      minMargin: reals.length ? reals[0].margin : null,
+      gradedCount: reals.length,
+      deadCount: cells.filter((x) => x.dead).length,
+      // `reals` follows the cell order above, in which graded readings are
+      // already ascending within their rank — but take the min explicitly so
+      // this cannot silently depend on the sort again.
+      minMargin: reals.length ? Math.min(...reals.map((x) => x.margin)) : null,
       meanMargin: mean,
-      worstName: reals.length ? reals[0].name : null,
+      worstName: reals.length
+        ? reals.reduce((w, x) => (x.margin < w.margin ? x : w)).name
+        : null,
     });
   }
 
-  // Worst-first: lowest min margin on top; all-asleep areas (no reading) last.
+  // Worst-first, as an explicit TIER rather than a boolean flag:
+  //
+  //   0  a confirmed-dead node and NOTHING readable   — the room is gone
+  //   1  a confirmed-dead node, something still reads — partly gone
+  //   2  graded, ordered by worst margin              — working, ranked
+  //   3  nothing readable and nothing dead            — all asleep/unknown/routed
+  //
+  // Tier 1 exists because an area with a dead device and one healthy device is
+  // still a problem: sorting it purely on that healthy margin put a ✕ below
+  // every green row. Tier 3 is genuinely uninformative and belongs last, which
+  // is why "no reading" alone must never be confused with "dead".
+  const tier = (x: AreaInfo): number => {
+    if (x.deadCount > 0) return x.gradedCount === 0 ? 0 : 1;
+    return x.gradedCount > 0 ? 2 : 3;
+  };
   areas.sort((a, b) => {
+    const ta = tier(a);
+    const tb = tier(b);
+    if (ta !== tb) return ta - tb;
+    // More dead devices is worse, within the tiers where that is the signal.
+    if (ta <= 1 && a.deadCount !== b.deadCount) return b.deadCount - a.deadCount;
     const am = a.minMargin ?? Infinity;
     const bm = b.minMargin ?? Infinity;
     if (am !== bm) return am - bm;
@@ -186,9 +270,12 @@ function areaRow(a: AreaInfo, W: number): string {
   const worstMarginStr =
     a.minMargin == null
       ? c.grey('—')
-      : c.grey('↓') + heatColor(a.minMargin)(fmtMargin(a.minMargin));
+      : c.grey('↓') + marginColor(a.minMargin)(fmtMargin(a.minMargin));
   const worst = padStart(worstMarginStr, WORST_W);
-  const count = padStart(c.grey(`${a.nodeCount}n`), COUNT_W);
+  // `12n` alone implied all 12 nodes back the grade; `4/12n` says how many
+  // actually contributed a direct reading.
+  const countTxt = a.gradedCount === a.nodeCount ? `${a.nodeCount}n` : `${a.gradedCount}/${a.nodeCount}n`;
+  const count = padStart(c.grey(countTxt), COUNT_W);
 
   // Space the heat strip may occupy if nothing else is added:
   //   W = LABEL_W + gap + cells + gap + rightBlock
@@ -200,7 +287,9 @@ function areaRow(a: AreaInfo, W: number): string {
   // worst-node name, which drops first when space is tight.
   let meanPiece = '';
   if (a.meanMargin != null) {
-    const p = c.grey('μ[') + meter(marginFrac(a.meanMargin), MEAN_BAR) + c.grey(']');
+    // Coloured by the SAME band function as the number beside it, the cells and
+    // the legend — meter()'s default zoneColor is a different, coarser ramp.
+    const p = c.grey('μ[') + meter(marginFrac(a.meanMargin), MEAN_BAR, { color: marginColor(a.meanMargin) }) + c.grey(']');
     if (cellsAvail - (MEAN_BAR + 3) - 1 >= MIN_CELLS) {
       meanPiece = p;
       cellsAvail -= MEAN_BAR + 3 + 1;
@@ -243,30 +332,24 @@ function renderCells(cells: AreaCell[], avail: number): string {
 }
 
 function cellGlyph(cell: AreaCell): string {
+  // A dead node is not "no reading" — it is a reading of a different, worse
+  // kind, and it gets its own mark instead of the same dot an asleep node gets.
+  if (cell.dead) return c.red('✕');
+  // Unknown is genuinely unmeasured, not confirmed-bad: its own neutral mark.
+  if (cell.unknown) return c.grey('○');
   if (cell.margin == null) return heatCell(0, { none: true });
-  // Density from the margin fraction, but COLOR from the same heatColor() bands
+  // A routed node's margin belongs to its repeater: drawn, but neutral, so it
+  // never contributes colour that would be read as this area's signal quality.
+  if (cell.routed) return c.grey('▒');
+  // Density from the margin fraction, but COLOR from the same marginColor() bands
   // (17/10/5 dB) the numeric worst-margin text uses, so cell and text agree.
-  return heatCell(marginFrac(cell.margin), { color: heatColor(cell.margin) });
+  return heatCell(marginFrac(cell.margin), { color: marginColor(cell.margin) });
 }
 
 /* ── colour / format helpers ───────────────────────────────────────────── */
 
-/** SNR-margin heat buckets (green strong → bold-red critical) for numeric text. */
-function heatColor(margin: number): (s: string) => string {
-  if (margin >= 17) return c.green;
-  if (margin >= 10) return c.yellow;
-  if (margin >= 5) return c.red;
-  return c.redB;
-}
-
 function fmtMargin(margin: number): string {
   return `${margin >= 0 ? '+' : ''}${margin}dB`;
-}
-
-function noiseColor(noise: number): (s: string) => string {
-  if (noise >= -75) return c.red;
-  if (noise >= -85) return c.yellow;
-  return c.grey;
 }
 
 /* ── legend ─────────────────────────────────────────────────────────────── */
@@ -276,18 +359,55 @@ function noiseColor(noise: number): (s: string) => string {
  * the dB span it covers, plus the grey "no reading" marker. The ramp width
  * flexes with the terminal so it never crowds a narrow frame.
  */
+/**
+ * The heat legend, fitted to the terminal.
+ *
+ * Every glyph on this screen means nothing without its key, so the legend
+ * degrades by dropping WHOLE keys (rightmost first) and shrinking the ramp —
+ * never by letting frame() clip the tail. A fixed budget silently amputated the
+ * newest key the moment one was added.
+ */
 function legendLine(W: number): string {
-  const ramp = Math.max(6, Math.min(14, W - 30));
-  let strip = '';
-  for (let i = 0; i < ramp; i++) strip += heatCell(ramp === 1 ? 1 : i / (ramp - 1));
-  return (
-    c.grey('margin ') +
-    strip +
-    ' ' +
-    c.grey(`0→${MARGIN_FULL}dB+`) +
-    c.grey('   ') +
-    heatCell(0, { none: true }) +
-    c.grey(' no reading')
-  );
+  // MOST ALARMING FIRST. Keys are shed from the END, so this order decides
+  // which glyph loses its explanation first on a narrow terminal. `✕ dead` was
+  // last and therefore first to go — the one mark an operator most needs
+  // decoded. "no reading" is the most self-evident and goes first.
+  const KEYS: [string, string][] = [
+    [c.red('✕'), ' dead'],
+    [c.grey('○'), ' unknown'],
+    [c.grey('▒'), ' via repeater'],
+    [heatCell(0, { none: true }), ' no reading'],
+  ];
+  const gap = 3;
+  const head = (ramp: number): string => {
+    let strip = '';
+    for (let i = 0; i < ramp; i++) {
+      // Colour the ramp with the SAME band function the cells use. heatCell's
+      // default is gauges.zoneColor (3 bands at 16.5/8.25 dB) while every real
+      // cell goes through marginColor (4 bands at 17/10/5 incl. redB) — so the
+      // key disagreed with the map at 0–4 dB and at 9 dB, and the map's most
+      // alarming colour never appeared in its own legend at all.
+      const frac = ramp === 1 ? 1 : i / (ramp - 1);
+      strip += heatCell(frac, { color: marginColor(frac * MARGIN_FULL) });
+    }
+    return c.grey('margin ') + strip + ' ' + c.grey(`0→${MARGIN_FULL}dB+`);
+  };
+  const keyW = (k: [string, string]): number => gap + 1 + k[1].length;
+
+  // KEYS OUTER, ramp INNER. The keys are what make the glyphs on the map
+  // readable; the ramp is decoration that merely needs to be wide enough to
+  // show a gradient. Searching ramp-first returned the WIDEST ramp with the
+  // FEWEST keys — at the default 80 columns that dropped "✕ dead" while
+  // leaving 7 columns unused, so the most alarming mark on the screen had no
+  // explanation. Prefer every key, then shrink the ramp to pay for them.
+  for (let n = KEYS.length; n >= 0; n--) {
+    for (let ramp = 14; ramp >= 4; ramp--) {
+      const width = visLen(head(ramp)) + KEYS.slice(0, n).reduce((sum, k) => sum + keyW(k), 0);
+      if (width <= W) {
+        return head(ramp) + KEYS.slice(0, n).map((k) => c.grey(' '.repeat(gap)) + k[0] + c.grey(k[1])).join('');
+      }
+    }
+  }
+  return truncate(head(4), W);
 }
 

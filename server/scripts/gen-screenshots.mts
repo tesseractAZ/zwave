@@ -281,7 +281,7 @@ const shots: Array<[string, string[], string]> = [
 
 // The Actions Menu is a modal, not a screen — render it separately.
 const menuItems = [
-  ...buildMenu({ hasNode: true, rebuilding: false }),
+  ...buildMenu({ scope: 'device', hasNode: true, rebuilding: false }),
   ...buildEntityRows([
     { entityId: 'light.kitchen_ceiling', domain: 'light', name: 'Kitchen Ceiling', state: 'on', attrs: {} },
     { entityId: 'lock.front_door', domain: 'lock', name: 'Front Door', state: 'locked', attrs: {} },
@@ -290,8 +290,18 @@ const menuItems = [
   ...buildConfigRows(PARAMS),
 ];
 shots.push(['actions-menu',
-  renderActionsMenu(view('overview'), { items: menuItems, index: menuItems.findIndex((i) => i.desc.label.startsWith('Unlock')), targetLabel: '#12 Kitchen Ceiling', locked: false }),
-  'Actions Menu — mesh maintenance, device controls and configuration, all behind a typed CONFIRM']);
+  renderActionsMenu(view('overview'), { scope: 'device', items: menuItems, index: menuItems.findIndex((i) => i.desc.label.startsWith('Unlock')), targetLabel: '#12 Kitchen Ceiling', locked: false }),
+  'DEVICE ACTIONS — maintenance, device controls and configuration for ONE node, all behind a typed CONFIRM']);
+
+// The mesh-wide menu is a separate surface with a separate blast radius, so it
+// gets its own shot: no device target, and a header that says "whole mesh".
+shots.push(['network-actions',
+  renderActionsMenu(view('overview'), {
+    scope: 'network',
+    items: buildMenu({ scope: 'network', hasNode: false, rebuilding: false }),
+    index: 0, targetLabel: null, locked: false,
+  }),
+  'NETWORK ACTIONS — the mesh-wide operations, kept out of any single device\u2019s menu']);
 
 mkdirSync(OUT_DIR, { recursive: true });
 for (const [name, lines, title] of shots) {

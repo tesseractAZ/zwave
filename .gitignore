@@ -23,3 +23,6 @@ data/
 
 # Claude session/scratch (kept local)
 .claude/
+
+# mutation-check.mjs crash-recovery sidecar (never commit; see scripts/mutation-check.mjs)
+server/.mutation-check-pending.json
