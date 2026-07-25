@@ -1,11 +1,18 @@
 # CodeQL security scanning for the Z-Wave TUI add-on (JS/TS).
 #
-# This repo is PRIVATE and owned by a personal account, so GitHub Advanced
-# Security (the Security-tab code scanning + SARIF upload) is not available
-# ("Advanced security has not been purchased"). Uploading results is therefore
-# impossible. Instead we run the full CodeQL analysis in CI, publish the SARIF
-# as a downloadable build artifact, and FAIL the job on any actionable finding
-# (see .github/scripts/check-sarif.mjs). Same defensive value, no GHAS required.
+# The repo is PUBLIC, so GitHub code scanning is available at no cost and
+# results are UPLOADED to the Security tab, alongside the Dependabot alerts.
+#
+# (History: while the repo was private under a personal account, GHAS was
+# unavailable — "Advanced security has not been purchased" — so this workflow
+# ran with `upload: false` and self-gated on a SARIF artifact. Going public made
+# that workaround unnecessary; the upload is strictly better because a finding
+# now surfaces in the Security tab instead of only inside a CI artifact nobody
+# opens.)
+#
+# The artifact and the hard CI gate are DELIBERATELY KEPT. Upload alone is not
+# a gate: code scanning surfaces a finding but does not fail the build, so
+# without check-sarif.mjs a new vulnerability would merge green.
 name: CodeQL
 
 on:
@@ -19,6 +26,7 @@ on:
 permissions:
   contents: read
   actions: read            # CodeQL reads the workflow run for its analysis summary
+  security-events: write   # REQUIRED to upload SARIF; without it the upload 403s
 
 jobs:
   analyze:
@@ -33,10 +41,12 @@ jobs:
           queries: security-extended   # broader than default: more CodeQL-class rules
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
-      - name: Perform CodeQL Analysis (local; no Security-tab upload — GHAS unavailable)
+      - name: Perform CodeQL Analysis (uploads to the Security tab)
         uses: github/codeql-action/analyze@v3
         with:
-          upload: false
+          # `always` also writes the SARIF locally, so the artifact + the CI
+          # gate below keep working exactly as before.
+          upload: always
           output: sarif-results
       - name: Publish SARIF artifact
         if: always()

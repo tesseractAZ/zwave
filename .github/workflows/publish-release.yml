@@ -1,16 +1,19 @@
 name: Publish release
 
-# Cut a PRIVATE GitHub Release on a `v*.*.*` tag push — release notes from the
+# Cut a GitHub Release on a `v*.*.*` tag push — release notes from the
 # CHANGELOG + the printable manual (.docx editable, .pdf reader-friendly) as
 # assets. Deliberately does NOT publish a container image: this add-on is
-# deployed by LOCAL build (the Pi builds from source), the repo stays private,
-# and no GHCR package is ever pushed. A Release here is a private, versioned
-# record + a downloadable manual — nothing is made public.
+# deployed by SOURCE BUILD (Supervisor builds it on the user's own device), so
+# no GHCR package is ever pushed.
+#
+# NB the repo is PUBLIC, so a Release and its manual ARE public. This comment
+# said "private … nothing is made public" until the repo was opened up —
+# written when that was true, and quietly false from the moment it was not.
 #
 # To cut a release: after the version's PR is merged to main (subject `vX.Y…`,
 # never `Release v`), push the tag at that merge commit:
 #     git tag v0.21.0 <merge-sha> && git push origin v0.21.0
-# This workflow then builds the manual and creates the private Release.
+# This workflow then builds the manual and creates the Release.
 
 on:
   push:
