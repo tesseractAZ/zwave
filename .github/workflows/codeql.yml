@@ -39,6 +39,17 @@ jobs:
         with:
           languages: javascript-typescript
           queries: security-extended   # broader than default: more CodeQL-class rules
+          # Exclude the test suite from ANALYSIS (not from the repo — the image
+          # does ship server/test, it just never executes it). Test code is not
+          # attack surface, and treating it as a taint SOURCE produced findings
+          # about production code that cannot happen in production: both
+          # `js/insecure-temporary-file` hits (sev 7.0, on historyStore.ts and
+          # outcomes.ts) traced to tests passing an os.tmpdir() path into the
+          # store. At runtime that path is always /data — the add-on's own
+          # private volume — so the atomic write-then-rename is correct there.
+          config: |
+            paths-ignore:
+              - server/test/**
       - name: Autobuild
         uses: github/codeql-action/autobuild@v3
       - name: Perform CodeQL Analysis (uploads to the Security tab)
