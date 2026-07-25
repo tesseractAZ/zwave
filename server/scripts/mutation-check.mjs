@@ -344,6 +344,12 @@ const MUTANTS = [
     repl: "  return c.green('●') + ' ' + c.green('ONLINE');",
     what: 'the masthead reports the link state it was given' },
 
+  /* ── v0.24.1: found by LIVE verification, not by any fixture ────────── */
+  { id: 'margin-fractional-floor', file: 'src/telnet/screens/overview.ts',
+    find: '    const margin = Math.round(rssi - noise);',
+    repl: '    const margin = rssi - noise;',
+    what: 'a fractional noise floor never truncates a margin into a unitless number' },
+
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",

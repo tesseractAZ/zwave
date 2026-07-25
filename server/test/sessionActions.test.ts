@@ -38,7 +38,13 @@ function mkActions(enabled = true) {
 
 function mkSession(runner: ActionRunner, d: DataProvider = data) {
   let last = '';
-  const s = new TuiSession({ write: (x) => { last = x; }, data: d, actions: runner, width: 100, height: 30 });
+  // `log` MUST be supplied. Without it TuiSession falls back to console.log,
+  // and node:test multiplexes its IPC protocol over the child's stdout — a
+  // session that logs mid-test corrupts that stream and the runner dies with
+  // "Unable to deserialize cloned data", an error that names no test and reads
+  // like an unrelated CI flake. (v0.24's on-screen action refusal added a
+  // this.log() call, which is what started tripping it.)
+  const s = new TuiSession({ write: (x) => { last = x; }, data: d, actions: runner, log: () => {}, width: 100, height: 30 });
   s.draw();
   return { s, last: () => last };
 }
@@ -245,7 +251,7 @@ test('SECURITY: an armed CONFIRM does NOT survive an idle re-lock + re-login', a
     blockedMsFor: () => 0, registerFailure: () => {}, registerSuccess: () => {},
   };
   let last = '';
-  const s = new TuiSession({ write: (x) => { last = x; }, data, actions: runner, auth: auth as never, peer: 't', width: 100, height: 30 });
+  const s = new TuiSession({ write: (x) => { last = x; }, data, actions: runner, auth: auth as never, peer: 't', log: () => {}, width: 100, height: 30 });
   s.draw();
   const login = async () => {
     for (const ch of 'user') s.feed([key(ch)]);
@@ -623,15 +629,20 @@ test('SECURITY: a notice DETAIL line does not survive an idle re-lock', async ()
   // explanation reappear under a different action's notice — after a
   // re-authentication, so potentially in front of a different operator.
   const { runner } = mkActions(true);
+  // idleLockMs must be long enough that the login keystrokes and the setup
+  // draws cannot themselves trip the re-lock (any draw >idleLockMs after the
+  // last key re-locks, and on a loaded CI runner a 1 ms budget is routinely
+  // exceeded MID-login — an intermittent CI failure, caught before merge).
+  // The boundary is crossed explicitly below by advancing lastActivity.
   const auth = {
-    enabled: true, requireOnIngress: false, idleLockMs: 1,
+    enabled: true, requireOnIngress: false, idleLockMs: 60_000,
     hasUsers: () => true, verify: async () => true,
     blockedMsFor: () => 0, registerFailure: () => {}, registerSuccess: () => {},
   };
   let last = '';
   const s = new TuiSession({
     write: (x) => { last = x; }, data, actions: runner,
-    auth: auth as never, peer: 't', width: 100, height: 30,
+    auth: auth as never, peer: 't', log: () => {}, width: 100, height: 30,
   });
   s.draw();
   const login = async () => {
@@ -649,9 +660,9 @@ test('SECURITY: a notice DETAIL line does not survive an idle re-lock', async ()
   s.draw();
   assert.match(strip(last), /no node cursor/, 'setup: expected a two-line refusal notice');
 
-  // Cross the authentication boundary: idleLockMs is 1, so the next draw past
-  // that window re-locks and runs resetActionState().
-  await new Promise((r) => setTimeout(r, 15));
+  // Cross the authentication boundary DETERMINISTICALLY: rewind the session's
+  // last-activity stamp past the idle window instead of racing a wall clock.
+  (s as unknown as { lastActivity: number }).lastActivity = Date.now() - 120_000;
   s.draw();
   await login();
 
@@ -661,6 +672,13 @@ test('SECURITY: a notice DETAIL line does not survive an idle re-lock', async ()
   const after = strip(last);
   assert.doesNotMatch(after, /no node cursor/,
     `a stale detail line survived the auth boundary:\n${after.slice(0, 300)}`);
+
+  // Settle the async credential check kicked off by the re-login above. Without
+  // this the promise resolves AFTER the test returns and touches a session the
+  // runner has torn down, which surfaced as an intermittent
+  // "Unable to deserialize cloned data" from node:test — an IPC error, not an
+  // assertion, so it named no test and looked like an unrelated CI flake.
+  await flush(); await flush();
 });
 
 test('INVARIANT: every path that sets a notice also settles its detail line', () => {

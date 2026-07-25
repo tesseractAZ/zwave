@@ -300,7 +300,7 @@ function nodeLine(
 function routeSignalBars(view: ViewState, lwr: RouteStat | null, noise: number, neutral = false): string {
   const rssi = lwr?.rssi ?? null;
   if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('▁▃▅▇');
-  const margin = rssi - noise;
+  const margin = Math.round(rssi - noise);
   let frac: number;
   if (margin >= 17) frac = 1; // 4 bars
   else if (margin >= 5) frac = 0.5; // 2 bars
@@ -352,7 +352,7 @@ function signalCell(
   if (view.signalDisplay === 'dbm') {
     return (neutral ? c.grey : rssiColor(rssi))(`${rssi}dBm`);
   }
-  const margin = rssi - noise; // margin above the noise floor
+  const margin = Math.round(rssi - noise); // margin above the noise floor (fractional floor → round)
   // `est` marks a margin measured against the ASSUMED noise floor rather than a
   // real one read from the driver — without it an estimate reads as a reading.
   const est = hasRealNoise ? '' : c.grey(' est');

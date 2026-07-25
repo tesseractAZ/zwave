@@ -176,7 +176,9 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       rssiVal = c.grey('—');
       marginVal = c.grey('—');
     } else {
-      const m = rssi - noise;
+      // Rounded before display: the live noise floor is fractional, so an
+      // unrounded margin renders as "+35.062 dB" and can overflow its cell.
+      const m = Math.round(rssi - noise);
       const rc = routed ? c.grey : rssiColor(rssi);
       const mc = routed ? c.grey : marginColor(m);
       rssiVal = rc(`${rssi} dBm`) + (routed ? c.grey(' last-hop') : '');
@@ -187,7 +189,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     // Graphics: SNR-margin quality meter + RSSI/RTT trend sparklines. Skip the
     // live SNR meter for a routed node (its margin is last-hop, not the device's);
     // the historical trends below stay, being clearly past readings.
-    if (rssi != null && !routed) pushG(snrRow(rssi - noise, data.hasRealNoise(), inner));
+    if (rssi != null && !routed) pushG(snrRow(Math.round(rssi - noise), data.hasRealNoise(), inner));
     const hist = data.history(n.nodeId);
     const rssiHist = hist.rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
     const rttHist = hist.rtt.filter((v) => Number.isFinite(v) && v >= 0);
