@@ -19,7 +19,7 @@ import fastifyCompress from '@fastify/compress';
 import fastifyCors from '@fastify/cors';
 
 import { config } from './config';
-import { createAuth, isAllowedOrigin, isSupervisorSource } from './auth';
+import { createAuth, isAllowedOrigin, isSupervisorSource, pinSupervisorAddress } from './auth';
 import { createAuthPolicy } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
@@ -132,6 +132,12 @@ async function main(): Promise<void> {
   }
   // Ingress requests carry X-Ingress-Path AND originate from the Supervisor
   // subnet (req.ip is the unspoofable socket peer; trustProxy is off).
+  // Pin ingress trust to the Supervisor's REAL address before serving. Until
+  // this resolves, isSupervisorSource() returns false for everything, so a
+  // request arriving mid-startup is treated as untrusted (login required)
+  // rather than trusted-by-default.
+  await pinSupervisorAddress(log);
+
   const isIngressTrusted = (req: { headers: Record<string, unknown>; ip: string }): boolean =>
     !!req.headers['x-ingress-path'] && isSupervisorSource(req.ip);
 
