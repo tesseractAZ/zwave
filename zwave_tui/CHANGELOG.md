@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.24.2 — 2026-07-24
+
+**Security: all four dependency advisories cleared, and one dependency dropped.**
+
+GitHub reported two high-severity Dependabot alerts (both `fast-uri`
+GHSA-v2hh-gcrm-f6hx). `npm audit` found **four**:
+
+| package | severity | issue |
+| --- | --- | --- |
+| `@fastify/static` | **high** | route-guard bypass via path traversal (CWE-22) |
+| `@fastify/static` | moderate | authorization bypass via non-canonical path (CWE-180) |
+| `find-my-way` | high | DDoS with HTTP/2 (CWE-1321) |
+| `brace-expansion` | high | DoS via unbounded expansion (CWE-400/770) |
+| `fast-uri` ×2 | high | host confusion via literal-backslash authority (CWE-436) |
+
+**`@fastify/static` is removed entirely** — it was declared in `package.json`
+and never imported anywhere in the source. The browser console serves its
+vendored xterm.js assets through its own explicit routes, so the dependency
+carrying the worst advisory was pure dead weight. That is a removal, not a
+version bump: the vulnerable code is no longer shipped at all.
+
+The rest are transitive through Fastify's schema machinery and are resolved by
+a lockfile update — `fast-uri` 3.1.3→3.1.4 and 4.1.0→4.1.1, `find-my-way`
+→9.7.0, `brace-expansion` patched. No direct dependency changed version, so
+there is no behavioural risk beyond the removal above.
+
+Verified end-to-end after the removal: the server boots and `/console`,
+`/console/xterm.js` and `/console/xterm.css` all return 200. `npm audit`
+reports **0 vulnerabilities**. 488 tests pass.
+
 ## 0.24.1 — 2026-07-24
 
 **A truncation defect the release itself was about, found by verifying v0.24.0
