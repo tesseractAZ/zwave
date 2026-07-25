@@ -36,15 +36,37 @@ const failing = [];
 const byLevel = { error: 0, warning: 0, note: 0, none: 0 };
 
 for (const run of runs) {
-  // Build a ruleId -> {level, securitySeverity, name} index from the tool driver.
+  // Build a ruleId -> {level, securitySeverity, name} index.
+  //
+  // ★ Rules live in tool.EXTENSIONS, not tool.driver. CodeQL emits an EMPTY
+  //   `tool.driver.rules` and puts all 103 rule definitions — including the
+  //   `security-severity` property this gate keys on — under
+  //   `tool.extensions[*].rules`. Reading only the driver meant every lookup
+  //   missed, every `sev` was NaN, and the `sev >= 7` half of the fail
+  //   condition COULD NEVER FIRE. The gate silently degraded to "fail only on
+  //   error-level results" while its own header advertised severity gating.
+  //   Caught when enabling the Security-tab upload made GitHub report two
+  //   findings as HIGH that this script had just called "no actionable
+  //   findings" — the same value at 7.0 judged two different ways.
+  //   Driver is still read first so a non-CodeQL SARIF keeps working.
   const ruleMeta = new Map();
-  const rules = run?.tool?.driver?.rules ?? [];
-  for (const r of rules) {
-    ruleMeta.set(r.id, {
-      level: r.defaultConfiguration?.level ?? 'warning',
-      sev: Number(r.properties?.['security-severity'] ?? NaN),
-      name: r.name ?? r.id,
-    });
+  const ruleSources = [
+    run?.tool?.driver?.rules ?? [],
+    ...(run?.tool?.extensions ?? []).map((e) => e?.rules ?? []),
+  ];
+  for (const rules of ruleSources) {
+    for (const r of rules) {
+      ruleMeta.set(r.id, {
+        level: r.defaultConfiguration?.level ?? 'warning',
+        sev: Number(r.properties?.['security-severity'] ?? NaN),
+        name: r.name ?? r.id,
+      });
+    }
+  }
+  if (ruleMeta.size === 0 && (run.results ?? []).length > 0) {
+    // Results with no rule metadata anywhere: severity gating is impossible,
+    // so say so rather than quietly passing on an unenforceable threshold.
+    console.error('WARNING: no rule metadata in driver OR extensions — severity gating is INERT for this SARIF.');
   }
   for (const res of run.results ?? []) {
     total += 1;
