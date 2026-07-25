@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.24.1 — 2026-07-24
+
+**A truncation defect the release itself was about, found by verifying v0.24.0
+on the live mesh.** The driver's real background-noise floor is *fractional*
+(−95.062 dBm), so the SNR margin computed as `rssi − noise` produced
+`+35.062dB` — nine characters, which the signal cell's defensive seven-char cap
+then sliced to `+35.062`, **amputating the unit** and leaving a bare number that
+reads as an exact measurement.
+
+Every synthetic fixture used a whole-number floor, so no test, no screenshot and
+no review round could see it — it took a real 39-node mesh. The margin is now
+rounded before formatting at all five sites that compute it (Overview, the
+Detail dossier's RSSI row and SNR meter, and both Topology cells), and a
+regression test pins a fractional floor across all three screens.
+
 ## 0.24.0 — 2026-07-23
 
 ### Actions are scoped to what you are looking at

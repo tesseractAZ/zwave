@@ -1143,3 +1143,41 @@ test('the dossier bands the DISPLAYED rtt, matching the Overview', () => {
   assert.ok(got, `rtt not rendered with a colour: ${JSON.stringify(strip(row))}`);
   assert.equal(got[1], want, 'the dossier banded the raw value, not the one it printed');
 });
+
+test('a FRACTIONAL noise floor never truncates a margin into a bare number', () => {
+  // Found on the live 39-node mesh, not by any fixture: the driver's real floor
+  // is fractional (-95.062), so `rssi - noise` rendered "+35.062dB" — 9 chars,
+  // which the signal cell's defensive 7-char cap then sliced to "+35.062",
+  // amputating the UNIT and leaving a bare number that reads as exact. Every
+  // synthetic fixture used a whole-number floor, so this branch was invisible.
+  const REAL_FLOOR = -95.062;
+  const n = mkNode({
+    nodeId: 16, name: 'Laundry Room Lights',
+    stats: { ...mkNode().stats, rssi: -60, lwr: { repeaters: [], rssi: -60, protocolDataRate: 3, repeaterRSSI: [], routeFailedBetween: null } },
+  });
+  const data = { ...mockData({ nodes: [n] }), noiseFloor: () => REAL_FLOOR, hasRealNoise: () => true };
+
+  for (const cols of [80, 104, 140, 200]) {
+    const row = renderOverview({
+      view: mkView({ screen: 'overview', cols, rows: 24, selected: 0 }),
+      data, visibleNodes: [n], filtering: false,
+    } as ScreenCtx).map(strip).find((r) => r.includes('Laundry'));
+    assert.ok(row, `node row missing at cols=${cols}`);
+    // The margin must carry its unit and no decimal tail.
+    assert.match(row, /[+-]\d+dB\b/, `margin lost its unit at cols=${cols}: ${JSON.stringify(row)}`);
+    assert.ok(!/\d\.\d/.test(row), `fractional margin leaked into the cell at cols=${cols}: ${JSON.stringify(row)}`);
+  }
+
+  // Same on the dossier and the route tree, which read the same floor.
+  const detail = renderDetail({
+    view: mkView({ screen: 'detail', cols: 110, rows: 30, selected: 0 }),
+    data, visibleNodes: [n], filtering: false,
+  } as ScreenCtx).map(strip).join('\n');
+  assert.ok(!/[+-]\d+\.\d+\s*dB/.test(detail), `dossier shows a fractional margin:\n${detail.slice(0, 400)}`);
+
+  const topo = renderTopology({
+    view: mkView({ screen: 'topology', cols: 110, rows: 30 }),
+    data, visibleNodes: [n], filtering: false,
+  } as ScreenCtx).map(strip).join('\n');
+  assert.ok(!/[+-]\d+\.\d+dB/.test(topo), `route tree shows a fractional margin:\n${topo.slice(0, 400)}`);
+});

@@ -482,7 +482,13 @@ function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDi
     colorFn = rssiColor(rssi);
     frac = bandFrac(rssi, -88, -70);
   } else {
-    const margin = rssi - noise;
+    // ROUND before formatting. The driver's noise floor is fractional
+    // (-95.062 live), so `rssi - noise` produced "+35.062dB" — 9 chars, which
+    // the defensive cap below then sliced to "+35.062", silently amputating the
+    // UNIT and leaving a bare number that reads as an exact measurement. This
+    // is the exact defect class the release exists to remove, found on the live
+    // 39-node mesh; no synthetic fixture has a fractional floor.
+    const margin = Math.round(rssi - noise);
     text = `${margin >= 0 ? '+' : ''}${margin}dB`;
     colorFn = marginColor(margin);
     frac = bandFrac(margin, 5, 17);
