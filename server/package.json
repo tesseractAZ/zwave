@@ -14,7 +14,6 @@
   "dependencies": {
     "@fastify/compress": "^8",
     "@fastify/cors": "^10",
-    "@fastify/static": "^9",
     "@fastify/websocket": "^11",
     "@xterm/xterm": "6.0.0",
     "fastify": "^5",
