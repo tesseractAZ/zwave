@@ -350,6 +350,16 @@ const MUTANTS = [
     repl: '    const margin = rssi - noise;',
     what: 'a fractional noise floor never truncates a margin into a unitless number' },
 
+  /* ── v0.24.3 security posture ──────────────────────────────────────── */
+  { id: 'ingress-pin', file: 'src/auth.ts',
+    find: '  if (supervisorIps.size === 0) return false; // unresolved ⇒ trust nothing\n  return supervisorIps.has(normalizeIp(ip));',
+    repl: "  return /^172\\.30\\.3[23]\\.\\d{1,3}$/.test(normalizeIp(ip));",
+    what: 'ingress trust is pinned to the Supervisor, not the whole sibling-add-on bridge' },
+  { id: 'blank-password', file: 'src/auth/loginPolicy.ts',
+    find: '      if (username.length > 0 && password.length > 0) out.push({ username, password });',
+    repl: '      if (username.length > 0) out.push({ username, password });',
+    what: 'a blank-password user row is rejected instead of authenticating on ""' },
+
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",

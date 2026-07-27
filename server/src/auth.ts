@@ -77,10 +77,23 @@ export function isAllowedOrigin(origin: string, sameOrigins: Set<string>): boole
 }
 
 /**
- * True when the request's TCP peer is the HA Supervisor (the hassio docker
- * network, 172.30.32.0/23). Genuine Ingress traffic ALWAYS originates from the
- * Supervisor; a request arriving on the directly-published :8788 LAN port
- * presents the real client IP instead.
+ * True when the request's TCP peer is the HA Supervisor ITSELF.
+ *
+ * ★ This used to test the whole 172.30.32.0/23 hassio bridge — which is where
+ *   EVERY sibling add-on container lives, not just the Supervisor. Because
+ *   :8788 is ingress-only (not in `ports:`), every peer that can open the
+ *   socket at all was already inside that /23, so
+ *       !!headers['x-ingress-path'] && isSupervisorSource(req.ip)
+ *   degenerated to "did the client send a header it chooses" — a control that
+ *   could not fire. Any sibling add-on (or an SSRF in one) got a login-free
+ *   operator session, and `trusted` sessions are also exempt from the idle
+ *   re-lock. Verified by driving the real wiring from a 172.30.33.9 peer: full
+ *   TUI, no login gate.
+ *
+ *   Now pinned to the addresses `supervisor` actually resolves to (the add-on
+ *   already dials that host for the Core WebSocket, so it always resolves).
+ *   Resolution failure FAILS CLOSED: nothing is treated as ingress, so the
+ *   operator logs in as they would from the LAN.
  *
  * Because the Fastify server runs with trustProxy OFF, `req.ip` is the raw,
  * unspoofable socket peer — not a client-supplied X-Forwarded-For. So this
@@ -88,12 +101,52 @@ export function isAllowedOrigin(origin: string, sameOrigins: Set<string>): boole
  * X-Ingress-Path header ONLY when the request genuinely came through the
  * Supervisor, closing the LAN-forge bypass.
  */
+/** Addresses `supervisor` resolves to. Empty until resolved ⇒ fail closed. */
+const supervisorIps = new Set<string>();
+
+/** Normalize Node's IPv4-mapped IPv6 form (::ffff:172.30.32.2). */
+function normalizeIp(ip: string): string {
+  return ip.startsWith('::ffff:') ? ip.slice('::ffff:'.length) : ip;
+}
+
+/**
+ * Resolve the Supervisor's address(es) once at startup. Call before serving.
+ * Returns the addresses pinned, so the caller can log what it trusts.
+ */
+export async function pinSupervisorAddress(
+  log: (m: string) => void = () => {},
+  lookup: (host: string) => Promise<string[]> = defaultLookup,
+): Promise<string[]> {
+  try {
+    const ips = (await lookup('supervisor')).map(normalizeIp).filter(Boolean);
+    supervisorIps.clear();
+    for (const ip of ips) supervisorIps.add(ip);
+    if (ips.length > 0) log(`auth: ingress trust pinned to supervisor at ${ips.join(', ')}`);
+    else log('auth: supervisor did not resolve — ingress trust DISABLED (login required)');
+    return ips;
+  } catch (e) {
+    supervisorIps.clear();
+    log(`auth: supervisor lookup failed (${(e as Error).message}) — ingress trust DISABLED (login required)`);
+    return [];
+  }
+}
+
+async function defaultLookup(host: string): Promise<string[]> {
+  const { lookup } = await import('node:dns/promises');
+  const rs = await lookup(host, { all: true });
+  return rs.map((r) => r.address);
+}
+
+/** TEST SEAM: set the pinned addresses directly. */
+export function setSupervisorAddressesForTest(ips: readonly string[]): void {
+  supervisorIps.clear();
+  for (const ip of ips) supervisorIps.add(normalizeIp(ip));
+}
+
 export function isSupervisorSource(ip: string | undefined | null): boolean {
   if (!ip) return false;
-  // Node reports IPv4-mapped IPv6 as ::ffff:172.30.32.2 — normalize it.
-  const v4 = ip.startsWith('::ffff:') ? ip.slice('::ffff:'.length) : ip;
-  // hassio supervisor network 172.30.32.0/23 → 172.30.32.* and 172.30.33.*
-  return /^172\.30\.3[23]\.\d{1,3}$/.test(v4);
+  if (supervisorIps.size === 0) return false; // unresolved ⇒ trust nothing
+  return supervisorIps.has(normalizeIp(ip));
 }
 
 /* ─── token bootstrap ─────────────────────────────────────────────── */

@@ -93,7 +93,14 @@ export function parseUsers(json: string | undefined | null): UserRecord[] {
     if (u && typeof u === 'object') {
       const username = String((u as Record<string, unknown>).username ?? '').trim();
       const password = String((u as Record<string, unknown>).password ?? '');
-      if (username.length > 0) out.push({ username, password });
+      // A row needs BOTH. A username with a blank password used to become a
+      // real account whose password was "" — and because `hasUsers()` then
+      // returned true, the fail-closed "no users configured" branch did not
+      // fire either. The operator saw a login gate, believed they were
+      // protected, and the gate accepted an empty password. Dropping the row
+      // makes `hasUsers()` false, which fails CLOSED and denies the session
+      // with a message telling them to fix the config.
+      if (username.length > 0 && password.length > 0) out.push({ username, password });
     }
   }
   return out;

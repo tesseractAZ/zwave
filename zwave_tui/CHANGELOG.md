@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.24.3 — 2026-07-25
+
+**Security — the login gate could be bypassed by any sibling add-on.**
+
+An adversarial audit of the add-on's own posture (25 candidate findings, 9
+confirmed after refutation) found one HIGH issue, reproduced end-to-end.
+
+`isSupervisorSource()` tested membership of the whole **172.30.32.0/23** hassio
+bridge — which is where every *sibling add-on container* lives, not just the
+Supervisor. Ingress trust is composed as:
+
+```js
+!!req.headers['x-ingress-path'] && isSupervisorSource(req.ip)
+```
+
+Because `:8788` is ingress-only (deliberately not in `ports:`), **every peer
+able to open that socket was already inside the /23** — so the second term was
+always true on every reachable path and the whole expression reduced to *"did
+the client send a header it chooses."* A control that could not fire.
+
+With `auth_enabled: true` and the shipped `auth_require_on_ingress: false`, any
+sibling add-on — or an SSRF/RCE in a third-party one — got a **login-free
+operator session** on `/console/ws`: the full node roster, device and area
+names, live entity states, and with write actions on, the Actions Menu
+including lock/unlock and remove-failed-node. Such sessions were also exempt
+from the idle re-lock.
+
+Ingress trust is now **pinned to the address `supervisor` actually resolves
+to**, checked once at startup before the server listens. Resolution failure
+**fails closed** — nothing is treated as ingress and the operator simply logs
+in. Verified against this system's real neighbours: the Supervisor stays
+trusted, `mosquitto`, `core_zwave_js`, `ecoflow_panel` and `budget` all lose
+the bypass.
+
+**A user row with a blank password authenticated.** `parseUsers` required a
+non-empty *username* but never checked the password, so `{username: "op",
+password: ""}` became a real account whose password was `""` — and because
+`hasUsers()` then returned true, the fail-closed "no users configured" branch
+did not fire either. The operator saw a login gate and believed they were
+protected. Such rows are now dropped, which makes `hasUsers()` false and fails
+closed.
+
+Neither path had **any** test. Both now do, and both are in the mutation
+harness. 492 tests.
+
+### What the audit did NOT find
+
+Reported for completeness, since a clean result is only meaningful if the
+attempt was real. These controls were each driven with input that should be
+rejected, and each rejected it: the `/console/ws` Origin gate, the WebSocket
+session cap and 64 KiB payload limit, the telnet connection cap, write-token
+file mode 0600 and its constant-time compare, the `write_actions_enabled` gate
+(refuses even when the ActionRunner is called directly), the typed-CONFIRM
+requirement, the scrypt verify, the resize clamp, the login field caps, and the
+ANSI-stripping sanitizers — which held against CSI, 8-bit C1, OSC 52 clipboard,
+OSC title, newline and CR injection from a device-controlled node name. The
+`/console` page contains no dynamic interpolation at all, so HTML injection
+there is structurally impossible.
+
 ## 0.24.2 — 2026-07-24
 
 **Security: all four dependency advisories cleared, and one dependency dropped.**
