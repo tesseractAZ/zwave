@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.24.4 — 2026-07-27
+
+**Security — the remaining findings from the v0.24.3 posture audit.** No
+privilege boundary here was as consequential as the ingress bypass v0.24.3
+closed; these are the seven that survived refutation alongside it.
+
+**The sidebar panel was visible to every Home Assistant user.** `panel_admin`
+was `false`. The console can remove a failed node, rebuild every route, and —
+with write actions on — unlock a lock or open a garage door, while the add-on
+treats *"arrived via ingress"* as full operator authority. So the only
+authorization the mesh-mutating console received was "HA let this browser
+through", and that boolean had lowered the bar to non-admin users. It is now
+`true`, matching the official Z-Wave JS add-on (`require_admin: true`).
+
+**A dead write-token gate was persisting a live secret.** `requireWriteAuth`,
+`tokenEquals` and `loadOrCreateWriteToken` were registered on **zero** routes
+and had no callers — there are no mutating HTTP routes; every action goes
+through the TUI behind `write_actions_enabled` plus a typed CONFIRM. The
+bootstrap nonetheless wrote a long-lived token to `/data` on every boot, and the
+module docstring described the gate as protecting "any mutating HTTP command
+route". A control that authorises nothing while persisting a secret is worse
+than none: it implies a protection that does not exist. Removed, docstring
+corrected. **Existing installs may still have a stale
+`/data/zwave-write-token.txt` — it authorises nothing and can be deleted.**
+
+**The frame's control-character backstop did not cover C1.** `CTL_RE` matched
+`\x00-\x1f` and DEL but not **U+0080–U+009F** — which is exactly the range that
+matters, because **U+009B is an 8-bit CSI and U+009D an 8-bit OSC, and xterm.js
+on the `/console` path executes both.** The data-boundary sanitizer already
+strips `\x7f-\x9f` and names the 8-bit CSI as its reason; the backstop — the
+thing meant to catch whatever the boundary missed — did not, so any string
+reaching a frame without passing `sanitizeLabel`/`sanitizeEventText` had no
+backstop at all. Both `CTL_RE` and `IS_CTL` now cover C1.
+
+**Error text was the one mesh string never sanitized.** `errMsg` returned
+Home Assistant, Z-Wave JS driver, and device error strings verbatim, and they
+reach the frame in three places: `configuration unavailable: <error>`, the
+roster's LINK LOST token, and the action-result card. Every *other* mesh-derived
+string is scrubbed at a data boundary. `errMsg` is now itself the chokepoint —
+all nine call sites route through it, `lastErr` included — and the action
+runner sanitizes what an HA service call threw. The controller's
+`sdk_version` and `firmware_version` are sanitized on the same principle.
+
+**The login backoff could be outrun by concurrent submits.** The failure was
+counted *after* `await verify()` resolved. `this.verifying` serialises only ONE
+session, and the transports allow 16 telnet + 16 ws concurrently, each with its
+own flag — so every session that submitted before the first failure landed read
+a still-clean counter, and roughly 32 guesses were evaluated with the backoff
+contributing nothing regardless of what it was about to become. The attempt is
+now charged **before** the await, so concurrent submits contend for one counter;
+success clears it immediately.
+
+**One host could take every telnet slot, and quiet sockets never gave theirs
+back.** The 16-connection global cap was the only limit, so a single LAN machine
+could deny the TUI to every operator. Worse, a peer that connected and sent
+nothing — never even negotiating telnet — held its slot **forever**: there was
+no read timeout and no keepalive, and the only per-connection timers were the
+60 ms ESC flush and the 1 Hz redraw, neither of which reclaims anything. Added a
+**per-source-IP cap of 4**, a **30-minute idle timeout** (deliberately generous:
+`setTimeout` fires on *read* inactivity, and an operator may watch a screen for a
+long time without typing), and **60-second TCP keepalive** to detect half-open
+peers that never send a FIN.
+
+Verified by 497 tests and the full mutation harness: **77 killed, 0 survived, 0
+invalid**, with the two remaining `equivalent` entries documented and their
+invariants pinned by separate tests. The per-IP cap was additionally proven
+against a running server — four connections accepted, the fifth and sixth
+refused.
+
 ## 0.24.3 — 2026-07-25
 
 **Security — the login gate could be bypassed by any sibling add-on.**

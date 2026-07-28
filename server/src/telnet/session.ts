@@ -327,6 +327,16 @@ export class TuiSession {
     this.loginError = '';
     this.draw(); // show "Checking…"
 
+    // RESERVE THE ATTEMPT BEFORE THE AWAIT. `this.verifying` only serialises
+    // ONE session; the transports allow 16 telnet + 16 ws concurrently, and
+    // each has its own flag. Counting the failure only after `verify()`
+    // resolved meant every session that submitted before the first failure
+    // landed read a still-clean counter — so ~32 guesses were evaluated with
+    // the backoff contributing nothing, whatever it was about to become.
+    // Charging up front makes concurrent submits contend for one counter;
+    // success clears it immediately below.
+    this.auth.registerFailure(this.peer);
+
     let ok = false;
     try {
       ok = await this.auth.verify(user, pass);
@@ -347,7 +357,8 @@ export class TuiSession {
       return;
     }
 
-    this.auth.registerFailure(this.peer);
+    // NOT registerFailure() again — the attempt was already charged before the
+    // await. Counting it twice here would halve the real attempt budget.
     this.loginAttempts += 1;
     this.log(`auth: login FAILED for "${user}" from ${this.peer} (${this.loginAttempts}/${this.auth.maxAttempts})`);
     this.resetLogin();

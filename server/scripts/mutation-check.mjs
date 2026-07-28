@@ -360,6 +360,30 @@ const MUTANTS = [
     repl: '      if (username.length > 0) out.push({ username, password });',
     what: 'a blank-password user row is rejected instead of authenticating on ""' },
 
+  /* ── v0.24.4 posture audit ─────────────────────────────────────────── */
+  { id: 'c1-backstop', file: 'src/telnet/ansi.ts',
+    find: "const CTL_RE = /[\\x00-\\x1f\\x7f-\\x9f]/g;\nconst IS_CTL = /[\\x00-\\x1f\\x7f-\\x9f]/;",
+    repl: "const CTL_RE = /[\\x00-\\x1f\\x7f]/g;\nconst IS_CTL = /[\\x00-\\x1f\\x7f]/;",
+    what: 'the C1 block (8-bit CSI/OSC, which xterm.js executes) cannot reach the wire' },
+  { id: 'errmsg-sanitized', file: 'src/zwave/zwaveData.ts',
+    find: '  return sanitizeEventText(e instanceof Error ? e.message : String(e));',
+    repl: '  return e instanceof Error ? e.message : String(e);',
+    what: 'HA/device error text is sanitized at the errMsg chokepoint' },
+  { id: 'backoff-reserve', file: 'src/telnet/session.ts',
+    find: '    this.auth.registerFailure(this.peer);\n\n    let ok = false;',
+    repl: '    let ok = false;',
+    what: 'the login attempt is charged BEFORE the async verify, so concurrent submits contend' },
+  { id: 'telnet-per-ip', file: 'src/telnet/server.ts',
+    find: '    if (sameIp >= MAX_CONNS_PER_IP) {',
+    repl: '    if (false as boolean) {',
+    what: 'one host cannot take every telnet slot' },
+  { id: 'writetoken-gone', file: 'src/auth.ts',
+    find: '  return { sameOrigins, corsOriginCallback };',
+    // Re-introduce the identifier in a COMPILING way — the source-scan test
+    // asserts auth.ts no longer mentions it anywhere outside the docstring.
+    repl: '  const tokenEquals = 1;\n  void tokenEquals;\n  return { sameOrigins, corsOriginCallback };',
+    what: 'the dead write-token gate stays removed (it authorised nothing while persisting a secret)' },
+
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
