@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.24.3"
+version: "0.24.4"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
@@ -36,7 +36,14 @@ ingress: true
 ingress_port: 8788
 panel_icon: mdi:z-wave
 panel_title: "Z-Wave TUI"
-panel_admin: false
+# ADMIN-ONLY. The console can remove a failed node, rebuild every route, and —
+# with write actions on — unlock a lock and open a garage door. `false` exposed
+# that panel to every HA user, while the add-on treats "arrived via ingress" as
+# full operator authority: the only authorization the mesh-mutating console
+# received was "HA let this browser through", a bar this setting had lowered to
+# non-admins. The official Z-Wave JS add-on takes the same position
+# (require_admin: true).
+panel_admin: true
 map:
   - data:rw
 # Request access to Home Assistant's Core WebSocket/REST API so the add-on can

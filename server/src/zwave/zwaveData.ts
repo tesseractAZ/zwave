@@ -421,8 +421,14 @@ function nodeIdOfDevice(d: RawDevice): number | null {
   return null;
 }
 
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
+export function errMsg(e: unknown): string {
+  // SANITIZED AT THE CHOKEPOINT. These strings come from Home Assistant, the
+  // Z-Wave JS driver, or a device — none of them ours — and they reach the TUI
+  // frame (`configuration unavailable: <error>`, the roster's LINK LOST token,
+  // the action-result card). Every other mesh string is scrubbed at a data
+  // boundary; error text was the gap. All 9 call sites, `lastErr` included,
+  // route through here.
+  return sanitizeEventText(e instanceof Error ? e.message : String(e));
 }
 
 class ZwaveDataImpl implements ZwaveData {
@@ -1497,8 +1503,8 @@ class ZwaveDataImpl implements ZwaveData {
     return {
       homeId: raw.home_id ?? null,
       nodeId: raw.own_node_id ?? 1,
-      sdkVersion: raw.sdk_version ?? null,
-      firmwareVersion: raw.firmware_version ?? null,
+      sdkVersion: sanitizeStrOrNull(raw.sdk_version),
+      firmwareVersion: sanitizeStrOrNull(raw.firmware_version),
       rfRegion: rfRegionLabel(raw.rf_region),
       isPrimary: raw.is_primary === true,
       isSUC: raw.is_suc === true,
