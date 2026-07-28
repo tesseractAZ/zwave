@@ -29,11 +29,6 @@ configuration:
       Telnet is unencrypted — on an untrusted network turn on the login gate
       below, or leave this off and use only the browser console in the HA
       sidebar.
-  telnet_port:
-    name: Telnet port
-    description: >-
-      TCP port for the telnet TUI, published on your LAN. Default 2324 (chosen to
-      avoid clashing with other control-room add-ons).
   # ── Login gate ─────────────────────────────────────────────────────────────
   auth_enabled:
     name: Require login (direct access)

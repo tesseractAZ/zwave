@@ -42,14 +42,29 @@ seriously.
   two-command allowlist, and is **never proxied or re-exposed** to the TUI,
   ingress, or logs.
 - **Trust model.** Access over the Home Assistant sidebar (ingress) is already
-  HA-authenticated; direct LAN access to the telnet port and the console is
-  gated by an optional login (`auth_enabled`, users with plaintext or
-  `scrypt:` passwords) with a shared per-peer backoff that survives reconnects.
-  The login gate **fails closed** (denies) when enabled with no users
-  configured.
+  HA-authenticated, and the panel is **admin-only** (`panel_admin: true`) — the
+  console can remove a failed node and, with write actions on, unlock a lock.
+  Ingress trust is **pinned to the address `supervisor` resolves to**, resolved
+  once before the server listens, so a *sibling add-on* on the same Supervisor
+  bridge cannot forge it; resolution failure **fails closed**. Direct LAN access
+  to the telnet port and the console is gated by an optional login
+  (`auth_enabled`, users with plaintext or `scrypt:` passwords) with a shared
+  per-peer backoff that survives reconnects, charged **before** the async verify
+  so concurrent sessions contend for one counter. The login gate **fails closed**
+  (denies) when enabled with no users configured, and a row with a blank password
+  is rejected rather than becoming an account whose password is `""`.
+- **The telnet listener bounds one host.** A global 16-connection cap, a
+  **per-source-IP cap of 4**, reclamation of connections that have *received*
+  nothing for 30 minutes, and TCP keepalive for half-open peers. Without the
+  per-IP cap and the idle reclaim, a single LAN machine could hold every slot
+  indefinitely and deny the TUI to every operator.
 - **Input is sanitized at the boundary.** Device names and externally-sourced
-  state strings are stripped of control/ANSI sequences before they reach the
-  terminal frame; inbound console WebSocket frames are size-capped.
+  state strings — **including error text from Home Assistant, the driver and the
+  device**, which reaches the frame on the action-result card and the roster's
+  LINK LOST token — are stripped of control/ANSI sequences before they reach the
+  terminal frame. The strip covers **C0, DEL and C1 (U+0080–U+009F)**; C1 matters
+  because U+009B is an 8-bit CSI and U+009D an 8-bit OSC, and xterm.js executes
+  both. Inbound console WebSocket frames are size-capped.
 - **The controller mesh is bound by home id.** Persisted evidence and learned
   state are tagged with the controller's `homeId`; a mismatch on reconnect (a
   stick swap / different NVM) purges the restored state rather than aliasing one

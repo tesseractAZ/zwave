@@ -19,6 +19,7 @@ import fastifyCompress from '@fastify/compress';
 import fastifyCors from '@fastify/cors';
 
 import { config } from './config';
+import { createLogger } from './logger';
 import { createAuth, isAllowedOrigin, isSupervisorSource, pinSupervisorAddress } from './auth';
 import { createAuthPolicy } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
@@ -30,11 +31,11 @@ import { startTelnetServer } from './telnet/server';
 import type { LogEvent } from './types';
 
 /* ── logging ─────────────────────────────────────────────────────────────
- * bashio already prefixes add-on lines; keep this a single flat sink so the
- * data layer, provider, and transports all funnel through one place. */
-const log = (msg: string): void => {
-  process.stdout.write(`[zwave-tui] ${msg}\n`);
-};
+ * One sink for the data layer, provider and transports — now honouring the
+ * `log_level` option, which until v0.25.0 was parsed and then read by nobody
+ * (see logger.ts). Still callable as `log(msg)` for the informational stream;
+ * `log.warn` / `log.error` survive a raised threshold. */
+const log = createLogger(config.logLevel);
 
 async function main(): Promise<void> {
   log(`Z-Wave TUI v${config.version} starting — HA ${config.haWsUrl}`);
@@ -64,9 +65,8 @@ async function main(): Promise<void> {
   });
   zwaveData.start();
 
-  // 3) Bridge ZwaveData → ZwaveDataSource. v0.1 has no live event ring yet, so
-  //    events() is empty (the Log screen is a v0.2 stub); everything else maps
-  //    straight through.
+  // 3) Bridge ZwaveData → ZwaveDataSource. events() serves the live ring that
+  //    feeds the Log screen; everything else maps straight through.
   const source: ZwaveDataSource = {
     snapshot: () => zwaveData.snapshot(),
     controller: () => zwaveData.controller(),
@@ -114,8 +114,9 @@ async function main(): Promise<void> {
       : 'write actions disabled (read-only) — set write_actions_enabled to unlock',
   );
 
-  // 5) Auth (origin allow-list + write-token bootstrap). v0.1 exposes no
-  //    mutating routes, but the CORS + ws-origin policy still applies.
+  // 5) Auth — the CORS allow-list + the /console/ws upgrade origin check.
+  //    (The write-token gate this used to bootstrap was removed in v0.24.4:
+  //    it was registered on zero routes and still wrote a secret to /data.)
   const auth = createAuth({ host: config.host, port: config.port });
 
   // TUI login policy — gates direct (non-ingress) telnet + console access.
@@ -127,7 +128,7 @@ async function main(): Promise<void> {
         `${loginPolicy.idleLockMs > 0 ? `, idle-lock ${config.auth.idleLockMin}m` : ''})`,
     );
     if (!loginPolicy.hasUsers()) {
-      log('login gate WARNING: auth_enabled but no users configured — direct LAN access will be denied');
+      log.warn('login gate WARNING: auth_enabled but no users configured — direct LAN access will be denied');
     }
   }
   // Ingress requests carry X-Ingress-Path AND originate from the Supervisor

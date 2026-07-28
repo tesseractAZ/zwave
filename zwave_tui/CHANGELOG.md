@@ -1,5 +1,91 @@
 # Changelog
 
+## 0.25.0 — 2026-07-28
+
+**The add-on could not be installed from the store.** `repository.yaml` and the
+README both describe adding this repository in Home Assistant and installing
+Z-Wave TUI from the Add-on Store. Home Assistant builds an add-on from **its own
+directory**, and `zwave_tui/` held only `config.yaml`, `CHANGELOG.md`, `DOCS.md`,
+`apparmor.txt` and `translations/` — no `Dockerfile`, no `build.yaml`, no
+`server/`, no `rootfs/`. Those sat at the repository root, where a store install
+can never reach them; the root `Dockerfile` even does `COPY server/ ./server/`,
+confirming it expected the root as its build context. The add-on worked only via
+the *local* `/addons` path, whose deploy step happens to flatten the two trees
+together. **`Dockerfile`, `build.yaml`, `server/`, `rootfs/` and `.dockerignore`
+now live inside `zwave_tui/`,** so the directory is self-contained and the
+documented install path builds. CI's smoke build uses `context: ./zwave_tui` —
+exactly what Supervisor does — so this stays true.
+
+**The 30-minute idle timeout added in v0.24.4 never fired.** It used
+`socket.setTimeout`, and a code comment asserted that this "fires on READ
+inactivity, so the server's own 1 Hz redraw does not keep a dead socket alive."
+Node does not behave that way: the socket timer is reset by reads **and writes**,
+so the redraw refreshed it forever. The feature was inert from the day it
+shipped, and the test that covered it only grepped for the source line — from a
+branch that never executed. Reclamation is now an explicit sweep over the last
+time each connection **received** data, which a write cannot refresh. Both the
+reclaim and the TCP keepalive now have behavioural tests, and both are in the
+mutation harness.
+
+**`log_level` was dead config.** Declared in `config.yaml`, given a translation,
+exported by the run script as `LOG_LEVEL`, parsed into `config.logLevel` — and
+read by nobody. Setting it to `warning` to quiet the add-on did nothing at all,
+which is worse than not offering the knob. There is now a real levelled sink
+(`logger.ts`): the informational stream is suppressed above its threshold while
+warnings and errors still surface.
+
+**`telnet_port` silently killed LAN telnet.** The published `ports:` key is the
+**container** port and a hard-coded literal, so the option moved only the
+in-container bind. Any value but `2324` left the published mapping pointing at
+nothing, with no error anywhere. The option is **removed**; the LAN port is
+remapped where Home Assistant already offers it, in the add-on's Network panel.
+
+**A contract test now guards the whole option surface** — option ↔ schema ↔
+translation ↔ run-script export ↔ `config.ts` consumer, plus bound-port ↔
+published-port and `package.json` ↔ `config.yaml` version. `config.ts`'s header
+had asked readers to "keep the two in lock-step" for fourteen releases with
+nothing enforcing it; both defects above are exactly what it failed to catch.
+Writing it immediately surfaced two more: `ha_ws_url` is a **clearable** (`str?`)
+option parsed with `??`, so clearing the field to restore the default yielded
+`''` rather than the default; and `DB_PATH` / `config.dbPath` was dead plumbing
+maintained in three files and consumed by none. Both fixed.
+
+**Documentation had drifted from the code, including on security.** `DOCS.md`
+still documented `panel_admin: false`, the deleted `requireWriteAuth` /
+`X-Zwave-Write-Token` gate, and ingress trust as the `172.30.32.0/23` subnet
+check — i.e. the reference manual described the exact pre-fix posture that
+v0.24.3 and v0.24.4 had corrected. Also fixed: the action-failure message is
+sanitized, not "verbatim"; there are nine mutating verbs, not seven; the
+driver-WS allowlist is exactly two commands; `parseUsers` requires a non-empty
+password; three cross-references pointed at sections that do not exist.
+`DESIGN.md` claimed the edge-cluster detector was unbuilt (it shipped in
+v0.20.0), listed two detectors that were never implemented without saying so,
+advertised an `engine_enabled` option that does not exist, and still called the
+repository private. `SECURITY.md` gained the admin-only panel, the pinned
+ingress trust, the connection caps and the C1 sanitization. The README's test
+count and mutation-harness path were wrong, and `server/package.json` had said
+`0.10.0` since v0.10.
+
+**CI now builds `aarch64`.** It smoke-built `amd64` only — while `aarch64` is
+the sole architecture actually deployed, so an arch-specific regression would
+have reached the Pi unseen. `BUILD_FROM` is read from `build.yaml` instead of
+being duplicated in the workflow with nothing checking the two agreed.
+
+**Release-workflow hardening.** `${{ inputs.version }}` was interpolated
+directly into a `run:` script in a `contents: write` job — expanded as raw text
+*before* bash parses the line, and on the line *above* the regex that was
+supposed to validate it, so the validation could not protect anything. Only repo
+writers can dispatch the workflow, so this was self-inflicted rather than
+remotely exploitable; it now goes through the environment. The workflow also
+verifies the pushed tag matches `config.yaml`, fails instead of substituting a
+placeholder when a CHANGELOG section is missing, only claims `--latest` when the
+version really is the newest, no longer reports success on the skip path, and no
+longer calls a public Release "private".
+
+Mutation harness: **83 killed, 0 survived, 0 invalid**, over an entry list that
+now includes every behavioural change in this release and the four from v0.24.4
+that shipped without one.
+
 ## 0.24.4 — 2026-07-27
 
 **Security — the remaining findings from the v0.24.3 posture audit.** No

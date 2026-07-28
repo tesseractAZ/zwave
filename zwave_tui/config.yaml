@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.24.4"
+version: "0.25.0"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
@@ -28,7 +28,7 @@ host_network: false
 ports:
   "2324/tcp": 2324
 ports_description:
-  "2324/tcp": "Telnet TUI (NO AUTH — keep on a trusted LAN)"
+  "2324/tcp": "Telnet TUI (NO AUTH — keep on a trusted LAN). Change the LAN port here, in Network."
 # HA Ingress: makes the browser terminal appear as a sidebar item inside Home
 # Assistant (visible in the HA mobile app), authenticated through HA's normal
 # session. Same server, same port — HA's hassio_ingress reverse-proxies in.
@@ -65,7 +65,6 @@ options:
   write_actions_enabled: false
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled: true
-  telnet_port: 2324
   # ── Login gate (guards DIRECT/telnet; HA-sidebar access is already authed) ──
   auth_enabled: false
   auth_require_on_ingress: false
@@ -85,7 +84,6 @@ schema:
   signal_display: list(margin|dbm)
   write_actions_enabled: bool
   telnet_enabled: bool
-  telnet_port: port
   auth_enabled: bool
   auth_require_on_ingress: bool
   # `users` is a repeatable {username, password} row; password renders masked.
