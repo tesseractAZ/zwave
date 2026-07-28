@@ -11,9 +11,10 @@
  * The heavy lifting the render loop can't afford (health scoring, snapshots)
  * lives behind the cached `DataProvider` accessors, so navigation stays cheap.
  *
- * v0.1 is READ-ONLY: the mutating action keys (p/i/h/R/x) are recognized so
- * the muscle-memory is right, but they no-op with a log line instead of
- * actuating the mesh. `write_actions_enabled` unlocks them in a later phase.
+ * The mutating action keys (p/i/h/R/x) are always recognized so the
+ * muscle-memory is right. With `write_actions_enabled` OFF they no-op with a
+ * log line; with it ON the session intercepts them before `applyKey` and routes
+ * them through the type-CONFIRM modal (see the note further down this file).
  */
 
 import type { DataProvider, LogEvent, LogRange, NodeSnapshot, ViewState } from '../types';

@@ -7,7 +7,8 @@ PDF alongside it (LibreOffice converts the .docx — no LaTeX needed).
 Used in CI (.github/workflows/ci.yml) on every push/PR: build the manual and
 upload it as an artifact, so a DOCS.md that no longer converts cleanly fails the
 PR — and reviewers get an offline copy of the branch's manual in both formats.
-(This repo is private and does NOT publish releases, so — unlike ecoflow-panel,
+(The repo is public and DOES publish releases — publish-release.yml attaches
+this manual to each one. Unlike ecoflow-panel,
 on which this script is modeled — there is no release-asset path.)
 
 It concatenates, in reading order:

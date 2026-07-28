@@ -1,6 +1,6 @@
 {
   "name": "zwave-tui-server",
-  "version": "0.10.0",
+  "version": "0.25.0",
   "private": true,
   "author": "Eric Paschal (https://github.com/tesseractAZ)",
   "license": "MIT",

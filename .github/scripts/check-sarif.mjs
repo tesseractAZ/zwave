@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Gate CI on CodeQL findings WITHOUT GitHub Advanced Security.
 //
-// This private, personal-account repo can't use GitHub's hosted code scanning
-// (the Security tab / SARIF upload is a GHAS feature, unavailable here), so the
-// CodeQL workflow analyzes locally and hands the SARIF to this script instead of
-// uploading it. We print every result grouped by severity and FAIL the job on any
+// The CodeQL workflow DOES upload to the Security tab (code scanning is free on
+// public repositories). This script is the second, self-contained gate: it reads
+// the same SARIF and fails the job in CI, so the build breaks on a finding rather
+// than merely filing an alert someone has to notice.
+// We print every result grouped by severity and FAIL the job on any
 // genuinely actionable finding — an `error`-level result, or a rule whose
 // `security-severity` is >= HIGH (7.0). Notes/warnings are surfaced but don't
 // break the build (security-extended emits a fair number of low-signal notes).
@@ -13,9 +14,14 @@
 import { readFileSync } from 'node:fs';
 
 const args = process.argv.slice(2);
-const sarifPath = args.find((a) => !a.startsWith('--'));
 const thrIdx = args.indexOf('--fail-threshold');
 const FAIL_SEVERITY = thrIdx >= 0 ? Number(args[thrIdx + 1]) : 7.0; // HIGH
+// Skip the flag AND its value when looking for the path — otherwise
+// `--fail-threshold 8.0 report.sarif` took "8.0" as the file to read, so the
+// script's own documented flag broke it whenever it came first.
+const sarifPath = args.find(
+  (a, i) => !a.startsWith('--') && !(thrIdx >= 0 && i === thrIdx + 1),
+);
 
 if (!sarifPath) {
   console.error('usage: check-sarif.mjs <sarif> [--fail-threshold <float>]');
@@ -66,7 +72,13 @@ for (const run of runs) {
   if (ruleMeta.size === 0 && (run.results ?? []).length > 0) {
     // Results with no rule metadata anywhere: severity gating is impossible,
     // so say so rather than quietly passing on an unenforceable threshold.
-    console.error('WARNING: no rule metadata in driver OR extensions — severity gating is INERT for this SARIF.');
+    // FAIL. A gate that cannot evaluate its own threshold has not passed —
+    // it has not run. Warning and exiting 0 reported a green check for an
+    // unenforceable rule, which is exactly the false assurance this script
+    // exists to prevent.
+    console.error('ERROR: no rule metadata in driver OR extensions — severity gating is INERT for this SARIF.');
+    console.error('Refusing to report a pass on a gate that cannot fire.');
+    process.exit(2);
   }
   for (const res of run.results ?? []) {
     total += 1;

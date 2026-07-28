@@ -33,7 +33,6 @@ if bashio::config.true 'telnet_enabled'; then
 else
   export TELNET_ENABLED=0
 fi
-export TELNET_PORT="$(bashio::config 'telnet_port')"
 
 # ── Write-action safety gates ────────────────────────────────────────────────
 if bashio::config.true 'write_actions_enabled'; then
@@ -67,7 +66,14 @@ export ZWAVE_USERS="$(jq -c '.users // []' /data/options.json 2>/dev/null || ech
 export PORT=8788
 export HOST=::
 export TELNET_HOST=::
-export DB_PATH=/data/zwave.db
+# FIXED, not an option. config.yaml publishes the container's 2324 via
+# `ports: "2324/tcp"`, and that key is the CONTAINER port — a literal, not
+# something an option can move. The old `telnet_port` option changed only what
+# the server BOUND TO inside the container, so setting it to anything but 2324
+# left the published port pointing at nothing and silently killed LAN telnet
+# with no error anywhere. To change the port ON THE LAN, remap the host side in
+# the add-on's Network panel; the container side stays 2324.
+export TELNET_PORT=2324
 # v0.5 persistent RSSI/RTT sparkline history — atomic JSON ring on the /data
 # volume so the graphs survive a restart / reconnect / power blip. Flush cadence
 # is fixed in code (30s + on shutdown); no user knob.

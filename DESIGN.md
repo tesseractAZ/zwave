@@ -285,11 +285,11 @@ verbatim where one exists — §3.5):
 | `route-churn` | routeKey churn ≫ baseline + rate/RTT corroboration (**routeSchemeState does not exist on either WS — dropped**; explorer detection only ever as a labelled best-effort log parse) | one legit re-route after topology change *(§2.1, DR)* |
 | `rtt-degraded` | RTT median over **fresh** samples ≫ route-stratified baseline, dwell | route change (settle window); EMA lag; wake latency *(§1.11, DR)* |
 | `weak-signal` | low RSSI **on a direct (non-routed) node** + timeout corroboration | routed node (RSSI = last hop, not the device) *(§1.3)* |
-| `diurnal-degradation` | a node's band median vs its own other-band medians AND vs the mesh same-band norm — persistent night-vs-day asymmetry | time-of-day banding otherwise makes recurring diurnal interference *permanently invisible* — the banding rationale, inverted *(DR)* |
+| `diurnal-degradation` **(SPECIFIED, NOT BUILT — M6 shipped the diurnal *view* only)** | a node's band median vs its own other-band medians AND vs the mesh same-band norm — persistent night-vs-day asymmetry | time-of-day banding otherwise makes recurring diurnal interference *permanently invisible* — the banding rationale, inverted *(DR)* |
 | `chatty-device` | dRx rate ≫ mesh median (orders of magnitude) | normal reporter; S0 3×-airtime *(§4.7)* |
 | `ghost-suspect` | requires **proven coverage**: store recording the node ≥N days with live subscriptions, zero successful comms AND zero non-dead status in that span; a young/empty store yields `insufficient history (n/N days)`, never a ghost verdict | rarely-woken battery node; store just wiped; subscription failure *(DR blocker)* |
 | `controller-degraded` | rising controller NAK/CAN/timeoutACK (serial link) | one node's RF problem *(§2.11)* |
-| `mesh-correlated` | breadth over **nodes-with-observable-traffic-in-window** (≥30–40% of active nodes, never an absolute K), sustained ≥2–3 consecutive windows, or corroborating controller-stats degradation | pipeline artifacts: post-gap windows are invalid for correlation (queued deltas aren't time-attributable); single-window unanimity after silence is evidence about the pipeline, not the mesh *(DR)* |
+| `mesh-correlated` **(SPECIFIED, NOT BUILT)** | breadth over **nodes-with-observable-traffic-in-window** (≥30–40% of active nodes, never an absolute K), sustained ≥2–3 consecutive windows, or corroborating controller-stats degradation | pipeline artifacts: post-gap windows are invalid for correlation (queued deltas aren't time-attributable); single-window unanimity after silence is evidence about the pipeline, not the mesh *(DR)* |
 | `edge-cluster` | a **small correlated subset** with shared-signature evidence: shared repeater/`routeFailedBetween` hop, same-band co-movement, co-onset — the explicit tier between per-node and mesh-level | coincidence (two nodes breaching different metrics at unrelated hours) *(§6, DR)* |
 
 **Detection vs advice — two layers, never conflated** *(DR)*:
@@ -510,15 +510,19 @@ without:
   the coarse tier spans the day and null (·) cells for no-traffic hours; and the
   current **correlated-degradation** state from the mesh-interference detector.
   The heavy coarse fold is memoized in `data.interference()` (the screen is pure
-  render). The edge-cluster detector/view is not built (no edge-cluster detector
-  shipped in M3); it remains future work.
+  render). ~~The edge-cluster detector/view is not built.~~ **Shipped in
+  v0.20.0** — see `symptoms.ts` (`kind: 'edge-cluster'`, gated by
+  `EDGE_MIN_MEMBERS`), surfaced on the Remedy screen.
 
 ## 4. Config surface (additions, all safe-defaulted for strangers' meshes)
 
 ```yaml
 # auto_remediation: DEFERRED — the executor tier (§3.5) is NOT built (owner chose
 #   advisory-only). This knob lands only if/when auto-execution is ever built.
-engine_enabled: true          # detectors + advisory always-on compute
+engine_enabled: true          # PROPOSED, NEVER IMPLEMENTED — the detectors and
+#                             # advisory compute are unconditionally on; there is
+#                             # no such add-on option. Listed here as design
+#                             # intent only.
 driver_ws_url: "ws://core-zwave-js:3000"  # read-only telemetry; empty = disabled (v0.13)
 # advanced:
 engine_cooldown_hours: 24     # int(1,168) per-node same-action cooldown
@@ -542,4 +546,6 @@ options only for knobs a stranger genuinely needs.
 | M7 (v0.18) | complete `DOCS.md` system & engine reference (12 chapters) + `SECURITY.md` + a printable `.docx`/`.pdf` manual built in CI (`scripts/build-docs-docx.py`). The no-dB-numbers guard already ships as a planner test (`no candidate fabricates a numeric dB claim`); defaults are safe-defaulted for strangers' meshes (read-only, driver-WS empty=disabled) | the whole system is documented from source; the offline manual stays current; safe for other users' meshes |
 
 Each lands as its own `vX.Y`, typecheck+tests+adversarial review, same
-pipeline as v0.5–v0.11. **No publish** — private repo, local add-on.
+pipeline as v0.5–v0.11. The repository is **public**, and each version is cut
+as a GitHub Release with the printable manual attached (`publish-release.yml`).
+No container image is published — Supervisor builds the add-on from source.

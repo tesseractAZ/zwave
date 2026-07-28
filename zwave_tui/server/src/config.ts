@@ -36,12 +36,22 @@ export const config = {
 
   /**
    * HA Core WebSocket endpoint the data layer authenticates against with
-   * SUPERVISOR_TOKEN. Override to `ws://core-zwave-js:3000` to talk to the
-   * zwave-js driver server directly (phase 2).
+   * SUPERVISOR_TOKEN.
+   *
+   * ★ This used to suggest overriding it to `ws://core-zwave-js:3000` "to talk
+   *   to the zwave-js driver server directly (phase 2)". That advice was both
+   *   stale and broken: the driver socket arrived in v0.13 as a SEPARATE,
+   *   strictly read-only client (`driverWsUrl` below), and pointing this URL at
+   *   the driver cannot work — the data layer speaks HA's `zwave_js/*` commands
+   *   authenticated with SUPERVISOR_TOKEN, which zwave-js-server does not serve.
    */
+  // `||`, not `??`. The `ha_ws_url` option's schema is `str?` — CLEARABLE in
+  // the HA UI — and bashio exports a cleared value as the EMPTY STRING, which
+  // `??` happily accepts. Clearing the field to "get the default back" instead
+  // produced `haWsUrl: ''`, and the WS client then tried to connect to nothing.
   haWsUrl:
-    process.env.HA_WS_URL ??
-    (process.env.NODE_ENV !== 'production' ? process.env.DEV_HA_WS_URL : undefined) ??
+    process.env.HA_WS_URL ||
+    (process.env.NODE_ENV !== 'production' ? process.env.DEV_HA_WS_URL : undefined) ||
     'ws://supervisor/core/websocket',
   /**
    * Auto-injected by the Supervisor for add-ons with `homeassistant_api: true`.
@@ -63,10 +73,8 @@ export const config = {
   /** Default signal unit: SNR-margin over the live noise floor vs raw dBm. */
   signalDisplay,
 
-  /** Add-on log verbosity, surfaced from bashio to the server logger. */
+  /** Add-on log verbosity (bashio's ladder). Consumed by `createLogger`. */
   logLevel: process.env.LOG_LEVEL ?? 'info',
-  /** Persistent SQLite path on the /data volume (reserved; unused). */
-  dbPath: process.env.DB_PATH ?? '/data/zwave.db',
   /**
    * Persistent RSSI/RTT sparkline history (atomic JSON ring on /data). The run
    * script exports `HISTORY_PATH=/data/history.json`; absent (bare dev) → null,

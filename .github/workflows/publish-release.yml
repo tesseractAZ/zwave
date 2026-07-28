@@ -6,9 +6,7 @@ name: Publish release
 # deployed by SOURCE BUILD (Supervisor builds it on the user's own device), so
 # no GHCR package is ever pushed.
 #
-# NB the repo is PUBLIC, so a Release and its manual ARE public. This comment
-# said "private … nothing is made public" until the repo was opened up —
-# written when that was true, and quietly false from the moment it was not.
+# NB the repo is PUBLIC, so a Release and its manual ARE public.
 #
 # To cut a release: after the version's PR is merged to main (subject `vX.Y…`,
 # never `Release v`), push the tag at that merge commit:
@@ -37,11 +35,23 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
     steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
       - id: v
+        # INPUT_VERSION is passed through the ENVIRONMENT, never interpolated
+        # into the script body. `${{ inputs.version }}` is substituted by the
+        # runner as raw text BEFORE bash parses the line, so a dispatch value
+        # like `"; curl … | sh; #` executed as shell — and it did so on the
+        # line ABOVE the regex check, meaning the validation could never
+        # protect anything. Only repo writers can dispatch this workflow, so
+        # this was self-inflicted rather than remotely exploitable, but the
+        # `contents: write` token made it worth closing regardless.
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ -n "${{ inputs.version }}" ]]; then
-            v="${{ inputs.version }}"
+          if [[ -n "${INPUT_VERSION:-}" ]]; then
+            v="$INPUT_VERSION"
           else
             v="${GITHUB_REF_NAME#v}"
           fi
@@ -49,9 +59,18 @@ jobs:
             echo "::error::Invalid version '$v' (expected X.Y.Z)"
             exit 1
           fi
+          # The tag and the shipped add-on version MUST agree. Nothing checked
+          # this before, so tagging v0.25.0 at a commit whose config.yaml still
+          # said 0.24.4 would have published a Release whose notes, manual and
+          # asset names all disagreed with what a user actually installs.
+          cfg=$(sed -n 's/^version:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' zwave_tui/config.yaml)
+          if [[ "$cfg" != "$v" ]]; then
+            echo "::error::tag v$v does not match zwave_tui/config.yaml version '$cfg' — bump the config or fix the tag"
+            exit 1
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "tag=v$v" >> "$GITHUB_OUTPUT"
-          echo "📦 Releasing v$v"
+          echo "📦 Releasing v$v (config.yaml agrees)"
 
   test:
     name: Server tests
@@ -65,25 +84,30 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: server/package-lock.json
+          cache-dependency-path: zwave_tui/server/package-lock.json
       - name: Install server deps
-        working-directory: server
+        working-directory: zwave_tui/server
         run: npm ci
       - name: Run server tests
-        working-directory: server
+        working-directory: zwave_tui/server
         run: npm test
       - name: tsc --noEmit (server)
-        working-directory: server
+        working-directory: zwave_tui/server
         run: npx tsc --noEmit
 
   release:
-    name: Cut GitHub Release (private) + attach manual
+    name: Cut GitHub Release + attach manual
     needs: [resolve, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ needs.resolve.outputs.tag }}
+          # Full history + tags: the --latest decision below compares this
+          # version against EVERY released tag. At the default depth-1, no-tags
+          # checkout, `git tag --list` sees only the tag being released, so it
+          # would always look like the newest one.
+          fetch-depth: 0
 
       - name: Skip if Release already exists
         id: gate
@@ -124,7 +148,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY' > /tmp/notes.md
-          import os, re
+          import os, re, sys
           version = os.environ["NEXT"]
           with open("zwave_tui/CHANGELOG.md") as f:
               content = f.read()
@@ -137,13 +161,16 @@ jobs:
               body = m.group(0).split("\n", 1)[1].strip()
               print(body)
           else:
-              print("_(see CHANGELOG.md)_")
+              # FAIL, don't paper over it. A Release whose notes read
+              # "(see CHANGELOG.md)" looks deliberate, so a forgotten
+              # CHANGELOG section shipped silently instead of being caught.
+              sys.exit(f"no '## {version}' section in zwave_tui/CHANGELOG.md")
           PY
           echo "── notes preview ────────────────────────────"
           cat /tmp/notes.md
           echo "─────────────────────────────────────────────"
 
-      - name: Create GitHub Release (private) with the manual attached
+      - name: Create GitHub Release with the manual attached
         if: steps.gate.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -151,21 +178,39 @@ jobs:
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
+          # --latest only when this really IS the newest version. It used to be
+          # unconditional, so re-releasing an OLD tag (the workflow_dispatch
+          # path exists precisely for that) would move the "Latest" badge
+          # backwards and point new installs at a superseded add-on.
+          newest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//' \
+                   | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+          if [[ "$newest" == "$V" ]]; then latest=--latest; else latest=--latest=false; fi
+          echo "newest tag = v${newest}; releasing v${V} with ${latest}"
           gh release create "$TAG" \
             --title "$TAG" \
             --notes-file /tmp/notes.md \
-            --latest \
+            "$latest" \
             "Z-Wave-TUI-Documentation-v${V}.docx" \
             "Z-Wave-TUI-Documentation-v${V}.pdf"
 
       - name: Summary
+        # Reports what ACTUALLY happened. This used to print "✅ released"
+        # unconditionally — including on the skip path — so a run that created
+        # nothing still showed a green success summary.
         env:
           V: ${{ needs.resolve.outputs.version }}
+          SKIPPED: ${{ steps.gate.outputs.skip }}
         run: |
           {
-            echo "## ✅ v${V} released (private)"
-            echo
-            echo "A private GitHub Release was cut with the CHANGELOG notes and the"
-            echo "printable manual (.docx + .pdf) attached. No container image was"
-            echo "published — the add-on is deployed by local build on the Pi."
+            if [[ "${SKIPPED:-}" == "true" ]]; then
+              echo "## ⏭️ v${V} — release SKIPPED"
+              echo
+              echo "A release for this version already exists; nothing was created."
+            else
+              echo "## ✅ v${V} released"
+              echo
+              echo "A public GitHub Release was cut with the CHANGELOG notes and the"
+              echo "printable manual (.docx + .pdf) attached. No container image was"
+              echo "published — Supervisor builds the add-on from source on the host."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

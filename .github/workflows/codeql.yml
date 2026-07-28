@@ -33,14 +33,14 @@ jobs:
     name: Analyze (javascript-typescript)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
         with:
           languages: javascript-typescript
           queries: security-extended   # broader than default: more CodeQL-class rules
           # Exclude the test suite from ANALYSIS (not from the repo — the image
-          # does ship server/test, it just never executes it). Test code is not
+          # does ship zwave_tui/server/test, it just never executes it). Test code is not
           # attack surface, and treating it as a taint SOURCE produced findings
           # about production code that cannot happen in production: both
           # `js/insecure-temporary-file` hits (sev 7.0, on historyStore.ts and
@@ -49,11 +49,11 @@ jobs:
           # private volume — so the atomic write-then-rename is correct there.
           config: |
             paths-ignore:
-              - server/test/**
+              - zwave_tui/server/test/**
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
       - name: Perform CodeQL Analysis (uploads to the Security tab)
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07 # v3
         with:
           # `always` also writes the SARIF locally, so the artifact + the CI
           # gate below keep working exactly as before.
@@ -61,7 +61,7 @@ jobs:
           output: sarif-results
       - name: Publish SARIF artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: codeql-sarif
           path: sarif-results

@@ -455,7 +455,8 @@ function barsPlain(frac: number, bars = 4): string {
  * Signal cell = signalBars(4) + ' ' + a right-aligned dB label, exactly 12 wide.
  * Bars reflect the SAME quantity coloured by the label (SNR margin in 'margin'
  * mode, RSSI in 'dbm' mode) so glyph and text always agree. No reading → blank
- * bars + '—' (same convention as the deferred columns).
+ * bars + '—' (the same convention every reading column uses when there is no
+ * reading).
  */
 function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDisplay']): GraphicCell {
   const rssi = n.stats.rssi;
@@ -640,8 +641,8 @@ function flagsCell(flags: string[]): Cell {
 
 /**
  * A centred, framed card — used for the Overview's loading / empty states and
- * reused verbatim by the v0.2 stub overlays (detail/controller/topology/
- * heatmap/log) so they all share one look. Returns exactly `view.rows` lines,
+ * reused by detail/controller/topology/heatmap/log for their genuine empty and
+ * terminal-too-small states, so they all share one look. Returns exactly `view.rows` lines,
  * each no wider than `view.cols`.
  */
 export function centeredNotice(

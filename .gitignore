@@ -25,4 +25,4 @@ data/
 .claude/
 
 # mutation-check.mjs crash-recovery sidecar (never commit; see scripts/mutation-check.mjs)
-server/.mutation-check-pending.json
+zwave_tui/server/.mutation-check-pending.json
