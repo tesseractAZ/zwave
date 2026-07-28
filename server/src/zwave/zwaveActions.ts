@@ -14,6 +14,7 @@
  */
 
 import type { HaWsClient } from '../ha/haWsClient';
+import { sanitizeEventText } from './zwaveData';
 import type { ActionRunner, ActionResult, ActionKind, ConfigParam, EntityVerb } from '../types';
 import { resolveService, verbLabel } from './entityControl';
 
@@ -71,7 +72,9 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
       if (learn) o.onOutcome?.(kind, nodeId, true);
       return { ok: true, message: `${verb}: ok` };
     } catch (e) {
-      const msg = errMsg(e);
+      // SANITIZED: this is whatever an HA service call threw, and session.ts
+      // puts it straight into the on-screen action-result card.
+      const msg = sanitizeEventText(errMsg(e));
       o.log('error', nodeId, `${verb} → failed: ${msg}`);
       if (learn) o.onOutcome?.(kind, nodeId, false);
       return { ok: false, message: msg };

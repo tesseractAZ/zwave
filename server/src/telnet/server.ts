@@ -42,6 +42,8 @@ const OPT_NAWS = 31;
 
 interface TelnetConn {
   socket: Socket;
+  /** Source address, kept for the per-IP connection cap. */
+  ip: string;
   session: TuiSession;
   inbuf: Buffer;
   timer: NodeJS.Timeout | null;
@@ -188,6 +190,25 @@ export interface TelnetServerOptions {
 /** Concurrent telnet connection cap — bounds resource use (and, with the login
  *  gate, the number of in-flight credential checks). Mirrors the ws console. */
 const MAX_TELNET_CONNS = 16;
+/**
+ * Per-source-IP cap. Without it, ONE host could take every slot: the global cap
+ * is all that stood between a single LAN machine and a total denial of the TUI
+ * to every operator.
+ */
+const MAX_CONNS_PER_IP = 4;
+/**
+ * Reclaim a socket that goes quiet. A peer that connects and then sends nothing
+ * — never even negotiating telnet — used to hold its slot FOREVER: no
+ * setTimeout, no keepalive, and the only timers on a connection were the 60 ms
+ * ESC flush and the 1 Hz redraw, neither of which reclaims anything. 16 silent
+ * sockets denied the TUI permanently. Generous, because a legitimate operator
+ * may sit and watch a screen for a long time without typing — the 1 Hz redraw
+ * writes to the socket but does not reset a READ timeout, so this must be long
+ * enough not to evict someone who is simply reading.
+ */
+const IDLE_TIMEOUT_MS = 30 * 60_000;
+/** Detect half-open peers (yanked cable, NAT drop) that never send a FIN. */
+const KEEPALIVE_MS = 60_000;
 
 export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void } {
   const { data, host, port, log, signalDisplay, auth, actions } = opts;
@@ -268,6 +289,22 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       try { socket.end('Too many connections — try again later.\r\n'); } catch { /* ignore */ }
       return;
     }
+    // Per-IP cap: the global cap alone let ONE host starve every operator.
+    const peerIp = socket.remoteAddress ?? '?';
+    let sameIp = 0;
+    for (const c of conns) if (c.ip === peerIp) sameIp += 1;
+    if (sameIp >= MAX_CONNS_PER_IP) {
+      log(`telnet: per-IP cap (${MAX_CONNS_PER_IP}) reached — refusing ${peerIp}`);
+      try { socket.end('Too many connections from your address — try again later.\r\n'); } catch { /* ignore */ }
+      return;
+    }
+    // Reclaim quiet and half-open peers. setTimeout fires on READ inactivity,
+    // so the server's own 1 Hz redraw does not keep a dead socket alive.
+    socket.setKeepAlive(true, KEEPALIVE_MS);
+    socket.setTimeout(IDLE_TIMEOUT_MS, () => {
+      log(`telnet: idle timeout — closing ${peerIp}`);
+      try { socket.destroy(); } catch { /* already gone */ }
+    });
     const session = new TuiSession({
       write: (payload) => safeWrite(socket, payload),
       data,
@@ -276,10 +313,10 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       auth,
       actions,
       trusted: false, // telnet is direct LAN — never HA-authenticated
-      peer: socket.remoteAddress ?? '?',
+      peer: peerIp,
       onClose: () => { try { socket.end(); } catch { /* already gone */ } },
     });
-    const conn: TelnetConn = { socket, session, inbuf: Buffer.alloc(0), timer: null, escTimer: null };
+    const conn: TelnetConn = { socket, ip: peerIp, session, inbuf: Buffer.alloc(0), timer: null, escTimer: null };
     conns.add(conn);
     log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${conns.size} active)`);
 

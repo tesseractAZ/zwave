@@ -168,7 +168,9 @@ immediate). Every outcome is logged. The *engine* never executes anything itself
 it only recommends; device control and config writes are **operator** actions, and
 are never fed to the learning ledger. If you expose the LAN telnet port on an
 untrusted network, enable the optional **login gate** (plaintext or `scrypt:`
-passwords, with a per-peer backoff); the sidebar console is already HA-authenticated.
+passwords, with a per-peer backoff). The sidebar console is **restricted to Home
+Assistant administrators** — the same position the official Z-Wave JS add-on
+takes, and appropriate for a panel that can remove a failed node or unlock a lock.
 
 ## Install
 

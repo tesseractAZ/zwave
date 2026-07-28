@@ -74,12 +74,21 @@ export const BOX = {
 };
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
-// C0 controls + DEL. After the SGR codes above are accounted for, anything left
-// in this range occupies no column but WILL wreck the frame (a stray \n splits
-// one row into two, \r rewinds it, \b eats a cell). Width math must not count
-// them, and truncate() drops them so they can never reach the wire.
-const CTL_RE = /[\x00-\x1f\x7f]/g;
-const IS_CTL = /[\x00-\x1f\x7f]/; // non-global: safe for single-character tests
+// C0 controls + DEL + **C1** (U+0080–U+009F). After the SGR codes above are
+// accounted for, anything left in these ranges occupies no column but WILL
+// wreck the frame (a stray \n splits one row into two, \r rewinds it, \b eats a
+// cell). Width math must not count them, and truncate() drops them so they can
+// never reach the wire.
+//
+// ★ C1 was missing until v0.24.4, so that last promise was false for exactly
+//   the bytes that matter most: U+009B is an 8-bit CSI and U+009D an 8-bit OSC,
+//   and xterm.js on the /console path EXECUTES both. The data-boundary
+//   sanitizer already strips \x7f-\x9f and names "the 8-bit CSI 0x9b" as the
+//   reason — this backstop, the thing that is supposed to catch whatever the
+//   boundary missed, did not. Any string reaching a frame without passing
+//   sanitizeLabel/sanitizeEventText therefore had no backstop at all.
+const CTL_RE = /[\x00-\x1f\x7f-\x9f]/g;
+const IS_CTL = /[\x00-\x1f\x7f-\x9f]/; // non-global: safe for single-character tests
 
 /** On-screen column count of a string, ignoring ANSI escape codes. */
 export function visLen(s: string): number {
