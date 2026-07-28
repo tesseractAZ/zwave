@@ -37,10 +37,14 @@ FROM ${BUILD_FROM}
 # main repo) and a CA bundle for outbound TLS.
 RUN apk add --no-cache nodejs npm ca-certificates tzdata
 
+# HOST is `::` — the DUAL-STACK bind the server documents as mandatory. This
+# image ENV said 0.0.0.0 (IPv4-only), directly contradicting it. The run script
+# exports `HOST=::` and wins at runtime, so nothing was actually broken; but the
+# two disagreed, and whichever a reader trusted, one of them was lying. DB_PATH
+# is gone with the dead `dbPath` plumbing it fed.
 ENV NODE_ENV=production \
     PORT=8788 \
-    HOST=0.0.0.0 \
-    DB_PATH=/data/zwave.db
+    HOST=::
 
 WORKDIR /app
 COPY server/ ./server/

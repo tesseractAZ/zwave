@@ -113,7 +113,7 @@ device doing right now?"* and *"how is it configured?"*:
 </details>
 
 > Screenshots are generated from a **synthetic demo mesh** by
-> [`server/scripts/gen-screenshots.mts`](./server/scripts/gen-screenshots.mts) —
+> [`zwave_tui/server/scripts/gen-screenshots.mts`](./zwave_tui/server/scripts/gen-screenshots.mts) —
 > regenerate them with `cd server && npx tsx scripts/gen-screenshots.mts`.
 
 Full keybinding and screen documentation is in
@@ -183,7 +183,7 @@ already set up.
    https://github.com/tesseractAZ/zwave
    ```
 2. Install **Z-Wave TUI** from the store. There is **no prebuilt image** — Supervisor
-   builds the add-on on your own device from the `Dockerfile`, so the **first install
+   builds the add-on on your own device from `zwave_tui/Dockerfile`, so the **first install
    takes a few minutes** (later updates are quicker). Nothing is pulled from a
    container registry.
 3. Start it. **No configuration is required:** the add-on auto-discovers your
@@ -224,10 +224,15 @@ gate on every PR; `codeql.yml` runs the self-contained CodeQL security check.
 
 ## Local development
 
-- `server/` — TypeScript backend run directly with `tsx` (no build step).
-  `npm test` runs the suite (460+ node:test cases); `npm run typecheck` is the CI
+- `zwave_tui/` — the add-on: `config.yaml`, `Dockerfile`, `build.yaml`, `rootfs/`
+  and `server/`. Everything Supervisor needs to build lives **inside this one
+  directory**, because an add-on is built from its own folder — before v0.25.0
+  the Dockerfile and source sat at the repository root, where a store install
+  could never find them.
+- `zwave_tui/server/` — TypeScript backend run directly with `tsx` (no build step).
+  `npm test` runs the suite (508 node:test cases); `npm run typecheck` is the CI
   gate; `npm start` runs the server.
-- `node scripts/mutation-check.mjs` reverts each behavioural fix one at a time
+- `node server/scripts/mutation-check.mjs` (from `zwave_tui/`) reverts each behavioural fix one at a time
   and requires the suite to go red. A green suite proves the tests run; this
   proves they would *notice*. It refuses to draw a conclusion it has not earned:
   `SURVIVED` is a fix no test protects, `MISSING` means the script has drifted

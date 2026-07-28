@@ -309,8 +309,9 @@ and trust:
 
 **Ingress trust.** A `/console/ws` upgrade is treated as pre-authenticated only
 when it both carries an `X-Ingress-Path` header *and* originates from the
-Supervisor subnet (`isIngressTrusted` in `index.ts`, using `req.ip` — the
-unspoofable socket peer, since `trustProxy: false`). A trusted upgrade skips the
+**pinned Supervisor address** (`isIngressTrusted` in `index.ts`, using `req.ip` —
+the unspoofable socket peer, since `trustProxy: false`). Before v0.24.3 this was
+the whole Supervisor *subnet*, which every sibling add-on shares. A trusted upgrade skips the
 login gate unless the policy sets `requireOnIngress`; a direct-LAN upgrade is
 gated like telnet.
 
@@ -1715,7 +1716,7 @@ rate  = trials > 0 ? events / trials : 0;
 ready = obs >= MIN_OBS (20) && days.length >= MIN_DAYS (3) && trials > 0;
 ```
 
-The Poisson *upper-tail* anomaly test is not applied here — it lives in `symptoms.ts` (`rateAnomalous`, §7.2.6). The baseline only supplies the reference rate λ and a confidence denominator (`trials`).
+The Poisson *upper-tail* anomaly test is not applied here — it lives in `symptoms.ts` (`rateAnomalous`). The baseline only supplies the reference rate λ and a confidence denominator (`trials`).
 
 #### 7.1.5 Continuous series — weighted median + MAD with a precision floor
 
@@ -1839,7 +1840,7 @@ The `SymptomKind` union declares **13** kinds. Eleven have live detector bodies 
 | 12 | `edge-cluster` | cluster (shared repeater; carries `members[]`) | warn | measured | yes |
 | 13 | `mesh-interference` | mesh | warn | measured/inferred | yes |
 
-`edge-cluster` is the only **cluster-scoped** kind: its `nodeId` is the shared upstream repeater (the actionable node), and a new optional `Symptom.members[]` carries the affected downstream node ids. It sits between the per-node detectors and the mesh-wide event (§7.2.7a).
+`edge-cluster` is the only **cluster-scoped** kind: its `nodeId` is the shared upstream repeater (the actionable node), and a new optional `Symptom.members[]` carries the affected downstream node ids. It sits between the per-node detectors and the mesh-wide event.
 
 #### 7.2.4 Per-node detectors — exact firing conditions
 
@@ -2812,7 +2813,7 @@ Every number the Interference Watch uses is a **fixed, tuned constant** — ther
 
 ## 11. Write Actions, Type-CONFIRM Safety & Authentication
 
-Every other chapter of this reference describes how the TUI *reads* the mesh. This one describes the only surface that *writes* to it — the seven mutating verbs the operator can request, and the two independent gauntlets each request must clear before a single byte reaches the Z-Wave JS driver:
+Every other chapter of this reference describes how the TUI *reads* the mesh. This one describes the only surface that *writes* to it — the nine mutating verbs the operator can request, and the two independent gauntlets each request must clear before a single byte reaches the Z-Wave JS driver:
 
 1. a **master gate** (`write_actions_enabled`) that must be flipped on at all, and
 2. a **deliberate, per-action, type-`CONFIRM` modal** that no timer, engine, or streaming event can bypass.
@@ -2882,7 +2883,7 @@ try {
 Two consequences worth stating explicitly:
 
 - The `!o.enabled` check inside `run()` is a **second** guard — the session already refuses to construct actions when disabled, but the runner will not execute even if called directly. Defence in depth.
-- Every outcome (start, ok, failed) is written to the **event ring with source `'you'`**, so the Log screen *closes the loop* on a manual action just as it does for engine/system events. Failures carry the underlying error message verbatim (`errMsg` unwraps `Error.message`).
+- Every outcome (start, ok, failed) is written to the **event ring with source `'you'`**, so the Log screen *closes the loop* on a manual action just as it does for engine/system events. Failures carry the underlying error message **sanitized** — `errMsg` unwraps `Error.message` and, since v0.24.4, is itself the sanitization chokepoint, because that text comes from Home Assistant, the driver or the device and lands directly on the action-result card.
 
 ### 11.3 The master gate: `write_actions_enabled`
 
@@ -3034,7 +3035,9 @@ This is the one thread by which manual operator behaviour feeds the learning eng
 Two independent auth mechanisms protect the add-on. Keep them distinct:
 
 1. **The TUI login gate** (`auth/loginPolicy.ts`) — username/password in front of *interactive TUI sessions* (telnet `:2324` and the xterm `/console`). This is the primary subject here.
-2. **The HTTP/ws origin + write-token layer** (`auth.ts`, `createAuth`) — CORS origin allow-list, the `/console/ws` upgrade origin check, and `requireWriteAuth` (a Fastify preHandler for future mutating HTTP routes, accepting Supervisor-sourced ingress **or** same-origin **or** the `X-Zwave-Write-Token` header via constant-time compare). v0.1 exposes no mutating HTTP routes, so today this layer only guards CORS + the ws upgrade; **actuating the mesh is gated by `write_actions_enabled` at the action layer, not here.**
+2. **The HTTP/ws origin layer** (`auth.ts`, `createAuth`) — the CORS origin allow-list and the `/console/ws` upgrade origin check. **Actuating the mesh is gated by `write_actions_enabled` at the action layer, not here.**
+
+> **Changed in v0.24.4.** This layer used to include `requireWriteAuth`, a Fastify preHandler described as protecting "future mutating HTTP routes" via Supervisor-sourced ingress, same-origin, or an `X-Zwave-Write-Token` header. It was registered on **zero** routes and had no caller — there are no mutating HTTP routes; every action goes through the TUI. Its bootstrap nonetheless wrote a long-lived token to `/data` on every boot. A control that authorises nothing while persisting a secret is worse than none: it implies a protection that does not exist. `requireWriteAuth`, `tokenEquals` and `loadOrCreateWriteToken` are gone. An existing install may still hold a stale `/data/zwave-write-token.txt`; it authorises nothing and can be deleted.
 
 #### Trust model — ingress-trusted vs telnet-always-gated
 
@@ -3044,7 +3047,9 @@ The decisive line is in the `TuiSession` constructor:
 authRequired = !!auth?.enabled && (!trusted || !!auth?.requireOnIngress)
 ```
 
-- **HA Ingress (sidebar)** connections are `trusted`. Home Assistant has already authenticated the user; the add-on recognises them by the `X-Ingress-Path` header **and** a Supervisor-subnet source IP. `isIngressTrusted(req) = !!headers['x-ingress-path'] && isSupervisorSource(req.ip)` (`index.ts:130`), where `isSupervisorSource` matches `172.30.32.0/23` (i.e. `172.30.32.*`/`172.30.33.*`, normalising IPv4-mapped IPv6). The header **alone is forgeable** by anything reaching the published LAN port, so the socket-peer pin (`trustProxy: false`, so `req.ip` is unspoofable) is what makes it trustworthy. Trusted connections **skip the login** unless `requireOnIngress` is set.
+- **HA Ingress (sidebar)** connections are `trusted`. Home Assistant has already authenticated the user; the add-on recognises them by the `X-Ingress-Path` header **and** a Supervisor-subnet source IP. `isIngressTrusted(req) = !!headers['x-ingress-path'] && isSupervisorSource(req.ip)`, where `isSupervisorSource` tests membership of the address `supervisor` actually **resolves to**, pinned once at startup by `pinSupervisorAddress()` before the server listens (normalising IPv4-mapped IPv6). Resolution failure **fails closed**: nothing is trusted and the operator simply logs in.
+
+> **Changed in v0.24.3.** This used to match the whole **`172.30.32.0/23`** hassio bridge — which is where every *sibling add-on container* lives, not just the Supervisor. Because `:8788` is ingress-only, every peer able to open that socket was already inside the `/23`, so the second term was always true and the expression collapsed to *"did the client send a header it chooses."* Any sibling add-on — or an SSRF in a third-party one — got a login-free operator session. The header **alone is forgeable** by anything reaching the published LAN port, so the socket-peer pin (`trustProxy: false`, so `req.ip` is unspoofable) is what makes it trustworthy. Trusted connections **skip the login** unless `requireOnIngress` is set.
 - **Telnet (`:2324`)** is always constructed with `trusted: false` (`server.ts:278`) — it is direct LAN and never HA-authenticated — so it **always faces the login gate whenever `auth_enabled`.**
 - The `/console/ws` transport computes `trusted = isTrusted(req)` per upgrade (`wsConsole.ts:370`).
 
@@ -3058,7 +3063,7 @@ authRequired = !!auth?.enabled && (!trusted || !!auth?.requireOnIngress)
 - The final return is `byName.has(username) && ok`, so the dummy path can never authenticate even on an astronomically unlikely scrypt collision.
 - It uses async `crypto.scrypt` (via `scryptAsync`), never `scryptSync`, so credential checking **never blocks the single Node event loop**. The comparison is `timingSafeEqual`.
 
-`parseUsers(json)` tolerates malformed input: non-JSON or non-array → `[]`; each entry needs a non-empty trimmed `username`.
+`parseUsers(json)` tolerates malformed input: non-JSON or non-array → `[]`; each entry needs a non-empty trimmed `username` **and a non-empty `password`**. Before v0.24.3 only the username was checked, so a row with a blank password became a real account whose password was `""` — and because `hasUsers()` then returned true, the fail-closed "no users configured" branch never ran.
 
 #### Shared per-peer backoff
 
@@ -3120,7 +3125,8 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 | `dummyHash` + `byName.has(...) && ok` | `loginPolicy.ts:138, 159` | Username enumeration by timing; collision auth |
 | Shared per-peer throttle, capped map | `loginPolicy.ts:167–179` | Reconnect resetting brute-force budget; map growth flood |
 | `mode='denied'` when enabled w/o users | `session.ts:190–199` | Silently allowing LAN access on misconfig |
-| `X-Ingress-Path` **and** Supervisor-subnet IP | `index.ts:130`, `auth.ts:91` | Forged ingress header from the LAN port |
+| `X-Ingress-Path` **and** the pinned Supervisor address | `index.ts`, `auth.ts` | Forged ingress header from the LAN port; a sibling add-on forging ingress trust |
+| Per-source-IP telnet cap (4) + idle reclaim + TCP keepalive | `telnet/server.ts` | One host taking every telnet slot; silent sockets holding slots forever |
 | Login buffers length-bounded, input ignored while verifying | `session.ts:237, 262, 264` | Buffer abuse; keys racing an in-flight scrypt |
 
 ## 12. Configuration, Deployment, Security & Operations
@@ -3194,7 +3200,6 @@ advanced ones. Every option below is a **tunable default** unless noted.
 | `signal_display` | `margin` | `list(margin\|dbm)` | `SIGNAL_DISPLAY` | `config.signalDisplay` | Anything not exactly `"dbm"` ⇒ `'margin'`. Live-toggleable in the TUI (`T`). |
 | `write_actions_enabled` | `false` | `bool` | `WRITE_ACTIONS_ENABLED` (1/0) | `config.writeActions` | Master gate for all mutating actions. Off ⇒ pure monitor. |
 | `telnet_enabled` | `true` | `bool` | `TELNET_ENABLED` (1/0) | `config.telnet.enabled` | Fail-**open** (`!== '0'`). |
-| `telnet_port` | `2324` | `port` | `TELNET_PORT` | `config.telnet.port` | The only LAN-published port (see §12.9). |
 | `auth_enabled` | `false` | `bool` | `AUTH_ENABLED` (1/0) | `config.auth.enabled` | Gates DIRECT (telnet/`:8788`) access only. |
 | `auth_require_on_ingress` | `false` | `bool` | `AUTH_REQUIRE_ON_INGRESS` (1/0) | `config.auth.requireOnIngress` | Also gate the HA-sidebar console. |
 | `users` | `[]` | repeatable `{username: str, password: password}` | `ZWAVE_USERS` (JSON) | `config.auth.users` | See §12.2.1 — lifted with `jq`, not `bashio::config`. |
@@ -3202,10 +3207,10 @@ advanced ones. Every option below is a **tunable default** unless noted.
 | `auth_idle_lock_min` | `0` | `int(0,240)` | `AUTH_IDLE_LOCK_MIN` | `config.auth.idleLockMin` | Minutes of no keystrokes ⇒ re-lock; `0` disables. |
 | `refresh_interval` | `2` | `int(1,30)` | `REFRESH_INTERVAL_MS` | `config.refreshMs` | **seconds → ms**: run script does `* 1000`. Cheap render/roster cadence. |
 | `route_poll_interval` | `10` | `int(5,120)` | `ROUTE_POLL_INTERVAL_MS` | `config.routePollMs` | **seconds → ms**. Expensive route/controller-stats cadence; also the evidence-sample tick. |
-| `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` | Surfaced from bashio to the server logger. |
+| `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. |
 | `zwave_entry_id` | `""` | `str?` | `ZWAVE_ENTRY_ID` | `config.entryId` (`|| null`) | Empty ⇒ auto-discover via `config_entries/get`. |
 | `ha_ws_url` | `ws://supervisor/core/websocket` | `str?` | `HA_WS_URL` | `config.haWsUrl` | Override to point at a different Core/driver WS. |
-| `driver_ws_url` | `ws://core-zwave-js:3000` | `str?` | `DRIVER_WS_URL` | `config.driverWsUrl` (`|| null`) | **Empty ⇒ disabled.** Strictly read-only telemetry (§12.9). |
+| `driver_ws_url` | `ws://core-zwave-js:3000` | `str?` | `DRIVER_WS_URL` | `config.driverWsUrl` (`|| null`) | **Empty ⇒ disabled.** Strictly read-only telemetry. |
 
 Two schema choices are deliberate and marked "do not tidy" in `config.yaml`:
 
@@ -3237,7 +3242,7 @@ export ZWAVE_USERS="$(jq -c '.users // []' /data/options.json 2>/dev/null || ech
 
 `config.ts` then runs it through `parseUsers(process.env.ZWAVE_USERS)`
 (`auth/loginPolicy.ts`), which JSON-parses defensively (any parse failure or
-non-array ⇒ `[]`) and keeps only rows with a non-empty `username`.
+non-array ⇒ `[]`) and keeps only rows with a non-empty `username` **and** a non-empty `password`.
 
 ### 12.3 Internal paths and the `/data` volume
 
@@ -3382,7 +3387,8 @@ involved in either.
 
 Three workflows guard and publish the project:
 
-1. **`ci.yml`** (every push + PR — the required gate) — type-checks and runs the
+1. **`ci.yml`** (every push + PR — the gate, by convention; `main` carries no
+   branch protection, so it is not mechanically enforced) — type-checks and runs the
    full server test suite (`tsc --noEmit -p tsconfig.test.json`, which covers the
    test tree too), smoke-builds the add-on container (amd64), and builds the
    printable manual, failing the PR if `DOCS.md` stops converting cleanly.
@@ -3411,8 +3417,20 @@ treated as **privileged**. `SECURITY.md` and the code together define the postur
 **Read-only by default.** `write_actions_enabled` defaults **off**; a fresh
 install exposes no mutating control. `homeassistant_api: true` grants the add-on
 the Core WS/REST API (via `SUPERVISOR_TOKEN`) needed for `zwave_js/*` reads;
-`hassio_api: false` because no Supervisor-level calls are made; `panel_admin:
-false`; `host_network: false`.
+`hassio_api: false` because no Supervisor-level calls are made; **`panel_admin:
+true`** — the sidebar panel is restricted to Home Assistant **administrators**;
+`host_network: false`.
+
+> **Changed in v0.24.4.** This was `panel_admin: false`, which exposed the panel
+> to *every* HA user while the add-on treats "arrived via ingress" as full
+> operator authority — so the only authorisation the mesh-mutating console
+> received was "HA let this browser through", and that bar had been lowered to
+> non-admins. The official Z-Wave JS add-on takes the same position
+> (`require_admin: true`). Note that Home Assistant registers an add-on panel
+> **once**: after changing this, `require_admin` stays stale in the running
+> frontend until an HA **Core restart** — an add-on restart, an add-on update,
+> and a `hassio` config-entry reload all leave it unchanged. Verify with the
+> `get_panels` WebSocket command, not by reading this file.
 
 **Every mutation is human-gated, and the engine is advisory-only.** When write
 actions are enabled, each action — mesh maintenance (ping / refresh / re-interview /
@@ -3433,7 +3451,7 @@ never as engine advice.)
 **All mesh mutations ride the HA WebSocket** (Supervisor-token authenticated).
 The separate, **unauthenticated driver WebSocket** (`ws://core-zwave-js:3000`) is
 used **strictly read-only**, behind a closed command allowlist (`set_api_schema`,
-`start_listening` — plus cached route reads per §2.1), and is **never proxied or
+`start_listening` — exactly two, frozen), and is **never proxied or
 re-exposed** to the TUI, ingress, or logs verbatim. Empty `driver_ws_url`
 disables it entirely; an unreachable server, an untested schema, or a
 different-network home id simply leaves the extra telemetry blank while everything

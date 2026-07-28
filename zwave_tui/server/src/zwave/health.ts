@@ -38,8 +38,9 @@
  *     works) but the expected report never arrived — a return-path / responsiveness
  *     problem. The raw `commandsDroppedTX`/`commandsDroppedRX` counts are still
  *     shown on the Detail TRAFFIC row as honest context, just never folded into
- *     the score. (The hard RF-failure event — Alive↔Dead flapping — is a future
- *     symptom-engine detector; here a currently-DEAD node is the D gate.)
+ *     the score. (The hard RF-failure event — Alive↔Dead flapping — is the symptom
+ *     engine's `dead-flap` detector; the SCORE still does not fold it in, and
+ *     here a currently-DEAD node is the D gate.)
  *
  *   Long-Range (nodeId ≥ 256) nodes talk *directly* to the controller in a
  *   star — mesh routing is meaningless — so the 20% Route weight is

@@ -2,7 +2,15 @@ name: CI
 
 # Type-check + test the server and smoke-build the add-on container on every
 # push and PR. Cheap insurance that no broken commit lands on main and gets
-# installed onto the Pi. This is the required check the release PR waits on.
+# installed onto the Pi.
+#
+# NOTE: this is the gate the release process waits on BY CONVENTION. `main` has
+# no branch protection and no ruleset, so nothing mechanically prevents a merge
+# while these checks are red — the maintainer merges with `--squash --admin`.
+# Calling it "the required check" (as this comment did) overstated it. To make
+# it genuinely required, add a branch-protection rule on `main` requiring
+# "Type-check & test (server)" and the smoke builds, leaving admin bypass ON so
+# a solo maintainer can still land an urgent fix.
 
 on:
   push:
@@ -26,41 +34,79 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: server/package-lock.json
+          cache-dependency-path: zwave_tui/server/package-lock.json
 
       - name: Install
-        working-directory: server
+        working-directory: zwave_tui/server
         run: npm ci
 
       - name: Type-check
-        working-directory: server
+        working-directory: zwave_tui/server
         run: npm run typecheck
 
       - name: Test
-        working-directory: server
+        working-directory: zwave_tui/server
         run: npm test
 
   docker-smoke:
-    # Build the Home Assistant add-on container (amd64 only) on every push/PR.
-    # Catches Dockerfile regressions before they reach the Pi. Buildx cache
-    # in GitHub Actions cache cuts subsequent runs to ~1–2 minutes.
-    name: Dockerfile smoke build (amd64)
+    # Build the Home Assistant add-on container on every push/PR, for EVERY
+    # architecture config.yaml declares. Previously this built amd64 only —
+    # which meant aarch64, the one architecture actually deployed (a Pi 5), was
+    # never compiled in CI, so an arch-specific Dockerfile or apk regression
+    # would have reached the Pi unseen. Buildx cache keeps repeat runs ~1-2 min.
+    #
+    # The build context is ./zwave_tui, matching what HA Supervisor uses: an
+    # add-on is built from ITS OWN directory, not the repository root.
+    name: Dockerfile smoke build (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, aarch64]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+        if: matrix.arch != 'amd64'
+
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # Read BUILD_FROM from build.yaml rather than hardcoding it here. The two
+      # used to be duplicated with nothing checking they agreed, so CI could go
+      # on smoke-building a base image the add-on no longer uses.
+      # ARCH goes through the environment, never straight into the script body.
+      # `${{ }}` is expanded by the runner BEFORE bash sees the line, so
+      # interpolating any input directly into `run:` splices text into the
+      # script. matrix.arch is a trusted literal from this file, but the shape
+      # is the one that bites when the value later comes from somewhere else.
+      - name: Resolve BUILD_FROM from build.yaml
+        id: base
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          img=$(awk -v arch="$ARCH" '
+            /^build_from:/      { inblock = 1; next }
+            inblock && /^[^[:space:]]/ { inblock = 0 }
+            inblock && $1 == arch":" { print $2; found = 1; exit }
+            END { if (!found) exit 1 }
+          ' zwave_tui/build.yaml) || {
+            echo "::error::no build_from entry for '$ARCH' in zwave_tui/build.yaml"
+            exit 1
+          }
+          echo "image=$img" >> "$GITHUB_OUTPUT"
+          echo "BUILD_FROM($ARCH) = $img"
 
       - uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
+          context: ./zwave_tui
+          file: ./zwave_tui/Dockerfile
+          platforms: linux/${{ matrix.arch == 'aarch64' && 'arm64' || 'amd64' }}
           push: false
           load: false
           build-args: |
-            BUILD_FROM=ghcr.io/home-assistant/amd64-base:3.21
-            BUILD_ARCH=amd64
+            BUILD_FROM=${{ steps.base.outputs.image }}
+            BUILD_ARCH=${{ matrix.arch }}
             BUILD_DATE=ci
             BUILD_DESCRIPTION=Z-Wave TUI (smoke)
             BUILD_NAME=Z-Wave TUI
@@ -68,16 +114,16 @@ jobs:
             BUILD_REPOSITORY=${{ github.repository }}
             BUILD_VERSION=ci
           # ignore-error=true so a flaky GHA cache doesn't fail the smoke build.
-          cache-from: type=gha,scope=docker-smoke
-          cache-to: type=gha,mode=max,scope=docker-smoke,ignore-error=true
+          cache-from: type=gha,scope=docker-smoke-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-smoke-${{ matrix.arch }},ignore-error=true
 
   docs:
     # Assemble README + SECURITY + zwave_tui/DOCS.md into one printable manual on
     # every push/PR, as BOTH an editable .docx (pandoc) and a reader-friendly
     # .pdf (LibreOffice converts the .docx — no LaTeX). Purpose: (1) fail the PR
     # if DOCS.md no longer converts cleanly, and (2) upload a downloadable offline
-    # manual for the branch. This repo does NOT publish releases, so this is the
-    # only doc-build path.
+    # manual for the branch. publish-release.yml builds the same manual again and
+    # attaches it to the GitHub Release; this job is the per-branch check.
     name: Build documentation (.docx + .pdf)
     runs-on: ubuntu-latest
     steps:

@@ -377,6 +377,36 @@ const MUTANTS = [
     find: '    if (sameIp >= MAX_CONNS_PER_IP) {',
     repl: '    if (false as boolean) {',
     what: 'one host cannot take every telnet slot' },
+  { id: 'idle-sweep', file: 'src/telnet/server.ts',
+    find: '      if (conn.lastRxAt > cutoff) continue;',
+    repl: '      if (true) continue;',
+    what: 'a socket that has RECEIVED nothing is reclaimed (v0.24.4 used socket.setTimeout, which a WRITE resets — the 1 Hz redraw refreshed it forever and the timeout never fired)' },
+
+  { id: 'idle-rx-stamp', file: 'src/telnet/server.ts',
+    find: "    socket.on('data', (d) => { conn.lastRxAt = Date.now(); onData(conn, d as Buffer); });",
+    repl: "    socket.on('data', (d) => { onData(conn, d as Buffer); });",
+    what: 'inbound data refreshes the idle clock, so an ACTIVE operator is never evicted' },
+
+  { id: 'telnet-keepalive', file: 'src/telnet/server.ts',
+    find: '    socket.setKeepAlive(true, keepAliveMs);',
+    repl: '    void keepAliveMs;',
+    what: 'accepted sockets get TCP keepalive, so a half-open peer that never sends a FIN is detected' },
+
+  { id: 'actions-sanitize', file: 'src/zwave/zwaveActions.ts',
+    find: '      const msg = sanitizeEventText(errMsg(e));',
+    repl: '      const msg = errMsg(e);',
+    what: 'the action-result card sanitizes whatever an HA service call threw' },
+
+  { id: 'sdkversion-sanitize', file: 'src/zwave/zwaveData.ts',
+    find: '    sdkVersion: sanitizeStrOrNull(raw.sdk_version),',
+    repl: '    sdkVersion: (raw.sdk_version == null ? null : String(raw.sdk_version)),',
+    what: 'driver-sourced controller version strings are sanitized before the CONTROLLER screen renders them' },
+
+  { id: 'logconfig-consumed', file: 'src/index.ts',
+    find: 'const log = createLogger(config.logLevel);',
+    repl: "const log = createLogger('info');",
+    what: 'the log_level option actually reaches the logger (it was dead config through v0.24.4)' },
+
   { id: 'writetoken-gone', file: 'src/auth.ts',
     find: '  return { sameOrigins, corsOriginCallback };',
     // Re-introduce the identifier in a COMPILING way — the source-scan test

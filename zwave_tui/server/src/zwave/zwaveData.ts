@@ -21,10 +21,10 @@
  *      each node against the registry maps → `NodeSnapshot`. Build one
  *      `ControllerSnapshot` from `controller` + the controller device.
  *
- * v0.1 is READ-ONLY and stats are partial: `NodeSnapshot.stats` is all-null and
- * `ControllerSnapshot.statistics` / `backgroundRSSI` are empty. The live
- * `subscribe_node_statistics` / `subscribe_controller_statistics` /
- * `subscribe_events` wiring is v0.2 — see `startLiveStatistics()`.
+ * Live statistics are wired: `subscribeStatistics()` subscribes
+ * `zwave_js/subscribe_controller_statistics`, `zwave_js/subscribe_node_statistics`
+ * and the activity events, so `NodeSnapshot.stats` and the controller's
+ * `statistics` / `backgroundRSSI` carry real readings.
  *
  * ANTI-FOOTGUN: `zwave_js/network_status` takes `entry_id`, NOT `config_entry_id`
  * (the latter rejects with `invalid_format`).
@@ -391,7 +391,8 @@ export function sanitizeEventText(s: string): string {
     .slice(0, 300);
 }
 
-/** All-null stats — v0.1 has no live statistics subscription yet. */
+/** All-null stats — the per-node fallback for a node that has not reported yet.
+ *  (The live subscriptions are set up in `subscribeStatistics()`.) */
 function emptyStats(): NodeStats {
   return {
     rtt: null,
@@ -1503,8 +1504,7 @@ class ZwaveDataImpl implements ZwaveData {
     return {
       homeId: raw.home_id ?? null,
       nodeId: raw.own_node_id ?? 1,
-      sdkVersion: sanitizeStrOrNull(raw.sdk_version),
-      firmwareVersion: sanitizeStrOrNull(raw.firmware_version),
+      ...controllerVersions(raw),
       rfRegion: rfRegionLabel(raw.rf_region),
       isPrimary: raw.is_primary === true,
       isSUC: raw.is_suc === true,
@@ -2141,7 +2141,31 @@ function strOrNull(x: unknown): string | null {
 
 /** strOrNull + sanitizeLabel, for device-reported strings that reach a TUI frame
  *  (firmware versions). Strips control/ESC bytes + folds wide chars; null stays null. */
-function sanitizeStrOrNull(x: unknown): string | null {
+/**
+ * Sanitizing string coercion for driver-sourced scalars (controller
+ * `sdk_version` / `firmware_version`). Exported so the test binds to the real
+ * function: a v0.24.4 test COMMENT claimed this was covered while the only
+ * assertion exercised `sanitizeEventText`, a different function entirely.
+ */
+/**
+ * The controller's driver-sourced version strings, sanitized.
+ *
+ * Extracted from `buildController` so a test can bind to the CALL SITE. A test
+ * that only exercised `sanitizeStrOrNull` left the two call sites free to drop
+ * the sanitizer without any test noticing — which the mutation harness proved
+ * by surviving exactly that change.
+ */
+export function controllerVersions(raw: { sdk_version?: unknown; firmware_version?: unknown }): {
+  sdkVersion: string | null;
+  firmwareVersion: string | null;
+} {
+  return {
+    sdkVersion: sanitizeStrOrNull(raw.sdk_version),
+    firmwareVersion: sanitizeStrOrNull(raw.firmware_version),
+  };
+}
+
+export function sanitizeStrOrNull(x: unknown): string | null {
   const s = strOrNull(x);
   return s == null ? null : sanitizeLabel(s);
 }

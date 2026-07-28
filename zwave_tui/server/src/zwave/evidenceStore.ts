@@ -44,7 +44,7 @@
  * survives ring eviction so "no evidence rows" is distinguishable from "node
  * never communicated" — the ghost detector depends on that distinction.
  *
- * Reserved fields (null until the v0.13 read-only driver-WS client lands):
+ * Driver-WS fields (populated since v0.13 by `driverWsClient`):
  * per-sample lastSeen, controller per-channel bgRssi. Reserving them now means
  * v0.13 lands without a schema migration or baseline re-learn.
  */

@@ -1,0 +1,26 @@
+# Keep the SHA-pinned GitHub Actions current.
+#
+# Every workflow pins its actions by commit SHA rather than by a floating tag,
+# which is the right call for supply-chain safety — but a pin with no update
+# path silently rots, and a rotted pin is how a repo ends up running an action
+# with a known advisory against it. Dependabot is the missing half of pinning.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies"]
+
+  # The add-on's server dependencies. `open-pull-requests-limit: 3` keeps this
+  # from burying the repo — a solo project reviews these by hand.
+  - package-ecosystem: npm
+    directory: "/zwave_tui/server"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies"]

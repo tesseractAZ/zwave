@@ -44,6 +44,13 @@ interface TelnetConn {
   socket: Socket;
   /** Source address, kept for the per-IP connection cap. */
   ip: string;
+  /**
+   * Epoch ms of the last byte RECEIVED from the peer. Deliberately not "last
+   * activity": the server writes a redraw every second, and a write must not
+   * count as evidence the peer is alive — the absent peer is exactly what the
+   * reclaim sweep exists to detect.
+   */
+  lastRxAt: number;
   session: TuiSession;
   inbuf: Buffer;
   timer: NodeJS.Timeout | null;
@@ -185,6 +192,15 @@ export interface TelnetServerOptions {
   auth?: AuthPolicy;
   /** Mutating-action runner (v0.3), present only when write_actions_enabled. */
   actions?: ActionRunner;
+  /**
+   * Read-inactivity timeout and TCP keepalive, in ms. Production never sets
+   * these — the defaults below are the shipped values. They exist so tests can
+   * drive the reclaim path with a short timeout instead of asserting that a
+   * line of source exists, which is what the v0.24.4 test did: deleting BOTH
+   * `setKeepAlive` and `setTimeout` left all 497 tests green.
+   */
+  idleTimeoutMs?: number;
+  keepAliveMs?: number;
 }
 
 /** Concurrent telnet connection cap — bounds resource use (and, with the login
@@ -212,6 +228,8 @@ const KEEPALIVE_MS = 60_000;
 
 export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void } {
   const { data, host, port, log, signalDisplay, auth, actions } = opts;
+  const idleTimeoutMs = opts.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
+  const keepAliveMs = opts.keepAliveMs ?? KEEPALIVE_MS;
   const conns = new Set<TelnetConn>();
 
   const safeWrite = (socket: Socket, payload: string | Buffer) => {
@@ -298,13 +316,16 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       try { socket.end('Too many connections from your address — try again later.\r\n'); } catch { /* ignore */ }
       return;
     }
-    // Reclaim quiet and half-open peers. setTimeout fires on READ inactivity,
-    // so the server's own 1 Hz redraw does not keep a dead socket alive.
-    socket.setKeepAlive(true, KEEPALIVE_MS);
-    socket.setTimeout(IDLE_TIMEOUT_MS, () => {
-      log(`telnet: idle timeout — closing ${peerIp}`);
-      try { socket.destroy(); } catch { /* already gone */ }
-    });
+    // Half-open peers (yanked cable, expired NAT entry) never send a FIN, so
+    // ask the kernel to probe them.
+    socket.setKeepAlive(true, keepAliveMs);
+    // NOTE: the idle reclaim is the `sweep` interval below, NOT
+    // `socket.setTimeout`. v0.24.4 used setTimeout and claimed in a comment
+    // that it "fires on READ inactivity, so the server's own 1 Hz redraw does
+    // not keep a dead socket alive". That is not how Node behaves: the socket
+    // timer is reset by reads AND writes, so the redraw refreshed it forever
+    // and the timeout could never fire. The feature was inert from the day it
+    // shipped, and the test that covered it only grepped for the source line.
     const session = new TuiSession({
       write: (payload) => safeWrite(socket, payload),
       data,
@@ -316,7 +337,7 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       peer: peerIp,
       onClose: () => { try { socket.end(); } catch { /* already gone */ } },
     });
-    const conn: TelnetConn = { socket, ip: peerIp, session, inbuf: Buffer.alloc(0), timer: null, escTimer: null };
+    const conn: TelnetConn = { socket, ip: peerIp, session, inbuf: Buffer.alloc(0), timer: null, escTimer: null, lastRxAt: Date.now() };
     conns.add(conn);
     log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${conns.size} active)`);
 
@@ -338,7 +359,7 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     // node:net never delivers strings on a socket without setEncoding(); the
     // @types/node ≥ 22.19 union of `string | Buffer` is a theoretical-only
     // possibility for our setup, so coerce to keep the inner signature tight.
-    socket.on('data', (d) => onData(conn, d as Buffer));
+    socket.on('data', (d) => { conn.lastRxAt = Date.now(); onData(conn, d as Buffer); });
     socket.on('close', () => endConn(conn));
     socket.on('error', () => endConn(conn));
   });
@@ -346,8 +367,23 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
   server.on('error', (e: any) => log(`telnet: server error: ${e?.message ?? e}`));
   server.listen(port, host);
 
+  // Reclaim connections that have RECEIVED nothing for idleTimeoutMs. Runs on
+  // its own cadence rather than per-socket so one timer covers every peer.
+  // unref()'d so it can never hold the process open on its own.
+  const sweepMs = Math.min(60_000, Math.max(50, Math.floor(idleTimeoutMs / 2)));
+  const sweep = setInterval(() => {
+    const cutoff = Date.now() - idleTimeoutMs;
+    for (const conn of [...conns]) {
+      if (conn.lastRxAt > cutoff) continue;
+      log(`telnet: idle ${idleTimeoutMs}ms with no inbound data — closing ${conn.ip}`);
+      endConn(conn);
+    }
+  }, sweepMs);
+  sweep.unref?.();
+
   return {
     stop: () => {
+      clearInterval(sweep);
       for (const conn of [...conns]) endConn(conn);
       server.close();
     },
