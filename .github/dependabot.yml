@@ -13,6 +13,21 @@ updates:
     commit-message:
       prefix: "ci"
     labels: ["dependencies"]
+    groups:
+      # ★ github/codeql-action/{init,autobuild,analyze} are ONE action whose
+      #   parts must move together, but Dependabot sees three dependencies and
+      #   opens three PRs. Each one alone leaves the trio mismatched, and CodeQL
+      #   fails with "CodeQL job status was configuration error" — so those PRs
+      #   are not merely risky, they are unmergeable individually. Grouping is
+      #   the fix; it produces a single PR that bumps all three.
+      codeql:
+        patterns:
+          - "github/codeql-action*"
+      # The docker/* setup actions are used as a set; one PR keeps them coherent
+      # and keeps the review queue short.
+      docker:
+        patterns:
+          - "docker/*"
 
   # The add-on's server dependencies. `open-pull-requests-limit: 3` keeps this
   # from burying the repo — a solo project reviews these by hand.
@@ -24,3 +39,16 @@ updates:
     commit-message:
       prefix: "deps"
     labels: ["dependencies"]
+    ignore:
+      # ★ @types/node MUST track the RUNTIME major, not the newest release.
+      #   The container installs Node 22 (alpine 3.21) and CI runs 22. Types for
+      #   a newer major would let `tsc` bless APIs that do not exist at runtime —
+      #   a green typecheck that proves nothing. Raise this deliberately, with
+      #   the Dockerfile and ci.yml, when the runtime itself moves.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      # Patch/minor runtime deps in one PR; majors still come through singly so
+      # each gets a real look.
+      server-minor:
+        update-types: ["minor", "patch"]
