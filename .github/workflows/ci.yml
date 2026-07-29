@@ -59,17 +59,20 @@ jobs:
     #
     # The build context is ./zwave_tui, matching what HA Supervisor uses: an
     # add-on is built from ITS OWN directory, not the repository root.
+    #
+    # ★ Each architecture builds on a NATIVE runner. Building aarch64 on an x86
+    #   runner meant every instruction of `apk add` and `npm ci` went through
+    #   QEMU user-mode emulation — the first such run took over 35 minutes and
+    #   was still going. `ubuntu-24.04-arm` is free for public repositories, so
+    #   the emulation layer buys nothing here.
     name: Dockerfile smoke build (${{ matrix.arch }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
         arch: [amd64, aarch64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-        if: matrix.arch != 'amd64'
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
