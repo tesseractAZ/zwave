@@ -3387,8 +3387,9 @@ involved in either.
 
 Three workflows guard and publish the project:
 
-1. **`ci.yml`** (every push + PR — the gate, by convention; `main` carries no
-   branch protection, so it is not mechanically enforced) — type-checks and runs the
+1. **`ci.yml`** (every push + PR — a **required** check: `main` is protected and
+   these contexts must pass to merge, with admin bypass left on for urgent
+   fixes) — type-checks and runs the
    full server test suite (`tsc --noEmit -p tsconfig.test.json`, which covers the
    test tree too), smoke-builds the add-on container (amd64), and builds the
    printable manual, failing the PR if `DOCS.md` stops converting cleanly.
