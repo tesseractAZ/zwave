@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.25.1 — 2026-07-28
+
+**Dependency and CI maintenance.** No behaviour change to the add-on.
+
+Adding Dependabot in v0.25.0 immediately produced eight pull requests and
+exposed two things worth recording:
+
+* `github/codeql-action/{init,autobuild,analyze}` are **one action whose parts
+  must move in lockstep**, but Dependabot sees three dependencies and opened a
+  separate PR for each. Every one of them left the trio mismatched and CodeQL
+  failed with `CodeQL job status was configuration error` — those PRs were not
+  risky-but-reviewable, they were unmergeable individually. A `groups:` rule now
+  bumps all three together.
+* `@types/node` was offered a 22 → 26 major bump. The container installs Node 22
+  and CI runs 22, so types for a newer major would let `tsc` accept APIs that do
+  not exist at runtime — a green typecheck proving nothing. Major bumps of that
+  package are now ignored; it moves when the runtime does.
+
+**The aarch64 smoke build now runs on a native ARM runner.** v0.25.0 added it
+correctly but ran it on an x86 runner, so `apk add` and `npm ci` went through
+QEMU user-mode emulation: the first real run passed **35 minutes** and was still
+going, blocking every PR behind a required check. `ubuntu-24.04-arm` is free for
+public repositories, and the same build now completes in about a minute.
+
+**Runtime dependencies bumped** — `@fastify/cors` 10 → 11, `@fastify/compress`
+8 → 9, `ws` 8.21.0 → 8.21.1, `tsx` 4.23.0 → 4.23.1. Both Fastify plugin majors
+were checked beyond the green suite, because `index.ts` — where plugins are
+registered — has no test coverage, so a passing suite would not notice a plugin
+that refuses to load. The full stack (compress + cors + websocket, in the order
+`index.ts` uses) was registered against the resolved tree on Fastify 5.10.0 and
+a request exercised end-to-end: registration succeeds and the CORS header is
+still returned.
+
+**`main` is now a protected branch.** The five CI contexts are required,
+force-pushes and deletion are blocked, and admin bypass is deliberately left on
+so a solo maintainer can still land an urgent fix. v0.25.0 documented, correctly
+at the time, that no protection existed; that note is now corrected.
+
 ## 0.25.0 — 2026-07-28
 
 **The add-on could not be installed from the store.** `repository.yaml` and the
