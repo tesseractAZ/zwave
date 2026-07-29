@@ -4,13 +4,15 @@ name: CI
 # push and PR. Cheap insurance that no broken commit lands on main and gets
 # installed onto the Pi.
 #
-# NOTE: this is the gate the release process waits on BY CONVENTION. `main` has
-# no branch protection and no ruleset, so nothing mechanically prevents a merge
-# while these checks are red — the maintainer merges with `--squash --admin`.
-# Calling it "the required check" (as this comment did) overstated it. To make
-# it genuinely required, add a branch-protection rule on `main` requiring
-# "Type-check & test (server)" and the smoke builds, leaving admin bypass ON so
-# a solo maintainer can still land an urgent fix.
+# These ARE required checks: `main` carries a branch-protection rule requiring
+# "Type-check & test (server)", both "Dockerfile smoke build" jobs, the docs
+# build and "Analyze (javascript-typescript)". Force-pushes and deletions of
+# `main` are blocked. Admin bypass is deliberately left ON (`enforce_admins:
+# false`) so a solo maintainer can still land an urgent fix with
+# `--squash --admin` — the rule is a guard rail, not a lock.
+#
+# Renaming a job here without updating the protection contexts silently drops
+# that check from the required set; the rule matches on the job NAME.
 
 on:
   push:
