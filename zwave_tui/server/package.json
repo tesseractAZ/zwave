@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@fastify/compress": "^9",
-    "@fastify/cors": "^10",
+    "@fastify/cors": "^11",
     "@fastify/websocket": "^11",
     "@xterm/xterm": "6.0.0",
     "fastify": "^5",
