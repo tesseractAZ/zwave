@@ -160,3 +160,36 @@ test('server/package.json version tracks the add-on version', () => {
   const pkg = JSON.parse(read('server/package.json')) as { version: string };
   assert.equal(pkg.version, cfg[1], 'server/package.json version has drifted from config.yaml');
 });
+
+test('the Node major is the same in dev, CI and the container', () => {
+  // These had silently diverged: the container installs Node 22 (alpine 3.21 is
+  // the newest Home Assistant base image, and it ships nodejs 22.x), CI pinned
+  // 22 — but a developer machine runs whatever is installed, and this suite was
+  // being run locally on Node 26. A green local run on a different major than
+  // production is a weaker signal than it looks, in exactly the direction that
+  // hides problems: newer Node accepts more.
+  //
+  // `engines` is the single source of truth; .nvmrc and CI must agree with it.
+  const pkg = JSON.parse(read('server/package.json')) as { engines?: { node?: string } };
+  const range = pkg.engines?.node;
+  assert.ok(range, 'server/package.json declares no engines.node');
+  const major = /(\d+)/.exec(range)?.[1];
+  assert.ok(major, `could not read a major out of engines.node "${range}"`);
+
+  const nvmrc = read('server/.nvmrc').trim();
+  assert.equal(nvmrc, major, `.nvmrc (${nvmrc}) disagrees with engines.node (${major})`);
+
+  const ci = readFileSync(
+    new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const ciNode = /node-version:\s*'?(\d+)'?/.exec(ci)?.[1];
+  assert.equal(ciNode, major,
+    `ci.yml node-version (${ciNode}) disagrees with engines.node (${major}) — ` +
+    'CI would be testing a different runtime than the add-on ships');
+
+  // The container's Node comes from the HA base image's Alpine version, so a
+  // base bump is what moves this. Keep the note beside the assertion.
+  const build = read('build.yaml');
+  assert.match(build, /base:3\.21/,
+    'the HA base image changed — re-check which Node the new Alpine ships and ' +
+    'update engines/.nvmrc/ci.yml together (3.21 ships nodejs 22.x)');
+});
