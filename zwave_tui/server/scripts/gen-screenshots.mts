@@ -197,7 +197,11 @@ const CW = 8.4;  // 14px monospace advance (0.6em) — frame width only; text la
 const CH = 18;   // line height
 const PAD = 14;
 
-const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// Escapes quotes as well as the markup metacharacters: esc() output lands in
+// double-quoted SVG attributes (aria-label, title), where an unescaped '"'
+// terminates the attribute (CodeQL js/incomplete-html-attribute-sanitization).
+const esc = (s: string): string =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 interface Run { text: string; fg: string; bold: boolean; invert: boolean }
 
