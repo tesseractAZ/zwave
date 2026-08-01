@@ -153,6 +153,20 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
       break;
     }
 
+    case 's2-desync': {
+      headline = 'Secure link is losing nonce sync — an RF problem, not a security one';
+      // Long-Range holds ONE direct link to the controller and has no mesh, so
+      // "add a repeater on its path" is advice for a topology that cannot
+      // exist there (same guard the route-churn card carries).
+      const s2LR = isLR(node, symptom.nodeId); // shared helper: fails closed on a roster miss
+      candidates.push(s2LR
+        ? { action: null, title: 'Close the distance or clear the obstruction (Long-Range is a direct link)', rationale: 'S2 keeps a rolling nonce (SPAN) in step between controller and device. A storm of resyncs means frames are being lost faster than the sync recovers — the encryption is working, the radio link under it is not. This node is Long-Range: it holds a single direct link to the controller with no intermediate hop to strengthen, so the fix is distance, obstruction, or antenna placement at one end or the other.', basis: 'source', cost: 'physical', blocked: null }
+        : { action: null, title: 'Improve the RF path (distance, obstruction, interference)', rationale: 'S2 keeps a rolling nonce (SPAN) in step between controller and device. Resynchronisation is normal after an occasional missed frame, but a storm of resyncs means frames are being lost faster than the sync can recover — the encryption is working as designed, the radio link underneath it is not. Move the device or add a mains repeater on its path.', basis: 'source', cost: 'physical', blocked: null });
+      candidates.push({ action: null, title: 'Check whether the device is rebooting', rationale: 'A device that keeps power-cycling loses its nonce state on every boot and produces the same resync pattern. If its other telemetry also restarts (uptime, battery, config reverting), treat it as a power/hardware fault rather than an RF one.', basis: 'lore', cost: 'physical', blocked: null });
+      candidates.push({ action: 'reInterview', title: 'Re-interview — NOT a fix for nonce desync', rationale: 'Re-interviewing re-reads capabilities over the SAME degraded link; it neither re-keys the device nor repairs SPAN sync, and on a marginal link it often fails part-way and leaves the node half-interviewed. Fix the RF path first.', basis: 'source', cost: 'caution', blocked: 'RF-link symptom — re-interviewing will not repair it' });
+      break;
+    }
+
     case 'dead-flap': {
       headline = 'Reachability runbook — a rebuild cannot repair an unreachable node';
       candidates.push({ action: 'ping', title: 'Ping the node (reachability request)', rationale: "Sends a ping request. HA does not return the result, so watch the node's status/last-seen right after: if it stays dead/unchanged the node is genuinely unreachable and the next steps are physical.", basis: 'source', cost: 'safe', blocked: gateExecutable(node, ctx, { probes: true }) });

@@ -22,8 +22,10 @@ browser console.
 - **Browser console** in the Home Assistant sidebar (HA Ingress) — works inside
   the HA mobile app, no extra ports exposed.
 
-The Home Assistant add-on itself lives in [`./zwave_tui`](./zwave_tui); the
-Node/TypeScript server is under [`./server`](./server).
+The Home Assistant add-on — including the Node/TypeScript server — lives in
+[`./zwave_tui`](./zwave_tui); the server source is under
+[`./zwave_tui/server`](./zwave_tui/server). Home Assistant builds an add-on from
+its own directory, so everything the image needs sits inside `zwave_tui/`.
 
 > **Works with any Z-Wave JS network.** Nothing about a specific controller or
 > mesh is hard-coded: the `zwave_js` config-entry id is **auto-discovered** at
@@ -44,9 +46,13 @@ measured evidence:**
    quarantined so a fault can't teach the baseline to accept itself.
 3. **Symptom detectors** — degraded return path, dead-flapping, rate fallback,
    high RTT, weak signal, a chatty flooder, a suspected ghost, controller
-   serial-link strain, and correlation across nodes: an **edge-cluster** (a small
-   group sharing one repeater) and a mesh-wide interference event, which *subsume*
-   the per-node symptoms beneath them so you see one cause, not N faults.
+   serial-link strain, **S2 nonce-resync storms** (a marginal *secure* link, which
+   no statistics counter can see — it is read from the driver's own log stream),
+   and correlation across nodes: an **edge-cluster** (a small group sharing one
+   repeater) and a mesh-wide interference event, which *subsume* the per-node
+   symptoms beneath them so you see one cause, not N faults.
+   A detector only fires while the condition is *still happening* — a burst that
+   ends de-asserts rather than maturing into a "persistent" symptom.
 4. **Planner** — each symptom becomes a ranked set of recommendations: physical
    guidance first (most Z-Wave fixes are physical — move a repeater, power-cycle,
    relocate the stick) plus any safe executable probe. Safety gates fail closed;
@@ -114,7 +120,7 @@ device doing right now?"* and *"how is it configured?"*:
 
 > Screenshots are generated from a **synthetic demo mesh** by
 > [`zwave_tui/server/scripts/gen-screenshots.mts`](./zwave_tui/server/scripts/gen-screenshots.mts) —
-> regenerate them with `cd server && npx tsx scripts/gen-screenshots.mts`.
+> regenerate them with `cd zwave_tui/server && npx tsx scripts/gen-screenshots.mts`.
 
 Full keybinding and screen documentation is in
 [`zwave_tui/DOCS.md`](./zwave_tui/DOCS.md) — the complete System & Engine

@@ -12,10 +12,27 @@
  *  - The socket is UNAUTHENTICATED — treat it as privileged. Nothing received
  *    here is ever proxied or re-exposed (not to the TUI transport, not to
  *    ingress, not verbatim to logs — log types/counts, never payloads).
- *  - CLOSED COMMAND ALLOWLIST, enforced in code: `set_api_schema` and
- *    `start_listening` only. `send()` THROWS on anything else — no health
- *    checks, no pings, no route surgery, nothing that transmits RF. All
- *    mesh-mutating actions stay on the authenticated HA WS.
+ *  - CLOSED COMMAND ALLOWLIST, enforced in code: `set_api_schema`,
+ *    `start_listening`, and the log-stream pair `start_listening_logs` /
+ *    `stop_listening_logs` (v0.26) only. `send()` THROWS on anything else —
+ *    no health checks, no pings, no route surgery, nothing that transmits RF.
+ *    All mesh-mutating actions stay on the authenticated HA WS. The log pair
+ *    is still read-only telemetry: it toggles THIS client's `receiveLogs`
+ *    flag server-side and transmits nothing over RF.
+ *
+ * LOG LISTENING (v0.26 — the S2 SPAN-resync watch). S2 nonce desync surfaces
+ * ONLY in driver log lines — no statistics counter moves — so after each state
+ * dump we subscribe to the log stream (`start_listening_logs`, top-level since
+ * schema 31 < our floor of 32) and match the S2 resync family locally.
+ * Deliberately NO server-side `filter`: zwave-js-server's log forwarder is one
+ * GLOBAL transport whose first subscriber's filter wins and is silently applied
+ * to every other client — a narrow filter from us would corrupt the HA Z-Wave
+ * log viewer for the operator. We take the full stream at the driver's current
+ * level (the same lines the add-on log shows; the resync retry is `info`, the
+ * terminal drop `warn`, so both arrive at the stock level) and drop
+ * non-matching lines with one cheap substring test. A storm backstop stops OUR
+ * subscription (nobody else's) if the stream runs hot, and log payloads are
+ * never re-logged or re-exposed — the matcher returns only a node id.
  *  - Dormant, never fatal: unreachable server / schema mismatch / homeId
  *    mismatch ⇒ the dependent telemetry stays null and detectors that need it
  *    stay dormant (collapse method, never measurement). The add-on never
@@ -41,6 +58,8 @@ import WebSocket from 'ws';
 export const DRIVER_WS_ALLOWLIST: readonly string[] = Object.freeze([
   'set_api_schema',
   'start_listening',
+  'start_listening_logs',
+  'stop_listening_logs',
 ]);
 
 /** Schema range this client's parsing is tested against. */
@@ -59,6 +78,8 @@ export interface DriverWsCallbacks {
   onNodeFlags?: (nodeId: number, flags: { isListening: boolean | null; isFrequentListening: boolean | null }) => void;
   /** The server's homeId (from the version handshake) — caller cross-checks vs HA. */
   onHomeId?: (homeId: number) => void;
+  /** An S2 SPAN-resync log event was attributed to a node (v0.26). */
+  onS2Resync?: (nodeId: number) => void;
 }
 
 export interface DriverWsClientOptions {
@@ -82,6 +103,12 @@ export type DriverWsState =
   | 'stopped'; // stop() called — start() can re-establish
 
 export interface DriverWsClient {
+  /** Is the S2 log lane ACTUALLY listening right now? False when logs were
+   *  never started, were refused, or the storm backstop stopped them. The
+   *  consumer records an honest `null` rather than `0` when this is false —
+   *  "lane switched off" must never read as "no resyncs happened" (v0.26
+   *  review: it converted a switched-off measurement into a recovery). */
+  s2LaneLive(): boolean;
   start(): void;
   stop(): void;
   state(): DriverWsState;
@@ -120,6 +147,44 @@ export function safeTag(v: unknown, max = 40): string {
  *  or buggy server must not grow the driver maps with junk ids. */
 export function saneNodeId(v: unknown): number | null {
   return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 4000 ? v : null;
+}
+
+/** S2 SPAN-resync matcher (v0.26): the node id a driver `logging` event
+ *  attributes an S2 nonce-desync line to, or null for everything else.
+ *
+ *  Verified against node-zwave-js v15.26.0 sources — the S2 desync family is:
+ *   outgoing (device could not decrypt us; controllerLog.logNode → node ctx):
+ *    · "failed to decode the message, retrying with SPAN extension..."  (info)
+ *    · "failed to decode the message after re-transmission with SPAN
+ *       extension, dropping the message."                               (warn)
+ *   incoming (we could not decrypt the device; also node-attributed):
+ *    · "Message authentication failed|No SPAN is established yet, cannot
+ *       decode command. …"                                           (verbose)
+ *  The incoming family only streams when the driver log level is `verbose`+;
+ *  the outgoing pair arrives at the stock `info` level. Node attribution is
+ *  REQUIRED (context.type === 'node' with a sane nodeId) — the un-attributed
+ *  driver-level "Dropping message with invalid payload" line is deliberately
+ *  NOT matched, so a hostile/buggy server cannot charge resyncs to nobody.
+ *  The message text is server-sent: it is matched, never logged or stored. */
+export function s2ResyncNodeId(ev: Record<string, unknown>): number | null {
+  if (ev.event !== 'logging') return null;
+  const ctx = ev.context as Record<string, unknown> | undefined;
+  if (!ctx || typeof ctx !== 'object' || ctx.type !== 'node') return null;
+  const nodeId = saneNodeId(ctx.nodeId);
+  if (nodeId == null) return null;
+  const raw = ev.message;
+  const msg = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.filter((x) => typeof x === 'string').join('\n') : '';
+  // ONE resync = ONE count. The outgoing family emits TWO lines for a single
+  // failed transmission — the `retrying with SPAN extension...` attempt and,
+  // if the retry also fails, `...after re-transmission with SPAN extension,
+  // dropping the message.` Counting both double-scored every terminal failure
+  // and silently halved the effective S2_ABS threshold, so match only the
+  // ATTEMPT line and let the drop line fall through (it is always preceded by
+  // its own retry line, so nothing is lost).
+  if (msg.includes('re-transmission with SPAN extension')) return null;
+  if (msg.includes('SPAN extension')) return nodeId;
+  if (msg.includes('cannot decode command')) return nodeId;
+  return null;
 }
 
 /** A finite, non-sentinel dBm value or null. */
@@ -175,17 +240,27 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   let serverHomeId: number | null = null;
   let statusLine = url ? 'not started' : 'disabled (no driver_ws_url)';
   let msgId = 0;
+  /** Log-stream state — all per-connection, reset in connect(). */
+  let logsMsgId: string | null = null; // messageId of our start_listening_logs
+  /** True only between a successful start_listening_logs ack and the next
+   *  disconnect / storm-stop — the S2 lane's liveness (see s2LaneLive). */
+  let logsAcked = false;
+  let logStormStopped = false; // storm backstop tripped (until next reconnect)
+  let logEvWindowStart = 0; // rolling 60 s window for the storm meter
+  let logEvCount = 0;
 
   /** The allowlist gate — defense in depth; nothing else may ever be sent.
    *  `extra` is spread FIRST so the checked `command`/`messageId` always win —
    *  a colliding `extra.command` can never override the allowlisted value
    *  (v0.13 review: spread-order allowlist bypass). */
-  function send(command: string, extra: Record<string, unknown> = {}): void {
+  function send(command: string, extra: Record<string, unknown> = {}): string | null {
     if (!DRIVER_WS_ALLOWLIST.includes(command)) {
       throw new Error(`driver-ws: command '${command}' is not on the read-only allowlist`);
     }
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ ...extra, command, messageId: `dw-${++msgId}` }));
+    if (!ws || ws.readyState !== WebSocket.OPEN) return null;
+    const messageId = `dw-${++msgId}`;
+    ws.send(JSON.stringify({ ...extra, command, messageId }));
+    return messageId;
   }
 
   function setState(s: DriverWsState, line: string): void {
@@ -224,6 +299,11 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   function connect(): void {
     if (stopped || state === 'dormant' || !url) return;
     teardownSocket();
+    logsMsgId = null;
+    logStormStopped = false;
+    logsAcked = false;
+    logEvWindowStart = 0;
+    logEvCount = 0;
     setState('connecting', `connecting to ${redactUrl(url)}`);
     let sock: WebSocket;
     try {
@@ -322,7 +402,24 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
           onStateDump((result as { state?: unknown }).state);
           attempts = 0;
           setState('live', `live (schema ${negotiatedSchema}, home ${serverHomeId ?? '?'})`);
-        } else if (!success) {
+          // Subscribe to the log stream only once the listener is LIVE — a
+          // connection that dies during handshake never requests logs. The
+          // subscription is per-connection (like start_listening) and is
+          // re-established on every reconnect by landing here again.
+          logsMsgId = send('start_listening_logs');
+          return;
+        }
+        if (m.messageId === logsMsgId && logsMsgId != null) {
+          // Log listening is OPTIONAL telemetry: a refusal degrades the S2
+          // watch to dormant, it never touches the main listener.
+          log(success
+            ? 'driver-ws: log stream active (S2 SPAN-resync watch)'
+            : `driver-ws: log stream unavailable (${safeTag(m.errorCode ?? 'refused')}) — S2 watch dormant`);
+          logsAcked = success;
+          if (!success) logsMsgId = null;
+          return;
+        }
+        if (!success) {
           log(`driver-ws: command failed (${safeTag(m.errorCode ?? 'unknown')})`);
         }
         return;
@@ -364,8 +461,36 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     log(`driver-ws: state dump processed (${flagged} nodes, bgRSSI ${bg ? 'present' : 'absent'})`);
   }
 
+  /** One streamed driver log line. Storm-metered, matched, and dropped —
+   *  the payload is never stored, logged, or forwarded (privileged socket). */
+  const LOG_STORM_PER_MIN = 3000;
+  function onLoggingEvent(ev: Record<string, unknown>): void {
+    if (logStormStopped) return; // stop was sent; drain whatever is in flight
+    const now = Date.now();
+    if (now - logEvWindowStart >= 60_000) {
+      logEvWindowStart = now;
+      logEvCount = 0;
+    }
+    logEvCount += 1;
+    if (logEvCount > LOG_STORM_PER_MIN) {
+      // The driver was likely switched to debug/silly. OUR unsubscribe only
+      // clears this client's receiveLogs flag — other subscribers (the HA log
+      // viewer) are untouched. Re-arms on the next reconnect.
+      logStormStopped = true;
+      send('stop_listening_logs');
+      log(`driver-ws: log stream storm (>${LOG_STORM_PER_MIN}/min — driver log level raised?) — S2 watch paused until reconnect`);
+      return;
+    }
+    const nodeId = s2ResyncNodeId(ev);
+    if (nodeId != null) cb.onS2Resync?.(nodeId);
+  }
+
   function onEvent(ev: Record<string, unknown> | null): void {
     if (!ev) return;
+    if (ev.event === 'logging') {
+      onLoggingEvent(ev);
+      return;
+    }
     if (ev.source === 'controller' && ev.event === 'statistics updated') {
       const stats = ev.statistics as Record<string, unknown> | undefined;
       const bg = parseBgRssi(stats?.backgroundRSSI);
@@ -385,6 +510,13 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   }
 
   return {
+    s2LaneLive(): boolean {
+      // Every way the lane can be dark, in one predicate: never started, the
+      // server refused it, the storm backstop stopped it, or the socket is not
+      // currently live. Callers record `null` (unknown) rather than 0 when this
+      // is false.
+      return logsAcked && !logStormStopped && state === 'live';
+    },
     start(): void {
       if (!url) {
         setState('disabled', 'disabled (no driver_ws_url)');

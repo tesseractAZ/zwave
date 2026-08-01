@@ -29,6 +29,7 @@ export type SymptomKind =
   | 'quiet-node'
   | 'rate-fallback'
   | 'route-churn'
+  | 's2-desync'
   | 'rtt-degraded'
   | 'weak-signal'
   | 'chatty-device'
@@ -98,6 +99,14 @@ const CHRONIC_DAYS_MS = 2 * 24 * 60_000 * 60; // 2 days sustained → chronic
 const RTT_Z = 4; // z-score over route-stratified baseline
 const WEAK_MARGIN_DB = 7; // direct-node weak-signal margin
 const FLAPS_WINDOW = 3; // ≥3 Alive↔Dead transitions in the window
+const S2_WINDOW_MS = 30 * 60_000; // S2 SPAN-resync lookback (sparser than counters)
+const S2_ABS = 12; // resyncs in the window before it is a symptom (occasional resync is normal S2)
+const S2_WARN_MULT = 3; // 3× the threshold escalates watch → warn
+// Recency conjunct = DWELL_MS, deliberately: a recency window LONGER than the
+// dwell recreates the illusory-dwell flaw in miniature (a burst stays "recent"
+// past the dwell and matures anyway). An ongoing storm at ≥12/30m has events
+// in any 5-min slice; one that pauses longer has, for now, stopped.
+const S2_RECENT_MS = DWELL_MS;
 const RX_FLOOD_MULT = 20; // dRx rate orders-of-magnitude over the mesh median
 const GHOST_MIN_COVERAGE_MS = 3 * 24 * 60_000 * 60; // ≥3 days observed, zero comms
 const CTRL_DEGRADED_ABS = 5; // controller NAK+CAN+timeoutACK per window
@@ -182,6 +191,32 @@ function windowFlaps(samples: EvidenceSample[], now: number, windowMs = WINDOW_M
   return f;
 }
 
+/** Windowed S2 SPAN-resync count. `null` samples mean the log lane was NOT
+ *  listening — they are skipped, and a window with no listening sample at all
+ *  yields `null` (unknown) rather than 0, so a dormant lane can never look
+ *  like a clean one. */
+function windowS2(samples: EvidenceSample[], now: number, windowMs = S2_WINDOW_MS): number | null {
+  let n = 0;
+  let known = 0;
+  for (const s of samples) {
+    if (now - s.t > windowMs || s.dS2Resync == null) continue;
+    n += s.dS2Resync;
+    known += 1;
+  }
+  return known > 0 ? n : null;
+}
+
+/** RECENCY CONJUNCT (v0.26, assessment fix): a windowed breach must also show
+ *  evidence inside the recent sub-window, or it de-asserts. Without this, the
+ *  lookback (10–30 min) outlives the 5-min dwell, so ONE transient burst stays
+ *  "breaching" for the whole lookback and matures a "persistent" symptom off
+ *  evidence that already stopped — the dwell was armed by the calendar, not by
+ *  the mesh. */
+function hadRecent(samples: EvidenceSample[], now: number, recentMs: number, pick: (s: EvidenceSample) => number): boolean {
+  for (const s of samples) if (now - s.t <= recentMs && pick(s) > 0) return true;
+  return false;
+}
+
 /** Windowed dRx rate (reports/min) — for chatty-device detection. */
 function windowRxRate(samples: EvidenceSample[], now: number, windowMs = WINDOW_MS): number | null {
   let rx = 0;
@@ -262,7 +297,8 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
     // dead-flap — the hard RF-failure event, from the event-driven flap counter.
     {
       const flaps = windowFlaps(samples, now);
-      const b = flaps >= FLAPS_WINDOW;
+      // Recency conjunct: still flapping within the dwell horizon (see hadRecent).
+      const b = flaps >= FLAPS_WINDOW && hadRecent(samples, now, DWELL_MS, (s) => s.dFlaps);
       markDegrading(id, b);
       const since = dwell(state, key(id, 'dead-flap'), b, now);
       if (since != null) {
@@ -275,12 +311,40 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       }
     }
 
+    // s2-desync — S2 SPAN-resync storm (v0.26). Nonce desync surfaces ONLY in
+    // driver log events (no statistics counter moves), fed via the driver-ws
+    // log listener into the same event-accumulator discipline as flaps. An
+    // occasional resync is normal S2 behaviour after a missed frame; a storm
+    // means the link is dropping frames faster than the nonce sync can hold —
+    // usually marginal RF on a secure link, sometimes a rebooting device.
+    // Absolute threshold (like chronic-return-path): resyncs are rare-normal,
+    // so a baseline would learn a bad link as "its normal" and never fire.
+    {
+      const s2 = windowS2(samples, now);
+      const b = s2 != null && s2 >= S2_ABS &&
+        hadRecent(samples, now, S2_RECENT_MS, (s) => s.dS2Resync ?? 0);
+      markDegrading(id, b);
+      const since = dwell(state, key(id, 's2-desync'), b, now);
+      if (since != null) {
+        breaching = true;
+        out.push({
+          kind: 's2-desync', nodeId: id, severity: s2! >= S2_ABS * S2_WARN_MULT ? 'warn' : 'watch',
+          sinceMs: since, basis: 'measured',
+          evidence: [{ label: 'S2 SPAN resyncs', value: `${s2} in 30m` }],
+          narrative: `${node.name} is repeatedly losing S2 nonce sync — the encrypted link is dropping frames faster than SPAN resynchronisation can hold. Usually marginal RF on a secure link (distance, interference), occasionally a device that keeps rebooting. Fix the link quality; re-interviewing or rebuilding routes does not repair RF.`,
+        });
+      }
+    }
+
     // return-path-degraded (relative) + chronic-return-path (absolute).
     {
       const w = windowTimeoutRate(samples, now);
       const norm = baselines.timeoutNormal(id, now);
       if (w) {
-        const relBreach = norm?.ready ? rateAnomalous(w.rate, norm.rate, TIMEOUT_RATE_MULT) : false;
+        // Recency conjunct: a rate whose bad half has scrolled past the dwell
+        // horizon (zero timeouts in the last 5 min) is history, not a breach.
+        const stillTimingOut = hadRecent(samples, now, DWELL_MS, (s) => s.dTimeout ?? 0);
+        const relBreach = (norm?.ready ? rateAnomalous(w.rate, norm.rate, TIMEOUT_RATE_MULT) : false) && stillTimingOut;
         markDegrading(id, relBreach || w.rate >= TIMEOUT_RATE_ABS);
         const since = dwell(state, key(id, 'return-path-degraded'), relBreach, now);
         if (since != null) {
@@ -339,8 +403,24 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
     // RTT in the window (not `last`), so a non-fresh tick doesn't reset the dwell.
     {
       const norm = baselines.rttNormal(id, now);
-      const rtt = latestFresh(samples, now, (s) => (s.rtt != null && s.rtt >= 0 ? s.rtt : null));
-      const b = !!(norm?.ready && rtt != null && rtt > norm.median + RTT_Z * norm.scale);
+      const obs = latestFresh(samples, now, (s) => (s.rtt != null && s.rtt >= 0 ? { rtt: s.rtt, t: s.t } : null));
+      const rtt = obs?.rtt ?? null;
+      // NO recency conjunct here — RTT is a LEVEL, not an event count.
+      //
+      // v0.26 briefly added `now - obs.t <= DWELL_MS`, which silently disabled
+      // this detector for any node that communicates less often than every
+      // 5 minutes: dwell() stamps `since` on the tick the reading lands, so
+      // maturing needs `now - since >= DWELL_MS` while the conjunct needs
+      // `now - obs.t <= DWELL_MS` — satisfiable only if a SECOND fresh
+      // breaching reading arrives inside the same 5 minutes. A battery or
+      // low-traffic node reporting every 6-10 min could never fire again.
+      //
+      // The staleness bound the conjunct was reaching for already exists:
+      // latestFresh only scans within WINDOW_MS, so the newest fresh reading
+      // is at most 10 min old, and for a level signal the newest reading IS
+      // the current best estimate — unlike flaps/timeouts/resyncs, where a
+      // count from a burst that has stopped is stale evidence of a past event.
+      const b = !!(norm?.ready && obs != null && obs.rtt > norm.median + RTT_Z * norm.scale);
       const since = dwell(state, key(id, 'rtt-degraded'), b, now);
       if (since != null) {
         breaching = true;

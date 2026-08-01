@@ -220,7 +220,7 @@ test('save → load round-trips EVERY column with null fidelity (fine, coarse, c
   // Sample 1: first sample → ALL deltas null; sentinel rssi → null; no route.
   s.record(6, stats({ commandsTX: 100, timeoutResponse: 5, rssi: 127, rtt: null, lwr: null }), NodeStatus.Asleep, { fresh: false }, FIXED);
   // Sample 2: valid deltas, real values, hopped route, events.
-  s.record(6, stats({ commandsTX: 140, timeoutResponse: 9, commandsDroppedTX: 2, commandsRX: 130, rssi: -64, rtt: 45.67, lwr: { repeaters: [7, 9], protocolDataRate: 1, rssi: -70, repeaterRSSI: [], routeFailedBetween: null } }), NodeStatus.Alive, { flaps: 1, routeChanges: 2, fresh: true }, FIXED + TICK);
+  s.record(6, stats({ commandsTX: 140, timeoutResponse: 9, commandsDroppedTX: 2, commandsRX: 130, rssi: -64, rtt: 45.67, lwr: { repeaters: [7, 9], protocolDataRate: 1, rssi: -70, repeaterRSSI: [], routeFailedBetween: null } }), NodeStatus.Alive, { flaps: 1, routeChanges: 2, s2Resyncs: 5, fresh: true }, FIXED + TICK);
   s.recordController({ messagesTX: 10, messagesRX: 9, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutCallback: 0, timeoutResponse: 0 }, true, FIXED);
   s.recordController({ messagesTX: 25, messagesRX: 20, messagesDroppedTX: 1, messagesDroppedRX: 0, NAK: 2, CAN: 1, timeoutACK: 0, timeoutCallback: 0, timeoutResponse: 3 }, true, FIXED + TICK);
   s.recordRouteFailure(6, [7, 9], FIXED);
@@ -229,15 +229,17 @@ test('save → load round-trips EVERY column with null fidelity (fine, coarse, c
   s2.load();
   const ring = s2.forNode(6);
   assert.equal(ring.length, 2);
-  // Full null-fidelity on the first sample.
+  // Full null-fidelity on the first sample. dS2Resync is null (not 0): the
+  // sample carried no s2Resyncs extra, meaning the S2 log lane was not
+  // listening — an honest unknown, never "no resyncs happened".
   assert.deepEqual(
     ring[0],
-    { t: FIXED, dTx: null, dTimeout: null, dDropTx: null, dRx: null, dFlaps: 0, dRouteChanges: 0, fresh: false, rtt: null, rssi: null, rateKbps: null, routeKey: null, status: NodeStatus.Asleep, lastSeen: null, isListening: null, isFrequentListening: null },
+    { t: FIXED, dTx: null, dTimeout: null, dDropTx: null, dRx: null, dFlaps: 0, dRouteChanges: 0, dS2Resync: null, fresh: false, rtt: null, rssi: null, rateKbps: null, routeKey: null, status: NodeStatus.Asleep, lastSeen: null, isListening: null, isFrequentListening: null },
   );
   // Full value-fidelity on the second (rtt rounded to 0.1 at record time).
   assert.deepEqual(
     ring[1],
-    { t: FIXED + TICK, dTx: 40, dTimeout: 4, dDropTx: 2, dRx: 130, dFlaps: 1, dRouteChanges: 2, fresh: true, rtt: 45.7, rssi: -64, rateKbps: 9.6, routeKey: 'r7-9', status: NodeStatus.Alive, lastSeen: null, isListening: null, isFrequentListening: null },
+    { t: FIXED + TICK, dTx: 40, dTimeout: 4, dDropTx: 2, dRx: 130, dFlaps: 1, dRouteChanges: 2, dS2Resync: 5, fresh: true, rtt: 45.7, rssi: -64, rateKbps: 9.6, routeKey: 'r7-9', status: NodeStatus.Alive, lastSeen: null, isListening: null, isFrequentListening: null },
   );
   // Coarse bucket: every aggregate field round-trips.
   const b = s2.coarseForNode(6)[0];

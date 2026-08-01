@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { statsNodeId, mapRouteRaw, statsCounters, isFreshSample, pickDisplayAttrs, mapConfigParams } from '../src/zwave/zwaveData';
+import { statsNodeId, mapRouteRaw, statsCounters, isFreshSample, pickDisplayAttrs, mapConfigParams, mapControllerStats } from '../src/zwave/zwaveData';
 
 // ── statsNodeId: the casing bug that froze all live stats ──────────────────
 // HA delivers the INITIAL on-subscribe event with `nodeId` (camelCase) but every
@@ -184,4 +184,48 @@ test('mapConfigParams parses property BY POSITION for a partial-param key (not t
   assert.equal(out[0].property, 7, 'property is the 4th segment, not the propertyKey tail');
   assert.equal(out[0].propertyKey, 255, 'propertyKey parsed from the 5th segment');
   assert.equal(out[0].endpoint, 0);
+});
+
+/* ── controller-statistics raw mapping (v0.26: zero tests through 5 releases) ── */
+
+test('controller stats: accepts BOTH the misspelled and corrected timeout_response keys', () => {
+  const base = {
+    source: 'controller', messages_tx: 100, messages_rx: 90, messages_dropped_tx: 1,
+    messages_dropped_rx: 2, nak: 3, can: 4, timeout_ack: 5,
+  };
+  // HA ships the misspelling today; an upstream fix must not zero the field.
+  const misspelled = mapControllerStats({ ...base, timout_response: 7 });
+  const corrected = mapControllerStats({ ...base, timeout_response: 7 });
+  assert.equal(misspelled?.timeoutResponse, 7, 'the misspelled key HA actually sends');
+  assert.equal(corrected?.timeoutResponse, 7, 'the corrected key a future HA may send');
+  // And the misspelled key wins only by ?? order — both present, same value path.
+  assert.equal(mapControllerStats({ ...base, timout_response: 7, timeout_response: 9 })?.timeoutResponse, 7);
+});
+
+test('controller stats: a malformed event is REJECTED, never coerced to zeros', () => {
+  const base = {
+    source: 'controller', messages_tx: 100, messages_rx: 90, messages_dropped_tx: 1,
+    messages_dropped_rx: 2, nak: 3, can: 4, timeout_ack: 5, timout_response: 6,
+  };
+  assert.ok(mapControllerStats(base), 'control: the well-formed event maps');
+  // Each required counter, when non-numeric, must reject the WHOLE event —
+  // zeros would re-baseline the evidence deltas and fabricate a giant delta.
+  for (const key of ['messages_tx', 'messages_rx', 'messages_dropped_tx', 'messages_dropped_rx', 'nak', 'can', 'timeout_ack'] as const) {
+    assert.equal(mapControllerStats({ ...base, [key]: 'not-a-number' }), null, `${key} non-numeric must reject`);
+    assert.equal(mapControllerStats({ ...base, [key]: undefined }), null, `${key} absent must reject`);
+  }
+  assert.equal(mapControllerStats({ ...base, timout_response: undefined }), null, 'BOTH timeout spellings absent must reject');
+  assert.equal(mapControllerStats({ ...base, source: 'node' }), null, 'non-controller event must not map');
+  assert.equal(mapControllerStats(null), null);
+});
+
+test('controller stats: optional timeout_callback null-safe; counters truncated to integers', () => {
+  const base = {
+    source: 'controller', messages_tx: 100.9, messages_rx: 90, messages_dropped_tx: 1,
+    messages_dropped_rx: 2, nak: 3, can: 4, timeout_ack: 5, timout_response: 6,
+  };
+  const noCb = mapControllerStats(base);
+  assert.equal(noCb?.timeoutCallback, null, 'absent optional counter maps to null, not rejection');
+  assert.equal(noCb?.messagesTX, 100, 'fractional counter truncated');
+  assert.equal(mapControllerStats({ ...base, timeout_callback: 8.7 })?.timeoutCallback, 8);
 });

@@ -37,8 +37,10 @@ const HEAT_MAX = 0.05;
  *  sparkline spans the WHOLE series, not just its last `cells` samples
  *  (`sparkline` tail-slices; a multi-day trend must not silently collapse to its
  *  most-recent tail while its label claims the full span). */
-export function downsampleMean(vals: number[], cells: number): number[] {
-  if (vals.length <= cells) return vals;
+export function downsampleMean(vals: readonly number[], cells: number): number[] {
+  // Copy on pass-through: the input may be a READONLY view (history()), and
+  // this function promises a fresh mutable array either way.
+  if (vals.length <= cells) return [...vals];
   const out: number[] = [];
   for (let i = 0; i < cells; i++) {
     const lo = Math.floor((i * vals.length) / cells);

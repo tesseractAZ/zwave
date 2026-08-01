@@ -110,3 +110,34 @@ test('null / partial stats never produce NaN', () => {
   assert.ok(Number.isFinite(r.score));
   assert.ok(!Number.isNaN(r.rating));
 });
+
+test('a NEVER-MEASURED Alive node reads unknown — not a fabricated 84/B "ok" (v0.26)', () => {
+  // The emptyStats() fingerprint: no lastSeen, zero traffic, no RF reading.
+  // Pre-v0.26 the `!stats` gate was unreachable (buildNode always substitutes
+  // emptyStats()), so this node flowed through the neutral lanes to 84/B with
+  // "RF health nominal" — an asserted unmeasured B-grade during monitoring
+  // holes (add-on boot before the first replay, failed per-node subscription,
+  // roster node with no HA device entry).
+  const r = scoreNode(makeNode({ stats: emptyStats() }), NOISE);
+  assert.equal(r.state, 'unknown', `never-measured node read state "${r.state}"`);
+  assert.ok(r.score <= 15, `never-measured node scored ${r.score} (docs promise ≤15)`);
+  // A node with ANY evidence of contact is scored normally: a cached RSSI is a
+  // real measurement even with zeroed counters (counters reset on driver
+  // restart; readings survive).
+  const seen = scoreNode(makeNode({ stats: emptyStats({ rssi: -60 }) }), NOISE);
+  assert.notEqual(seen.state, 'unknown', 'a cached RSSI is evidence of contact');
+});
+
+test('the CONTROLLER grades A/100, not F — its branch precedes the never-measured gate (v0.26)', () => {
+  // Node 1 is deliberately excluded from per-node statistics subscriptions, so
+  // it ALWAYS carries emptyStats() and matches the never-measured fingerprint
+  // exactly. Ordering the gates the other way graded every mesh's controller
+  // F/unknown on the roster (v0.26 review reproduced score 10 / grade F).
+  const ctrl = scoreNode(makeNode({ nodeId: 1, isController: true, stats: emptyStats() }), NOISE);
+  assert.equal(ctrl.grade, 'A', `a live controller graded ${ctrl.grade}`);
+  assert.equal(ctrl.score, 100);
+  assert.equal(ctrl.state, 'ok');
+  // A DEAD controller is still dead — the branch is gated on Alive/Awake.
+  const dead = scoreNode(makeNode({ nodeId: 1, isController: true, status: NodeStatus.Dead, stats: emptyStats() }), NOISE);
+  assert.equal(dead.state, 'dead');
+});

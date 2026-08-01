@@ -53,9 +53,9 @@ export interface ZwaveDataSource {
   /** Epoch ms of the last SUCCESSFUL roster refresh (null before the first). */
   lastUpdated?(): number | null;
   /** Rolling RSSI/RTT history for a node (for sparklines). */
-  history?(nodeId: number): { rssi: number[]; rtt: number[] };
+  history?(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] };
   /** Coarse long-horizon RSSI/RTT trend for a node (~2h). */
-  historyLong?(nodeId: number): { rssi: number[]; rtt: number[] };
+  historyLong?(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] };
   /**
    * Optional: trigger an expensive route/controller-statistics refresh. When
    * present it is driven on the `routePollMs` cadence; when absent the data
