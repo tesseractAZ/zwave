@@ -19,7 +19,7 @@ function node(id: number, over: Partial<NodeSnapshot> = {}): NodeSnapshot {
 
 function ev(over: Partial<EvidenceSample> = {}): EvidenceSample {
   return {
-    t: T, dTx: 100, dTimeout: 0, dDropTx: 0, dRx: 5, dFlaps: 0, dRouteChanges: 0, fresh: true,
+    t: T, dTx: 100, dTimeout: 0, dDropTx: 0, dRx: 5, dFlaps: 0, dRouteChanges: 0, dS2Resync: 0, fresh: true,
     rtt: 30, rssi: -60, rateKbps: 100, routeKey: 'direct', status: NodeStatus.Alive,
     lastSeen: null, isListening: null, isFrequentListening: null, ...over,
   };
@@ -342,4 +342,167 @@ test('EDGE-CLUSTER: a mesh-wide event SUPPRESSES the cluster (mesh owns the stor
   assert.equal(fired.filter((s) => s.kind === 'edge-cluster').length, 0, 'edge-cluster suppressed under a mesh event');
   const mem = fired.find((s) => s.kind === 'return-path-degraded' && s.nodeId === 2);
   assert.ok(mem && mem.subsumedBy === 'mesh', 'members subsume under the MESH event, not the cluster');
+});
+
+/* ── v0.26: s2-desync + the recency conjuncts (illusory-dwell fix) ───────── */
+
+test('s2-desync: a SUSTAINED resync storm matures after dwell; 3× escalates to warn', () => {
+  const nodes = [node(1), node(17)];
+  // ~1.3 resyncs/min sliding with `now` — an ongoing storm (≥12 per 30m).
+  // ~0.5/min sliding with `now` → ~15 per 30 m: over the 12 threshold, under
+  // the 36 warn line. (Fractional per-sample counts are fine for the sum.)
+  const inp = (now: number) => input({ nodes, recent: new Map([[17, window(now, 31, { dS2Resync: 0.5 })]]), now });
+  const state: SymptomState = new Map();
+  assert.equal(detectSymptoms(inp(T), state).filter((s) => s.kind === 's2-desync').length, 0, 'arming, not fired');
+  const fired = settle(inp, state, T, 6);
+  const s2 = fired.find((s) => s.kind === 's2-desync');
+  assert.ok(s2, 'sustained storm fires after >5min dwell');
+  assert.equal(s2!.nodeId, 17);
+  assert.equal(s2!.severity, 'watch');
+  // 3× the threshold escalates.
+  const hot = (now: number) => input({ nodes, recent: new Map([[17, window(now, 31, { dS2Resync: 2 })]]), now });
+  const hotFired = settle(hot, new Map(), T, 6);
+  assert.equal(hotFired.find((s) => s.kind === 's2-desync')!.severity, 'warn');
+});
+
+test('s2-desync: a single burst that STOPPED never matures (recency conjunct)', () => {
+  const nodes = [node(1), node(17)];
+  // 15 resyncs in one old sample; quiet padding keeps the ring populated. The
+  // burst is inside the 30-min lookback the whole test, but outside the 5-min
+  // recency slice — pre-fix semantics (lookback alone) would fire at T+5m.
+  const burst = [
+    ...window(T, 31, { dS2Resync: 0 }).slice(0, -1),
+    ev({ dS2Resync: 15, t: T - 6 * MIN }),
+  ];
+  const inp = (now: number) => input({ nodes, recent: new Map([[17, burst]]), now });
+  const fired = settle(inp, new Map(), T, 8);
+  assert.equal(fired.filter((s) => s.kind === 's2-desync').length, 0, 'a dead burst must not mature into "persistent"');
+});
+
+test('dead-flap: a burst outside the dwell horizon de-asserts (recency conjunct)', () => {
+  const nodes = [node(1), node(6)];
+  // 3 flaps, all 8-9 minutes ago: inside the 10-min lookback, outside the
+  // 5-min recency slice. Pre-fix this armed at T and fired at T+5m.
+  const stale = [
+    ...window(T, 12, { dFlaps: 0 }).slice(0, -3),
+    ev({ dFlaps: 2, t: T - 9 * MIN }),
+    ev({ dFlaps: 1, t: T - 8 * MIN }),
+  ];
+  const inp = (now: number) => input({ nodes, recent: new Map([[6, stale]]), now });
+  const fired = settle(inp, new Map(), T, 6);
+  assert.equal(fired.filter((s) => s.kind === 'dead-flap').length, 0, 'stale flap burst must not fire');
+  // Control: the same 3 flaps with one INSIDE the recency slice still fires.
+  const live = [
+    ...window(T, 12, { dFlaps: 0 }).slice(0, -3),
+    ev({ dFlaps: 2, t: T - 9 * MIN }),
+    ev({ dFlaps: 1, t: T - 1 * MIN }),
+  ];
+  void live;
+  // An ONGOING storm: all three flaps slide with `now`, so the window keeps
+  // seeing 3 and the newest is always inside the dwell horizon.
+  const liveInp = (now: number) => input({
+    nodes,
+    recent: new Map([[6, [
+      ...window(now, 12, { dFlaps: 0 }).slice(0, -3),
+      ev({ dFlaps: 2, t: now - 4 * MIN }),
+      ev({ dFlaps: 1, t: now - 1 * MIN }),
+    ]]]),
+    now,
+  });
+  const state: SymptomState = new Map();
+  const liveFired = settle(liveInp, state, T, 6);
+  assert.ok(liveFired.find((s) => s.kind === 'dead-flap'), 'an ONGOING flap storm still fires');
+});
+
+test('return-path-degraded: a rate whose bad half went quiet de-asserts (recency conjunct)', () => {
+  const nodes = [node(1), node(6)];
+  // Heavy timeouts 8-12 minutes ago, clean traffic since: the 10-min windowed
+  // rate stays anomalous for a while, but zero timeouts in the last 5 min
+  // means the problem is history — pre-fix the dwell matured on it anyway.
+  const cold = (now: number) => {
+    const samples = window(now, 12, { dTx: 100, dTimeout: 0 }).map((s) =>
+      now - s.t >= 8 * MIN ? { ...s, dTimeout: 60 } : s,
+    );
+    return input({ nodes, recent: new Map([[6, samples]]), now });
+  };
+  const fired = settle(cold, new Map(), T, 6);
+  assert.equal(fired.filter((s) => s.kind === 'return-path-degraded').length, 0, 'cold timeout burst must not mature');
+});
+
+test('rtt-degraded: one old in-window outlier does not arm; a RECENT outlier does', () => {
+  const nodes = [node(1), node(6)];
+  // Newest FRESH rtt reading is a 300ms outlier — but it is 7 minutes old.
+  const stale = [
+    ...window(T, 12, { rtt: null, fresh: false }).slice(0, -1),
+    ev({ rtt: 300, fresh: true, t: T - 7 * MIN }),
+  ];
+  const staleInp = (now: number) => input({ nodes, recent: new Map([[6, stale]]), now });
+  assert.equal(settle(staleInp, new Map(), T, 6).filter((s) => s.kind === 'rtt-degraded').length, 0, 'a 7-min-old outlier must not arm the dwell');
+  // The same outlier kept fresh within the dwell horizon fires.
+  const liveInp = (now: number) => input({
+    nodes,
+    recent: new Map([[6, [...window(now, 12, { rtt: null, fresh: false }).slice(0, -1), ev({ rtt: 300, fresh: true, t: now - MIN })]]]),
+    now,
+  });
+  const state: SymptomState = new Map();
+  assert.ok(settle(liveInp, state, T, 6).find((s) => s.kind === 'rtt-degraded'), 'a recent outlier still fires');
+});
+
+test('dead-flap: a finished burst de-asserts — the dwell cannot mature on stale evidence (v0.26)', () => {
+  const state: SymptomState = new Map();
+  const T9 = T + 9 * 60_000;
+  // Three flaps in ONE old sample — inside the 10-min lookback but outside the
+  // 5-min dwell horizon by evaluation time. Pre-v0.26 the windowed count kept
+  // "breaching" for the whole lookback, so the dwell matured off a burst that
+  // had already stopped.
+  const burst = [
+    ev({ t: T9 - 8 * 60_000, dFlaps: 3, fresh: true }),
+    ...window(T9, 4, { dFlaps: 0 }),
+  ];
+  const inp = (now: number): DetectInput =>
+    input({ nodes: [node(5)], recent: new Map([[5, burst]]), now });
+  // Arm with the burst 2 min old (recent → legitimately breaching), a full
+  // 6 min before the final evaluation — enough for the dwell to elapse, so a
+  // reverted conjunct (still "breaching" at T9) WOULD fire and be caught.
+  detectSymptoms(inp(T9 - 6 * 60_000), state);
+  // …then evaluate with the burst 8 min stale: the recency conjunct must have
+  // DE-ASSERTED the breach, so no dead-flap fires despite the elapsed dwell.
+  const out = detectSymptoms(inp(T9), state);
+  assert.ok(!out.some((sy) => sy.kind === 'dead-flap'),
+    'a stale flap burst matured a "persistent" dead-flap through the dwell');
+
+  // Control: same totals but flapping STILL ACTIVE inside the dwell horizon.
+  const active = [
+    ev({ t: T9 - 8 * 60_000, dFlaps: 2, fresh: true }),
+    ev({ t: T9 - 2 * 60_000, dFlaps: 1, fresh: true }),
+  ];
+  const st2: SymptomState = new Map();
+  const inp2 = (now: number): DetectInput =>
+    input({ nodes: [node(5)], recent: new Map([[5, active]]), now });
+  detectSymptoms(inp2(T9 - 6 * 60_000), st2);
+  const out2 = detectSymptoms(inp2(T9), st2);
+  assert.ok(out2.some((sy) => sy.kind === 'dead-flap'), 'control: an ACTIVE flap pattern must still fire');
+});
+
+test('rtt-degraded still fires for a node that talks less often than the dwell (v0.26 regression guard)', () => {
+  // A v0.26 draft gated this detector on `now - obs.t <= DWELL_MS`. Since
+  // dwell() stamps `since` at the tick the reading lands, maturing needs
+  // `now - since >= DWELL_MS` while that conjunct needs the reading to be
+  // NEWER than DWELL_MS — satisfiable only if a second fresh breaching reading
+  // arrives inside the same 5 minutes. Any battery or low-traffic node
+  // reporting every 6-10 min could then never fire again. RTT is a LEVEL, not
+  // an event count: latestFresh already bounds staleness at WINDOW_MS.
+  const T2 = T + 30 * 60_000;
+  const norm = baselineStub({ rttNormal: () => ({ ready: true, median: 30, scale: 8 }) });
+  // ONE fresh breaching observation, 8 minutes old — inside WINDOW_MS(10m),
+  // older than DWELL_MS(5m). This is the ONLY reading a 10-min-cadence node has.
+  const sparse = [ev({ t: T2 - 8 * 60_000, rtt: 300, fresh: true })];
+  const inp = (now: number): DetectInput =>
+    input({ nodes: [node(9)], recent: new Map([[9, sparse]]), baselines: norm, now });
+  detectSymptoms(inp(T2 - 7 * 60_000), new Map()); // arm
+  const state: SymptomState = new Map();
+  detectSymptoms(inp(T2 - 7 * 60_000), state);
+  const out = detectSymptoms(inp(T2 - 60_000), state); // dwell elapsed
+  assert.ok(out.some((s) => s.kind === 'rtt-degraded'),
+    'a sparsely-reporting node with a sustained bad RTT never surfaced');
 });

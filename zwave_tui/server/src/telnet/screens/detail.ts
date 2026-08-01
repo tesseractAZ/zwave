@@ -37,6 +37,7 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
+import { downsampleMean } from './interference';
 import { frame, type Keycap } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
 import { rssiColor, marginColor, rttColor, timeoutPctColor } from '../bands';
@@ -193,11 +194,20 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     const hist = data.history(n.nodeId);
     const rssiHist = hist.rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
     const rttHist = hist.rtt.filter((v) => Number.isFinite(v) && v >= 0);
-    pushG(trendRow('Signal', rssiHist, 'dBm', lastColor(rssiHist, rssiColor), inner));
-    pushG(trendRow('Latency', rttHist, 'ms', lastColor(rttHist, rttColor), inner));
+    // Same stale rule as the RTT/RSSI/Timeouts rows around them: a DEAD/UNKNOWN
+    // node's history rings end at its last healthy answer (kept on purpose,
+    // zwaveData never clears them), and lastColor graded that final sample —
+    // so the dossier drew health-green sparklines directly under its own
+    // greyed `RSSI —`, while the Overview greyed the identical trend cell for
+    // the same node. Grey EXPLICITLY: `undefined` would hand sparkline its
+    // relative zoneColor default, not neutrality.
+    const trendColor = (vals: number[], band: (v: number) => (s: string) => string) =>
+      dead(n) ? c.grey : lastColor(vals, band);
+    pushG(trendRow('Signal', rssiHist, 'dBm', trendColor(rssiHist, rssiColor), inner));
+    pushG(trendRow('Latency', rttHist, 'ms', trendColor(rttHist, rttColor), inner));
     // Long-horizon coarse RSSI trend (~2h, 1 pt/min); needs a few points first.
     const longRssi = data.historyLong(n.nodeId).rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
-    if (longRssi.length >= 3) pushG(trendRow('Sig 2h', longRssi, 'dBm', lastColor(longRssi, rssiColor), inner));
+    if (longRssi.length >= 3) pushG(trendRow('Sig 2h', longRssi, 'dBm', trendColor(longRssi, rssiColor), inner));
 
     // Response-timeout % via the SHARED responseTimeoutPct — the same figure the
     // Overview TMO column shows. Numerator is timeoutResponse (ACKed Get whose
@@ -567,7 +577,13 @@ function trendRow(
     sparkW = Math.min(56, va);
   }
   if (sparkW < 8) return null;
-  const val = sparkline(values, sparkW, { color }) + (ann ? ' ' + c.grey(ann) : '');
+  // Downsample so the drawing spans the WHOLE series. sparkline() tail-slices
+  // to `width`, so the 120-sample coarse ring behind this ≤56-cell row drew
+  // only its newest ~56 minutes while the 'Sig 2h' label and the min…max
+  // caption (computed over the full series, above) both claimed two hours —
+  // an hour-long RF sag was invisible in the very graphic captioned with it.
+  // interference.ts documents this exact trap and built downsampleMean for it.
+  const val = sparkline(downsampleMean(values, sparkW), sparkW, { color }) + (ann ? ' ' + c.grey(ann) : '');
   return kv(label, val, inner);
 }
 
@@ -587,16 +603,25 @@ function rssiStrength(dbm: number): number {
 /* ── route rendering ─────────────────────────────────────────────────────── */
 
 /**
- * Push one route as a single row: the repeater chain, then rate / route-RSSI /
- * a route-failed marker. The failed marker is placed first after the chain so a
- * narrow-terminal truncation can never drop it before the (advisory) rate/rssi.
+ * Push one route as a single row: the repeater chain, then a route-failed
+ * marker / data rate / route RSSI. The failed marker leads the tail and is
+ * never shed while any tail token renders.
+ *
+ * Overflow drops WHOLE tokens with a dim `+N` disclosure (the commandBar /
+ * fieldStrip idiom) — never a character clip. Dropping the signal bars used to
+ * be the ONLY step before kv()'s blind truncate, which at the documented
+ * 80-col default rendered a 4-repeater LWR's 100k rate as a bare '1' and a
+ * route RSSI of -70 dBm as '-70 d' (or '-7') — clipped numbers that read as
+ * plausible, wrong values on exactly the rows an operator studies for the
+ * weakest multi-hop nodes.
  */
 function pushRoute(body: string[], label: string, route: RouteStat, inner: number, stale = false): void {
+  // The failed-route alert is not droppable; rate/RSSI are advisory and shed
+  // from the right when the columns run out.
+  const alert = route.routeFailedBetween
+    ? c.red(`⚠ failed n${route.routeFailedBetween[0]}↮n${route.routeFailedBetween[1]}`)
+    : null;
   const bits: string[] = [];
-  if (route.routeFailedBetween) {
-    const [a, b] = route.routeFailedBetween;
-    bits.push(c.red(`⚠ failed n${a}↮n${b}`));
-  }
   const rate = route.protocolDataRate;
   if (rate != null) {
     const rl = DATA_RATE_LABEL[rate] ?? '?';
@@ -605,10 +630,54 @@ function pushRoute(body: string[], label: string, route: RouteStat, inner: numbe
   const rssi = validRssi(route.rssi);
   if (rssi != null) bits.push((stale ? c.grey : rssiColor(rssi))(`${rssi} dBm`));
 
-  const tail = bits.length ? c.grey('  ·  ') + bits.join(c.grey(' · ')) : '';
-  let chain = routeChain(route, true, stale);
-  if (visLen(chain) + visLen(tail) > inner - 11) chain = routeChain(route, false);
-  body.push(kv(label, chain + tail, inner));
+  const budget = inner - 11; // kv() spends 11 columns on indent + label cell
+  const tailOf = (keep: number): string => {
+    const tokens = [...(alert ? [alert] : []), ...bits.slice(0, keep)];
+    const tail = tokens.length ? c.grey('  ·  ') + tokens.join(c.grey(' · ')) : '';
+    // Disclose what fell off: a route row silently missing its rate/RSSI reads
+    // as "this route HAS no rate/RSSI", which is a different claim.
+    const dropped = bits.length - keep;
+    return tail + (dropped > 0 ? c.grey(` +${dropped}`) : '');
+  };
+  // Chain forms, richest first: hop bars + RSSI → hop RSSI only → bare hop ids
+  // → interior hops collapsed to a count (the Overview's `n3→+N` idiom). Every
+  // form now carries `stale` — the old no-bars retry dropped it, so a dead
+  // node's per-hop readings sprang back to health-green the moment the row got
+  // narrow enough to shed its bars.
+  const chains = [
+    routeChain(route, true, stale),
+    routeChain(route, false, stale),
+    routeChain(route, false, stale, false),
+    routeChainCollapsed(route),
+  ];
+  // Pass 1 — shed chain decoration, keep every tail token: rate and route RSSI
+  // are measurements; the bars and per-hop annotations are redundant renderings
+  // of readings the chain itself still names.
+  for (const chain of chains) {
+    const line = chain + tailOf(bits.length);
+    if (visLen(line) <= budget) {
+      body.push(kv(label, line, inner));
+      return;
+    }
+  }
+  // Pass 2 — barest chains, shedding tail tokens right-to-left with the `+N`.
+  for (const chain of [chains[2], chains[3]]) {
+    for (let keep = bits.length - 1; keep >= 0; keep--) {
+      const line = chain + tailOf(keep);
+      if (visLen(line) <= budget) {
+        body.push(kv(label, line, inner));
+        return;
+      }
+    }
+  }
+  // Nothing fits whole — a pathologically narrow frame. Keep the alert in a
+  // short whole-word form ('⚠ failed n12' names half the failed pair, which is
+  // worse than naming neither; a bare '⚠' explains nothing), disclose the rest
+  // as a count, and let kv()'s truncate stand as the width backstop — the only
+  // text it can still clip is chain scaffolding, not a measurement.
+  const alertShort = alert ? c.grey('  ·  ') + c.red('⚠ failed') : '';
+  const mark = bits.length ? c.grey(` +${bits.length}`) : '';
+  body.push(kv(label, routeChainCollapsed(route) + alertShort + mark, inner));
 }
 
 /**
@@ -616,7 +685,7 @@ function pushRoute(body: string[], label: string, route: RouteStat, inner: numbe
  * repeaterRSSI[] hop reading and (when `bars`) a WiFi-style signal-strength
  * glyph derived from that reading. Empty repeaters ⇒ a direct link.
  */
-function routeChain(route: RouteStat, bars: boolean, stale = false): string {
+function routeChain(route: RouteStat, bars: boolean, stale = false, hopAnn = true): string {
   const reps = Array.isArray(route.repeaters) ? route.repeaters : [];
   const arrow = c.grey(' ← ');
   const parts: string[] = [c.grey('controller')];
@@ -627,7 +696,7 @@ function routeChain(route: RouteStat, bars: boolean, stale = false): string {
     // threaded `stale` in but never passed it here, so a dead node's PER-HOP
     // readings stayed health-green inside a row already greyed around them.
     const hopColor = stale ? c.grey : rssiColor(hop!);
-    const ann = valid ? c.grey('(') + hopColor(`${hop}`) + c.grey(')') : '';
+    const ann = hopAnn && valid ? c.grey('(') + hopColor(`${hop}`) + c.grey(')') : '';
     // Coloured by the SAME band function as the dBm printed immediately before
     // it — signalBars' default zoneColor is a coarser, unrelated ramp, so the
     // glyph and the number beside it could disagree about the same hop.
@@ -637,6 +706,24 @@ function routeChain(route: RouteStat, bars: boolean, stale = false): string {
   parts.push(c.whiteB('node'));
   const chain = parts.join(arrow);
   return reps.length === 0 ? chain + c.grey('  · direct') : chain;
+}
+
+/**
+ * Barest chain form: the first repeater named, the remaining interior hops
+ * collapsed to a dim `+N` (the Overview's idiom). When columns are scarce the
+ * load-bearing facts are "routed, via n3, N hops deep" — per-hop readings are
+ * already gone by the time pushRoute reaches for this form, and a chain that
+ * silently dropped WHICH repeater leads the path would send an operator to the
+ * wrong device.
+ */
+function routeChainCollapsed(route: RouteStat): string {
+  const reps = Array.isArray(route.repeaters) ? route.repeaters : [];
+  const arrow = c.grey(' ← ');
+  if (reps.length === 0) return c.grey('controller') + arrow + c.whiteB('node') + c.grey('  · direct');
+  const parts = [c.grey('controller'), c.white('n' + reps[0])];
+  if (reps.length > 1) parts.push(c.grey(`+${reps.length - 1}`));
+  parts.push(c.whiteB('node'));
+  return parts.join(arrow);
 }
 
 /* ── section / row builders (return the INNER content string) ────────────── */

@@ -8,11 +8,22 @@ import {
   DRIVER_WS_ALLOWLIST,
   DRIVER_SCHEMA_MIN,
   DRIVER_SCHEMA_MAX,
+  s2ResyncNodeId,
   type DriverWsCallbacks,
 } from '../src/zwave/driverWsClient';
 import { driverHomeGuard, leadingRun } from '../src/zwave/zwaveData';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Poll until `cond` holds (or fail after ~4s) — event-driven waits beat fixed
+ *  sleeps for the reconnect/log-stream tests, which are timing-sensitive. */
+async function waitFor(cond: () => boolean, ms = 4000): Promise<void> {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > ms) throw new Error('waitFor: condition not met in time');
+    await sleep(25);
+  }
+}
 
 /**
  * A minimal mock zwave-js-server: records every command the client sends
@@ -31,6 +42,8 @@ async function mockServer(over: { minSchema?: number; maxSchema?: number; homeId
       const m = JSON.parse(String(raw)) as { messageId: string; command: string };
       commands.push(m.command);
       if (m.command === 'set_api_schema') {
+        ws.send(JSON.stringify({ type: 'result', messageId: m.messageId, success: true, result: {} }));
+      } else if (m.command === 'start_listening_logs' || m.command === 'stop_listening_logs') {
         ws.send(JSON.stringify({ type: 'result', messageId: m.messageId, success: true, result: {} }));
       } else if (m.command === 'start_listening') {
         ws.send(JSON.stringify({
@@ -71,8 +84,10 @@ function collect() {
     seen: [] as { nodeId: number; lastSeen: number }[],
     flags: [] as { nodeId: number; isListening: boolean | null }[],
     homeId: null as number | null,
+    s2: [] as number[],
   };
   const callbacks: DriverWsCallbacks = {
+    onS2Resync: (nodeId) => got.s2.push(nodeId),
     onBgRssi: (channels, at) => got.bg.push({ channels, at }),
     onNodeLastSeen: (nodeId, lastSeen) => got.seen.push({ nodeId, lastSeen }),
     onNodeFlags: (nodeId, f) => got.flags.push({ nodeId, isListening: f.isListening }),
@@ -298,4 +313,98 @@ test('leadingRun: keeps channel index integrity by stopping at the first gap', (
   assert.deepEqual(leadingRun([null, -97, null, null]), []); // ch0 absent ⇒ never mislabel ch1 as ch0
   assert.deepEqual(leadingRun([-101, null, -95, null]), [-101]); // interior gap ⇒ stop (honest)
   assert.deepEqual(leadingRun([]), []);
+});
+
+/* ── v0.26: the S2 SPAN-resync watch (log-stream listening) ──────────────── */
+
+/** A node-attributed controller `logging` event, as zwave-js-server streams it. */
+function logEvent(nodeId: number, message: string | string[], over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    source: 'driver', event: 'logging', formattedMessage: String(message),
+    level: 'info', direction: '  ', primaryTags: `[Node ${String(nodeId).padStart(3, '0')}]`,
+    message,
+    context: { source: 'controller', type: 'node', nodeId, direction: 'none' },
+    ...over,
+  };
+}
+
+test('s2ResyncNodeId: matches the verified S2 desync family, node-attributed only', () => {
+  // Outgoing pair (arrive at the stock `info` driver level).
+  assert.equal(s2ResyncNodeId(logEvent(17, 'failed to decode the message, retrying with SPAN extension...')), 17);
+  // The TERMINAL drop line must NOT match: it is always preceded by its own
+  // retry line, so counting both scored one failed transmission twice and
+  // silently halved the effective S2_ABS threshold (v0.26 review).
+  assert.equal(s2ResyncNodeId(logEvent(17, 'failed to decode the message after re-transmission with SPAN extension, dropping the message.')), null);
+  // Incoming family (verbose level, matched in case the operator raises it).
+  assert.equal(s2ResyncNodeId(logEvent(8, 'Message authentication failed, cannot decode command. Requesting a nonce...')), 8);
+  assert.equal(s2ResyncNodeId(logEvent(8, 'No SPAN is established yet, cannot decode command. Requesting a nonce...')), 8);
+  // message may be a string[] — the join must still match.
+  assert.equal(s2ResyncNodeId(logEvent(9, ['failed to decode the message,', 'retrying with SPAN extension...'])), 9);
+  // NOT matched: un-attributed driver-level lines (no nodeId to charge).
+  assert.equal(s2ResyncNodeId({ source: 'driver', event: 'logging', message: 'Dropping message with invalid payload', context: { source: 'driver', direction: 'none' } }), null);
+  // NOT matched: node-attributed but not S2.
+  assert.equal(s2ResyncNodeId(logEvent(17, 'Timed out while waiting for a response from the node')), null);
+  // NOT matched: hostile shapes — junk node id, value context, non-logging event.
+  assert.equal(s2ResyncNodeId(logEvent(4001, 'retrying with SPAN extension...')), null);
+  assert.equal(s2ResyncNodeId(logEvent(17, 'retrying with SPAN extension...', { context: { source: 'controller', type: 'value', nodeId: 17 } })), null);
+  assert.equal(s2ResyncNodeId({ event: 'statistics updated', nodeId: 17 }), null);
+});
+
+test('log stream: subscribed after live, S2 events attributed, non-S2 dropped, resubscribed per connection', async () => {
+  const srv = await mockServer();
+  const { got, callbacks } = collect();
+  const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60 });
+  client.start();
+  try {
+    await waitFor(() => client.state() === 'live');
+    await waitFor(() => srv.commands.includes('start_listening_logs'));
+
+    // ONE failed transmission emits BOTH lines — the retry attempt and, when
+    // the retry also fails, the terminal drop. Only the ATTEMPT counts: scoring
+    // both double-counted every terminal failure and silently halved the
+    // effective S2_ABS threshold (v0.26 review).
+    srv.push(logEvent(17, 'failed to decode the message, retrying with SPAN extension...'));
+    srv.push(logEvent(17, 'failed to decode the message after re-transmission with SPAN extension, dropping the message.'));
+    srv.push(logEvent(6, 'value updated: currentValue 99')); // chatty non-S2 line
+    await waitFor(() => got.s2.length === 1);
+    assert.deepEqual(got.s2, [17], 'one failed transmission must count exactly once');
+
+    // The subscription is per-connection: a drop + reconnect must re-issue it.
+    srv.dropClient();
+    await waitFor(() => srv.connectionCount() === 2 && client.state() === 'live');
+    await waitFor(() => srv.commands.filter((c) => c === 'start_listening_logs').length === 2);
+    srv.push(logEvent(3, 'No SPAN is established yet, cannot decode command. Requesting a nonce...'));
+    await waitFor(() => got.s2.length === 2); // 1 from before the drop + this one
+    assert.equal(got.s2[1], 3);
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
+test('log-stream storm guard: a hot stream stops OUR subscription and stays quiet until reconnect', async () => {
+  const srv = await mockServer();
+  const { got, callbacks } = collect();
+  const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60 });
+  client.start();
+  try {
+    await waitFor(() => srv.commands.includes('start_listening_logs'));
+    // Blow past the per-minute cap with cheap non-matching lines (the guard
+    // counts EVERY logging event — a driver switched to debug/silly).
+    for (let i = 0; i < 3005; i++) srv.push(logEvent(6, 'SERIAL » 0x01…'));
+    await waitFor(() => srv.commands.includes('stop_listening_logs'));
+    // After the stop, even a REAL S2 line must be ignored (we told the server
+    // to stop; anything still in flight is drained unmatched).
+    srv.push(logEvent(17, 'failed to decode the message, retrying with SPAN extension...'));
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(got.s2.length, 0, 'no attribution after the storm stop');
+    // A reconnect re-arms the watch.
+    srv.dropClient();
+    await waitFor(() => srv.connectionCount() === 2 && srv.commands.filter((c) => c === 'start_listening_logs').length === 2);
+    srv.push(logEvent(17, 'failed to decode the message, retrying with SPAN extension...'));
+    await waitFor(() => got.s2.length === 1);
+  } finally {
+    client.stop();
+    await srv.close();
+  }
 });

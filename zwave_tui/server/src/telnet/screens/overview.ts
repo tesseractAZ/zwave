@@ -36,7 +36,7 @@ import {
 } from '../ansi';
 import { masthead, titleRule, fieldStrip, field, commandBar, linkState, type Keycap } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
-import { noiseColor, rssiColor, marginColor, rttColor, timeoutPctColor } from '../bands';
+import { noiseColor, rssiColor, marginColor, rttColor, timeoutPctColor, WEAK_MARGIN_DB } from '../bands';
 import { meter, signalBars, litBars, sparkline, vblock, fmtElapsed, spinner } from '../gauges';
 import {
   NodeStatus,
@@ -270,10 +270,14 @@ function telemetryStrip(ctx: ScreenCtx): string {
     ...(unknown > 0 ? [field('UNKNOWN', String(unknown), c.yellow)] : []),
     // Showing '—' hid the fact that the MARGIN column is still being computed
     // — against the assumed floor. Name the assumption instead of hiding it.
+    // ROUND for display, and band the DISPLAYED value (the RTT rule): the
+    // driver's channel median is fractional (-95.062 on the live mesh), so
+    // this field spelt the same floor differently from the Interference
+    // screen's rounded copy — one reading, two representations.
     field(
       'NOISE',
-      data.hasRealNoise() ? `${noise} dBm` : `${noise} dBm assumed`,
-      data.hasRealNoise() ? noiseColor(noise) : c.grey,
+      data.hasRealNoise() ? `${Math.round(noise)} dBm` : `${Math.round(noise)} dBm assumed`,
+      data.hasRealNoise() ? noiseColor(Math.round(noise)) : c.grey,
     ),
     c.grey('MESH ') + meter(meshFrac, 8) + c.grey(` ${Math.round(meshFrac * 100)}%`),
   ];
@@ -437,7 +441,13 @@ function bandFrac(v: number, yellow: number, green: number): number {
     v >= green
       ? 0.66 + ((v - green) / span) * 0.34
       : 0.33 + ((v - yellow) / span) * 0.33;
-  return clamp01(f);
+  // Floor ABOVE zero: bandFrac is only ever called with a PRESENT reading, and
+  // litBars maps frac 0 to zero lit bars — the "no signal at all" rendering.
+  // The red ramp hits 0 at exactly (yellow − span), so any link that far under
+  // the anchor fell off a cliff into looking absent; moving the shared anchor
+  // 5 → 7 dB (v0.26) surfaced what the old anchor happened to hide. 0.02 keeps
+  // it deep red while guaranteeing the 1-bar floor on both bar forms.
+  return Math.max(0.02, clamp01(f));
 }
 
 /** Plain (uncoloured) ascending bars — lit glyphs then spaces — for the
@@ -492,7 +502,11 @@ function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDi
     const margin = Math.round(rssi - noise);
     text = `${margin >= 0 ? '+' : ''}${margin}dB`;
     colorFn = marginColor(margin);
-    frac = bandFrac(margin, 5, 17);
+    // The yellow anchor is the SHARED weak-margin threshold, not a private
+    // literal. This cell carried a 5 that predated bands.ts and drifted from
+    // WEAK_MARGIN_DB=7 — a 6 dB link lit a second bar here while the number
+    // beside it, the W flag and every other margin surface called it weak.
+    frac = bandFrac(margin, WEAK_MARGIN_DB, 17);
   }
   // Defensive cap: keep the label ≤ 7 so padStart never has to truncate() (that
   // would append a RESET into the plain selected-row string). Realistic ranges

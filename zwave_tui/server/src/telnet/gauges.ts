@@ -41,7 +41,7 @@ export function vblock(frac: number): string {
  * `width` cells. Auto-scales to [min,max] of the data unless given. Colored by
  * the LAST value's position in range (recent health), or a fixed color.
  */
-export function sparkline(values: number[], width: number, opts: { min?: number; max?: number; color?: ColorFn } = {}): string {
+export function sparkline(values: readonly number[], width: number, opts: { min?: number; max?: number; color?: ColorFn } = {}): string {
   if (width <= 0) return '';
   const vals = values.filter((v) => Number.isFinite(v));
   if (vals.length === 0) return c.grey('·'.repeat(width));
@@ -140,7 +140,7 @@ export function heatCell(frac: number, opts: { none?: boolean; color?: ColorFn }
  * Braille sparkline — 2 samples per cell using the left/right dot columns, for
  * a denser trend in the same width. Falls back to dim when empty.
  */
-export function brailleSparkline(values: number[], width: number, opts: { min?: number; max?: number; color?: ColorFn } = {}): string {
+export function brailleSparkline(values: readonly number[], width: number, opts: { min?: number; max?: number; color?: ColorFn } = {}): string {
   if (width <= 0) return '';
   const vals = values.filter((v) => Number.isFinite(v));
   if (vals.length === 0) return c.grey('·'.repeat(width));

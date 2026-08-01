@@ -30,7 +30,7 @@
  * (the latter rejects with `invalid_format`).
  */
 
-import type { HaWsClient } from '../ha/haWsClient';
+import type { HaWsClient, HaSubscription } from '../ha/haWsClient';
 import {
   NodeStatus,
   NODE_STATUS_LABEL,
@@ -153,6 +153,8 @@ export function mapStateChanged(
 /** Coarse (long-horizon) ring depth + cadence: 1 downsampled point per minute
  *  × 120 ≈ a 2-hour trend. Shared with the store's `coarseMax`. */
 const COARSE_MAX = 120;
+/** Battery/firmware re-read cadence (v0.26) — slow-moving by nature. */
+const ENTITY_REFRESH_MS = 10 * 60_000;
 const COARSE_INTERVAL_MS = 60_000;
 /** v0.22: min gap before a FAILED config-param fetch is retried, so a Detail
  *  screen that re-requests every frame can't hammer a flaky device. */
@@ -276,9 +278,9 @@ export interface ZwaveData {
   /** Epoch ms of the last statistics event (node or controller), or null. */
   lastStatsUpdated(): number | null;
   /** Rolling RSSI/RTT history for a node (for sparklines). */
-  history(nodeId: number): { rssi: number[]; rtt: number[] };
+  history(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] };
   /** Coarse long-horizon RSSI/RTT trend for a node (~2h). */
-  historyLong(nodeId: number): { rssi: number[]; rtt: number[] };
+  historyLong(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] };
   /** Per-node evidence samples (M2) — windowed counter deltas + instantaneous
    *  values, newest last. Read by the symptom engine (M3). Empty if unavailable. */
   evidence(nodeId: number): EvidenceSample[];
@@ -364,16 +366,42 @@ function rfRegionLabel(n: number | null | undefined): string | null {
  * (which includes ESC 0x1b, so a crafted name can't inject ANSI escapes into a
  * TUI frame) and caps the length so one long name can't blow the layout.
  */
+/**
+ * East-Asian-WIDE + unknown-width code points, folded to a single-cell
+ * placeholder so they cannot desync the fixed-width column accounting.
+ *
+ * ★ Written with \u ESCAPES ON PURPOSE. Both call sites below used to carry this
+ *   class as literal characters and had silently DIVERGED: one range began at
+ *   U+F900 (CJK Compatibility Ideographs — the intended start) and the other at
+ *   U+8C48, a homoglyph that renders identically, so the event-text sanitizer
+ *   was folding thousands of NARROW code points (Vai, Lisu, Latin Extended-D…)
+ *   to '?'. Escapes make that kind of drift visible in review; literals hid it
+ *   from every reader of this file for five releases.
+ *
+ * Blocks (UAX #11 East_Asian_Width = W/F) plus two unknowable-width ranges:
+ *   1100-115F Hangul Jamo            2E80-A4CF CJK/Kangxi/radicals/kana/Yi
+ *   A960-A97F Hangul Jamo Ext-A      AC00-D7A3 Hangul syllables
+ *   E000-F8FF Private Use            F900-FAFF CJK Compatibility ideographs
+ *   FE10-FE19 Vertical forms         FE30-FE4F CJK Compatibility forms
+ *   FF00-FF60 Fullwidth              FFE0-FFE6 Fullwidth signs
+ *   D800-DFFF lone surrogates (an astral half that would break slice()/width)
+ *
+ * A960-A97F and FE10-FE19 were MISSING before v0.26 — both are Wide, so a
+ * device named with them overflowed the row on a real terminal. Private Use is
+ * folded because its width is font-defined (a Nerd-Font icon is double-width),
+ * i.e. unknowable here, and an unknowable width is exactly what the frame
+ * contract cannot absorb.
+ */
+const WIDE_GLYPHS = /[\u1100-\u115f\u2e80-\ua4cf\ua960-\ua97f\uac00-\ud7a3\ud800-\udfff\ue000-\uf8ff\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/g;
+
 function sanitizeLabel(s: string): string {
   return s
     // Strip C0 + DEL + C1 controls (incl. ESC 0x1b and the 8-bit CSI 0x9b) so a
     // crafted device name can't inject ANSI escapes into a TUI frame.
     // eslint-disable-next-line no-control-regex
     .replace(/[\x00-\x1f\x7f-\x9f]/g, '')
-    // Fold wide / astral code points (CJK, Hangul, kana, fullwidth, emoji, and
-    // lone surrogates) to a single-cell placeholder so they can't desync the
-    // fixed-width column accounting.
-    .replace(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\ud800-\udfff]/g, '?')
+    // Fold wide / unknown-width code points (see WIDE_GLYPHS).
+    .replace(WIDE_GLYPHS, '?')
     .slice(0, 48);
 }
 
@@ -387,7 +415,7 @@ export function sanitizeEventText(s: string): string {
   return s
     // eslint-disable-next-line no-control-regex
     .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
-    .replace(/[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦\ud800-\udfff]/g, '?')
+    .replace(WIDE_GLYPHS, '?')
     .slice(0, 300);
 }
 
@@ -432,6 +460,9 @@ export function errMsg(e: unknown): string {
   return sanitizeEventText(e instanceof Error ? e.message : String(e));
 }
 
+/** Shared frozen empty series so absent-node reads allocate nothing. */
+const EMPTY_SERIES: readonly number[] = Object.freeze([]);
+
 class ZwaveDataImpl implements ZwaveData {
   private readonly client: HaWsClient;
   private readonly refreshMs: number;
@@ -461,6 +492,10 @@ class ZwaveDataImpl implements ZwaveData {
   private statsByNode = new Map<number, NodeStats>();
   /** v0.4 rolling per-node RSSI/RTT history for sparklines (bounded ring). */
   private histByNode = new Map<number, { rssi: number[]; rtt: number[] }>();
+  /** New history samples since the last flush (v0.26 dirty gate). */
+  private histDirty = false;
+  /** Periodic battery/firmware re-read (v0.26) — see fetchEntityStates. */
+  private entityRefreshTimer: ReturnType<typeof setInterval> | null = null;
   /** v0.5 disk persistence for `histByNode` (null → in-memory only). */
   private readonly historyStore: HistoryStore | null;
   private readonly historyFlushMs: number;
@@ -481,6 +516,12 @@ class ZwaveDataImpl implements ZwaveData {
    *  level-sampling the roster status misses sub-window flaps by construction. */
   private flapAccum = new Map<number, number>();
   private routeChangeAccum = new Map<number, number>();
+  /** S2 SPAN-resync log events per node since the last evidence sample (v0.26).
+   *  Fed by the driver-ws log listener; drains beside flapAccum. Nonce desync
+   *  appears ONLY in driver logs — no statistics counter moves — so without
+   *  this accumulator the engine is blind to a failing S2 link's first symptom. */
+  private s2Accum = new Map<number, number>();
+
   /** Nodes with a live `subscribe_node_status` subscription (flap source).
    *  Nodes NOT in this set fall back to the 2 s roster diff for flap counting. */
   private statusSubbed = new Set<number>();
@@ -500,6 +541,9 @@ class ZwaveDataImpl implements ZwaveData {
   /** Devices whose per-node subscriptions failed — retried on a slow timer. */
   private pendingNodeSubs = new Map<number, string>();
   private subRetryTimer: ReturnType<typeof setInterval> | null = null;
+  /** Last destructive self-heal (re-discovery) — rate-limits it during a
+   *  continuous failure episode (v0.26). */
+  private lastSelfHealAt = 0;
   /** v0.13 read-only driver-WS telemetry (null = disabled). */
   private readonly driverWs: DriverWsClient | null;
   /** Latest driver background RSSI (per-channel averages) + arrival time. */
@@ -569,6 +613,12 @@ class ZwaveDataImpl implements ZwaveData {
   private logSeq = 0;
   /** True once statistics subscriptions are live on the CURRENT connection. */
   private statsSubscribed = false;
+  /** Monotonic connection epoch (v0.26). Bumped on every onReady; a
+   *  subscribeStatistics run that AWAITS across a reconnect checks this before
+   *  landing its activity subscription, so a run spanning the reconnect does
+   *  not double-subscribe the state_changed feed on the new socket (which
+   *  duplicated every activity-log row until the next disconnect). */
+  private connEpoch = 0;
 
   private lastNodes: NodeSnapshot[] = [];
   private lastController: ControllerSnapshot | null = null;
@@ -595,8 +645,12 @@ class ZwaveDataImpl implements ZwaveData {
     const histPath = (opts.historyPath ?? process.env.HISTORY_PATH) || null;
     // A garbage HISTORY_FLUSH_MS must fall back to the default, not NaN (which
     // would silently disable the periodic flush via the `> 0` guard in start()).
-    const flushMs = opts.historyFlushMs ?? Number(process.env.HISTORY_FLUSH_MS ?? 30_000);
-    this.historyFlushMs = Number.isFinite(flushMs) ? flushMs : 30_000;
+    // 30 s → 120 s in v0.26: with the dirty gate below, the old cadence was
+    // ~2 880 unconditional ~75 KB writes/day (~215 MB) to /data — real wear on
+    // an SD-card host — for a display ring where 2-minute persistence lag is
+    // invisible (the ring only matters across a restart).
+    const flushMs = opts.historyFlushMs ?? Number(process.env.HISTORY_FLUSH_MS ?? 120_000);
+    this.historyFlushMs = Number.isFinite(flushMs) ? flushMs : 120_000;
     this.historyStore = histPath
       ? createHistoryStore({ path: histPath, maxSamples: HIST_MAX, log: this.log })
       : null;
@@ -617,8 +671,14 @@ class ZwaveDataImpl implements ZwaveData {
     this.evidenceSampleMs = Number.isFinite(evSample) && evSample > 0 ? evSample : this.routePollMs;
     // Flush is dirty-flagged in the store; 5 min default bounds crash loss to a
     // few samples without grinding SD cards with full-file rewrites (DR).
-    const evFlush = opts.evidenceFlushMs ?? Number(process.env.EVIDENCE_FLUSH_MS ?? 300_000);
-    this.evidenceFlushMs = Number.isFinite(evFlush) ? evFlush : 300_000;
+    // 5 min → 15 min in v0.26: the store's save() is already dirty-gated, but
+    // a live mesh records samples every ~30 s so it was effectively always
+    // dirty — a multi-MB synchronous stringify + write 288×/day (~600-900 MB).
+    // At 15 min the loss window is still small (the fine ring is display +
+    // recent-window evidence; baselines/outcomes flush separately) and /data
+    // writes drop by ~3×. Shutdown still flushes unconditionally.
+    const evFlush = opts.evidenceFlushMs ?? Number(process.env.EVIDENCE_FLUSH_MS ?? 900_000);
+    this.evidenceFlushMs = Number.isFinite(evFlush) ? evFlush : 900_000;
     this.evidenceStore = evPath
       ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log })
       : null;
@@ -661,6 +721,14 @@ class ZwaveDataImpl implements ZwaveData {
               if (!this.driverHomeOk()) return;
               this.driverListening.set(nodeId, flags);
             },
+            onS2Resync: (nodeId) => {
+              // S2 SPAN-resync log event (v0.26). Same event-accumulator
+              // discipline as flaps: count now, drain into the next evidence
+              // sample. No log-ring entry here — the matured s2-desync symptom
+              // is the honest, throttled surface for the operator.
+              if (!this.driverHomeOk()) return;
+              this.s2Accum.set(nodeId, (this.s2Accum.get(nodeId) ?? 0) + 1);
+            },
           },
         })
       : null;
@@ -688,6 +756,7 @@ class ZwaveDataImpl implements ZwaveData {
     this.client.onReady(() => {
       this.registriesLoaded = false;
       this.statsSubscribed = false;
+      this.connEpoch += 1;
       void this.subscribeStatistics();
     });
     void this.tick();
@@ -696,6 +765,10 @@ class ZwaveDataImpl implements ZwaveData {
     // `.unref()` keeps this timer from holding the event loop open at shutdown.
     if (this.historyStore && !this.flushTimer && this.historyFlushMs > 0) {
       this.flushTimer = setInterval(() => {
+        // Dirty gate (v0.26): a quiet mesh (or a lost HA connection) pushes no
+        // samples — rewriting an identical file every tick was pure SD wear.
+        if (!this.histDirty) return;
+        this.histDirty = false;
         this.historyStore!.save(this.buildHistoryMap());
       }, this.historyFlushMs);
       this.flushTimer.unref?.();
@@ -707,6 +780,18 @@ class ZwaveDataImpl implements ZwaveData {
     if (!this.coarseTimer) {
       this.coarseTimer = setInterval(() => this.rollCoarse(), COARSE_INTERVAL_MS);
       this.coarseTimer.unref?.();
+    }
+
+    // Slow-moving entity states (battery %, firmware-update availability) are
+    // NOT delivered by the live state_changed path for every integration and
+    // were previously read only on (re)subscribe — frozen on a stable
+    // connection (v0.26 assessment fix). 10 min is generous for signals that
+    // move on the scale of weeks.
+    if (!this.entityRefreshTimer) {
+      this.entityRefreshTimer = setInterval(() => {
+        if (this.statsSubscribed) void this.fetchEntityStates();
+      }, ENTITY_REFRESH_MS);
+      this.entityRefreshTimer.unref?.();
     }
 
     // M2 evidence: sample every node with cached stats on a regular cadence, and
@@ -805,15 +890,20 @@ class ZwaveDataImpl implements ZwaveData {
       });
       const flaps = this.flapAccum.get(n.nodeId) ?? 0;
       const routeChanges = this.routeChangeAccum.get(n.nodeId) ?? 0;
+      // null when the S2 log lane is not listening — "switched off" must not
+      // read as "no resyncs" (v0.26 review). Same honest-unknown rule the
+      // driver-WS noise floor uses two blocks below.
+      const s2Resyncs = this.driverWs?.s2LaneLive() ? (this.s2Accum.get(n.nodeId) ?? 0) : null;
       this.flapAccum.delete(n.nodeId);
       this.routeChangeAccum.delete(n.nodeId);
+      this.s2Accum.delete(n.nodeId);
       // Driver-WS telemetry (v0.13): the REAL last-communication time and the
       // listening/FLiRS capability — null when the client is absent/dormant.
       const drvSeen = this.driverLastSeen.get(n.nodeId) ?? null;
       const drvFlags = this.driverListening.get(n.nodeId);
       this.evidenceStore.record(
         n.nodeId, stats, n.status,
-        { flaps, routeChanges, fresh, lastSeen: drvSeen, isListening: drvFlags?.isListening ?? null, isFrequentListening: drvFlags?.isFrequentListening ?? null },
+        { flaps, routeChanges, s2Resyncs, fresh, lastSeen: drvSeen, isListening: drvFlags?.isListening ?? null, isFrequentListening: drvFlags?.isFrequentListening ?? null },
         now,
       );
     }
@@ -1065,6 +1155,10 @@ class ZwaveDataImpl implements ZwaveData {
       clearInterval(this.coarseTimer);
       this.coarseTimer = null;
     }
+    if (this.entityRefreshTimer) {
+      clearInterval(this.entityRefreshTimer);
+      this.entityRefreshTimer = null;
+    }
     if (this.evidenceSampleTimer) {
       clearInterval(this.evidenceSampleTimer);
       this.evidenceSampleTimer = null;
@@ -1129,7 +1223,20 @@ class ZwaveDataImpl implements ZwaveData {
       // the id may be stale (the integration was removed + re-added, minting a
       // new entry_id + device_ids). Force a fresh discovery + registry reload.
       // A user-configured (seeded) entry is left alone.
-      if (this.errStreak >= 3 && !this.entrySeeded && this.entryId) {
+      //
+      // TWO GUARDS (v0.26, from the live 2026-07-31 zwave-js-update churn):
+      //  · `not_loaded` means the entry EXISTS and is reloading (an add-on
+      //    update, an integration reload) — the id is NOT stale and the caches
+      //    belong to the SAME network. Re-discovering wiped every node's live
+      //    stats each ~3 ticks for the whole update window. Wait it out.
+      //  · once fired, do not fire again on EVERY subsequent failed tick — a
+      //    multi-hour HA outage otherwise becomes a cache-wipe + forced
+      //    reconnect per tick against a recovering Core. Re-arm after 5 min.
+      const entryReloading = /not_loaded/.test(this.lastErr ?? '');
+      const healArmed =
+        this.errStreak === 3 || Date.now() - this.lastSelfHealAt >= 5 * 60_000;
+      if (this.errStreak >= 3 && !this.entrySeeded && this.entryId && !entryReloading && healArmed) {
+        this.lastSelfHealAt = Date.now();
         this.log('repeated failures — re-discovering zwave_js entry + reloading registries');
         this.entryId = null;
         this.registriesLoaded = false;
@@ -1244,6 +1351,7 @@ class ZwaveDataImpl implements ZwaveData {
           }
           this.flapAccum.delete(id);
           this.routeChangeAccum.delete(id);
+          this.s2Accum.delete(id);
           this.subStatus.delete(id);
           this.statusSubbed.delete(id);
           this.statsSubbedNodes.delete(id);
@@ -1289,6 +1397,7 @@ class ZwaveDataImpl implements ZwaveData {
         // Evidence accumulators are node-id-keyed too.
         this.flapAccum.clear();
         this.routeChangeAccum.clear();
+        this.s2Accum.clear();
         this.subStatus.clear();
         this.prevSampleSig.clear();
         this.missingSince.clear();
@@ -1389,6 +1498,13 @@ class ZwaveDataImpl implements ZwaveData {
     this.updateEntitiesByNode.clear();
     this.updateEntityToNode.clear();
     this.entityIndex.clear();
+    // The battery/ping reverse maps are fully regenerated from the entity loop
+    // below, so clear them here too (v0.26 assessment fix). Left uncleared, a
+    // renamed or removed battery sensor / ping button kept a stale entity_id→
+    // node (or node→entity_id) mapping across a registry rebuild — and on a
+    // home_id network reset, mappings for a DIFFERENT network entirely.
+    this.batteryEntityToNode.clear();
+    this.pingEntityByNode.clear();
     let count = 0;
     for (const e of entities) {
       if (e.platform !== 'zwave_js') continue;
@@ -1456,6 +1572,20 @@ class ZwaveDataImpl implements ZwaveData {
     }
   }
 
+  /** Cached stats with the DISPLAYED lastSeen upgraded by the driver's own
+   *  reading (v0.26). The driver-ws lastSeen is the node's REAL last
+   *  communication (monotonic, replay-safe); the HA-side stamp is an arrival
+   *  time that only advances on counter movement. Displaying the max of the
+   *  two means: precise when the driver-ws is live, honest (movement-gated)
+   *  when it is dormant, and never fabricated by a subscribe replay. */
+  private mergedStats(nodeId: number): NodeStats {
+    const cached = this.statsByNode.get(nodeId);
+    if (!cached) return emptyStats();
+    const drv = this.driverLastSeen.get(nodeId) ?? null;
+    if (drv == null || (cached.lastSeen != null && cached.lastSeen >= drv)) return cached;
+    return { ...cached, lastSeen: drv };
+  }
+
   private buildNode(raw: RawNode): NodeSnapshot {
     const nodeId = raw.node_id;
     const dev = this.deviceByNodeId.get(nodeId);
@@ -1485,7 +1615,7 @@ class ZwaveDataImpl implements ZwaveData {
         ? { level: this.batteryByNode.get(nodeId)!, isLow: this.batteryByNode.get(nodeId)! <= 25 }
         : null,
       firmware: this.firmwareByNode.get(nodeId) ?? null,
-      stats: this.statsByNode.get(nodeId) ?? emptyStats(),
+      stats: this.mergedStats(nodeId),
       entities: dev ? this.entitiesByDeviceId.get(dev.id) ?? [] : [],
     };
   }
@@ -1562,6 +1692,14 @@ class ZwaveDataImpl implements ZwaveData {
     if (this.logRing.length > LOG_MAX) this.logRing.length = LOG_MAX;
   }
 
+  /** Has a reconnect superseded the run that captured `epoch`? Logged once per
+   *  check-point so a stand-down is legible in the activity log. */
+  private superseded(epoch: number): boolean {
+    if (epoch === this.connEpoch) return false;
+    this.log('subscribe: superseded by a reconnect mid-run — standing down');
+    return true;
+  }
+
   /**
    * Establish the live statistics subscriptions on the current connection.
    * Idempotent per connection; re-run on every (re)auth via `onReady`.
@@ -1571,25 +1709,47 @@ class ZwaveDataImpl implements ZwaveData {
   private async subscribeStatistics(): Promise<void> {
     if (this.statsSubscribed) return;
     this.statsSubscribed = true;
+    const epoch = this.connEpoch;
+    // Every subscription this run creates, so a stand-down can RELEASE them
+    // all. Releasing only the most recent one still left the controller feed
+    // and both per-node feeds live on the socket (v0.26 review), and their
+    // handles were discarded so nothing could ever close them.
+    const owned: HaSubscription[] = [];
+    const standDown = async (): Promise<void> => {
+      for (const sub of owned.splice(0)) await sub.unsubscribe().catch(() => {});
+    };
     try {
       const entryId = await this.ensureEntryId();
       if (!entryId) { this.statsSubscribed = false; return; }
       await this.ensureRegistries();
+      // Epoch checks after EVERY await, not just before the activity feed.
+      // A run parked inside any of these calls wakes on the NEW socket, and
+      // haWsClient.subscribe() queues while disconnected — so the controller
+      // and all 38 per-node feeds doubled while only the activity feed was
+      // protected (v0.26 review measured ctrl=2, node_stats=6, node_status=6
+      // for 3 nodes). Those handles are not retained, so a duplicate is
+      // unreleasable for the life of the socket.
+      if (this.superseded(epoch)) return;
 
-      await this.client.subscribe(
+      const ctrlSub = await this.client.subscribe(
         { type: 'zwave_js/subscribe_controller_statistics', entry_id: entryId },
-        (msg) => this.onControllerStats(msg.event),
+        (msg) => { if (epoch === this.connEpoch) this.onControllerStats(msg.event); },
       );
+      owned.push(ctrlSub);
+      if (this.superseded(epoch)) { await standDown(); return; }
 
       // Two subscriptions per end node (node 1 = controller, covered above):
       // statistics (counters/routes) + node status (the EVENT-driven flap
       // source — the roster poll only sees transitions that survive 2 s).
       const nodeDevices = [...this.deviceByNodeId.entries()].filter(([nodeId]) => nodeId !== 1);
+      // Clearing the per-feed idempotency sets is what lets a superseded run
+      // re-subscribe every node, so do it only once we own this epoch.
       this.statusSubbed.clear();
       this.statsSubbedNodes.clear();
       this.subStatus.clear();
       this.pendingNodeSubs.clear();
-      await Promise.all(nodeDevices.map(([nodeId, dev]) => this.subscribeNode(nodeId, dev.id)));
+      await Promise.all(nodeDevices.map(([nodeId, dev]) => this.subscribeNode(nodeId, dev.id, owned)));
+      if (this.superseded(epoch)) { await standDown(); return; }
       this.log(`live statistics: subscribed controller + ${nodeDevices.length} nodes (${this.statusSubbed.size} status feeds)`);
       // Failed per-node subscriptions are retried on a slow timer — a silent
       // .catch-and-forget hole in coverage is exactly what the ghost detector
@@ -1598,7 +1758,13 @@ class ZwaveDataImpl implements ZwaveData {
         this.subRetryTimer = setInterval(() => void this.retryNodeSubs(), 60_000);
         this.subRetryTimer.unref?.();
       }
+      if (this.superseded(epoch)) { await standDown(); return; }
       await this.subscribeActivityEvents();
+      // FINAL check: subscribeActivityEvents releases its OWN feed when it
+      // wakes superseded, but this run still holds the controller + per-node
+      // handles it created before parking. Without this the stand-down never
+      // ran for them — the exact gap the churn test measures.
+      if (this.superseded(epoch)) { await standDown(); return; }
       void this.fetchEntityStates();
     } catch (e) {
       this.statsSubscribed = false;
@@ -1610,14 +1776,14 @@ class ZwaveDataImpl implements ZwaveData {
    *  PER-FEED idempotent (review): a retry must only re-attempt the feed that
    *  actually failed — re-subscribing a live feed leaks a duplicate
    *  subscription per retry and double-counts every event thereafter. */
-  private async subscribeNode(nodeId: number, deviceId: string): Promise<void> {
+  private async subscribeNode(nodeId: number, deviceId: string, owned?: HaSubscription[]): Promise<void> {
     let ok = true;
     if (!this.statsSubbedNodes.has(nodeId)) {
       try {
-        await this.client.subscribe(
+        owned?.push(await this.client.subscribe(
           { type: 'zwave_js/subscribe_node_statistics', device_id: deviceId },
           (msg) => this.onNodeStats(msg.event),
-        );
+        ));
         this.statsSubbedNodes.add(nodeId);
       } catch (e) {
         ok = false;
@@ -1626,10 +1792,10 @@ class ZwaveDataImpl implements ZwaveData {
     }
     if (!this.statusSubbed.has(nodeId)) {
       try {
-        await this.client.subscribe(
+        owned?.push(await this.client.subscribe(
           { type: 'zwave_js/subscribe_node_status', device_id: deviceId },
           (msg) => this.onNodeStatusEvent(nodeId, msg.event),
-        );
+        ));
         // Seed the event-feed state from the roster so the FIRST event after
         // subscribing diffs against the node's known status instead of being
         // swallowed (review: a real Alive→Dead as the first event counted 0).
@@ -1693,19 +1859,37 @@ class ZwaveDataImpl implements ZwaveData {
    * never fire on a given mesh); the state feed is the primary source.
    */
   private async subscribeActivityEvents(): Promise<void> {
+    // Epoch pinned at entry and RE-CHECKED after every await: the caller's
+    // pre-call check cannot help a run that was already parked inside one of
+    // these subscribes when the reconnect happened — it would wake on the NEW
+    // connection and land a duplicate feed beside the onReady-launched run
+    // (v0.26; the churn test constructs exactly this interleaving).
+    const epoch = this.connEpoch;
     try {
-      await this.client.subscribe(
+      const sub = await this.client.subscribe(
         { type: 'subscribe_events', event_type: 'state_changed' },
-        (msg) => this.onStateChanged(msg.event),
+        (msg) => { if (epoch === this.connEpoch) this.onStateChanged(msg.event); },
       );
+      if (epoch !== this.connEpoch) {
+        // The subscribe RESOLVED on the new connection — release it, don't
+        // just mute it: a zombie server-side feed costs HA a fanout per state
+        // change in the whole house for the life of the socket.
+        void sub.unsubscribe().catch(() => {});
+        this.log('activity subscribe: superseded by a reconnect mid-run — standing down');
+        return;
+      }
       await this.client
         .subscribe(
           { type: 'subscribe_events', event_type: 'zwave_js_notification' },
-          (msg) => this.onZwaveNotification(msg.event),
+          (msg) => { if (epoch === this.connEpoch) this.onZwaveNotification(msg.event); },
         )
         .catch(() => {
           /* best-effort — some meshes never emit notifications */
         });
+      if (epoch !== this.connEpoch) {
+        this.log('activity subscribe: superseded by a reconnect mid-run — standing down');
+        return;
+      }
       // A visible marker in the activity log itself so a (re)connect is legible
       // right where the user is watching — useful given the WS can wedge.
       this.pushEvent('net', 'info', 'system', null, `activity feed live — watching ${this.entityIndex.size} device entities`);
@@ -1764,8 +1948,15 @@ class ZwaveDataImpl implements ZwaveData {
 
   /**
    * Read slow-moving entity states in one get_states pass: battery levels AND
-   * firmware-update status. Both change rarely, so this rides the same cadence
-   * as the battery poll (called after each registry (re)load / on reconnect).
+   * firmware-update status.
+   *
+   * CADENCE (v0.26, assessment fix): called after each registry (re)load /
+   * reconnect AND every ENTITY_REFRESH_MS by a timer. The old comment claimed
+   * it rode "the battery poll" — a poll that did not exist, so on a stable
+   * connection battery drain past the low-battery gate and newly-available
+   * firmware updates never reached the roster, the ≤25% gate, or the
+   * battery-low symptom until the next reconnect. The two slow-moving alerts
+   * this feature exists for were exactly the ones a healthy connection froze.
    */
   private async fetchEntityStates(): Promise<void> {
     // entityIndex ⊇ (battery ∪ update ∪ every other tracked mesh entity); an
@@ -1854,16 +2045,21 @@ class ZwaveDataImpl implements ZwaveData {
     return this.lastStatsAt;
   }
 
-  /** Rolling RSSI/RTT history for a node (for sparklines). Empty when unknown. */
-  history(nodeId: number): { rssi: number[]; rtt: number[] } {
+  /** Rolling RSSI/RTT history for a node (for sparklines). Empty when unknown.
+   *  READONLY VIEW, not a copy (v0.26): the Overview calls this once per node
+   *  row per 1 Hz frame, and cloning two 60-sample arrays per call made the
+   *  hottest render path also the biggest allocator. The readonly type is the
+   *  guard — render code filters/slices into new arrays when it needs to. */
+  history(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] } {
     const h = this.histByNode.get(nodeId);
-    return h ? { rssi: [...h.rssi], rtt: [...h.rtt] } : { rssi: [], rtt: [] };
+    return h ? { rssi: h.rssi, rtt: h.rtt } : { rssi: EMPTY_SERIES, rtt: EMPTY_SERIES };
   }
 
-  /** Coarse long-horizon RSSI/RTT trend (1 pt/min ≈ 2h). Empty when unknown. */
-  historyLong(nodeId: number): { rssi: number[]; rtt: number[] } {
+  /** Coarse long-horizon RSSI/RTT trend (1 pt/min ≈ 2h). Empty when unknown.
+   *  Readonly view — see history(). */
+  historyLong(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] } {
     const h = this.histLongByNode.get(nodeId);
-    return h ? { rssi: [...h.rssi], rtt: [...h.rtt] } : { rssi: [], rtt: [] };
+    return h ? { rssi: h.rssi, rtt: h.rtt } : { rssi: EMPTY_SERIES, rtt: EMPTY_SERIES };
   }
 
   /** Per-node evidence samples (M2). A copy, newest last; [] when none/no store. */
@@ -1909,6 +2105,25 @@ class ZwaveDataImpl implements ZwaveData {
     }
     this.lastStatsAt = Date.now();
     const prev = this.statsByNode.get(nodeId);
+    // DISPLAYED lastSeen (v0.26, assessment fix). Every (re)subscribe REPLAYS
+    // each node's current snapshot, and stamping arrival time unconditionally
+    // fabricated "seen 0s ago" for all 39 nodes on every reconnect — exactly
+    // when an operator is looking. The evidence path always had the replay
+    // rule (isFreshSample requires counter movement); the display path now
+    // gets the same discipline, three-way:
+    //  · counters MOVED vs our cache → real traffic happened → stamp arrival;
+    //  · replay with no movement    → carry the previous stamp forward;
+    //  · FIRST delivery (no cache)  → we cannot distinguish replay from real,
+    //    so no arrival stamp at all — the driver's own lastSeen (driver-ws,
+    //    merged in buildNode) covers it, and "no data yet" beats a fabricated
+    //    "just now" on every boot.
+    const moved =
+      prev != null &&
+      (prev.commandsTX !== counters.tx ||
+        prev.commandsRX !== counters.rx ||
+        prev.commandsDroppedTX !== counters.dropTx ||
+        prev.commandsDroppedRX !== counters.dropRx ||
+        prev.timeoutResponse !== counters.timeout);
     const stats: NodeStats = {
       rtt: num(e.rtt),
       rssi: num(e.rssi),
@@ -1919,7 +2134,7 @@ class ZwaveDataImpl implements ZwaveData {
       commandsDroppedTX: counters.dropTx,
       commandsDroppedRX: counters.dropRx,
       timeoutResponse: counters.timeout,
-      lastSeen: Date.now(),
+      lastSeen: moved ? Date.now() : prev?.lastSeen ?? null,
     };
     this.statsByNode.set(nodeId, stats);
     // routeFailedBetween is TRANSIENT (overwritten on the next OK transmission)
@@ -1952,6 +2167,7 @@ class ZwaveDataImpl implements ZwaveData {
     }
     this.histByNode.set(nodeId, h);
     this.coarseAccum.set(nodeId, acc);
+    this.histDirty = true;
     // Log a route change (repeater chain differs) so the mesh's re-routing is
     // visible — and count it into the evidence accumulator (route churn).
     if (prev && routeKey(prev.lwr) !== routeKey(stats.lwr)) {
@@ -1960,48 +2176,72 @@ class ZwaveDataImpl implements ZwaveData {
     }
   }
 
-  /** Map the raw controller-statistics event (note the misspelled key). */
+  /** Map the raw controller-statistics event via the exported pure mapper. */
   private onControllerStats(ev: unknown): void {
-    const e = ev as Record<string, unknown> | null;
-    if (!e || e.source !== 'controller') return;
-    // Same rejection rule as node counters (DR): a malformed event coerced to
-    // zeros would re-baseline the controller evidence deltas and fabricate a
-    // giant delta on the next real event. ALL counters must be numeric.
-    // timeout_response: HA's dev source misspells the key 'timout_response';
-    // accept either spelling so an upstream fix can't zero the field forever.
-    const msgTx = num(e.messages_tx);
-    const msgRx = num(e.messages_rx);
-    const msgDropTx = num(e.messages_dropped_tx);
-    const msgDropRx = num(e.messages_dropped_rx);
-    const nak = num(e.nak);
-    const can = num(e.can);
-    const tAck = num(e.timeout_ack);
-    const tRes = num(e.timout_response) ?? num(e.timeout_response);
-    // Optional — absence must not reject the event (see the type's comment).
-    const tCb = num(e.timeout_callback);
-    if (msgTx == null || msgRx == null || msgDropTx == null || msgDropRx == null ||
-        nak == null || can == null || tAck == null || tRes == null) {
-      this.log('controller: malformed statistics event (non-numeric counters) — ignored');
+    const mapped = mapControllerStats(ev);
+    if (mapped == null) {
+      // Distinguish "not a controller event" (routine) from "controller event
+      // with broken counters" (worth a log line).
+      const e = ev as Record<string, unknown> | null;
+      if (e && e.source === 'controller') {
+        this.log('controller: malformed statistics event (non-numeric counters) — ignored');
+      }
       return;
     }
     this.lastStatsAt = Date.now();
-    this.ctrlStats = {
-      messagesTX: Math.trunc(msgTx),
-      messagesRX: Math.trunc(msgRx),
-      messagesDroppedTX: Math.trunc(msgDropTx),
-      messagesDroppedRX: Math.trunc(msgDropRx),
-      NAK: Math.trunc(nak),
-      CAN: Math.trunc(can),
-      timeoutACK: Math.trunc(tAck),
-      timeoutResponse: Math.trunc(tRes),
-      timeoutCallback: tCb == null ? null : Math.trunc(tCb),
-    };
+    this.ctrlStats = mapped;
   }
 
   /** Convert a raw route (repeaters as HA device_ids) → RouteStat (node ids). */
   private mapRoute(r: unknown): RouteStat | null {
     return mapRouteRaw(r, (devId) => this.deviceIdToNodeId.get(String(devId)) ?? 0);
   }
+}
+
+/**
+ * Pure mapper for the raw controller-statistics event → ControllerStatsShape.
+ * Returns null for a non-controller event OR a controller event with any
+ * non-numeric required counter (the DR rejection rule: coercing a malformed
+ * event to zeros would re-baseline the evidence deltas and fabricate a giant
+ * delta on the next real event).
+ *
+ * ★ `timout_response`: HA's own source misspells the key; accept either
+ *   spelling so an upstream fix can't zero the field forever. Exported so a
+ *   test pins BOTH spellings and the all-counters-numeric rejection — this
+ *   mapping had zero tests through five releases (v0.26 assessment).
+ */
+export function mapControllerStats(ev: unknown): {
+  messagesTX: number; messagesRX: number; messagesDroppedTX: number;
+  messagesDroppedRX: number; NAK: number; CAN: number; timeoutACK: number;
+  timeoutResponse: number; timeoutCallback: number | null;
+} | null {
+  const e = ev as Record<string, unknown> | null;
+  if (!e || e.source !== 'controller') return null;
+  const msgTx = num(e.messages_tx);
+  const msgRx = num(e.messages_rx);
+  const msgDropTx = num(e.messages_dropped_tx);
+  const msgDropRx = num(e.messages_dropped_rx);
+  const nak = num(e.nak);
+  const can = num(e.can);
+  const tAck = num(e.timeout_ack);
+  const tRes = num(e.timout_response) ?? num(e.timeout_response);
+  // Optional — absence must not reject the event (see the type's comment).
+  const tCb = num(e.timeout_callback);
+  if (msgTx == null || msgRx == null || msgDropTx == null || msgDropRx == null ||
+      nak == null || can == null || tAck == null || tRes == null) {
+    return null;
+  }
+  return {
+    messagesTX: Math.trunc(msgTx),
+    messagesRX: Math.trunc(msgRx),
+    messagesDroppedTX: Math.trunc(msgDropTx),
+    messagesDroppedRX: Math.trunc(msgDropRx),
+    NAK: Math.trunc(nak),
+    CAN: Math.trunc(can),
+    timeoutACK: Math.trunc(tAck),
+    timeoutResponse: Math.trunc(tRes),
+    timeoutCallback: tCb == null ? null : Math.trunc(tCb),
+  };
 }
 
 /**

@@ -82,7 +82,12 @@ export const config = {
    * shutdown).
    */
   historyPath: process.env.HISTORY_PATH || null,
-  historyFlushMs: Number(process.env.HISTORY_FLUSH_MS ?? 30_000),
+  // 30 s → 120 s in v0.26. THE DEFAULT LIVES HERE, not in zwaveData: index.ts
+  // passes this value as `opts.historyFlushMs`, and zwaveData reads
+  // `opts.historyFlushMs ?? env ?? default` — so opts ALWAYS wins and the
+  // constructor's default is unreachable in production. Raising it there alone
+  // would have left the SD-wear fix inert on the only host that matters.
+  historyFlushMs: Number(process.env.HISTORY_FLUSH_MS ?? 120_000),
   /**
    * Persistent per-node EVIDENCE store (M2 — the symptom engine's time series;
    * atomic JSON ring on /data). The run script exports
@@ -90,7 +95,8 @@ export const config = {
    * Flush is dirty-flagged; 5 min bounds crash loss without grinding SD cards.
    */
   evidencePath: process.env.EVIDENCE_PATH || null,
-  evidenceFlushMs: Number(process.env.EVIDENCE_FLUSH_MS ?? 300_000),
+  // 5 min → 15 min in v0.26 — same precedence trap as historyFlushMs above.
+  evidenceFlushMs: Number(process.env.EVIDENCE_FLUSH_MS ?? 900_000),
   /**
    * READ-ONLY zwave-js driver WS (v0.13 — DESIGN §2.1): background RSSI,
    * lastSeen, capability flags. Empty/absent ⇒ disabled (bare dev runs

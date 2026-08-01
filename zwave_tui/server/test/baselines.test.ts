@@ -22,7 +22,7 @@ function mk(path: string, extra: Partial<BaselineStoreOptions> = {}) {
 /** A minimal fresh evidence sample. */
 function sample(over: Partial<EvidenceSample> = {}): EvidenceSample {
   return {
-    t: T0, dTx: 100, dTimeout: 0, dDropTx: 0, dRx: 10, dFlaps: 0, dRouteChanges: 0,
+    t: T0, dTx: 100, dTimeout: 0, dDropTx: 0, dRx: 10, dFlaps: 0, dRouteChanges: 0, dS2Resync: 0,
     fresh: true, rtt: 30, rssi: -60, rateKbps: 100, routeKey: 'direct',
     status: NodeStatus.Alive, lastSeen: null, isListening: null, isFrequentListening: null, ...over,
   };

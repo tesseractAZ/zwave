@@ -14,7 +14,7 @@ The add-on is a Node/TypeScript server (`server/`) that talks to Home Assistant'
 3. [The Control-Room TUI: Screens, Navigation & Rendering](#3-the-control-room-tui-screens-navigation--rendering)
 4. [Node Health Scoring](#4-node-health-scoring)
 5. [The Evidence Store (M2)](#5-the-evidence-store-m2)
-6. [Read-Only Driver-WS Evidence Client (v0.13)](#6-read-only-driver-ws-evidence-client-v013)
+6. [Read-Only Driver-WS Evidence Client (v0.13) & the S2 Resync Watch (v0.26)](#6-read-only-driver-ws-evidence-client-v013)
 7. [Baselines & Symptom Detectors (M3)](#7-baselines--symptom-detectors-m3)
 8. [The Remediation Planner (M4)](#8-the-remediation-planner-m4)
 9. [The Outcome-Learning Loop (M5)](#9-the-outcome-learning-loop-m5)
@@ -1326,7 +1326,7 @@ The on-disk format (`interface Persisted`, `SCHEMA_V = 2`) is genuinely **column
 - writes **atomically**: `writeFileSync(tmp, …)` then `renameSync(tmp, path)`, where `tmp = ${path}.tmp` — a crash mid-write leaves the old good file intact;
 - **never throws** — a failed write is logged and swallowed.
 
-Flushes are driven on a **~5-minute cadence** (`EVIDENCE_FLUSH_MS`, default `300_000`) plus an explicit save on shutdown — not a fixed full-file rewrite every tick.
+Flushes are driven on a **~15-minute cadence** (`EVIDENCE_FLUSH_MS`, default `900_000` since v0.26; was 5 min) plus an explicit save on shutdown — not a fixed full-file rewrite every tick.
 
 ### 5.10 Load path + host-boot grace
 
@@ -1350,7 +1350,7 @@ Under grace or when the fine ring is too old, the store **still loads the coarse
 | --- | --- | --- |
 | `EVIDENCE_PATH` → `path` | `null` (in-memory, engine dormant) | on-disk location, e.g. `/data/evidence.json` |
 | `EVIDENCE_SAMPLE_MS` → `cadenceMs` | `routePollMs` (falls back to ~2 s `REFRESH_INTERVAL_MS`) | sample cadence; **drives `maxWindowMs = cadenceMs·3`** |
-| `EVIDENCE_FLUSH_MS` → `evidenceFlushMs` | `300_000` (5 min) | dirty-flush interval |
+| `EVIDENCE_FLUSH_MS` → `evidenceFlushMs` | `900_000` (15 min, v0.26) | dirty-flush interval |
 | `maxSamples` | `DEFAULT_MAX_SAMPLES = 240` | fine-ring cap per node |
 | `maxAgeMs` | `DEFAULT_MAX_AGE_MS = 3_600_000` | **fine-tier-only** staleness; `0` = never |
 | `coarseHorizonMs` | `DEFAULT_COARSE_HORIZON_MS = 14 d` | coarse prune horizon |
@@ -1610,6 +1610,111 @@ export DRIVER_WS_URL="$(bashio::config 'driver_ws_url')"
 
 which `config.ts` reads as `driverWsUrl: process.env.DRIVER_WS_URL || null`. The default `ws://core-zwave-js:3000` matches the official Z-Wave JS add-on's internal DNS name and port; Z-Wave JS UI users point it at their own server's WS port. **Empty disables the client entirely** — `createDriverWsClient` is passed `null`, `state()` is `'disabled'`, and every driver-fed field stays `null`. As the translation copy (`translations/en.yaml`) and the code comments both stress, disabling it costs only the noise floor / true-last-seen / capability flags — "everything else keeps working, and this connection is never used to control the mesh." That single sentence is the whole security contract of the module: read-only, optional, and inert with respect to the mesh.
 
+### 6.11 The S2 SPAN-resync watch: driver log-event listening (v0.26)
+
+Section 6.1 explained that HA's WS boundary strips the noise floor. There is a
+second, subtler gap on the same boundary, and it hides an entire class of RF
+fault: **S2 nonce desynchronisation leaves no trace in any statistics counter.**
+
+Z-Wave S2 keeps a rolling nonce — the SPAN (Singlecast Pre-Agreed Nonce) —
+in step between controller and device. When a frame is lost, the two sides
+disagree about the nonce, and the protocol recovers by resynchronising: the
+receiver requests a fresh nonce and the sender re-transmits with a SPAN
+extension. That recovery is *correct behaviour*, and an occasional resync is
+completely normal on a healthy secure link.
+
+The diagnostic problem is what a **storm** of them means, and where it shows up.
+A node whose link is marginal loses frames faster than the resync can absorb,
+so it resyncs repeatedly — but from the counters' point of view nothing is
+wrong: the command eventually succeeds, so `commandsTX` increments, no reply
+times out, and `commandsDroppedTX` stays where §2 says it stays (near-silent
+for RF loss). Every metric the Overview shows can read healthy while a secure
+node is quietly burning airtime on retries. The failure is visible **only** in
+the driver's log stream.
+
+Node 17 on the maintainer's mesh demonstrated exactly this on 2026-07-31:
+twenty `failed to decode the message, retrying with SPAN extension` /
+`Dropping message with invalid payload` events over three hours, self-resolving,
+with no statistics anomaly of any kind and nothing on any screen.
+
+#### What the driver actually emits
+
+Verified against node-zwave-js v15.26.0 sources, the S2 desync family splits by
+direction, and — decisively — by **log level**:
+
+| Direction | Message | Level | Node-attributed |
+|---|---|---|---|
+| Outgoing (device could not decrypt us) | `failed to decode the message, retrying with SPAN extension...` | `info` | yes |
+| Outgoing, terminal | `failed to decode the message after re-transmission with SPAN extension, dropping the message.` | `warn` | yes |
+| Incoming (we could not decrypt the device) | `Message authentication failed` / `No SPAN is established yet`, `…cannot decode command. Requesting a nonce...` | **`verbose`** | yes |
+
+**Only the outgoing pair is visible at the stock `info` level.** The incoming
+family requires the Z-Wave JS add-on's log level to be raised to `verbose`, so
+this detector sees roughly half the S2 desync picture on a default install —
+which is honest to say and is said again in §7 where the symptom is defined.
+The un-attributed driver-level line (`Dropping message with invalid payload`,
+logged via `driverLog` with no `nodeId`) is deliberately **not** matched: it
+carries no node attribution, and charging resyncs to nobody is worse than not
+counting them.
+
+#### Subscribing: `start_listening_logs`
+
+zwave-js-server exposes the log stream through a top-level command pair,
+`start_listening_logs` / `stop_listening_logs` (schema 31+; the older
+driver-scoped `driver.start_listening_logs` dates to schema 4). Both are inside
+the negotiated 32–41 range from §6.3, so the client uses the top-level form. It
+is added to the frozen allowlist of §6.2 alongside `start_listening` — it is a
+subscription, not a mutation, and it remains true that this client can never
+alter the mesh.
+
+Log events arrive as
+`{type:'event', event:{source:'driver', event:'logging', formattedMessage, message, level, context, …}}`,
+where a node-scoped controller line carries `context = {source:'controller',
+type:'node', nodeId, direction}`. The matcher (`s2ResyncNodeId`) requires
+`context.type === 'node'` and a sane `nodeId` before it looks at the text at all.
+
+#### Three properties of the server the client must defend against
+
+Reading the zwave-js-server source turned up three behaviours that make naïve
+log listening unsafe, all handled here:
+
+1. **The forwarder is global and shared.** `configureLoggingEventForwarder`
+   starts one transport for *all* subscribed clients, so the **first**
+   subscriber's `filter` wins and later clients' filters are silently ignored;
+   worse, the internal `restartIfNeeded()` re-attaches with **no filter at all**
+   after any log-level change. Server-side filtering therefore can never be
+   load-bearing. This client filters **client-side**, treating whatever arrives
+   as untrusted, and passes no filter at all rather than depending on one.
+2. **There is no throttling of any kind** — one WebSocket message per log line
+   per subscribed client, synchronously in the driver's logging pipeline. At
+   `debug`/`silly` levels that is every serial frame. The client therefore
+   carries its own **storm guard**: if inbound log events exceed
+   `LOG_STORM_PER_MIN` (3000) it sends `stop_listening_logs`, logs the reason
+   once, and continues without the S2 lane. A diagnostic that can drown the Pi
+   it is diagnosing is not a diagnostic.
+3. **The stream follows the driver's current log level**, which the user may
+   change at any time from the Z-Wave JS add-on. Volume is therefore not under
+   this add-on's control, which is the second reason the storm guard exists.
+
+Failure to start the log stream is, like everything else in §6, **degradation
+not fatality**: the S2 lane goes quiet, `dS2Resync` stays 0 for every sample,
+the `s2-desync` detector never fires, and every other signal is unaffected.
+
+#### Into the evidence store
+
+A matched event increments a per-node accumulator, `s2Accum`, which drains into
+the next evidence sample exactly as `flapAccum` does (§5) — the same
+event-accumulator discipline, for the same reason: level-sampling a rate this
+bursty would miss sub-window storms by construction. The sample field is
+`dS2Resync`, folded into the coarse tier as `s2`. Both are optional on disk and
+revive as `0` from pre-v0.26 snapshots, so the schema version does not change
+and an upgrade loses no history.
+
+The message text itself is **never stored or logged** — only matched. It is
+server-sent data, and §6.6's payload-safety rule applies unchanged.
+
+---
+
 ## 7. Baselines & Symptom Detectors (M3)
 
 M3 is the layer that turns the raw evidence stream (Chapter 6, `evidenceStore.ts`) into *meaning*. It has two halves, each a self-contained module:
@@ -1818,11 +1923,35 @@ const DWELL_MS = 5 * 60_000;   // 5 min of continuous breach before emission
 Two helpers keep dwell stable against the freshness flag:
 
 - `latestFresh(samples, now, pick, window)` — scans newest-first, skips non-fresh samples, and returns the first usable value. This is why `rtt-degraded` and `weak-signal` gate on the newest *fresh* reading instead of `last`, so a non-fresh tick doesn't reset the dwell (v0.14 review: those detectors almost never matured before this fix).
-- `windowTimeoutRate`, `windowFlaps`, `windowRxRate` — windowed aggregations over the recent fine ring (default `WINDOW_MS = 10 min`).
+- `windowTimeoutRate`, `windowFlaps`, `windowRxRate`, `windowS2` — windowed aggregations over the recent fine ring (default `WINDOW_MS = 10 min`; `S2_WINDOW_MS = 30 min`).
+- `hadRecent(samples, now, recentMs, pick)` — the **recency conjunct** (v0.26).
 
-#### 7.2.3 The 13 `SymptomKind`s
+**The recency conjunct, and why dwell alone was not persistence.** A windowed
+detector combined two horizons that did not agree: the *lookback* (10–30 min)
+and the *dwell* (5 min). Because the lookback is the longer of the two, a
+single transient burst kept the windowed count above threshold for the whole
+lookback — so the breach stayed asserted long after the mesh had gone quiet,
+and the dwell matured on evidence that had already stopped. The dwell was being
+armed by the calendar rather than by the mesh, which is the precise opposite of
+what "persisted 5 minutes" claims to the operator.
 
-The `SymptomKind` union declares **13** kinds. Eleven have live detector bodies in `detectSymptoms`; two (`quiet-node`, `route-churn`) are declared in the union but have **no detector implemented yet** — they are reserved names from the DESIGN table awaiting the driver-WS cadence/route-scheme data:
+Every burst-prone detector now conjoins its windowed threshold with
+`hadRecent(...)` — evidence of the *same* signal inside the dwell horizon:
+
+```ts
+const b = flaps >= FLAPS_WINDOW && hadRecent(samples, now, DWELL_MS, (s) => s.dFlaps);
+```
+
+`dead-flap` (flaps), `return-path-degraded` (timeouts) and `s2-desync`
+(resyncs) carry it; `rtt-degraded` gets the equivalent by requiring its newest
+fresh reading to itself fall inside the dwell horizon. A storm that ends
+therefore de-asserts and clears its dwell entry, and only a condition that is
+*still happening* can mature. `symptoms.test.ts` pins both directions — a stale
+burst must not fire, an active one must.
+
+#### 7.2.3 The 14 `SymptomKind`s
+
+The `SymptomKind` union declares **14** kinds. Twelve have live detector bodies in `detectSymptoms`; two (`quiet-node`, `route-churn`) are declared in the union but have **no detector implemented yet** — they are reserved names from the DESIGN table awaiting the driver-WS cadence/route-scheme data:
 
 | # | kind | scope | severity | basis | implemented? |
 | --- | --- | --- | --- | --- | --- |
@@ -1839,6 +1968,7 @@ The `SymptomKind` union declares **13** kinds. Eleven have live detector bodies 
 | 11 | `controller-degraded` | mesh | warn/crit | measured | yes |
 | 12 | `edge-cluster` | cluster (shared repeater; carries `members[]`) | warn | measured | yes |
 | 13 | `mesh-interference` | mesh | warn | measured/inferred | yes |
+| 14 | `s2-desync` | node | watch/warn | measured | yes (v0.26) |
 
 `edge-cluster` is the only **cluster-scoped** kind: its `nodeId` is the shared upstream repeater (the actionable node), and a new optional `Symptom.members[]` carries the affected downstream node ids. It sits between the per-node detectors and the mesh-wide event.
 
@@ -1925,6 +2055,36 @@ b = rr >= rxMedian * RX_FLOOD_MULT (20) && rr >= 6   // ≥6 reports/min AND ≫
 ```
 
 The offending node id is captured as `floodNode` for the correlation ladder. `chatty-device` is a *cause hypothesis* and is exempt from `subsumedBy` demotion (§7.5).
+
+**`s2-desync`** — watch (warn at ≥3×), measured, **v0.26**.
+
+```
+windowS2(samples, 30 min) >= S2_ABS (12)
+  AND hadRecent(samples, now, S2_RECENT_MS (10 min), s => s.dS2Resync)
+```
+
+Fed by the driver log-event lane of §6.11, not by any counter — S2 nonce
+desync moves no statistic, so without that lane this detector's input is
+structurally zero.
+
+The threshold is **absolute, not baseline-relative**, for the same reason
+`chronic-return-path` is: resyncs are rare-normal, so a per-node baseline would
+learn a chronically bad secure link as "its normal" and then never fire on it.
+The window is 30 min rather than the usual 10 because the signal is sparser than
+counter traffic.
+
+The remedy card (§8) is deliberately blunt about direction: this is an **RF**
+fault surfaced through the security layer, not a security fault. Re-interviewing
+re-reads capabilities over the same degraded link, does not re-key the device or
+repair SPAN sync, and on a marginal link often fails part-way leaving the node
+half-interviewed — so it is offered only as a *blocked* candidate with that
+rationale. The actionable candidates are physical (improve the path; check
+whether the device is power-cycling, which loses nonce state on every boot).
+
+**Coverage caveat, restated from §6.11:** at the stock Z-Wave JS `info` log
+level only the *outgoing* desync pair is emitted. The incoming family is
+`verbose`, so on a default install this detector sees roughly half the S2
+picture. It under-reports; it does not over-report.
 
 #### 7.2.5 `controller-degraded` — the serial-link event (warn/crit, measured)
 
@@ -2016,6 +2176,10 @@ All `symptoms.ts` thresholds ship as documented compile-time constants (shareabi
 | `RTT_Z` | 4 | z-score over route-stratified RTT baseline |
 | `WEAK_MARGIN_DB` | 7 | Direct-node weak-signal SNR margin |
 | `FLAPS_WINDOW` | 3 | Alive↔Dead transitions/window → dead-flap |
+| `S2_WINDOW_MS` | 30 min | S2 SPAN-resync lookback (sparser than counter signals) |
+| `S2_ABS` | 12 | Resyncs in the window → `s2-desync` (absolute; see below) |
+| `S2_WARN_MULT` | 3 | ×`S2_ABS` escalates watch → warn |
+| `S2_RECENT_MS` | 10 min | Recency conjunct for `s2-desync` |
 | `RX_FLOOD_MULT` | 20 | dRx rate over the mesh median → chatty |
 | `GHOST_MIN_COVERAGE_MS` | 3 days | Observed-with-zero-comms before ghost-suspect |
 | `CTRL_DEGRADED_ABS` | 5 | Serial NAK+CAN+timeoutACK per window (×3 = crit) |
@@ -3274,15 +3438,27 @@ important:
 Flush cadence is fixed in code, not a knob. The relevant defaults in `config.ts`:
 
 ```ts
-historyFlushMs:  Number(process.env.HISTORY_FLUSH_MS  ?? 30_000),   // 30 s + on shutdown
-evidenceFlushMs: Number(process.env.EVIDENCE_FLUSH_MS ?? 300_000),  // 5 min + on shutdown
+historyFlushMs:  Number(process.env.HISTORY_FLUSH_MS  ?? 120_000),  // 120 s + on shutdown (v0.26)
+evidenceFlushMs: Number(process.env.EVIDENCE_FLUSH_MS ?? 900_000),  // 15 min + on shutdown (v0.26)
 ```
 
 The run script never exports `HISTORY_FLUSH_MS`/`EVIDENCE_FLUSH_MS`, so those
-`??` defaults always bind in production. History flushes every 30 s; evidence,
-baselines, and outcomes are **dirty-flagged on a ~5-minute cadence plus
-shutdown** — chosen (per `DESIGN.md` §3.1) to bound crash-loss without SD-card
-write amplification. `DB_PATH` exists but is reserved and currently unused.
+`??` defaults always bind in production. **These are the values that decide** —
+`zwaveData` reads `opts ?? env ?? default` and `index.ts` passes the config
+value as `opts`, so the constructor's own default is unreachable in production.
+A v0.26 draft raised only the constructor default and the change was inert;
+`configContract.test.ts` now pins both layers to the same number.
+
+All four stores are dirty-gated (`history`, `evidence`, `baselines`,
+`outcomes` — the last of these gained its gate in v0.26, having previously
+rewritten unconditionally 288×/day while this section claimed otherwise). Be
+honest about what the gates buy: on a live mesh recording a sample every ~10 s
+the evidence store is dirty at nearly every flush, so the steady-state saving is
+the **cadence**, not the gate — measured at roughly **3×**, with the remaining
+cost dominated by the 14-day coarse tier, still rewritten in full each flush.
+Cadences are chosen (per `DESIGN.md` §3.1) to bound crash-loss against SD-card
+write amplification; at 15 min the evidence loss window is a few samples of a
+fine ring that is display + recent-window evidence only. `DB_PATH` exists but is reserved and currently unused.
 
 `SUPERVISOR_TOKEN` is conspicuously **not** exported: the Supervisor injects it
 automatically for add-ons with `homeassistant_api: true`, and the Node process

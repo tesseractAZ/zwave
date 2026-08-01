@@ -232,8 +232,8 @@ export interface DataProvider {
   scoreFor(nodeId: number): HealthResult;
   noiseFloor(): number; // representative background RSSI (dBm) for SNR-margin math
   hasRealNoise(): boolean; // true when noiseFloor() is a real reading, not the fallback
-  history(nodeId: number): { rssi: number[]; rtt: number[] }; // rolling fine trend for sparklines
-  historyLong(nodeId: number): { rssi: number[]; rtt: number[] }; // coarse long-horizon (~2h) trend
+  history(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] }; // rolling fine trend (READONLY view — do not mutate)
+  historyLong(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] }; // coarse long-horizon (~2h) trend
   lastUpdated(): number | null; // epoch ms of the last successful roster refresh
   ready(): boolean; // has the first roster load completed?
   lastError(): string | null;
