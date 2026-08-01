@@ -65,8 +65,9 @@ test('the header alone is never sufficient', () => {
   setSupervisorAddressesForTest(['172.30.32.2']);
   // No header, right IP → not ingress (it is some other caller on the bridge).
   assert.equal(isIngressTrusted({ headers: {}, ip: '172.30.32.2' }), false);
-  // Header, wrong IP → the forge attempt.
-  assert.equal(isIngressTrusted({ headers: { 'x-ingress-path': '/x' }, ip: '192.168.5.40' }), false);
+  // Header, wrong IP → the forge attempt. Uses an RFC 5737 documentation
+  // address (TEST-NET-1) so no real LAN range appears in the repo.
+  assert.equal(isIngressTrusted({ headers: { 'x-ingress-path': '/x' }, ip: '192.0.2.40' }), false);
 });
 
 test('a user row with a blank password is REJECTED, and fails closed', async () => {
