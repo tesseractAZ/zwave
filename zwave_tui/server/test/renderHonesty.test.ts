@@ -1181,3 +1181,21 @@ test('a FRACTIONAL noise floor never truncates a margin into a bare number', () 
   } as ScreenCtx).map(strip).join('\n');
   assert.ok(!/[+-]\d+\.\d+dB/.test(topo), `route tree shows a fractional margin:\n${topo.slice(0, 400)}`);
 });
+
+test('the margin-mode bar glyphs use the SHARED band, not signalBars’ own zone ramp', () => {
+  // marginColor has a fourth band zoneColor cannot express: BOLD red (redB,
+  // SGR "1;91") below half the weak threshold. At +1 dB margin the shared band
+  // says redB while signalBars' internal zoneColor default says plain red —
+  // the one place the two rules visibly disagree, so this is the fixture that
+  // discriminates (every margin ≥ 3 dB agrees by construction, which is how a
+  // dropped colorFn would slip through unnoticed).
+  const weak = { ...mkNode().stats, rssi: -94 }; // vs the assumed -95 floor → +1 dB
+  const n = mkNode({ nodeId: 3, name: 'Barely', stats: weak });
+  const rows = renderOverview(ctxFor([n], { selected: 1, cols: 140, signalDisplay: 'margin' }));
+  const row = rows.find((r) => strip(r).includes('Barely'));
+  assert.ok(row, 'row must render');
+  const boldRedBars = (row!.match(/\x1b\[1;91m[▁▃▅▇]/g) ?? []).length;
+  const plainRedBars = (row!.match(/\x1b\[91m[▁▃▅▇]/g) ?? []).length;
+  assert.ok(boldRedBars >= 1,
+    `no bar carries the shared band's BOLD red (bold=${boldRedBars}, plain=${plainRedBars}) — the glyph is using signalBars' own zone ramp`);
+});

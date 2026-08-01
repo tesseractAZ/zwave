@@ -1,5 +1,140 @@
 # Changelog
 
+## 0.26.0 — 2026-08-01
+
+### The S2 SPAN-resync watch — a fault class the counters cannot see
+
+Z-Wave S2 keeps a rolling nonce (the SPAN) in step between controller and
+device. When a frame is lost the two sides disagree and the protocol recovers by
+resynchronising. An occasional resync is normal. A **storm** of them means the
+link is losing frames faster than the recovery absorbs — and it is invisible to
+every statistic the add-on has ever collected: the command eventually succeeds,
+so `commandsTX` increments, no reply times out, and `commandsDroppedTX` stays
+near-silent as always. A secure node can burn airtime on retries while every
+screen reads healthy.
+
+It surfaces only in the driver's log stream. So the read-only driver-WS client
+now also subscribes to it (`start_listening_logs`, added to the frozen
+allowlist — a subscription, not a mutation), matches the node-attributed S2
+desync lines, and drains them into the evidence store through the same
+event-accumulator discipline as Alive↔Dead flaps. The new `s2-desync` detector
+fires on 12+ resyncs in 30 minutes, and its remedy card is blunt about
+direction: this is an **RF** fault surfaced through the security layer, so
+re-interviewing is offered only as a blocked candidate — it re-reads
+capabilities over the same bad link, does not re-key the device or repair SPAN
+sync, and on a marginal link often leaves the node half-interviewed.
+
+Three properties of zwave-js-server made naïve log listening unsafe, all
+verified in its source and defended against here: the log forwarder is **global
+and shared** (the first subscriber's filter wins, and any log-level change drops
+the filter entirely — so filtering is done client-side and no filter is
+requested); there is **no throttling of any kind**, one message per log line per
+client, which at `debug` level is every serial frame (a storm guard stops the
+stream above 3000 events/min and continues without the lane); and the stream
+follows the **driver's current log level**, which this add-on does not control.
+
+**Coverage is honestly partial.** At the stock `info` level node-zwave-js emits
+only the *outgoing* desync pair. The incoming family is `verbose`, so on a
+default install this detector sees roughly half the S2 picture. It under-reports
+rather than over-reports, and both DOCS §6.11 and §7.2.4 say so.
+
+### Assessment fix wave
+
+A 27-agent adversarial assessment of v0.25.1 against the live 39-node mesh
+confirmed 19 findings. The measurement core came through clean — disjoint
+counter denominators, RSSI sentinel discipline, last-hop RSSI on routed nodes,
+unit-correct RTT, one timeout-% definition, and the exact-rows render contract
+all held under attack. What follows is what did not.
+
+**Dwell was not persistence.** Windowed detectors combined a 10–30 minute
+lookback with a 5-minute dwell, and because the lookback is longer, one
+transient burst kept the breach asserted for the whole lookback — maturing a
+"persistent" symptom off evidence that had already stopped. The dwell was armed
+by the calendar, not the mesh. Burst-prone detectors now conjoin their windowed
+threshold with evidence inside the dwell horizon, so a storm that ends
+de-asserts.
+
+**Reconnects fabricated freshness.** `lastSeen` was stamped at event arrival,
+and every re-subscribe replays each node's snapshot — so a reconnect reset all
+39 nodes to "seen 0s ago" with no RF traffic at all, precisely when an operator
+is looking. The evidence path always had the replay rule; the display path now
+gets it. A first delivery, which cannot be told from a replay, no longer stamps
+anything.
+
+**A superseded subscribe left a zombie feed.** A subscription run parked inside
+`state_changed` when the socket died would wake on the *new* connection and land
+a duplicate feed beside the live one, double-delivering every activity row and
+costing HA a fanout per state change in the whole house until the next
+disconnect. Runs are now epoch-pinned and release themselves.
+
+**A flapping Core was rejoined at ~1 s forever.** The backoff reset on
+`auth_ok`, which a Core that authenticates then dies satisfies on every cycle.
+The reset now requires the connection to survive.
+
+**Battery and firmware were frozen on a stable connection.** Both were fetched
+only on (re)subscribe, so on a long-lived healthy connection battery drain past
+25% and newly-available firmware updates never reached the roster, the low-
+battery gate, or the advisory engine. They now refresh on their own cadence.
+
+**A never-measured node claimed to be fine.** The documented "no statistics ⇒
+unknown, ≤15" gate was unreachable — the data layer always substitutes a zeroed
+stats object — so a node with no measurements scored **84/B "ok"** and reported
+"RF health nominal". The gate now tests the never-measured fingerprint. A cached
+RSSI still counts as contact.
+
+**"✓ helped 75% (n=4)" had no sampling-error control.** Near a coin flip at the
+minimum sample size. The claim is now gated on the Wilson score lower bound:
+*even pessimistically, this beats leaving it alone.*
+
+**Steady-state `/data` writes cut ~3×, against a failing SD card.**
+`history.json` was rewritten every 30 seconds with **no dirty gate at all** — a
+full-file rewrite whether or not a sample had been added. It now has one, and
+its cadence moved to 120 s. `evidence.json` already had a dirty gate (that gate
+is *not* new — an earlier draft of this entry said it was, which was wrong); its
+cadence moved from 5 to 15 minutes. Both gates are, in honesty, near no-ops in
+live steady state: a mesh recording a sample every ~10 s is dirty at almost
+every flush, so the real saving is the cadence, and the measured reduction is
+about **3×**, not the order of magnitude first claimed. The remaining cost is
+dominated by the 14-day coarse tier, which is still rewritten in full on every
+flush; compacting that is future work.
+
+`outcomes.json` was found to have **no dirty gate** while its own documentation
+claimed one — 288 unconditional full rewrites/day. It now has the same gate as
+`baselines.json` and `evidence.json`.
+
+**Render honesty.** The Detail ROUTES row blind-truncated, clipping a 100k rate
+to `1` and a −70 dBm route RSSI to `-7` at the documented 80-column default —
+plausible, wrong numbers on exactly the rows studied for multi-hop nodes. It now
+sheds whole tokens with a disclosed `+N`. The `Sig 2h` trend drew only its
+newest ~56 minutes while the label and caption claimed two hours. A dead node's
+trend sparklines rendered health-green on Detail while the Overview greyed the
+same cell. The Overview's margin bar anchor had drifted from the shared
+weak-margin threshold, and the noise floor printed unrounded where every other
+surface rounds.
+
+**Two East-Asian-Wide blocks could overflow a row.** The width-fold class missed
+Hangul Jamo Extended-A and Vertical Forms. Fixing it exposed that the two call
+sites had silently diverged: one range began at U+F900, the other at U+8C48 — a
+**homoglyph** that renders identically, so thousands of narrow code points were
+being folded to `?` in log text. Both now share one constant written with `\u`
+escapes, because that is a divergence review can see.
+
+### Verification
+
+534 tests (up from 521). Two files that had never existed: `haWsClient.test.ts`
+— the Core WebSocket client had **no test file at all**, leaving the exact
+reconnect path today's zwave-js update exercised entirely unproven — and
+`zwaveDataChurn.test.ts`, which drives the replay, epoch and dirty-gate
+behaviours through a real reconnect. The controller-statistics mapper, including
+its `timout_response` misspelling fallback, was extracted and pinned; it had
+zero tests through five releases.
+
+The mutation harness gained **14 entries covering the statistics and learning
+engine**, which previously had none — so the standing "83/83 clean" attested the
+render layer only. Every new fix is now reverted-and-caught, including the
+recency conjunct, the Wilson gate, the replay guard, the zombie-feed release and
+the dirty gate.
+
 ## 0.25.1 — 2026-07-28
 
 **Dependency and CI maintenance.** No behaviour change to the add-on.

@@ -203,8 +203,40 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
     return { score: 0, rating: 0, grade: 'F', state: 'dead', flags: orderFlags(flags) };
   }
 
-  // ── Gate 2a: no statistics at all → we simply don't know. Sensible low score.
-  if (!stats) {
+  // ── Gate 2a: NO MEASUREMENTS YET → we simply don't know (state 'unknown').
+  //
+  // The old guard was `!stats`, which the type system makes unreachable: the
+  // data layer always substitutes emptyStats() (a real object of zeros), so a
+  // never-contacted Alive node fell straight through the neutral lanes to a
+  // fabricated 84/B "ok" with "RF health nominal" (v0.26 assessment fix). The
+  // honest gate is the never-measured FINGERPRINT of emptyStats(): no lastSeen
+  // and zero traffic in either direction. A node that has actually communicated
+  // has a lastSeen or non-zero counters and is scored normally below. This is
+  // reachable in production briefly on every boot before the first stats
+  // replay, and permanently for a roster node with no HA device entry.
+  // ── Controller (node 1) FIRST. Its health lives on the Controller screen, not
+  // here: it has no upstream link or route to score, so a live controller is
+  // simply OK. This MUST precede the never-measured gate below — node 1 is
+  // deliberately excluded from per-node statistics subscriptions, so it always
+  // carries emptyStats() and matches the never-measured fingerprint exactly.
+  // Ordered the other way (v0.26, caught in review) every mesh's controller
+  // graded F/unknown on the roster.
+  if (node.isController && (node.status === NodeStatus.Alive || node.status === NodeStatus.Awake)) {
+    const flags = new Set<string>();
+    if (batteryLow) flags.add('B'); // controllers are mains-powered, but stay honest
+    if (updateAvail) flags.add('U');
+    return { score: 100, rating: 10, grade: 'A', state: 'ok', flags: orderFlags(flags) };
+  }
+
+  // "Never measured" must mean NO evidence of contact of any kind: zero
+  // traffic AND no cached RF reading. A node can carry a real rssi/rtt/route
+  // from the driver's stats cache while its counters read zero (the counters
+  // reset on driver restart; the readings survive) — that node HAS been
+  // measured, and gating it to 'unknown' would hide a real weak-signal W.
+  const neverMeasured =
+    stats.lastSeen == null && stats.commandsTX === 0 && stats.commandsRX === 0 &&
+    stats.rssi == null && stats.rtt == null && stats.lwr == null;
+  if (!stats || neverMeasured) {
     const flags = new Set<string>();
     if (!node.ready) flags.add('I');
     if (batteryLow) flags.add('B');
@@ -217,15 +249,6 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
       state: 'unknown',
       flags: orderFlags(flags),
     };
-  }
-
-  // ── Controller (node 1): its health lives on the Controller screen, not here.
-  // It has no upstream link/route to score, so a live controller is simply OK.
-  if (node.isController && (node.status === NodeStatus.Alive || node.status === NodeStatus.Awake)) {
-    const flags = new Set<string>();
-    if (batteryLow) flags.add('B'); // controllers are mains-powered, but stay honest
-    if (updateAvail) flags.add('U');
-    return { score: 100, rating: 10, grade: 'A', state: 'ok', flags: orderFlags(flags) };
   }
 
   const isLR = node.isLongRange || node.nodeId >= LR_NODE_ID;

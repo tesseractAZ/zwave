@@ -57,6 +57,8 @@ export interface WindowMetrics {
   rate: number | null; // timeouts / tx, or null when tx is too small to be a rate
   // ── other recovery signals ──
   flaps: number; // Σ dFlaps (Alive↔Dead transitions) — dead-flap recovery
+  s2: number; // Σ dS2Resync over samples where the log lane WAS listening
+  s2Known: number; // COUNT of those samples — the s2 branch's own evidence floor
   rssiMedian: number | null; // median of FRESH rssi readings — weak-signal recovery
   rssiN: number; // COUNT of non-null fresh rssi readings behind rssiMedian (its evidence floor)
   rttMedian: number | null; // median of FRESH rtt readings — rtt-degraded recovery
@@ -150,7 +152,7 @@ function median(vals: number[]): number | null {
  *  RSSI/RTT are taken from FRESH samples only (a re-sampled EMA carries no new
  *  information); flaps are event-driven counts; rateKbps is the worst seen. */
 export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetrics {
-  let tx = 0, rx = 0, timeouts = 0, flaps = 0, n = 0, freshN = 0;
+  let tx = 0, rx = 0, timeouts = 0, flaps = 0, s2 = 0, s2Known = 0, n = 0, freshN = 0;
   const rssis: number[] = [], rtts: number[] = [];
   let rateKbpsMin: number | null = null;
   for (const s of samples) {
@@ -159,6 +161,10 @@ export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetri
     if (s.dRx != null) rx += s.dRx;
     if (s.dTimeout != null) timeouts += s.dTimeout;
     if (s.dFlaps != null) flaps += s.dFlaps; // typed non-null, but guard legacy/persisted samples from NaN
+    // dS2Resync is null when the driver-WS log lane was NOT listening. Count
+    // only listening samples, and count HOW MANY — the s2 verdict needs its
+    // own liveness evidence, not the HA-stats freshN of a different transport.
+    if (s.dS2Resync != null) { s2 += s.dS2Resync; s2Known += 1; }
     // rssi/rtt/rateKbps are re-sampled from the driver's cached stats and carry
     // NEW information ONLY when the sample is fresh — a re-read of the same cached
     // value is not an observation (evidenceStore: "route fields meaningful ONLY
@@ -174,7 +180,7 @@ export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetri
   return {
     samples: n, freshN,
     tx, rx, timeouts, rate: tx >= minTx ? timeouts / tx : null,
-    flaps,
+    flaps, s2, s2Known,
     rssiMedian: median(rssis), rssiN: rssis.length,
     rttMedian: median(rtts), rttN: rtts.length,
     rateKbpsMin,
@@ -207,7 +213,7 @@ function comparable(a: WindowMetrics, b: WindowMetrics): boolean {
 // a different scale. Scoring every episode by the timeout rate (the original M5
 // behaviour) meant non-timeout kinds could never register improvement. Each kind
 // is mapped to the signal its recovery actually moves.
-type RecoveryMetric = 'timeout' | 'flap' | 'rssi' | 'rtt' | 'rate' | 'none';
+type RecoveryMetric = 'timeout' | 'flap' | 'rssi' | 'rtt' | 'rate' | 's2' | 'none';
 
 function metricOf(kind: SymptomKind): RecoveryMetric {
   switch (kind) {
@@ -217,6 +223,8 @@ function metricOf(kind: SymptomKind): RecoveryMetric {
       return 'timeout'; // reply-timeout rate
     case 'dead-flap':
       return 'flap'; // Alive↔Dead transitions stopping
+    case 's2-desync':
+      return 's2'; // SPAN resyncs subsiding
     case 'weak-signal':
       return 'rssi'; // signal strength improving
     case 'rtt-degraded':
@@ -264,6 +272,24 @@ function scoreRecovery(m: RecoveryMetric, before: WindowMetrics, after: WindowMe
       if (after.flaps > before.flaps) return 'worse';
       return after.flaps === 0 ? 'improved' : 'no-change'; // a clean, live after-window = flapping stopped
     }
+    case 's2': {
+      // Same discipline as 'flap': resyncs are concrete event drains, so the
+      // before-window needs only prior evidence (s2 ≥ 1). The after-window must
+      // prove the node is still ALIVE and communicating — otherwise a node that
+      // went silent (0 resyncs because 0 traffic) reads as a cure. Absence of
+      // failure is only recovery when there was something to fail.
+      // …and the S2 LANE'S OWN liveness, which freshN cannot carry: freshN
+      // measures the HA-statistics transport, while dS2Resync comes from the
+      // driver-WS log lane, and the two fail independently. Without s2Known,
+      // a storm-stop or an operator log-level change mid-episode switched the
+      // measurement off and the resulting run of zeros scored as a recovery
+      // the action never earned (v0.26 review).
+      if (before.s2 < 1 || before.s2Known < 1) return 'unverifiable';
+      if (after.s2Known < MIN_LIVE) return 'unverifiable'; // lane dark ⇒ unknown, never "improved"
+      if (after.freshN < MIN_LIVE) return 'unverifiable';
+      if (after.s2 > before.s2) return 'worse';
+      return after.s2 === 0 ? 'improved' : 'no-change';
+    }
     case 'rssi': {
       if (before.rssiMedian == null || after.rssiMedian == null || before.rssiN < MIN_OBS || after.rssiN < MIN_OBS) return 'unverifiable';
       const gain = after.rssiMedian - before.rssiMedian; // higher (less negative) = stronger
@@ -289,10 +315,36 @@ function scoreRecovery(m: RecoveryMetric, before: WindowMetrics, after: WindowMe
   }
 }
 
+/**
+ * Wilson score interval LOWER bound at ~95% (z=1.96) for a binomial rate.
+ *
+ * The green "✓ helped X%" advisory used the RAW success rate, so at the minimum
+ * n a fluke reads as proof: 4/4 successes is a point estimate of 100% but the
+ * true rate could plausibly be barely above half — a coin-flip dressed as a
+ * verdict (v0.26 assessment fix). Gating the claim on the Wilson LOWER bound
+ * means "even pessimistically, this beats leaving it alone." Wilson (not
+ * normal-approx) because it stays sane at the small n and extreme rates this
+ * feature lives at.
+ */
+export function wilsonLower(ok: number, n: number, z = 1.96): number {
+  if (n <= 0) return 0;
+  const p = ok / n;
+  const z2 = z * z;
+  const denom = 1 + z2 / n;
+  const centre = p + z2 / (2 * n);
+  const margin = z * Math.sqrt((p * (1 - p) + z2 / (4 * n)) / n);
+  return Math.max(0, (centre - margin) / denom);
+}
+
 export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore {
   const cfg = { ...DEFAULTS, ...clean(opts) };
   const log = opts.log ?? (() => {});
   const open = new Map<string, Episode>();
+  /** Learned-arm state changed since the last successful save (v0.26 review).
+   *  outcomes.ts was the ONLY persisted store without this — its own docs
+   *  claimed it had one — so it rewrote the whole file 288×/day regardless.
+   *  baselines.ts and evidenceStore.ts both open save() with the same guard. */
+  let dirty = false;
 
   // Per-kind control arm (no-action episodes) and per-detector false positives.
   const control = new Map<SymptomKind, Tally>();
@@ -348,11 +400,13 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
 
       if (ep.verdict === 'refused-misdiagnosis') {
         fp.set(kind, (fp.get(kind) ?? 0) + 1);
+        dirty = true;
       } else if (ep.verdict === 'unverifiable') {
         // Contributes to NEITHER arm — an honest "we couldn't tell".
       } else if (ep.action == null) {
         // Control arm: a symptom that resolved with no action taken.
         control.set(kind, bump(control.get(kind), ep.verdict === 'improved'));
+        dirty = true;
       } else {
         // Action arm — keyed by (kind, action) to match the un-banded control
         // arm. Time-of-day banding is deliberately NOT applied: it would need
@@ -362,6 +416,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         // limitation — see baseRate/efficacyFor).
         const ak = aKey(kind, ep.action.kind);
         action.set(ak, bump(action.get(ak), ep.verdict === 'improved'));
+        dirty = true;
       }
       log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'}`);
       return ep;
@@ -395,7 +450,13 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // out-perform a base rate you have not measured. With no base rate yet the
       // action is `ready` (enough attempts) but NOT distinguishable, so
       // expectedEfficacy stays null and the planner says exactly that.
-      const beats = base != null && rate >= base + cfg.minEffect;
+      //
+      // SAMPLING-ERROR GATE (v0.26): claim victory only when the Wilson lower
+      // bound — not the fragile point estimate — clears the base rate by the
+      // min effect. This is what stops a 4/4 fluke from printing a confident
+      // green "✓ helped 100%". The DISPLAYED efficacy stays the point estimate
+      // (honest best guess) but is shown only once the lower bound earns it.
+      const beats = base != null && wilsonLower(ok, n) >= base + cfg.minEffect;
       return { expectedEfficacy: beats ? rate : null, n, baseRate: base, beatsSelfHealing: beats, ready: true };
     },
 
@@ -421,10 +482,13 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     save(): void {
       const path = opts.path;
       if (!path) return;
+      if (!dirty) return; // nothing learned since the last write (v0.26)
       try {
         const tmp = `${path}.tmp`;
         writeFileSync(tmp, JSON.stringify(this.toJSON()), 'utf8');
         renameSync(tmp, path);
+        dirty = false; // cleared only on a SUCCESSFUL write — a failed save
+                       // must retry on the next tick, not silently drop state.
       } catch (e) {
         log(`outcomes: save failed (${e instanceof Error ? e.message : String(e)})`);
       }

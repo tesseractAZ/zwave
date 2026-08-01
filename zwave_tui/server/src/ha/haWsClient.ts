@@ -42,6 +42,10 @@ import { readFileSync } from 'node:fs';
 const DEFAULT_TIMEOUT_MS = 10_000;
 const HEARTBEAT_MS = 30_000;
 const BASE_BACKOFF_MS = 1_000;
+/** A connection must stay authenticated this long before it counts as a
+ *  recovery and clears the backoff (v0.26). Comfortably longer than the
+ *  connect→auth→drop cycle of a restarting Core. */
+const STABLE_AFTER_MS = 60_000;
 const MAX_BACKOFF_MS = 30_000;
 
 /** Minimal shape of an inbound HA WebSocket frame. */
@@ -178,6 +182,10 @@ class HaWebSocketClient implements HaWsClient {
   private lastErr: string | null = null;
 
   private reconnectAttempts = 0;
+  /** Pending "this connection has lasted long enough to count as recovered"
+   *  timer (v0.26). Cleared on every close, so a flapping Core never earns a
+   *  backoff reset. */
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards a socket that opens but never completes the auth handshake. */
   private authTimer: ReturnType<typeof setTimeout> | null = null;
@@ -297,6 +305,7 @@ class HaWebSocketClient implements HaWsClient {
   }
 
   stop(): void {
+    this.clearStableTimer(); // else a pending reset fires after shutdown
     this.stopped = true;
     this.started = false;
     this.authenticated = false;
@@ -409,7 +418,19 @@ class HaWebSocketClient implements HaWsClient {
   private handleAuthOk(): void {
     this.clearAuthTimer();
     this.authenticated = true;
-    this.reconnectAttempts = 0;
+    // BACKOFF RESET IS DEFERRED (v0.26, assessment fix). Resetting the attempt
+    // counter here meant "we authenticated once" counted as recovery — so a
+    // Core that accepts the socket and drops it seconds later (exactly what a
+    // restarting / reloading HA does) was rejoined at ~1 s spacing forever,
+    // each cycle costing two registry dumps, 39 stats subscriptions and a
+    // 272-entity subscribe against a machine already struggling. The reset now
+    // requires the connection to SURVIVE — see stableTimer below.
+    this.clearStableTimer();
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      if (this.authenticated) this.reconnectAttempts = 0;
+    }, STABLE_AFTER_MS);
+    this.stableTimer.unref?.();
     this.lastErr = null;
     this.log('authenticated with HA Core WebSocket');
     this.startHeartbeat();
@@ -467,6 +488,9 @@ class HaWebSocketClient implements HaWsClient {
 
   private handleClose(code?: number): void {
     this.clearAuthTimer();
+    // A close before STABLE_AFTER_MS means this connection never counted as a
+    // recovery — the backoff keeps growing across the flap (v0.26).
+    this.clearStableTimer();
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws = null;
@@ -485,6 +509,13 @@ class HaWebSocketClient implements HaWsClient {
     if (this.stopped) return;
     this.log(`connection closed${code != null ? ` (code ${code})` : ''}; reconnecting`);
     this.scheduleReconnect();
+  }
+
+  private clearStableTimer(): void {
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
+    }
   }
 
   private scheduleReconnect(): void {

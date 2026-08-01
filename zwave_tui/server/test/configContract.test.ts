@@ -193,3 +193,25 @@ test('the Node major is the same in dev, CI and the container', () => {
     'the HA base image changed — re-check which Node the new Alpine ships and ' +
     'update engines/.nvmrc/ci.yml together (3.21 ships nodejs 22.x)');
 });
+
+test('flush cadences: the SD-wear defaults are the ones production actually gets', () => {
+  // THE PRECEDENCE TRAP (v0.26): index.ts passes config.historyFlushMs as
+  // opts.historyFlushMs, and zwaveData reads `opts ?? env ?? default` — so opts
+  // ALWAYS wins and the constructor's default is dead code in production.
+  // Raising only the constructor default left the entire SD-wear fix inert on
+  // the one host that matters. Pin the value at the layer that actually
+  // decides, AND pin that the two layers still agree.
+  const cfg = read('server/src/config.ts');
+  assert.match(cfg, /HISTORY_FLUSH_MS \?\? 120_000/, 'config.ts history flush cadence regressed');
+  assert.match(cfg, /EVIDENCE_FLUSH_MS \?\? 900_000/, 'config.ts evidence flush cadence regressed');
+
+  const zd = read('server/src/zwave/zwaveData.ts');
+  assert.match(zd, /HISTORY_FLUSH_MS \?\? 120_000/, 'zwaveData default drifted from config');
+  assert.match(zd, /EVIDENCE_FLUSH_MS \?\? 900_000/, 'zwaveData default drifted from config');
+
+  // And index.ts must still be the thing that forwards them — if that wiring
+  // is removed, the two defaults above stop being what production gets.
+  const index = read('server/src/index.ts');
+  assert.match(index, /historyFlushMs: config\.historyFlushMs/, 'index.ts no longer forwards historyFlushMs');
+  assert.match(index, /evidenceFlushMs: config\.evidenceFlushMs/, 'index.ts no longer forwards evidenceFlushMs');
+});

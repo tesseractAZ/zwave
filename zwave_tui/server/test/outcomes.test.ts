@@ -1,16 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, statSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { rmSync } from 'node:fs';
-import { createOutcomeStore, windowMetrics, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
+import { wilsonLower, createOutcomeStore, windowMetrics, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
 import type { EvidenceSample } from '../src/zwave/evidenceStore';
 import type { SymptomKind } from '../src/zwave/symptoms';
 
 // A window with plenty of traffic; rate = timeouts/tx. Extra recovery signals
 // default to "no data" so the timeout-metric tests are unaffected.
 const W = (tx: number, timeouts: number, rx = tx, over: Partial<WindowMetrics> = {}): WindowMetrics =>
-  ({ tx, rx, timeouts, rate: tx >= 5 ? timeouts / tx : null, samples: 6, freshN: 6, flaps: 0,
+  ({ tx, rx, timeouts, rate: tx >= 5 ? timeouts / tx : null, samples: 6, freshN: 6, flaps: 0, s2: 0, s2Known: 6,
      rssiMedian: null, rssiN: 0, rttMedian: null, rttN: 0, rateKbpsMin: null, ...over });
 // Windows that carry a specific non-timeout recovery signal, with enough observations
 // of THAT signal to clear its evidence floor (MIN_OBS / MIN_LIVE = 3).
@@ -433,4 +433,122 @@ test('decay fades old episodes so a stale success cannot dominate forever', () =
   for (let i = 2; i < 5; i++) { o.open(i, 'return-path-degraded', 1000, W(100, 40)); o.resolve(i, 'return-path-degraded', 2000, W(100, 39)); }
   const base = o.baseRate('return-path-degraded');
   assert.ok(base != null && base < 0.2, `heavy decay pushes the stale win down, got ${base}`);
+});
+
+/* ── v0.26: sampling-error gate + the s2 recovery metric ─────────────────── */
+
+test('wilsonLower: sane bounds at the small n this feature lives at', () => {
+  // 4/4 successes: a 100% point estimate whose true rate could plausibly be
+  // barely above a coin flip — the exact case that used to print a confident
+  // green "✓ helped 100% (n=4)".
+  assert.ok(Math.abs(wilsonLower(4, 4) - 0.51) < 0.02, `4/4 → ~0.51, got ${wilsonLower(4, 4)}`);
+  assert.equal(wilsonLower(0, 4), 0);
+  assert.equal(wilsonLower(0, 0), 0, 'no evidence → zero, not NaN');
+  // More evidence at the same rate must RAISE the lower bound (monotone in n).
+  assert.ok(wilsonLower(8, 8) > wilsonLower(4, 4));
+  assert.ok(wilsonLower(16, 16) > wilsonLower(8, 8));
+  // And the bound never exceeds the point estimate.
+  assert.ok(wilsonLower(9, 10) < 0.9);
+});
+
+test('efficacy: a 4/4 fluke does NOT clear a strong base rate — but 8/8 does (Wilson gate)', () => {
+  // decay 0: the point of this test is the Wilson arithmetic, and per-episode
+  // decay would blur the exact 0.5 base rate it is built around.
+  const o = createOutcomeStore({ decay: 0 });
+  // Base rate 0.5: 8 no-action episodes, 4 improve.
+  for (let i = 0; i < 4; i++) { o.open(i, 'return-path-degraded', 1000, W(100, 20)); o.resolve(i, 'return-path-degraded', 2000, W(100, 1)); }
+  for (let i = 4; i < 8; i++) { o.open(i, 'return-path-degraded', 1000, W(100, 20)); o.resolve(i, 'return-path-degraded', 2000, W(100, 18)); }
+  assert.equal(o.baseRate('return-path-degraded'), 0.5);
+
+  // 4/4 action successes: point estimate 100%, Wilson lower ≈ 0.51 — NOT
+  // distinguishable from the 0.5 base + 0.05 effect. Pre-fix this was green.
+  for (let i = 10; i < 14; i++) {
+    o.open(i, 'return-path-degraded', 1000, W(100, 20));
+    o.recordAction(i, 'refreshValues', false, 1500);
+    o.resolve(i, 'return-path-degraded', 2000, W(100, 1));
+  }
+  const four = o.efficacyFor('return-path-degraded', 'refreshValues');
+  assert.equal(four.ready, true, 'enough episodes to have an opinion');
+  assert.equal(four.beatsSelfHealing, false, '4/4 must not beat a 50% base — the lower bound does not clear it');
+  assert.equal(four.expectedEfficacy, null);
+
+  // 4 more successes (8/8, Wilson lower ≈ 0.68) — now the claim is earned.
+  for (let i = 14; i < 18; i++) {
+    o.open(i, 'return-path-degraded', 1000, W(100, 20));
+    o.recordAction(i, 'refreshValues', false, 1500);
+    o.resolve(i, 'return-path-degraded', 2000, W(100, 1));
+  }
+  const eight = o.efficacyFor('return-path-degraded', 'refreshValues');
+  assert.equal(eight.beatsSelfHealing, true, '8/8 clears a 50% base at the lower bound');
+  assert.equal(eight.expectedEfficacy, 1);
+});
+
+test('s2 recovery metric: resyncs subsiding on a LIVE node = improved; silence ≠ cure', () => {
+  const o = createOutcomeStore();
+  const before = W(50, 0, 50, { s2: 9, freshN: 6 });
+  // After-window: alive (fresh floor met) and clean → improved.
+  o.open(3, 's2-desync', 1000, before);
+  o.resolve(3, 's2-desync', 2000, W(50, 0, 50, { s2: 0, freshN: 6 }));
+  // After-window: node went SILENT (no fresh samples) — 0 resyncs because 0
+  // traffic is not a recovery; it must be unverifiable, not a win.
+  o.open(4, 's2-desync', 1000, before);
+  o.resolve(4, 's2-desync', 2000, W(0, 0, 0, { s2: 0, freshN: 0, samples: 0 }));
+  // After-window: MORE resyncs → worse.
+  o.open(5, 's2-desync', 1000, before);
+  o.resolve(5, 's2-desync', 2000, W(50, 0, 50, { s2: 14, freshN: 6 }));
+  // 1 improved out of 2 verifiable (the silent one is censored from the tally).
+  const t = o.baseRate('s2-desync');
+  assert.equal(t, null, 'still below minEpisodes — but the verdicts above must not throw');
+});
+
+test('s2 recovery: a DARK log lane is unverifiable, never "improved" (v0.26 review)', () => {
+  // The lane can go dark mid-episode — the storm backstop trips, or the
+  // operator raises the driver log level while investigating the very node the
+  // advisory named. Every later sample then records dS2Resync = null, and that
+  // run of "no resyncs" must NOT read as a recovery the action earned. freshN
+  // cannot carry this: it measures the HA-statistics transport, while
+  // dS2Resync comes from the driver-WS log lane — the two fail independently.
+  const o = createOutcomeStore();
+  const before = W(50, 0, 50, { s2: 20, s2Known: 6, freshN: 6 });
+
+  // Lane OFF across the after-window (s2Known 0), node alive on HA stats.
+  o.open(11, 's2-desync', 1000, before);
+  const dark = o.resolve(11, 's2-desync', 2000, W(50, 0, 50, { s2: 0, s2Known: 0, freshN: 6 }));
+  assert.equal(dark?.verdict, 'unverifiable', 'a switched-off measurement scored as a recovery');
+
+  // Control: the lane WAS listening and genuinely saw nothing → improved.
+  o.open(12, 's2-desync', 1000, before);
+  const clean = o.resolve(12, 's2-desync', 2000, W(50, 0, 50, { s2: 0, s2Known: 6, freshN: 6 }));
+  assert.equal(clean?.verdict, 'improved', 'control: a live lane with zero resyncs is a real recovery');
+
+  // A before-window with no lane evidence cannot yield a scorable verdict either.
+  o.open(13, 's2-desync', 1000, W(50, 0, 50, { s2: 0, s2Known: 0, freshN: 6 }));
+  const noBase = o.resolve(13, 's2-desync', 2000, W(50, 0, 50, { s2: 0, s2Known: 6, freshN: 6 }));
+  assert.equal(noBase?.verdict, 'unverifiable');
+});
+
+test('save() is dirty-gated — an idle store does not rewrite the file (v0.26 review)', () => {
+  // outcomes.ts was the ONLY persisted store without this gate, while DOCS.md
+  // asserted it had one: 288 unconditional full rewrites/day onto an SD card.
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-out-'));
+  const path = join(dir, 'outcomes.json');
+  try {
+    const o = createOutcomeStore({ path });
+    // Nothing learned yet ⇒ no file at all.
+    o.save();
+    assert.equal(existsSync(path), false, 'an empty store wrote a file');
+
+    // Fold one verdict ⇒ dirty ⇒ writes.
+    o.open(21, 'dead-flap', 1000, W(50, 0, 50, { flaps: 4, freshN: 6 }));
+    o.resolve(21, 'dead-flap', 2000, W(50, 0, 50, { flaps: 0, freshN: 6 }));
+    o.save();
+    assert.ok(existsSync(path), 'a learned verdict was not persisted');
+    const m1 = statSync(path).mtimeMs;
+
+    // Idle flush ⇒ must NOT rewrite.
+    o.save();
+    assert.equal(statSync(path).mtimeMs, m1, 'an idle save rewrote the file');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -10,7 +10,7 @@ function cs(over: Partial<ControllerSample> = {}): ControllerSample {
   return { t: now, dMsgTx: 100, dMsgDroppedTx: 0, dNak: 0, dCan: 0, dTimeoutAck: 0, dTimeoutResponse: 0, fresh: true, bg0: null, bg1: null, bg2: null, bg3: null, ...over };
 }
 function bucket(hour: number, dTx: number, dTimeout: number): CoarseBucket {
-  return { t0: new Date(2026, 0, 15, hour).getTime(), n: 30, freshN: 30, invalidW: 0, dTx, dTimeout, dDropTx: 0, dRx: dTx, flaps: 0, routeChanges: 0, rssiN: 0, rssiSum: 0, rssiMin: null, rssiMax: null, rttN: 0, rttSum: 0, rateMin: null };
+  return { t0: new Date(2026, 0, 15, hour).getTime(), n: 30, freshN: 30, invalidW: 0, dTx, dTimeout, dDropTx: 0, dRx: dTx, flaps: 0, routeChanges: 0, s2: 0, rssiN: 0, rssiSum: 0, rssiMin: null, rssiMax: null, rttN: 0, rttSum: 0, rateMin: null };
 }
 function sym(kind: SymptomKind, nodeId: number | null): Symptom {
   return { kind, nodeId, severity: 'warn', sinceMs: now - 600_000, basis: 'measured', evidence: [], narrative: `${kind} narrative.` };
