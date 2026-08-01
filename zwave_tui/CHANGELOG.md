@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.26.1 — 2026-08-01
+
+### Screenshot generator: attribute-safe escaping
+
+The SVG screenshot generator's escape helper handled the markup
+metacharacters (`&`, `<`, `>`) but not quotes, while its output is
+interpolated into double-quoted attributes (`aria-label`, `<title>`); an
+unescaped `"` would terminate the attribute (CodeQL
+`js/incomplete-html-attribute-sanitization`). The helper now escapes `"` and
+`'` as well. Build-time tooling only — no runtime change.
+
 ## 0.26.0 — 2026-08-01
 
 ### The S2 SPAN-resync watch — a fault class the counters cannot see
