@@ -23,7 +23,7 @@ import { c, truncate, padStart } from '../ansi';
 import { sparkline, heatCell } from '../gauges';
 import { noiseColor, timeoutPctColor } from '../bands';
 import type { ScreenCtx, InterferenceView } from '../../types';
-import { frame } from '../chrome';
+import { frame, shelf } from '../chrome';
 
 type ColorFn = (s: string) => string;
 
@@ -76,8 +76,19 @@ export function renderInterference(ctx: ScreenCtx): string[] {
   const { view, data } = ctx;
   const W = view.cols;
   const iv = data.interference();
-  const body: string[] = [];
-  const push = (s = ''): void => { body.push(truncate(s, W)); };
+  // Sections are collected as BLOCKS so a wide frame can shelf them into
+  // columns (v0.28). Stacked, this screen used one narrow column and ran off
+  // the bottom — 5% ink with 64 of 80 rows blank at 200x80, the sparsest screen
+  // in the add-on despite having the richest data behind it.
+  const blocks: string[][] = [];
+  let cur: string[] = [];
+  const blockW = (): number => shelfColW(W);
+  const push = (s = ''): void => {
+    // A bare push() is a section separator: close the block instead of
+    // emitting a blank line, so shelf() controls the spacing.
+    if (s === '') { if (cur.length) { blocks.push(cur); cur = []; } return; }
+    cur.push(truncate(s, blockW()));
+  };
 
   // ── NOISE FLOOR ─────────────────────────────────────────────────────────
   push(c.label('NOISE FLOOR') + c.grey(' — 900 MHz background RSSI (driver-measured)'));
@@ -166,6 +177,9 @@ export function renderInterference(ctx: ScreenCtx): string[] {
     push('  ' + c.green('✓ ') + c.grey(iv.correlated.narrative));
   }
 
+  if (cur.length) blocks.push(cur);
+  const body = shelf(blocks, W, { minCol: 54 });
+
   // Surface an ACTIVE correlated event in the title rule too — it is the last
   // body section and could be clipped on a short terminal; the title never is.
   const noiseStr = iv.noise.real ? `${iv.noise.band} · ${dbm(iv.noise.floor)} dBm` : 'noise n/a';
@@ -221,4 +235,19 @@ function wrap(text: string, width: number): string[] {
   }
   if (line) out.push(line);
   return out;
+}
+
+/**
+ * The width one shelf column gets at frame width `W` — content must be BUILT at
+ * this width, never at `W` and cut afterwards. Rendering wide and letting
+ * hstack trim is exactly the defect that deleted every config-parameter value
+ * in v0.27: the cut is left-anchored and takes whatever the row right-aligned.
+ * Mirrors shelf()'s own arithmetic (gap 3, minCol 54).
+ */
+function shelfColW(W: number): number {
+  const GAP = 3;
+  const MIN = 54;
+  const n = Math.max(1, Math.floor((W + GAP) / (MIN + GAP)));
+  if (n < 2) return W;
+  return Math.floor((W - GAP * (n - 1)) / n);
 }

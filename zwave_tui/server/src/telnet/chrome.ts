@@ -297,3 +297,68 @@ export function splitCols(total: number, n: number, gap = 2, min = 24): number[]
   const extra = usable - base * n;
   return Array.from({ length: n }, (_, i) => base + (i < extra ? 1 : 0));
 }
+
+/**
+ * Lay a list of blocks into COLUMNS when the frame is wide enough, otherwise
+ * stack them as before.
+ *
+ * A screen built as N vertical blocks wastes both axes on a large terminal: the
+ * blocks are narrow, so most columns go unused, and they run off the bottom, so
+ * rows go blank underneath. `shelf` packs them side by side and returns a single
+ * block of lines that still honours the frame's width.
+ *
+ * Blocks are distributed by HEIGHT, not by count — filling each column to
+ * roughly `Σheights / n` keeps a tall block from leaving a short column half
+ * empty beside it. Order is preserved within and across columns, so the reading
+ * order the screen author chose still holds top-to-bottom, left-to-right.
+ *
+ * Returns the plain stacked form (blocks separated by a blank line) whenever
+ * `cols` is 1, the frame is too narrow for `minCol`, or there are fewer blocks
+ * than columns — a column of air is not a layout.
+ */
+export function shelf(blocks: readonly string[][], W: number, opts: { minCol?: number; gap?: number } = {}): string[] {
+  const gap = opts.gap ?? 3;
+  const minCol = opts.minCol ?? 46;
+  const live = blocks.filter((b) => b.length > 0);
+  if (live.length === 0) return [];
+
+  const stacked = (): string[] => {
+    const out: string[] = [];
+    for (const b of live) {
+      if (out.length > 0) out.push('');
+      out.push(...b);
+    }
+    return out;
+  };
+
+  const n = Math.min(live.length, Math.max(1, Math.floor((W + gap) / (minCol + gap))));
+  if (n < 2) return stacked();
+  const widths = splitCols(W, n, gap, minCol);
+  if (widths.length === 0) return stacked();
+
+  // Greedy fill to the target height, but never leave a later column empty:
+  // reserve at least one block for each remaining column.
+  const total = live.reduce((h, b) => h + b.length + 1, 0);
+  const target = Math.ceil(total / n);
+  const cols: string[][][] = Array.from({ length: n }, () => []);
+  let ci = 0;
+  let used = 0;
+  for (let i = 0; i < live.length; i++) {
+    const remainingBlocks = live.length - i;
+    const remainingCols = n - ci - 1;
+    if (ci < n - 1 && used > 0 && (used >= target || remainingBlocks <= remainingCols)) {
+      ci += 1;
+      used = 0;
+    }
+    cols[ci].push(live[i]);
+    used += live[i].length + 1;
+  }
+
+  return hstack(
+    cols.map((group, i) => ({
+      w: widths[i],
+      lines: group.flatMap((b, k) => (k > 0 ? ['', ...b] : b)),
+    })),
+    gap,
+  );
+}
