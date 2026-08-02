@@ -38,7 +38,7 @@ import {
 } from '../../types';
 import { centeredNotice } from './overview';
 import { downsampleMean } from './interference';
-import { frame, type Keycap } from '../chrome';
+import { frame, hstack, splitCols, type Keycap, type StackCol } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
 import { rssiColor, marginColor, rttColor, timeoutPctColor } from '../bands';
 
@@ -240,7 +240,12 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     if (ents.length === 0) {
       body.push(note('no entities on this node', inner));
     } else {
-      for (const e of ents) body.push(entityRow(e, inner));
+      // Multi-up on wide frames (v0.27). Entity rows are short, so at 200 cols
+      // a one-per-line list wasted most of the width AND pushed everything
+      // below it off the visible window — the dossier scrolls, so rows spent
+      // here are rows the operator has to page past. Two or three columns cut
+      // the section's height by the same factor and reveal more of the node.
+      for (const line of columnize(ents, (e, w) => entityRow(e, w), inner)) body.push(line);
     }
   }
   sep();
@@ -249,7 +254,17 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   {
     const cfg = data.configParams(n.nodeId);
     body.push(section('CONFIG PARAMETERS') + configCountTag(cfg));
-    for (const row of configRows(cfg, inner)) body.push(row);
+    // Same treatment: a device with 20+ parameters is otherwise 20+ rows of a
+    // scrolling document, each using a fraction of the available width. Only
+    // the PARAMETER ROWS are columnised — status/empty notes stay full width so
+    // an explanation is never split across a column boundary.
+    const cfgRows = configRows(cfg, inner);
+    const paramish = cfg.status === 'ready' && cfg.params.length > 0;
+    if (paramish && cfgRows.length > 1) {
+      for (const line of columnize(cfgRows, (r) => r, inner)) body.push(line);
+    } else {
+      for (const row of cfgRows) body.push(row);
+    }
   }
   sep();
 
@@ -861,4 +876,34 @@ function fmtAge(ms: number): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h`;
   return `${Math.floor(h / 24)}d`;
+}
+
+/**
+ * Lay a list of short rows into as many columns as the width honestly supports.
+ *
+ * Returns single-column output unchanged below the two-column threshold, so
+ * narrow terminals are untouched. Reading order is COLUMN-MAJOR (fill the first
+ * column top-to-bottom, then the next), which keeps the existing sort order
+ * scannable down the left edge instead of zig-zagging across it.
+ *
+ * `render(item, w)` draws one item at the per-column width — passing the width
+ * through matters, because the row builders truncate to it, and a row built for
+ * the full frame would be cut mid-value by hstack instead of by its own
+ * truncation rules.
+ */
+function columnize<T>(items: readonly T[], render: (item: T, w: number) => string, inner: number): string[] {
+  const GAP = 3;
+  const MIN_COL = 34; // below this an entity row loses its value, not just padding
+  const n = Math.max(1, Math.min(3, Math.floor((inner + GAP) / (MIN_COL + GAP))));
+  if (n === 1 || items.length < 2) return items.map((it) => render(it, inner));
+
+  const widths = splitCols(inner, n, GAP, MIN_COL);
+  if (widths.length === 0) return items.map((it) => render(it, inner));
+
+  const per = Math.ceil(items.length / n);
+  const cols: StackCol[] = widths.map((w, i) => ({
+    w,
+    lines: items.slice(i * per, (i + 1) * per).map((it) => render(it, w)),
+  }));
+  return hstack(cols, GAP);
 }
