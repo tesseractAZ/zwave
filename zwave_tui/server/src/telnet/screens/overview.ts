@@ -109,7 +109,14 @@ function layout(W: number, mode: ViewState['signalDisplay'], realNoise = true): 
   // Flex NODE: give it every column left over after the fixed ones + separators.
   const name = cols.find((col) => col.key === 'name')!;
   const fixed = cols.reduce((s, col) => s + col.w, 0) - name.w + (cols.length - 1);
-  name.w = Math.max(14, Math.min(40, W - fixed));
+  // Cap raised 40 → 64 (v0.27). At the wide tier the fixed columns + separators
+  // total 107, so the old cap saturated contentW at 147 and left 53 columns dead
+  // on EVERY body row at 200 cols — measured, 26.5% of the frame. Device names
+  // are the one field that genuinely uses the room ("Guest Bedroom Motion
+  // Sensor" is 27), and a wider NODE column means fewer names truncate, which is
+  // the honesty win as much as the density one. 64 is where real HA device names
+  // stop growing; beyond it the column would pad, not inform.
+  name.w = Math.max(14, Math.min(64, W - fixed));
   return cols;
 }
 
@@ -188,6 +195,30 @@ export function renderOverview(ctx: ScreenCtx): string[] {
       ),
     );
   }
+  // MESH ROLL-UP (v0.27) — earns the rows the roster does not need.
+  //
+  // Funded STRICTLY by surplus: it is drawn only when every visible node
+  // already has a row AND rows are left over, so it can never push the roster
+  // into scrolling. Before this, those rows were padded with '' — 16 of them at
+  // 200x60 on a 39-node mesh, measured.
+  //
+  // Deliberately NOT included, each for a reason found in review:
+  //  · no RF-headroom distribution — it would bucket nodes by `stats.rssi`,
+  //    which this very file (see signalDisplay) refuses to health-colour for a
+  //    ROUTED node because the value is the last-hop repeater→controller ACK,
+  //    not the device's own link. A distribution over it would imply precision
+  //    the source does not have.
+  //  · no extra command-bar/telemetry token — adding one changes what
+  //    fieldStrip drops at 80 and 120 cols, i.e. it would cost information on
+  //    small terminals to decorate large ones.
+  const surplus = (H - 1) - out.length;
+  const panel = surplus > 0 && end >= visibleNodes.length && start === 0
+    ? meshRollUp(ctx, W, surplus)
+    : [];
+  // Pad FIRST so the roll-up sits directly above the command bar: the blank gap
+  // separates it from the roster instead of floating it mid-frame.
+  while (out.length < H - 1 - panel.length) out.push('');
+  for (const line of panel) out.push(truncate(line, W));
   // Pad the body so the command bar lands on the last row.
   while (out.length < H - 1) out.push('');
 
@@ -722,4 +753,88 @@ export function windowStart(selected: number, scroll: number, total: number, cap
   if (selected >= start + cap) start = selected - cap + 1;
   const max = Math.max(0, total - cap);
   return Math.max(0, Math.min(start, max));
+}
+
+/**
+ * Compact mesh roll-up for the Overview's surplus rows. Returns AT MOST
+ * `budget` lines; returns [] when the budget cannot hold the smallest useful
+ * form, so the caller simply keeps its blank padding.
+ *
+ * Membership matches the Controller screen's NETWORK HEALTH block exactly —
+ * node 1 excluded, because this is the mesh the controller serves, not the
+ * controller itself. Two screens showing two different "mesh" totals would be
+ * a worse defect than the blank rows this replaces.
+ */
+function meshRollUp(ctx: ScreenCtx, W: number, budget: number): string[] {
+  const { data } = ctx;
+  const members = data.nodes().filter((n) => !n.isController);
+  // 1 rule + 1 status row + 1 grade row is the smallest form worth drawing.
+  if (budget < 4 || members.length === 0) return [];
+
+  let alive = 0, dead = 0, asleep = 0, unknown = 0;
+  const grades: Record<string, number> = { A: 0, B: 0, C: 0, D: 0, F: 0 };
+  const scored: { name: string; score: number; grade: string }[] = [];
+  for (const n of members) {
+    if (n.status === NodeStatus.Alive || n.status === NodeStatus.Awake) alive += 1;
+    else if (n.status === NodeStatus.Dead) dead += 1;
+    else if (n.status === NodeStatus.Asleep) asleep += 1;
+    else unknown += 1;
+    const h = data.scoreFor(n.nodeId);
+    if (h.grade in grades) grades[h.grade] += 1;
+    scored.push({ name: n.name, score: h.score, grade: h.grade });
+  }
+
+  const out: string[] = [];
+  out.push(c.grey('─'.repeat(Math.max(0, W))));
+  out.push(
+    c.cyanB(' MESH') + c.grey(`  ${members.length} nodes (excl. controller)`) +
+    c.grey('   ') + c.green(`${alive} alive`) +
+    (dead ? c.grey(' · ') + c.red(`${dead} dead`) : '') +
+    (asleep ? c.grey(' · ') + c.cyan(`${asleep} asleep`) : '') +
+    (unknown ? c.grey(' · ') + c.yellow(`${unknown} unknown`) : ''),
+  );
+  out.push(
+    c.grey(' HEALTH ') +
+    (['A', 'B', 'C', 'D', 'F'] as const)
+      .map((g) => gradeColor(g)(`${g} ${grades[g]}`))
+      .join(c.grey(' · ')),
+  );
+
+  // Worst nodes, only while rows remain. Sorted ascending by score; ties keep
+  // roster order, so the list is stable frame to frame.
+  // Worst nodes, only while rows remain. Ascending by score; ties keep roster
+  // order, so the list is stable frame to frame. One node PER ROW when the
+  // budget allows — a per-row form fits the node's name untruncated and reads
+  // as a work queue; the packed one-line form is the fallback when rows are
+  // tight. Never padded: the list is however many non-A nodes actually exist.
+  const room = budget - out.length;
+  const worstAll = scored.filter((x) => x.grade !== 'A').sort((a, b) => a.score - b.score);
+  if (room >= 2 && worstAll.length > 0) {
+    // Prefer the PER-ROW form and fill whatever rows exist, disclosing the
+    // remainder — packing into one line while rows sit blank below wastes the
+    // very space this panel exists to use. The packed form survives only for a
+    // budget too small for a header plus one entry.
+    if (room >= 3) {
+      const shown = worstAll.slice(0, room - 1);
+      const rest = worstAll.length - shown.length;
+      out.push(c.grey(' WORST') + (rest > 0 ? c.grey(`  (${shown.length} of ${worstAll.length})`) : ''));
+      for (const x of shown) {
+        out.push('   ' + gradeColor(x.grade)(`${x.grade} ${String(x.score).padStart(3)}`) +
+                 '  ' + c.white(truncate(x.name, Math.max(10, W - 14))));
+      }
+    } else {
+      const packed = worstAll.slice(0, Math.min(room - 1, 5));
+      out.push(
+        c.grey(' WORST  ') +
+        packed.map((x) => gradeColor(x.grade)(`${truncate(x.name, 22)} ${x.score}`)).join(c.grey('  ')) +
+        (worstAll.length > packed.length ? c.grey(`  +${worstAll.length - packed.length}`) : ''),
+      );
+    }
+  }
+  return out.slice(0, budget);
+}
+
+/** Grade → the roster's own grade colour (one source for the letter bands). */
+function gradeColor(g: string): (s: string) => string {
+  return g === 'A' ? c.green : g === 'B' ? c.green : g === 'C' ? c.yellow : g === 'D' ? c.yellow : c.red;
 }
