@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.29.1 — 2026-08-02
+
+**The startup log told the truth about the telnet listener's auth posture.**
+
+Found while live-verifying 0.29.0: the boot line read
+
+    telnet TUI on :::2324 (no auth — trusted LAN only)
+
+on a deployment where the login gate is ON, required on ingress, with write
+actions enabled — and the very next thing that happened was the telnet session
+presenting a login prompt. The suffix was a hardcoded string printed on every
+boot regardless of the policy handed to the listener two lines earlier, so it
+was a false statement about a security control in the one place an operator
+goes to check that control. (It was equally uninformative when auth was off:
+right by accident, not by derivation.)
+
+Nothing covered it because a log line assembled inline during boot is not
+reachable from a unit test. The description is now `describeTelnetAuth()` — a
+pure function beside the policy it describes — with a test and a mutant.
+
 ## 0.29.0 — 2026-08-02
 
 **Topology draws the per-hop readings it already held, and stops publishing a

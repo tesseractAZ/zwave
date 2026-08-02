@@ -21,7 +21,7 @@ import fastifyCors from '@fastify/cors';
 import { config } from './config';
 import { createLogger } from './logger';
 import { createAuth, isAllowedOrigin, isSupervisorSource, pinSupervisorAddress } from './auth';
-import { createAuthPolicy } from './auth/loginPolicy';
+import { createAuthPolicy, describeTelnetAuth } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
 import { createActionRunner } from './zwave/zwaveActions';
@@ -190,7 +190,12 @@ async function main(): Promise<void> {
       auth: loginPolicy,
       actions,
     });
-    log(`telnet TUI on ${config.telnet.host}:${config.telnet.port} (no auth — trusted LAN only)`);
+    // Report the policy this listener ACTUALLY enforces. The suffix used to be
+    // the hardcoded string "(no auth — trusted LAN only)", printed whether or
+    // not the login gate was on — so on an authenticated deployment the startup
+    // log stated the opposite of the truth about a security control, and on an
+    // unauthenticated one it was right only by accident.
+    log(`telnet TUI on ${config.telnet.host}:${config.telnet.port} ${describeTelnetAuth(loginPolicy.enabled)}`);
   } else {
     log('telnet TUI disabled (telnet_enabled=false) — /console only');
   }
