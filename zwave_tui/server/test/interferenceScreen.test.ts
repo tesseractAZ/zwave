@@ -164,3 +164,51 @@ test('tall frames draw the persisted series as CHARTS, and add ink rather than m
     assert.ok(line.replace(/\x1b\[[0-9;]*m/g, '').length <= 200, 'a chart row overflowed the frame');
   }
 });
+
+/** The diurnal chart's rows only — between its section header and its hour
+ *  axis. A looser "block glyphs, no letters" match also catches the NOISE
+ *  chart, whose full blocks are legitimate on its own -110..-80 scale. */
+function diurnalChart(cols: number, rows: number, iv: InterferenceView): string[] {
+  const lines = renderInterference(ctx(cols, rows, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  const head = lines.findIndex((l) => l.includes('DIURNAL'));
+  const axis = lines.findIndex((l, k) => k > head && /\b0\b.*\b6\b.*\b12\b/.test(l));
+  return head < 0 || axis < 0 ? [] : lines.slice(head + 1, axis);
+}
+
+test('the diurnal CHART uses the same absolute scale as the strip beneath it', () => {
+  // The first version auto-scaled to the peak in flat yellow — exactly what
+  // this screen's HEAT_MAX comment forbids. On a uniformly healthy mesh every
+  // hour became a solid warning block sitting directly above a strip showing
+  // all-clear light cells, for the SAME 24 numbers.
+  const cool = cleanView({
+    coverageDays: 6,
+    diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 200, rate: 0.008 })),
+  });
+  const chart = diurnalChart(100, 60, cool);
+  assert.ok(chart.length > 0, 'the diurnal chart did not render on a tall frame');
+  assert.equal(chart.filter((l) => /█/.test(l)).length, 0,
+    `a 0.8% mesh drew FULL blocks — the chart is normalized, not absolute:\n${chart.join('\n')}`);
+
+  // …and a genuinely hot hour DOES reach the top on the same fixed scale.
+  const hot = cleanView({
+    coverageDays: 6,
+    diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 200, rate: h === 12 ? 0.06 : 0.008 })),
+  });
+  assert.ok(diurnalChart(100, 60, hot).some((l) => /█/.test(l)),
+    'a real 6% hour must reach a full block on the absolute scale');
+});
+
+test('the diurnal chart marks an UNRATED hour as no-data, never as a measured 0%', () => {
+  // `rate: null` means "too little traffic to rate", which the strip renders as
+  // a grey dot. Substituting 0 drew a measured floor value that was never
+  // observed — directly above the dot saying otherwise.
+  const sparse = cleanView({
+    coverageDays: 6,
+    diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 200, rate: h < 10 ? null : 0.03 })),
+  });
+  const baseline = diurnalChart(100, 60, sparse).find((l) => /^\s+0%\s/.test(l));
+  assert.ok(baseline, 'chart baseline row not found');
+  const cols = baseline!.replace(/^\s+0%\s/, '');
+  assert.equal(cols.slice(0, 10), '·'.repeat(10),
+    `unrated hours drew bars instead of no-data dots: ${JSON.stringify(cols.slice(0, 14))}`);
+});

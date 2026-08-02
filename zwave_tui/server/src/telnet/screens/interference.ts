@@ -177,11 +177,22 @@ export function renderInterference(ctx: ScreenCtx): string[] {
     // hours, same data, at a resolution that shows the shape of the day.
     const dH = surplus >= 12 ? 5 : surplus >= 6 ? 3 : 0;
     if (dH > 0) {
-      const rates = iv.diurnal.map((d) => (d.rate == null ? 0 : d.rate * 100));
-      const peak = Math.max(...rates, 0.1);
-      const rows = chartRows(rates, 24, dH, { min: 0, max: peak, color: c.yellow });
+      // ABSOLUTE scale and PER-HOUR band colour — the same HEAT_MAX and
+      // heatColorFor the strip below uses. The first version auto-scaled to the
+      // peak in flat yellow, which is precisely what this screen's own comment
+      // forbids: on a uniformly healthy mesh every hour became a solid warning
+      // block above a strip showing all-clear green, for the same 24 numbers.
+      // Nulls stay null so an unrated hour draws the no-data dot, matching the
+      // strip's `·` instead of asserting a measured 0%.
+      const rates = iv.diurnal.map((d) => (d.rate == null ? null : d.rate * 100));
+      const rows = chartRows(rates, 24, dH, {
+        min: 0,
+        max: HEAT_MAX * 100,
+        colorFor: (v) => heatColorFor(v / 100),
+      });
+      const capTag = `${(HEAT_MAX * 100).toFixed(0)}%+`.padStart(5) + ' ';
       rows.forEach((line, i) => {
-        const tag = i === 0 ? `${peak.toFixed(1)}%`.padStart(5) + ' ' : i === rows.length - 1 ? '   0% ' : '      ';
+        const tag = i === 0 ? capTag : i === rows.length - 1 ? '   0% ' : '      ';
         push('  ' + c.grey(tag) + line);
       });
       push('  ' + '      ' + c.grey(hourAxis()));

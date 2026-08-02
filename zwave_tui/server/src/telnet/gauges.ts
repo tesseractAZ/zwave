@@ -218,22 +218,27 @@ export function spinner(nowMs: number): string {
  * stretches to imply data it does not have.
  */
 export function chartRows(
-  values: readonly number[],
+  values: readonly (number | null)[],
   width: number,
   height: number,
-  opts: { min?: number; max?: number; color?: ColorFn } = {},
+  opts: { min?: number; max?: number; color?: ColorFn; colorFor?: (v: number) => ColorFn } = {},
 ): string[] {
   if (width <= 0 || height <= 0) return [];
-  const vals = values.filter((v) => Number.isFinite(v));
-  if (vals.length === 0) {
+  // NULL IS NOT ZERO. A null sample means "not measured"; substituting 0 draws
+  // a measured floor value that was never observed — the same lie heatCell
+  // avoids with its `none` dot. Nulls keep their position so columns still line
+  // up with any axis or strip drawn beside the chart.
+  const kept = values.filter((v) => v == null || Number.isFinite(v));
+  if (kept.every((v) => v == null)) {
     return Array.from({ length: height }, () => c.grey('·'.repeat(width)));
   }
-  const recent = vals.slice(-width);
-  const lo = opts.min ?? Math.min(...recent);
-  const hi = opts.max ?? Math.max(...recent);
+  const recent = kept.slice(-width);
+  const drawn = recent.filter((v): v is number => v != null);
+  const lo = opts.min ?? Math.min(...drawn);
+  const hi = opts.max ?? Math.max(...drawn);
   const span = hi - lo || 1;
   const flat = hi === lo;
-  const color = opts.color ?? (flat ? c.grey : zoneColor((recent[recent.length - 1] - lo) / span));
+  const color = opts.color ?? (flat ? c.grey : zoneColor((drawn[drawn.length - 1] - lo) / span));
 
   // Sub-cell resolution: each row is 8 levels, so the column height is measured
   // in eighths and split into full cells plus one partial cap.
@@ -243,15 +248,28 @@ export function chartRows(
     const fromBottom = height - 1 - r;
     let line = pad > 0 ? c.grey('·'.repeat(pad)) : '';
     let cells = '';
+    let painted = '';
     for (const v of recent) {
+      if (v == null) {
+        // No-data column: dotted on the baseline only, so an unmeasured sample
+        // can never read as a measured floor value.
+        cells += fromBottom === 0 ? '·' : ' ';
+        painted += c.grey(fromBottom === 0 ? '·' : ' ');
+        continue;
+      }
       const frac = flat ? 0.5 : clamp01((v - lo) / span);
       const eighths = Math.round(frac * height * 8);
       const full = Math.floor(eighths / 8);
-      if (fromBottom < full) cells += '█';
-      else if (fromBottom === full) cells += BLOCKS[Math.max(0, (eighths % 8) - 1)];
-      else cells += ' ';
+      const glyph = fromBottom < full ? '█'
+        : fromBottom === full ? BLOCKS[Math.max(0, (eighths % 8) - 1)]
+        : ' ';
+      cells += glyph;
+      // Per-column colour when the caller supplies `colorFor`: a chart whose
+      // columns each carry their own band must colour them individually, or it
+      // contradicts the banded strip beside it.
+      painted += opts.colorFor ? opts.colorFor(v)(glyph) : glyph;
     }
-    out.push(line + color(cells));
+    out.push(line + (opts.colorFor ? painted : color(cells)));
   }
   return out;
 }

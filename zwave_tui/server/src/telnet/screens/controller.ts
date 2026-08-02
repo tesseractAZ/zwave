@@ -54,6 +54,12 @@ export function renderController(ctx: ScreenCtx): string[] {
 
   // Build the screen as a title line followed by four section blocks; adaptive
   // spacing inserts a blank between blocks only while there's vertical room.
+  // Surplus is measured against the compact body that will ACTUALLY be drawn.
+  // A fixed baseline ignored the CONDITIONAL rebuild block (4 rows + its
+  // separator), so during a route rebuild the gate over-counted free rows by 5
+  // and the new blocks pushed NETWORK HEALTH's link tally into the overflow
+  // marker — evicting pre-existing content to make room for an addition.
+  const surplus = surplusRows(H, ctrl.isRebuildingRoutes);
   const blocks: string[][] = [
     identityBlock(ctrl, W),
     // Only present while a rebuild is running — keeps the frame hash static
@@ -65,8 +71,8 @@ export function renderController(ctx: ScreenCtx): string[] {
     // Spend spare rows on data this screen has always had access to and never
     // drew (v0.28). Both answer questions the lifetime counters above cannot,
     // and both stay off a short frame entirely.
-    ...(surplusRows(H) >= 4 ? [serialRateBlock(ctx, W)] : []),
-    ...(surplusRows(H) >= 9 ? [meshSymptomBlock(ctx, W)] : []),
+    ...(surplus >= 4 ? [serialRateBlock(ctx, W)] : []),
+    ...(surplus >= 9 ? [meshSymptomBlock(ctx, W)] : []),
   ];
 
   // A blank line between each section; frame() pads the remainder.
@@ -552,9 +558,16 @@ function grid2(a: string, b: string, W: number): string {
   return padEnd(truncate(a, leftW), leftW) + ' ' + truncate(b, W - leftW - 1);
 }
 
-/** Rows this screen may spend beyond its compact form (measured at ~26). */
-function surplusRows(H: number): number {
-  return Math.max(0, (H - 3) - 26);
+/**
+ * Rows this screen may spend beyond its compact form.
+ *
+ * The baseline is measured (26 rows) and MUST include the conditional
+ * REBUILD ROUTES block when it is present — it costs 4 rows plus a separator,
+ * and ignoring it made the gate over-count free rows during a rebuild.
+ */
+function surplusRows(H: number, rebuilding: boolean): number {
+  const baseline = 26 + (rebuilding ? 5 : 0);
+  return Math.max(0, (H - 3) - baseline);
 }
 
 /**
@@ -603,8 +616,18 @@ function meshSymptomBlock(ctx: ScreenCtx, W: number): string[] {
   }
   for (const sym of mesh.slice(0, 4)) {
     const sev = sym.severity === 'crit' ? c.red : sym.severity === 'warn' ? c.yellow : c.cyan;
-    out.push('  ' + sev('● ') + c.white(sym.kind) + c.grey('  ' + truncate(sym.narrative.split('.')[0], Math.max(20, W - 24))));
+    // `basis` is load-bearing: 'inferred' means the engine reasoned to this
+    // from correlation, not measurement. Dropping it let a mesh-interference
+    // lead read as a confirmed reading — the distinction the Remedy screen
+    // makes explicitly, and this panel must not quietly erase.
+    const basis = sym.basis === 'measured' ? '' : c.grey(` (${sym.basis})`);
+    const room = Math.max(20, W - 26 - visLen(strip(basis)));
+    out.push('  ' + sev('● ') + c.white(sym.kind) + basis +
+             c.grey('  ' + truncate(sym.narrative.split('.')[0], room)));
   }
   if (mesh.length > 4) out.push('  ' + c.grey(`+${mesh.length - 4} more — [7] REMEDY`));
   return out;
 }
+
+const SGR = /\x1b\[[0-9;]*m/g;
+const strip = (x: string): string => x.replace(SGR, '');

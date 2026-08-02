@@ -360,6 +360,23 @@ const MUTANTS = [
     repl: '      if (username.length > 0) out.push({ username, password });',
     what: 'a blank-password user row is rejected instead of authenticating on ""' },
 
+  /* ── v0.28 review round 1 ─────────────────────────────────────────── */
+  { id: 'diurnal-absolute-scale', file: 'src/telnet/screens/interference.ts',
+    find: '        max: HEAT_MAX * 100,',
+    repl: '        max: Math.max(...rates.map((r) => r ?? 0), 0.1),',
+    what: 'the diurnal chart uses the ABSOLUTE HEAT_MAX scale, never normalized-to-peak' },
+  { id: 'diurnal-null-not-zero', file: 'src/telnet/screens/interference.ts',
+    find: '      const rates = iv.diurnal.map((d) => (d.rate == null ? null : d.rate * 100));',
+    repl: '      const rates = iv.diurnal.map((d) => (d.rate == null ? 0 : d.rate * 100));',
+    what: 'an UNRATED hour draws the no-data dot, not a measured 0% bar' },
+  { id: 'chart-null-gap', file: 'src/telnet/gauges.ts',
+    find: "        cells += fromBottom === 0 ? '·' : ' ';",
+    repl: "        cells += ' ';",
+    what: 'chartRows marks a null sample on the baseline so it reads as no-data' },
+  { id: 'ctrl-surplus-rebuild', file: 'src/telnet/screens/controller.ts',
+    find: '  const baseline = 26 + (rebuilding ? 5 : 0);',
+    repl: '  const baseline = 26;',
+    what: 'the surplus baseline counts the conditional REBUILD block, so an addition cannot evict existing content' },
   /* ── v0.28 charts + surplus-funded telemetry ──────────────────────── */
   { id: 'chart-draws-window', file: 'src/telnet/gauges.ts',
     find: '  const recent = vals.slice(-width);\n  const lo = opts.min ?? Math.min(...recent);',

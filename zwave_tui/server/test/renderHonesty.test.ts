@@ -1318,3 +1318,18 @@ test('chartRows: scales over the DRAWN window, not samples that scrolled off', (
   assert.equal(a, b,
     'a sample outside the drawn window changed the scale — it must not');
 });
+
+test('chartRows marks a null sample on the baseline so it reads as no-data', () => {
+  // A null column must be distinguishable from a measured minimum. The dot sits
+  // on the baseline only — a full column of dots would read as data.
+  const rows = chartRows([null, 5, null, 9], 4, 3).map(strip);
+  const baseline = rows[rows.length - 1];
+  assert.equal(baseline[0], '·', `null column 0 did not draw the no-data dot: ${JSON.stringify(baseline)}`);
+  assert.equal(baseline[2], '·', `null column 2 did not draw the no-data dot: ${JSON.stringify(baseline)}`);
+  assert.notEqual(baseline[1], '·', 'a MEASURED column must not draw the no-data dot');
+  // Above the baseline a null column is blank, not dotted.
+  assert.equal(rows[0][0], ' ', 'the null marker must appear on the baseline only');
+  // An all-null series is entirely no-data.
+  assert.ok(chartRows([null, null], 2, 2).map(strip).every((l) => /^·+$/.test(l)),
+    'an all-null series must render as no-data across every row');
+});

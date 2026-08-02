@@ -744,3 +744,30 @@ test('controller: a healthy mesh reports silence as silence, not a padded panel'
   assert.match(out, /no mesh-scoped symptoms open/,
     'an empty symptom set must say so in one line rather than render an empty panel');
 });
+
+test('controller: a route REBUILD does not let a new block evict existing content', () => {
+  // surplusRows measured against a fixed baseline ignored the CONDITIONAL
+  // REBUILD ROUTES block (4 rows + separator), so during a rebuild the gate
+  // over-counted free rows by 5 and the additions pushed NETWORK HEALTH's link
+  // tally into the overflow marker — an addition evicting what was already there.
+  const nodes = Array.from({ length: 39 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  const render = (rebuilding: boolean, cols: number, rows: number): string => {
+    const data = mockData({ nodes }) as never as Record<string, unknown>;
+    data.controller = () => ({ ...mkCtrl(NO_ERRORS), isRebuildingRoutes: rebuilding, rebuildStartedAt: rebuilding ? 1 : null });
+    return renderController({
+      view: mkView({ screen: 'controller', cols, rows }), data: data as never,
+      visibleNodes: nodes, filtering: false,
+    } as ScreenCtx).map(strip).join('\n');
+  };
+  // At the height the defect bit, a rebuild must not cost the link tally that
+  // renders fine when idle.
+  for (const [cols, rows] of [[100, 34], [60, 34], [100, 36]] as [number, number][]) {
+    const idle = render(false, cols, rows);
+    const busy = render(true, cols, rows);
+    if (!/links/.test(idle)) continue; // idle already overflows here — pre-existing
+    assert.match(busy, /links/,
+      `${cols}x${rows}: a rebuild evicted the link tally that renders when idle`);
+  }
+});
