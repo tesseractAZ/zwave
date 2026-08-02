@@ -20,7 +20,7 @@
  */
 
 import { c, truncate, padStart } from '../ansi';
-import { sparkline, heatCell } from '../gauges';
+import { sparkline, heatCell, chartRows } from '../gauges';
 import { noiseColor, timeoutPctColor } from '../bands';
 import type { ScreenCtx, InterferenceView } from '../../types';
 import { frame } from '../chrome';
@@ -75,7 +75,16 @@ function heatFor(rate: number | null): string {
 export function renderInterference(ctx: ScreenCtx): string[] {
   const { view, data } = ctx;
   const W = view.cols;
+  const H = view.rows;
   const iv = data.interference();
+  // Rows this screen may spend beyond its compact form. The screen's own
+  // measured problem was VERTICAL: at 200x60 it drew 842 characters and left 44
+  // rows blank, because two multi-day series were each compressed into a single
+  // sparkline row. Surplus rows are spent DRAWING THAT DATA at a resolution it
+  // can actually be read at — this adds ink from readings already collected and
+  // persisted, rather than moving existing ink around.
+  const compactRows = 20; // the pre-v0.28 body height, measured
+  const surplus = Math.max(0, (H - 3) - compactRows);
   const body: string[] = [];
   const push = (s = ''): void => { body.push(truncate(s, W)); };
 
@@ -110,9 +119,28 @@ export function renderInterference(ctx: ScreenCtx): string[] {
       const span = days >= 1 ? `${days.toFixed(days >= 10 ? 0 : 1)}d` : `${Math.max(1, Math.round(days * 24))}h`;
       // Downsample the full retained series into the 24 drawn cells so the spark
       // actually spans `span`, not just its most-recent 24 buckets (12 h).
-      const cells = downsampleMean(iv.noise.trendCoarse, 24);
-      const coarseSpark = sparkline(cells, cells.length, { min: -110, max: -80, color: c.cyan });
-      push('  ' + c.grey('days  ') + coarseSpark + c.grey(`   ${span} span (persisted 30-min buckets, survives restarts)`));
+      // Tall frames draw the persisted history as a real chart: more cells
+      // ACROSS (so more of the retained series is represented, not just the
+      // newest 24 buckets) and rows DOWN (so a 2 dB drift is visible instead of
+      // rounded into one glyph). The fixed -110..-80 scale is kept so this and
+      // the fine trend above stay directly comparable.
+      const chartH = surplus >= 12 ? 6 : surplus >= 6 ? 4 : 0;
+      if (chartH > 0) {
+        const w = Math.max(24, Math.min(iv.noise.trendCoarse.length, W - 12));
+        const cells = downsampleMean(iv.noise.trendCoarse, w);
+        const rows = chartRows(cells, w, chartH, { min: -110, max: -80, color: c.cyan });
+        push('  ' + c.grey(`days  ${span} span (persisted 30-min buckets, survives restarts)`));
+        rows.forEach((line, i) => {
+          // Label the scale ends only — an axis tick per row would imply a
+          // precision the 8-level glyph does not have.
+          const tag = i === 0 ? ' -80 ' : i === rows.length - 1 ? '-110 ' : '     ';
+          push('  ' + c.grey(tag) + line);
+        });
+      } else {
+        const cells = downsampleMean(iv.noise.trendCoarse, 24);
+        const coarseSpark = sparkline(cells, cells.length, { min: -110, max: -80, color: c.cyan });
+        push('  ' + c.grey('days  ') + coarseSpark + c.grey(`   ${span} span (persisted 30-min buckets, survives restarts)`));
+      }
     } else {
       push('  ' + c.grey('days  ') + c.grey('· building multi-day history'));
     }
@@ -144,8 +172,35 @@ export function renderInterference(ctx: ScreenCtx): string[] {
   if (iv.coverageDays < 0.5) {
     push('  ' + c.grey('◷ building — needs coarse history across the day (a few days).'));
   } else {
-    push('  ' + c.grey(hourAxis()));
-    push('  ' + iv.diurnal.map((d) => heatFor(d.rate)).join(''));
+    // A 24-cell heat strip answers "which hour is hot" but not "by how much".
+    // With rows to spare, draw the rates as a chart above the strip: same 24
+    // hours, same data, at a resolution that shows the shape of the day.
+    const dH = surplus >= 12 ? 5 : surplus >= 6 ? 3 : 0;
+    if (dH > 0) {
+      // ABSOLUTE scale and PER-HOUR band colour — the same HEAT_MAX and
+      // heatColorFor the strip below uses. The first version auto-scaled to the
+      // peak in flat yellow, which is precisely what this screen's own comment
+      // forbids: on a uniformly healthy mesh every hour became a solid warning
+      // block above a strip showing all-clear green, for the same 24 numbers.
+      // Nulls stay null so an unrated hour draws the no-data dot, matching the
+      // strip's `·` instead of asserting a measured 0%.
+      const rates = iv.diurnal.map((d) => (d.rate == null ? null : d.rate * 100));
+      const rows = chartRows(rates, 24, dH, {
+        min: 0,
+        max: HEAT_MAX * 100,
+        colorFor: (v) => heatColorFor(v / 100),
+      });
+      const capTag = `${(HEAT_MAX * 100).toFixed(0)}%+`.padStart(5) + ' ';
+      rows.forEach((line, i) => {
+        const tag = i === 0 ? capTag : i === rows.length - 1 ? '   0% ' : '      ';
+        push('  ' + c.grey(tag) + line);
+      });
+      push('  ' + '      ' + c.grey(hourAxis()));
+      push('  ' + '      ' + iv.diurnal.map((d) => heatFor(d.rate)).join(''));
+    } else {
+      push('  ' + c.grey(hourAxis()));
+      push('  ' + iv.diurnal.map((d) => heatFor(d.rate)).join(''));
+    }
     // Worst hour + legend.
     const worst = [...iv.diurnal].filter((d) => d.rate != null).sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))[0];
     const worstStr = worst
