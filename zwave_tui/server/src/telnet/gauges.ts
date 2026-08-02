@@ -196,3 +196,80 @@ export function spinner(nowMs: number): string {
   const i = Math.floor(nowMs / 120) % SPIN_FRAMES.length;
   return SPIN_FRAMES[i < 0 ? i + SPIN_FRAMES.length : i];
 }
+
+/**
+ * Multi-row column chart — `height` rows of `width` cells, one column per
+ * resampled sample, drawn bottom-up with the 8-level block glyphs.
+ *
+ * Why this exists: a `sparkline` compresses a whole series into ONE row, which
+ * is the right density for a table cell and the wrong one for a series worth
+ * studying. The interference screen holds a six-day noise-floor history and a
+ * 24-hour diurnal profile and drew each as a single row — the data was
+ * collected, persisted across restarts, and then shown at a resolution that
+ * could not answer the question it was collected for.
+ *
+ * Scaling matches `sparkline` deliberately: auto-scale over what is DRAWN, not
+ * over samples that scrolled off, or a long-past extreme flattens the visible
+ * trend against an invisible one. A flat series renders at mid-height in grey
+ * rather than as a row of red minimums.
+ *
+ * Returns exactly `height` strings, each exactly `width` visible columns —
+ * blank-padded on the left while history fills, so a partial series never
+ * stretches to imply data it does not have.
+ */
+export function chartRows(
+  values: readonly (number | null)[],
+  width: number,
+  height: number,
+  opts: { min?: number; max?: number; color?: ColorFn; colorFor?: (v: number) => ColorFn } = {},
+): string[] {
+  if (width <= 0 || height <= 0) return [];
+  // NULL IS NOT ZERO. A null sample means "not measured"; substituting 0 draws
+  // a measured floor value that was never observed — the same lie heatCell
+  // avoids with its `none` dot. Nulls keep their position so columns still line
+  // up with any axis or strip drawn beside the chart.
+  const kept = values.filter((v) => v == null || Number.isFinite(v));
+  if (kept.every((v) => v == null)) {
+    return Array.from({ length: height }, () => c.grey('·'.repeat(width)));
+  }
+  const recent = kept.slice(-width);
+  const drawn = recent.filter((v): v is number => v != null);
+  const lo = opts.min ?? Math.min(...drawn);
+  const hi = opts.max ?? Math.max(...drawn);
+  const span = hi - lo || 1;
+  const flat = hi === lo;
+  const color = opts.color ?? (flat ? c.grey : zoneColor((drawn[drawn.length - 1] - lo) / span));
+
+  // Sub-cell resolution: each row is 8 levels, so the column height is measured
+  // in eighths and split into full cells plus one partial cap.
+  const pad = width - recent.length;
+  const out: string[] = [];
+  for (let r = 0; r < height; r++) {
+    const fromBottom = height - 1 - r;
+    let line = pad > 0 ? c.grey('·'.repeat(pad)) : '';
+    let cells = '';
+    let painted = '';
+    for (const v of recent) {
+      if (v == null) {
+        // No-data column: dotted on the baseline only, so an unmeasured sample
+        // can never read as a measured floor value.
+        cells += fromBottom === 0 ? '·' : ' ';
+        painted += c.grey(fromBottom === 0 ? '·' : ' ');
+        continue;
+      }
+      const frac = flat ? 0.5 : clamp01((v - lo) / span);
+      const eighths = Math.round(frac * height * 8);
+      const full = Math.floor(eighths / 8);
+      const glyph = fromBottom < full ? '█'
+        : fromBottom === full ? BLOCKS[Math.max(0, (eighths % 8) - 1)]
+        : ' ';
+      cells += glyph;
+      // Per-column colour when the caller supplies `colorFor`: a chart whose
+      // columns each carry their own band must colour them individually, or it
+      // contradicts the banded strip beside it.
+      painted += opts.colorFor ? opts.colorFor(v)(glyph) : glyph;
+    }
+    out.push(line + (opts.colorFor ? painted : color(cells)));
+  }
+  return out;
+}

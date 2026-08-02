@@ -653,3 +653,121 @@ test('heatmap expansion budgets its "+N more" row — no false "enlarge the term
     assert.equal(strips, AREAS.length, `${cols}x${rows} lost ${AREAS.length - strips} area strip(s)`);
   }
 });
+
+test('controller: spare rows draw REAL unused data, and never on a short frame', () => {
+  // The screen read only controller() / nodes() / scoreFor(). Two things it
+  // always had access to and never drew answer questions its lifetime counters
+  // cannot: interference().serial gives per-hour RATES (a lifetime "63 reply
+  // timeouts" cannot say whether the link is failing NOW), and the engine's
+  // network-scoped symptoms are exactly the ones a per-node screen can't show.
+  const nodes = Array.from({ length: 12 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const data = mockData({ nodes }) as never as Record<string, unknown>;
+  data.controller = () => mkCtrl(NO_ERRORS);
+  data.interference = () => ({
+    noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' },
+    serial: { nakPerH: 0.4, canPerH: 3.2, tmoAckPerH: 0.1, tmoRespPerH: 4.8, band: 'healthy', spanH: 36 },
+    diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, narrative: '' },
+  });
+  data.symptoms = () => [{
+    kind: 'mesh-interference', nodeId: null, severity: 'warn', sinceMs: Date.now() - 9e5,
+    basis: 'inferred', evidence: [], narrative: 'Many nodes degraded together with no serial cause.',
+  }];
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  const render = (cols: number, rows: number): string[] => renderController({
+    view: mkView({ screen: 'controller', cols, rows }), data: data as never,
+    visibleNodes: nodes, filtering: false,
+  } as ScreenCtx);
+
+  const tall = render(200, 60).map(strip).join('\n');
+  assert.match(tall, /RECENT RATES/, 'per-hour serial rates were not drawn on a tall frame');
+  assert.match(tall, /4\.8/, 'the reply-timeout RATE value is missing');
+  assert.match(tall, /ACTIVE MESH EVENTS/, 'mesh-scoped symptoms were not drawn');
+  assert.match(tall, /mesh-interference/, 'the open mesh symptom is not named');
+
+  // A short frame must be untouched — these blocks are surplus-funded.
+  const small = render(80, 24);
+  assert.equal(small.length, 24);
+  const smallTxt = small.map(strip).join('\n');
+  assert.doesNotMatch(smallTxt, /RECENT RATES|ACTIVE MESH EVENTS/,
+    'a surplus-only block appeared on an 80x24 frame');
+  // Contrast at the SAME width so only the row budget differs — this is what
+  // makes the assertion about the surplus gate rather than about width.
+  assert.match(render(80, 60).map(strip).join('\n'), /RECENT RATES/,
+    'the same 80-col frame with rows to spare must draw the block');
+  // …and just BELOW the threshold, at a height where the compact body still
+  // fits. At 80x24 the roll-up already overflows, and that truncation would
+  // hide an unwanted block instead of proving it was never added.
+  const justUnder = render(80, 32).map(strip).join('\n');
+  assert.doesNotMatch(justUnder, /RECENT RATES/,
+    'the block appeared with no surplus to fund it');
+  assert.doesNotMatch(justUnder, /more \(taller terminal/,
+    'setup check: 80x32 must fit without overflow, or the assertion above proves nothing');
+  // NOT asserted: absence of the "…more (taller terminal)" note. That note is
+  // PRE-EXISTING and deliberate — the roll-up genuinely does not fit 24 rows,
+  // and the screen discloses it rather than silently dropping the tail. It
+  // appears identically on main with these blocks absent, so asserting it away
+  // would pin a behaviour this change neither caused nor should fix.
+});
+
+test('controller: ACTIVE MESH EVENTS excludes PER-NODE symptoms', () => {
+  // Network-scoped symptoms are the ones a per-node screen cannot show; per-node
+  // findings belong on REMEDY. Listing both would put one finding in two places
+  // with two row budgets, and would make this panel unbounded on a bad mesh.
+  const nodes = Array.from({ length: 12 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const data = mockData({ nodes }) as never as Record<string, unknown>;
+  data.controller = () => mkCtrl(NO_ERRORS);
+  data.symptoms = () => [
+    { kind: 'mesh-interference', nodeId: null, severity: 'warn', sinceMs: 1, basis: 'inferred', evidence: [], narrative: 'Mesh-wide event.' },
+    { kind: 'return-path-degraded', nodeId: 7, severity: 'warn', sinceMs: 1, basis: 'measured', evidence: [], narrative: 'Node seven reply timeouts.' },
+  ];
+  const out = renderController({
+    view: mkView({ screen: 'controller', cols: 200, rows: 60 }), data: data as never,
+    visibleNodes: nodes, filtering: false,
+  } as ScreenCtx).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(out, /mesh-interference/, 'the network-scoped symptom is missing');
+  assert.doesNotMatch(out, /return-path-degraded/,
+    'a PER-NODE symptom leaked into the mesh-scoped panel');
+});
+
+test('controller: a healthy mesh reports silence as silence, not a padded panel', () => {
+  const nodes = Array.from({ length: 12 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const data = mockData({ nodes }) as never as Record<string, unknown>;
+  data.controller = () => mkCtrl(NO_ERRORS);
+  data.symptoms = () => []; // healthy
+  const out = renderController({
+    view: mkView({ screen: 'controller', cols: 200, rows: 60 }), data: data as never,
+    visibleNodes: nodes, filtering: false,
+  } as ScreenCtx).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(out, /no mesh-scoped symptoms open/,
+    'an empty symptom set must say so in one line rather than render an empty panel');
+});
+
+test('controller: a route REBUILD does not let a new block evict existing content', () => {
+  // surplusRows measured against a fixed baseline ignored the CONDITIONAL
+  // REBUILD ROUTES block (4 rows + separator), so during a rebuild the gate
+  // over-counted free rows by 5 and the additions pushed NETWORK HEALTH's link
+  // tally into the overflow marker — an addition evicting what was already there.
+  const nodes = Array.from({ length: 39 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  const render = (rebuilding: boolean, cols: number, rows: number): string => {
+    const data = mockData({ nodes }) as never as Record<string, unknown>;
+    data.controller = () => ({ ...mkCtrl(NO_ERRORS), isRebuildingRoutes: rebuilding, rebuildStartedAt: rebuilding ? 1 : null });
+    return renderController({
+      view: mkView({ screen: 'controller', cols, rows }), data: data as never,
+      visibleNodes: nodes, filtering: false,
+    } as ScreenCtx).map(strip).join('\n');
+  };
+  // At the height the defect bit, a rebuild must not cost the link tally that
+  // renders fine when idle.
+  for (const [cols, rows] of [[100, 34], [60, 34], [100, 36]] as [number, number][]) {
+    const idle = render(false, cols, rows);
+    const busy = render(true, cols, rows);
+    if (!/links/.test(idle)) continue; // idle already overflows here — pre-existing
+    assert.match(busy, /links/,
+      `${cols}x${rows}: a rebuild evicted the link tally that renders when idle`);
+  }
+});
