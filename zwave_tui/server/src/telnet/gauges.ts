@@ -196,3 +196,64 @@ export function spinner(nowMs: number): string {
   const i = Math.floor(nowMs / 120) % SPIN_FRAMES.length;
   return SPIN_FRAMES[i < 0 ? i + SPIN_FRAMES.length : i];
 }
+
+/**
+ * Multi-row column chart — `height` rows of `width` cells, one column per
+ * resampled sample, drawn bottom-up with the 8-level block glyphs.
+ *
+ * Why this exists: a `sparkline` compresses a whole series into ONE row, which
+ * is the right density for a table cell and the wrong one for a series worth
+ * studying. The interference screen holds a six-day noise-floor history and a
+ * 24-hour diurnal profile and drew each as a single row — the data was
+ * collected, persisted across restarts, and then shown at a resolution that
+ * could not answer the question it was collected for.
+ *
+ * Scaling matches `sparkline` deliberately: auto-scale over what is DRAWN, not
+ * over samples that scrolled off, or a long-past extreme flattens the visible
+ * trend against an invisible one. A flat series renders at mid-height in grey
+ * rather than as a row of red minimums.
+ *
+ * Returns exactly `height` strings, each exactly `width` visible columns —
+ * blank-padded on the left while history fills, so a partial series never
+ * stretches to imply data it does not have.
+ */
+export function chartRows(
+  values: readonly number[],
+  width: number,
+  height: number,
+  opts: { min?: number; max?: number; color?: ColorFn } = {},
+): string[] {
+  if (width <= 0 || height <= 0) return [];
+  const vals = values.filter((v) => Number.isFinite(v));
+  if (vals.length === 0) {
+    return Array.from({ length: height }, () => c.grey('·'.repeat(width)));
+  }
+  const recent = vals.slice(-width);
+  const lo = opts.min ?? Math.min(...recent);
+  const hi = opts.max ?? Math.max(...recent);
+  const span = hi - lo || 1;
+  const flat = hi === lo;
+  const color = opts.color ?? (flat ? c.grey : zoneColor((recent[recent.length - 1] - lo) / span));
+
+  // Sub-cell resolution: each row is 8 levels, so the column height is measured
+  // in eighths and split into full cells plus one partial cap.
+  const pad = width - recent.length;
+  const out: string[] = [];
+  for (let r = 0; r < height; r++) {
+    const fromBottom = height - 1 - r;
+    let line = pad > 0 ? c.grey('·'.repeat(pad)) : '';
+    let cells = '';
+    for (const v of recent) {
+      const frac = flat ? 0.5 : clamp01((v - lo) / span);
+      // At least one eighth for any present reading: a real sample must never
+      // render as empty space, the same floor litBars() enforces.
+      const eighths = Math.max(1, Math.round(frac * height * 8));
+      const full = Math.floor(eighths / 8);
+      if (fromBottom < full) cells += '█';
+      else if (fromBottom === full) cells += BLOCKS[Math.max(0, (eighths % 8) - 1)];
+      else cells += ' ';
+    }
+    out.push(line + color(cells));
+  }
+  return out;
+}
