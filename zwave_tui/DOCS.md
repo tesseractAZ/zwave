@@ -821,6 +821,114 @@ Each overlay reuses `frame()`, `centeredNotice()`, the `c.*` palette and the gau
 - **Detail** (`detail.ts`) — a **scrollable seven-section per-node dossier** (IDENTITY / LIVE LINK / **LIVE ENTITIES** / **CONFIG PARAMETERS** / ROUTES / TRAFFIC + a pinned flag legend). As of v0.22 the dossier is taller than a terminal, so the body scrolls (`view.detailScroll`, §3.2) instead of shedding graphics: the health/battery gauges, SNR meter, and RSSI/RTT/coarse trend sparklines are all kept as scrollable rows (a graphic still returns `null` and is skipped when it can't fit its *columns*). **LIVE ENTITIES** joins every HA entity on the node with its current state via `data.entityStates(nodeId)`, formatted per-domain by the pure `formatEntityState()` — a light's `on · 72%`, a sensor's value + unit, a `binary_sensor` read through its `device_class` (motion → *detected*, door → *open*), climate mode + setpoint/current temp, cover open/closed + position, lock state, firmware-update availability, and a button/event's last-fired age. **CONFIG PARAMETERS** lazily fetches the device's Z-Wave configuration via `data.requestConfigParams(nodeId)` / `data.configParams(nodeId)` (see §2.3) and lists each parameter's label · value + unit · enum meaning, marking read-only params `(ro)`; it shows an honest *loading / unavailable / none* line while resolving. TMO here is the same `responseTimeoutPct`; the raw `commandsDroppedTX/RX` counters live honestly in TRAFFIC. Long-Range nodes show `direct to controller (Long-Range star)` instead of a mesh route. The Detail screen itself is **read-only** — it surfaces state + configuration but changes nothing; *acting* on a device (turning it on/off, unlocking a lock, writing a config parameter) is done from the **Actions Menu** (`a`), behind the write-actions + type-CONFIRM gate (v0.23, §2.8).
 - **Controller** (`controller.ts`) — node 1 plus a mesh roll-up: IDENTITY (home id in hex+dec, RF region, fw/SDK, primary/SUC/SIS roles), a **rebuild-routes banner present only while rebuilding** (honest elapsed time + an indeterminate sweep bar — HA exposes only the boolean, never a fake %), a **CONTROLLER FRAMES (host↔stick)** counter grid whose reliability gauge fills with the SUCCESS rate (v0.24 — it previously filled with the error fraction, so a flawless link drained the bar to empty) and counts only true serial faults (dropped TX/RX, NAK, CAN, timeout ACK, timeout callback); `timeoutResponse` is a NODE reply timeout and is shown separately rather than charged to the serial link, matching interference.ts's serial band. BACKGROUND RSSI, and a NETWORK HEALTH A–F grade histogram with alive/dead/asleep and direct/routed/LR tallies. The rebuild block being conditional keeps the frame hash static (no flicker) when idle. **v0.28** adds two surplus-funded blocks drawn only when rows are genuinely spare: **RECENT RATES (per hour)** reads `interference().serial` — which this screen never touched — because the counter grid above is *lifetime* and "63 reply timeouts" cannot distinguish a link failing now from a month of healthy operation that accumulated them; a rate the window is too short to divide renders `—`, never `0`. **ACTIVE MESH EVENTS** lists the engine's **network-scoped** symptoms (`nodeId === null`) only — per-node findings belong on REMEDY, and duplicating them would put one finding in two places with two row budgets — each carrying its `basis`, so an *inferred* correlation never reads as a measurement. A healthy mesh gets one honest line, not an empty panel. The surplus baseline counts the **conditional** rebuild block, so an addition can never evict the NETWORK HEALTH tallies during a route rebuild.
 - **Topology** (`topology.ts`) — end nodes bucketed by LWR hop count (Direct / 1 / 2 / 3+, plus Long-Range and route-pending groups), an optional hop-distribution histogram (shown only when `bodyCap ≥ 15 && W ≥ 64`), per-node route `signalBars` (only when `W ≥ 72`), and a pinned **Repeater-load panel** where a *full* bar is *bad* (a repeater carrying many nodes is a single point of failure, coloured by load not fill). The route tree **scrolls** (v0.24 — `↑↓`/`j`/`k`, `space`/`b`, `g`/`G`) with a footer reading `▴N ▾M more · ↑↓ scroll · X–Y/Z`; the repeater panel is always kept. It previously windowed from index 0 under a `…N more (taller terminal shows all)` note that was false: the tree is ordered shallowest-first, so overflow always cut the deep-hop, Long-Range and route-pending groups — the anomalies the screen exists to show — and 39 nodes need roughly 45 lines.
+### Per-hop route readings, and why the gutter was the target (v0.29)
+
+Topology's empty space was measured before anything was drawn into it, and the
+measurement changed the plan. The screen saturates at 55 rows — beyond that,
+added height produces only blank rows — which reads like a vertical problem. It
+is not the dominant one. `lr(left, right, cols)` pins a ~32-column left block and
+a ~16-column right block to opposite edges, so at 200 columns **every node row
+carries a ~152-column gutter**, and ink sits at 30% even at a height where zero
+rows are blank. Counted another way: the seven full-width rules were
+contributing more characters than the data between them.
+
+So the fix is horizontal, and it spends the gutter on `RouteStat.repeaterRSSI[]`
+— the reading taken AT each repeater. The screen already held it. Detail already
+drew it. Topology, the screen whose entire subject is routes, read `lwr.rssi`
+and nothing else, and `lwr.rssi` is the LAST hop's reading, which is why
+`nodeLine` deliberately greys it on a routed node: it describes the repeater's
+link, not the device's. The per-hop array is the quantity that comment says is
+missing.
+
+**Detail's idiom is not portable here unchanged.** Detail has no unit toggle;
+this screen does, and its own rule is that every number on a row shares one band
+and one unit. A raw `-93` beside a `+11dB est` cell is two units on one row, so
+`hopReading` follows `signalDisplay` exactly as `signalCell` does.
+
+**The chain sizes itself.** It cannot be left to `lr()` to trim: lr truncates the
+LEFT, the chain lives on the left, and a blind cut returned `⚠n153↮n1` — half a
+failed pair, which names one node and implies the other. Every degradation step
+drops a WHOLE token instead:
+
+```
+n31(-93)→n23(-84)→n12(-62) ⚠n31↮n23   full
+n31→n23→n12 ⚠n31↮n23                  readings dropped
+n31→…→n12 ⚠n31↮n23                    middle elided (… says so)
+3 hops ⚠n31↮n23                       chain collapsed to its length
+3 hops ⚠                              pair unnameable → warn WITHOUT naming
+3 hops                                nothing fits but the shape
+```
+
+The marker degrades on its own axis because naming one end is never an option.
+
+### Observed route churn (v0.29)
+
+Signal strength is an inference about fragility; a reroute is an observation of
+it. `zwaveData` already emits a `kind:'route'` event on every LWR chain change,
+so counting them per node separates a node that is weak-but-settled from one
+whose mesh keeps re-deciding how to reach it — two nodes at the same margin,
+very different stories, and the screen previously could not tell them apart.
+
+The honesty rule is the whole feature. The event ring is bounded and
+**session-scoped**: it resets when the add-on restarts. An unqualified
+"0 reroutes" would read as "this mesh is stable" when it may only mean "this
+add-on started four minutes ago". So the count is never shown without the window
+it was observed over — `23 REROUTES/6.2h` — the window comes from the oldest
+event of ANY kind (that is how far back the ring can see at all), and it is
+never divided into a rate, because the denominator is just "time since boot".
+
+For the same reason both tokens sit behind ONE width gate. Gating the per-row
+`↻7` separately from the header span would render bare counts on 72–99 column
+frames with nothing on screen to qualify them — precisely the reading the design
+exists to prevent. A node with no reroutes gets no token at all, never `↻0`.
+
+The count is deliberately drawn in a neutral colour rather than a band. A mesh
+that reroutes is a mesh doing its job; dressing the count as a warning would
+assert a severity the number does not carry.
+
+### Surplus accounting includes the disclosure itself (v0.29)
+
+The repeater panel's cap was a flat five while its header reported the true
+total, so repeaters stayed hidden even when blank pad rows sat directly beneath
+them. It is surplus-funded now, sized in two passes because panel height and
+tree capacity define each other: pass one sizes the panel at its floor to learn
+how many rows the tree leaves over, pass two spends exactly those rows.
+
+The subtlety is that **the "+N more" line is itself an addition and has to be
+paid for**. A first cut added it unconditionally, and at 80×24 — where there is
+no surplus — the panel grew by one line and the tree lost a node row to fund it.
+That is the exact trade the surplus rule exists to forbid. The explicit
+disclosure now appears only when surplus covers it; with no surplus the panel is
+byte-identical to before, and the header's own count carries the disclosure, as
+it always did.
+
+It reports the worst inbound hop reading across a repeater's live dependents,
+written as `worst -84 n5/8` — the sample size beside the population, because
+"worst -84" over one reading and over nine are different claims and the value
+alone cannot distinguish them. The `/8` reconciles it with the `carries 8 nodes`
+on the same row, which counts every dependent including the dead ones the
+aggregate deliberately excludes.
+
+It reports **no failure rate**, and that absence is deliberate.
+`Σ timeoutResponse / Σ commandsTX` over the dependents looks like per-repeater
+reliability and is not: those are per-node LIFETIME totals spanning every route
+the node has ever used, so a node routed through two repeaters charges all of
+its failures to BOTH, and a repeater that joined the route a minute ago inherits
+everything from before it was involved — the same history the `↻` token on that
+row attributes to a different route. The driver exposes no per-link counter, so
+the honest output is no rate rather than a confident wrong one.
+
+Measured, same fixture, non-space characters:
+
+| frame  | before | after |
+|--------|--------|-------|
+| 80×24  | 991    | **991** (byte-identical) |
+| 120×40 | 1830   | **1967** |
+| 200×60 | 3269   | **3551** |
+
+The residual gutter on a *direct* node's row is not waste — a direct route has
+no intermediate hop to report, so there is nothing honest to put there.
+
 - **Heatmap** (`heatmap.ts`) — nodes grouped by HA area, each drawn as `heatCell`s shaded by SNR margin against `MARGIN_FULL = 25 dB`, areas stacked worst-first. Cell marks (v0.24): a graded shade for a **direct** reading, grey `▒` for a node reached **via a repeater** (its `stats.rssi` is that repeater's last-hop ACK, so it is drawn but never grades the node or the area), grey `○` for **unknown** (never contacted — distinct from dead, and the fallback whenever HA omits a status), red `✕` for **dead**, and grey `·` for asleep / sentinel RSSI. Cells rank worst-state-first so the `✕`/`○` marks survive an overflow truncation rather than being the first discarded. Areas are sorted with **all-unreachable first** (≥1 confirmed-dead node and nothing DIRECTLY GRADED (a repeater-only area is not hoisted)) — a purely-unknown area is *not* hoisted, since never-contacted nodes are not evidence of failure. The count reads `4/12n` when only some nodes contributed a direct reading, so the grade's denominator is visible. Each row also carries a mean-margin meter, the worst node, and that count, with widgets dropped outermost-first while ≥ `MIN_CELLS = 3` of heat strip survives. The legend fits itself to the terminal by dropping **whole keys** and shrinking the ramp, preferring to keep every key; its ramp is coloured by the same `marginColor` bands as the cells it explains.
 - **Log** (`log.ts`) — the live activity stream. `logLayout(rows)` splits the frame into a list and an optional detail pane: the detail pane (`LOG_DETAIL_ROWS = 9`) appears only when `rows ≥ LOG_MIN_ROWS_FOR_DETAIL = 22`. Rows are `cursor · time · 3-letter kind tag · #node name · text`, coloured by severity (errors latch bold-red until acked). The list window uses the shared `windowStart`, and navigation/window math live together in `input.ts` so cursor and viewport can never disagree.
 
