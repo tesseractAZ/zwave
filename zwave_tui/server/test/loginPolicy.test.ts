@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthPolicy, hashPassword, parseUsers } from '../src/auth/loginPolicy';
+import { createAuthPolicy, hashPassword, parseUsers, describeTelnetAuth } from '../src/auth/loginPolicy';
 
 test('parseUsers: bad / non-array JSON → []', () => {
   assert.deepEqual(parseUsers(undefined), []);
@@ -68,4 +68,16 @@ test('throttle is per-peer', () => {
   p.registerFailure('peerX');
   assert.ok(p.blockedMsFor('peerX') > 0);
   assert.equal(p.blockedMsFor('peerY'), 0);
+});
+
+test('the telnet startup banner reports the auth posture actually in force', () => {
+  // The banner was a hardcoded "(no auth — trusted LAN only)" printed whether or
+  // not the login gate was on. On Eric's deployment — auth_enabled=true,
+  // required on ingress, write actions ON — the startup log therefore announced
+  // that a port offering lock/unlock and remove-failed-node was unauthenticated.
+  // It was a false statement about a security control, in the one place an
+  // operator goes to check that control.
+  assert.equal(describeTelnetAuth(true), '(login required)');
+  assert.equal(describeTelnetAuth(false), '(no auth — trusted LAN only)');
+  assert.notEqual(describeTelnetAuth(true), describeTelnetAuth(false));
 });

@@ -271,6 +271,13 @@ const MUTANTS = [
     repl: "  return bits.join(c.grey(' · ')) + c.grey('  —  advisory only; nothing is acted on');",
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
   /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
+  { id: 'telnet-auth-banner', file: 'src/auth/loginPolicy.ts',
+    // The startup line announced "(no auth — trusted LAN only)" on EVERY boot,
+    // including one with the login gate on and write actions enabled — a false
+    // statement about a security control in the place operators check it.
+    find: "  return enabled ? '(login required)' : '(no auth — trusted LAN only)';",
+    repl: "  return '(no auth — trusted LAN only)';",
+    what: 'the telnet startup banner reports the auth posture actually in force' },
   { id: 'topo-hop-sentinel', file: 'src/telnet/screens/topology.ts',
     // The sentinels are POSITIVE (127/126/125), so passing one through does not
     // merely show a wrong number — it ranks a missing reading as the strongest

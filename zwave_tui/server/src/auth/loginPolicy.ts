@@ -190,3 +190,18 @@ export function createAuthPolicy(cfg: AuthPolicyConfig): AuthPolicy {
     },
   };
 }
+
+/**
+ * How the telnet listener's auth posture should be described in the startup log.
+ *
+ * This exists as a function purely so it can be TESTED. The startup line used to
+ * end in the hardcoded string "(no auth — trusted LAN only)" regardless of the
+ * policy actually handed to the listener, so an operator reading the log of an
+ * authenticated deployment was told, in plain words, that the port was open —
+ * a claim about a security control that the code did not support. Nothing
+ * covered it, because a log line built inline during boot is not reachable from
+ * a unit test.
+ */
+export function describeTelnetAuth(enabled: boolean): string {
+  return enabled ? '(login required)' : '(no auth — trusted LAN only)';
+}
