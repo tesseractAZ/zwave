@@ -1199,3 +1199,94 @@ test('the margin-mode bar glyphs use the SHARED band, not signalBars’ own zone
   assert.ok(boldRedBars >= 1,
     `no bar carries the shared band's BOLD red (bold=${boldRedBars}, plain=${plainRedBars}) — the glyph is using signalBars' own zone ramp`);
 });
+
+test('the Overview signal GLYPH is banded by the same function as its number', () => {
+  // The bars and the dB label describe ONE reading. signalBars' default is
+  // zoneColor — a coarser, unrelated ramp — so dropping the explicit band
+  // argument lets the glyph and the number beside it disagree about the same
+  // node: amber bars next to a red number. Nothing caught that: the existing
+  // signalBars test exercises the helper directly, never the Overview cell.
+  //
+  // Pick a reading in a band where zoneColor and the real band DISAGREE, or the
+  // test cannot discriminate (the fixture-agreement trap). At -92 dBm the
+  // rssiColor band is red while the bar fraction lands zoneColor in amber.
+  const weak = { ...mkNode().stats, rssi: -92, lwr: { repeaters: [], protocolDataRate: 3, rssi: -92, repeaterRSSI: [], routeFailedBetween: null } };
+  const n = mkNode({ nodeId: 5, name: 'Weak Direct', stats: weak as never });
+  const rows = renderOverview(ctxFor([n], { selected: 9, cols: 140, signalDisplay: 'dbm' } as never));
+  const row = rows.find((r) => strip(r).includes('Weak Direct'));
+  assert.ok(row, 'the node row must render');
+
+  // Colour immediately preceding the first bar glyph, and the one preceding the
+  // dB number, must be the SAME SGR code.
+  const barSgr = /\x1b\[([0-9;]*)m[▁▃▅▇]/.exec(row!)?.[1];
+  const numSgr = /\x1b\[([0-9;]*)m\s*-9/.exec(row!)?.[1];
+  assert.ok(barSgr != null, 'no coloured bar glyph found in the row');
+  assert.ok(numSgr != null, 'no coloured dB number found in the row');
+  assert.equal(barSgr, numSgr,
+    `the signal glyph (SGR ${barSgr}) is banded differently from its own number (SGR ${numSgr})`);
+});
+
+test('the Overview roll-up is funded by SURPLUS only — it never pushes the roster into scrolling', () => {
+  // The panel exists to earn rows the roster does not need (16 blank rows at
+  // 200x60 on a 39-node mesh, measured). It must be invisible whenever the
+  // roster itself needs the space, or it would cost an operator visible nodes
+  // on a small terminal to decorate a large one.
+  const nodes = Array.from({ length: 39 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const has = (rows: string[]) => rows.some((r) => strip(r).includes('excl. controller'));
+  const roster = (rows: string[]) => rows.filter((r) => /\bDevice \d+/.test(strip(r))).length;
+
+  // Small: 39 nodes cannot fit → roster scrolls → NO panel, and the roster
+  // still gets every row it can use.
+  for (const [cols, rows_] of [[60, 16], [80, 24], [120, 40]] as [number, number][]) {
+    const out = renderOverview(ctxFor(nodes, { cols, rows: rows_ }));
+    assert.equal(out.length, rows_, `${cols}x${rows_} broke the exact-rows contract`);
+    assert.equal(has(out), false, `${cols}x${rows_} drew the roll-up while the roster was still scrolling`);
+    assert.equal(roster(out), rows_ - 5, `${cols}x${rows_} lost roster rows to the panel`);
+  }
+
+  // Tall: every node has a row AND rows remain → panel appears, and the roster
+  // still shows all 39.
+  const big = renderOverview(ctxFor(nodes, { cols: 200, rows: 60 }));
+  assert.equal(big.length, 60);
+  assert.ok(has(big), 'the roll-up did not appear despite 16 surplus rows');
+  assert.equal(roster(big), 39, 'the panel cost the roster rows it needed');
+  for (const line of big) {
+    assert.ok(strip(line).length <= 200, `a roll-up row overflowed 200 cols: ${JSON.stringify(strip(line).slice(0, 60))}`);
+  }
+});
+
+test('the Overview roll-up counts the same membership as the Controller screen', () => {
+  // Two screens showing two different "mesh" totals is a worse defect than the
+  // blank rows this panel replaced. Both exclude node 1 — the mesh the
+  // controller serves, not the controller itself.
+  const nodes = Array.from({ length: 12 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const out = renderOverview(ctxFor(nodes, { cols: 200, rows: 60 }));
+  const line = out.map(strip).find((r) => r.includes('excl. controller'));
+  assert.ok(line, 'roll-up did not render');
+  assert.match(line!, /\b11 nodes/, `roll-up counted the controller: ${line}`);
+});
+
+test('the Overview roll-up grades through the roster\'s own scoreColor', () => {
+  // A private letter→colour table was a THIRD mapping and it disagreed with the
+  // roster: scoreColor paints a 55-score node YELLOW (>= 40), while a
+  // hand-written table called grade D red — one node, two colours, one screen.
+  const nodes = Array.from({ length: 6 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const data = mockData({ nodes }) as never as Record<string, unknown>;
+  data.scoreFor = () => ({ score: 55, rating: 6, grade: 'D', state: 'ok', flags: [] });
+  const out = renderOverview({
+    view: mkView({ screen: 'overview', cols: 200, rows: 60 }),
+    data: data as never, visibleNodes: nodes, filtering: false,
+  } as ScreenCtx);
+
+  const health = out.find((r) => strip(r).includes('HEALTH'));
+  assert.ok(health, 'roll-up HEALTH line did not render');
+  // scoreColor(55) is c.yellow. The D segment must carry exactly that SGR.
+  const wantSgr = /\x1b\[([0-9;]*)m/.exec(c.yellow('x'))![1];
+  const gotSgr = /\x1b\[([0-9;]*)mD /.exec(health!)?.[1];
+  assert.ok(gotSgr != null, `no coloured D segment in: ${JSON.stringify(strip(health!))}`);
+  assert.equal(gotSgr, wantSgr,
+    `grade D (score 55) was coloured SGR ${gotSgr}; the roster's scoreColor gives ${wantSgr}`);
+});

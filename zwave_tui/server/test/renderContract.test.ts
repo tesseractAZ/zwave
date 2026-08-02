@@ -18,7 +18,11 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { visLen } from '../src/telnet/ansi';
+import { c, visLen } from '../src/telnet/ansi';
+import { hstack, splitCols } from '../src/telnet/chrome';
+
+/** SGR-free view of a rendered line. */
+const stripSgr = (x: string): string => x.replace(/\x1b\[[0-9;]*m/g, '');
 import { renderOverview } from '../src/telnet/screens/overview';
 import { renderDetail } from '../src/telnet/screens/detail';
 import { renderTopology } from '../src/telnet/screens/topology';
@@ -134,4 +138,37 @@ test('the Remedy cursor window terminates and always keeps the cursor visible', 
       assert.equal(view.remedyCursor, cursor, 'renderer moved the cursor it was asked to show');
     }
   }
+});
+
+test('hstack composes columns to an exact width, whatever the content', () => {
+  // Every screen that wanted two panes was hand-rolling this, and none of them
+  // got it right — the failure is invisible until one specific width. These are
+  // the cases that break a naive implementation.
+  const wide = c.red('a line far longer than its column will allow');
+  const out = hstack([
+    { lines: [c.green('short'), wide, 'third'], w: 20 },
+    { lines: [c.cyan('only one line')], w: 15 },
+  ], 3);
+  assert.equal(out.length, 3, 'height must be the TALLEST column, blank-filled');
+  for (const line of out) {
+    assert.equal(stripSgr(line).length, 20 + 3 + 15,
+      `hstack row was not exactly Σw + gaps: ${JSON.stringify(stripSgr(line))}`);
+  }
+  // An over-long cell must be cut by its OWN column, never shove the next one.
+  assert.match(stripSgr(out[1]), /^a line far longer th\s{18}$/,
+    'a long cell displaced its neighbour instead of being truncated');
+  // A zero-width column is dropped rather than drawn as a sliver.
+  assert.deepEqual(hstack([{ lines: ['x'], w: 0 }, { lines: ['y'], w: 4 }], 1).map(stripSgr), ['y   ']);
+});
+
+test('splitCols refuses to divide a frame below a usable pane width', () => {
+  // The caller's breakpoint signal: [] means "fall back to fewer panes". Without
+  // it a 3-way split at 80 cols yields 25-column panes that truncate values
+  // rather than padding — density bought with information.
+  assert.deepEqual(splitCols(200, 2, 2, 24), [99, 99]);
+  assert.deepEqual(splitCols(60, 3, 2, 24), [], 'split a 60-col frame 3 ways');
+  assert.deepEqual(splitCols(200, 3, 3, 34).reduce((a, b) => a + b, 0) + 6, 200,
+    'widths + gaps must account for every column');
+  // Remainder goes to the leftmost pane, where denser content sits.
+  assert.deepEqual(splitCols(101, 2, 1, 10), [50, 50]);
 });

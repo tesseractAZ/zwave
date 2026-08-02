@@ -13,7 +13,7 @@
  * most `view.cols` wide (callers still own the exact-rows contract).
  */
 
-import { c, lr, truncate, visLen } from './ansi';
+import { c, lr, padEnd, truncate, visLen } from './ansi';
 import type { DataProvider, ViewState } from '../types';
 
 /** Product identity shown at the far left of the masthead. */
@@ -240,4 +240,60 @@ export function frame(view: ViewState, data: DataProvider, o: FrameOpts): string
   }
   out.push(commandBar(view, o.keys, o.keysReserve ?? 0));
   return out.slice(0, view.rows);
+}
+
+/* ── column composition ──────────────────────────────────────────────────── */
+
+/** One column in an `hstack`: its content lines and the columns it occupies. */
+export interface StackCol {
+  lines: string[];
+  w: number;
+}
+
+/**
+ * Compose columns SIDE BY SIDE into one block of lines.
+ *
+ * Every screen that wanted two panes was hand-rolling this, which is why none
+ * of them did: getting it wrong breaks the frame contract in a way that is
+ * invisible until a specific width. The guarantees here are the whole point.
+ *
+ *   • Output height = the TALLEST column. Shorter columns are blank-filled, so
+ *     a ragged pair still yields rectangular rows.
+ *   • Every output line is EXACTLY `Σ w + gap × (n−1)` visible columns — each
+ *     cell is truncated to its own width and then padded back up to it, so a
+ *     long line in one column can never shove the next column rightwards.
+ *   • Padding uses padEnd/truncate (ANSI-aware), so SGR codes never count
+ *     toward width and a truncated cell cannot leak an unterminated colour into
+ *     its neighbour.
+ *
+ * Columns whose width collapses below 1 are dropped rather than rendered as a
+ * sliver — the caller decides breakpoints; this just refuses to draw nonsense.
+ */
+export function hstack(cols: readonly StackCol[], gap = 2): string[] {
+  const live = cols.filter((c) => c.w >= 1);
+  if (live.length === 0) return [];
+  const height = live.reduce((h, c) => Math.max(h, c.lines.length), 0);
+  const sep = ' '.repeat(Math.max(0, gap));
+  const out: string[] = [];
+  for (let r = 0; r < height; r++) {
+    out.push(live.map((c) => padEnd(truncate(c.lines[r] ?? '', c.w), c.w)).join(sep));
+  }
+  return out;
+}
+
+/**
+ * Split `total` columns into `n` panes of near-equal width, accounting for the
+ * gaps between them. Returns [] when the result would be narrower than `min`
+ * per pane — the caller's signal to fall back to fewer panes (or one).
+ *
+ * Remainder columns go to the LEFTMOST panes, which is where the denser content
+ * conventionally sits.
+ */
+export function splitCols(total: number, n: number, gap = 2, min = 24): number[] {
+  if (n < 1) return [];
+  const usable = total - gap * (n - 1);
+  if (usable < min * n) return [];
+  const base = Math.floor(usable / n);
+  const extra = usable - base * n;
+  return Array.from({ length: n }, (_, i) => base + (i < extra ? 1 : 0));
 }

@@ -5,17 +5,47 @@
 # config.yaml `ports_description:` — kept single-source, so no `network:` block here.
 # The order here mirrors config.yaml for readability; HA orders the FORM by the
 # `schema:` block, so keep the two in step there.
+#
+# ★ STRUCTURE IS CARRIED BY THE LABEL PREFIX ("Display · ", "Access · ",
+#   "Login gate · ", "Advanced · "), NOT by nesting the keys — and that is a
+#   deliberate, permanent decision, not a shortcut.
+#
+#   Home Assistant DOES render nested `schema:` objects as collapsible panels, so
+#   grouping the keys would look tidier. It is unsafe here for a reason that has
+#   nothing to do with merge depth (Supervisor deep-merges dicts): an add-on has
+#   NO options-migration hook, so nesting a key is a RENAME. The operator's value
+#   lives at the OLD path, which no longer exists in the new schema, while the
+#   new path has never been written and therefore resolves to its default. The
+#   old key is then dropped as unknown. No merge strategy recovers a value whose
+#   key the schema no longer declares.
+#
+#   Concretely, on an install with `auth_enabled: true`, `auth_require_on_ingress:
+#   true` and `write_actions_enabled: true` (verified against a real deployment),
+#   moving those under an `access:`/`auth:` group would silently return the login
+#   gate to its `false` default while write actions stayed ON — an unauthenticated
+#   LAN telnet listener with lock/unlock and remove-failed-node available. It is
+#   invisible too: `users` keeps its key, so the form still shows the populated
+#   user rows, and index.ts's "auth_enabled but no users" warning never fires.
+#
+#   Shadow-key migration was evaluated and is worse: `bashio::config.exists`
+#   cannot distinguish a value cleared to "" from an absent one, and `users` is a
+#   structured list that cannot be shadowed at all — a restrictive merge there
+#   locks the operator out of telnet, the direct port AND the sidebar.
+#
+#   So: NEVER nest or rename an existing option key to tidy this form. If a
+#   future release must regroup, it needs a major version, an explicit breaking
+#   note, and a documented manual re-entry step.
 configuration:
   # ── Display & safety ────────────────────────────────────────────────────────
   signal_display:
-    name: Signal display unit
+    name: Display · Signal display unit
     description: >-
       Default unit for link quality in the TUI. "margin" shows the SNR margin
       over the live background-noise floor (recommended); "dbm" shows raw RSSI.
       You can switch any time inside the TUI — press T (shown as [T] UNITS on the
       command bar).
   write_actions_enabled:
-    name: Enable write actions
+    name: Safety · Enable write actions
     description: >-
       Unlocks the Actions Menu (press A in the TUI) — ping, refresh values,
       re-interview, rebuild routes, and remove a failed node. Off keeps the
@@ -23,7 +53,7 @@ configuration:
       still be armed by typing the word CONFIRM before it runs.
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled:
-    name: Enable telnet TUI
+    name: Access · Enable telnet TUI
     description: >-
       Serve the full-screen TUI on the telnet port for terminals on your LAN.
       Telnet is unencrypted — on an untrusted network turn on the login gate
@@ -31,7 +61,7 @@ configuration:
       sidebar.
   # ── Login gate ─────────────────────────────────────────────────────────────
   auth_enabled:
-    name: Require login (direct access)
+    name: Login gate · Require login (direct access)
     description: >-
       Require a username and password for DIRECT access — telnet, or hitting the
       port directly. Access through the HA sidebar is already authenticated by
@@ -39,61 +69,61 @@ configuration:
       Add at least one user below first — with none configured, direct access is
       denied.
   auth_require_on_ingress:
-    name: Also require login in the HA sidebar
+    name: Login gate · Also require login in the HA sidebar
     description: >-
       Also show the login gate when opening the console from the Home Assistant
       sidebar. Off by default (HA already authenticated you there); turn on only
       if you want a second prompt in front of the mesh controls.
   users:
-    name: Login users
+    name: Login gate · Login users
     description: >-
       Allowed logins for the TUI — add one row per user. The password may be
       plaintext (masked here, stored in the add-on options) or a
       scrypt:<salt>:<hash> string so no plaintext is stored. See the
       Documentation tab to generate a hash.
   auth_max_attempts:
-    name: Max login attempts
+    name: Login gate · Max login attempts
     description: >-
       Failed password attempts allowed before the connection is dropped.
       Default 3.
   auth_idle_lock_min:
-    name: Idle re-lock (minutes)
+    name: Login gate · Idle re-lock (minutes)
     description: >-
       Re-require login after this many minutes with no keystrokes on a signed-in
       session. 0 disables it. Applies only to sessions that passed the login gate
       — not HA-sidebar sessions.
   # ── Advanced ───────────────────────────────────────────────────────────────
   refresh_interval:
-    name: Advanced — refresh interval (seconds)
+    name: Advanced · refresh interval (seconds)
     description: >-
       Seconds between live render refreshes and the cheap network_status roster
       poll. The default 2s is a good balance; lower is snappier, higher is
       lighter. Range 1–30.
   route_poll_interval:
-    name: Advanced — route poll interval (seconds)
+    name: Advanced · route poll interval (seconds)
     description: >-
       Seconds between the heavier route- and controller-statistics polls, kept
       off the fast render tick so they don't hammer the mesh. Default 10s.
       Range 5–120.
   log_level:
-    name: Advanced — log level
+    name: Advanced · log level
     description: >-
       Verbosity of the add-on log. "info" is the default; use debug or trace when
       troubleshooting, or warning/error to quiet routine output.
   zwave_entry_id:
-    name: Advanced — Z-Wave JS entry ID
+    name: Advanced · Z-Wave JS entry ID
     description: >-
       Leave blank to auto-discover the zwave_js integration (recommended — it
       survives re-adds of the integration). Set an explicit config-entry id only
       if you run more than one zwave_js entry.
   ha_ws_url:
-    name: Advanced — Home Assistant WebSocket URL
+    name: Advanced · Home Assistant WebSocket URL
     description: >-
       Leave at the default ws://supervisor/core/websocket for a normal install.
       Override only to point the data layer at a different HA Core / driver
       WebSocket.
   driver_ws_url:
-    name: Advanced — Z-Wave JS driver WebSocket URL (read-only telemetry)
+    name: Advanced · Z-Wave JS driver WebSocket URL (read-only telemetry)
     description: >-
       Direct READ-ONLY connection to the Z-Wave JS driver for diagnostics Home
       Assistant does not forward — the per-channel background-noise floor (real

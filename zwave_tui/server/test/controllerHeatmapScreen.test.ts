@@ -584,3 +584,72 @@ test('the heatmap does not label its own population with the Overview’s name',
   assert.ok(/DEVICES/.test(strip3), `heatmap still labels its count NODES: ${strip3}`);
   assert.ok(!/\bNODES\b/.test(strip3), `heatmap reuses the Overview's NODES label: ${strip3}`);
 });
+
+test('heatmap: surplus rows expand areas into their real DEVICES, never into padding', () => {
+  // The map is structurally one row per AREA, so 38 devices collapsed into ~8
+  // rows and a tall frame went mostly blank (measured 4% ink / 54 blank rows at
+  // 200x60). Surplus rows now name the devices behind each grade, weakest
+  // first — data groupByArea already computes and used to discard.
+  const AREAS = ['kitchen', 'garage', 'hallway', 'office'];
+  const nodes = Array.from({ length: 21 }, (_, i) => mkNode({
+    nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0,
+    area: AREAS[i % AREAS.length],
+    stats: { ...mkNode().stats, rssi: -60 - (i % 25) } as never,
+  }));
+  const ctx = (cols: number, rows: number): ScreenCtx => ({
+    view: mkView({ screen: 'heatmap', cols, rows }), data: mockData({ nodes }),
+    visibleNodes: nodes, filtering: false,
+  } as ScreenCtx);
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+  // Tall frame: device rows appear, and every one names a REAL node.
+  const tall = renderHeatmap(ctx(200, 60));
+  assert.equal(tall.length, 60, 'exact-rows contract broken');
+  const deviceRows = tall.map(strip).filter((r) => /^\s{4}\S\s+(\+|-|\s)?\d+dB|^\s{4}·\s+dead/.test(r));
+  assert.ok(deviceRows.length > 0, 'no device rows drawn despite ~47 surplus rows');
+  for (const r of deviceRows) {
+    assert.match(r, /Device \d+/, `a device row named no real node: ${JSON.stringify(r)}`);
+  }
+  for (const line of tall) {
+    assert.ok(strip(line).length <= 200, `row overflowed 200 cols: ${JSON.stringify(strip(line).slice(0, 50))}`);
+  }
+
+  // Short frame: NO expansion — the area strips must not lose rows to devices.
+  const short = renderHeatmap(ctx(80, 24));
+  assert.equal(short.length, 24);
+  const shortAreas = short.map(strip).filter((r) => AREAS.some((a) => r.startsWith(a)));
+  const tallAreas = tall.map(strip).filter((r) => AREAS.some((a) => r.startsWith(a)));
+  assert.equal(shortAreas.length, tallAreas.length,
+    'expansion cost the map one of its area strips');
+});
+
+test('heatmap expansion budgets its "+N more" row — no false "enlarge the terminal"', () => {
+  // expandArea emits ONE MORE row than its budget whenever it discloses a
+  // remainder. Budgeting only the device rows over-spent the surplus by one row
+  // per area, so the body overran the frame, chrome's overflow note replaced the
+  // last rows, and at 80x24 whole AREA STRIPS vanished while the telemetry still
+  // claimed all of them — misdirecting the operator to enlarge a terminal that
+  // had fit the map a release earlier.
+  const AREAS = ['kitchen', 'garage', 'hallway', 'office', 'patio', 'attic'];
+  const nodes = Array.from({ length: 37 }, (_, i) => mkNode({
+    nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0,
+    area: AREAS[i % AREAS.length],
+    stats: { ...mkNode().stats, rssi: -60 - (i % 25) } as never,
+  }));
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+  for (const [cols, rows] of [[60, 16], [80, 24], [80, 40], [100, 30], [120, 40], [200, 60]] as [number, number][]) {
+    const out = renderHeatmap({
+      view: mkView({ screen: 'heatmap', cols, rows }), data: mockData({ nodes }),
+      visibleNodes: nodes, filtering: false,
+    } as ScreenCtx);
+    assert.equal(out.length, rows, `${cols}x${rows} broke the exact-rows contract`);
+    const overflowed = out.some((l) => /more lines hidden|enlarge the terminal/.test(strip(l)));
+    assert.equal(overflowed, false,
+      `${cols}x${rows} printed the overflow note — the expansion over-spent its budget`);
+    // Every area must still have its strip: the map may not trade an area for
+    // device detail.
+    const strips = AREAS.filter((a) => out.some((l) => strip(l).startsWith(a))).length;
+    assert.equal(strips, AREAS.length, `${cols}x${rows} lost ${AREAS.length - strips} area strip(s)`);
+  }
+});
