@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.29.0 — 2026-08-02
+
+**Topology draws the per-hop readings it already held, and stops publishing a
+number it could not honestly compute.**
+
+The screen's empty space was measured before anything was drawn into it, and the
+measurement changed the plan. Topology saturates at 55 rows — beyond that, added
+height yields only blank rows — which reads like a vertical problem. It is not
+the dominant one. `lr(left, right, cols)` pins a short left block and a short
+right block to opposite edges, so at 200 columns every node row carried a
+~152-column gutter and ink sat at 30% even at a height where ZERO rows were
+blank. Counted another way, the seven full-width rules were drawing more
+characters than the data between them.
+
+So the fix is horizontal. `RouteStat.repeaterRSSI[]` — the strength measured AT
+each repeater — was already collected, already rendered by Detail, and never
+read by the screen whose entire subject is routes. Topology read only
+`lwr.rssi`, which is the LAST hop's reading, which is exactly why `nodeLine`
+greys it on a routed node: it describes the repeater's link, not the device's.
+The per-hop array is the quantity that comment says is missing.
+
+Also new: **observed route churn** (`↻N` per row, `N REROUTES/<span>` in the
+header) from the `kind:'route'` events the data layer already emitted; a
+**surplus-funded repeater panel** that no longer hides repeaters behind a flat
+cap of five; a **name budget** that stops silently shortening long names at 200
+columns; and a **REBUILDING** marker, because a route tree drawn while the
+controller is rewriting routes is provisional and never said so.
+
+Every addition is surplus-funded: **80×24 is byte-identical to 0.28.0.**
+
+| frame  | 0.28.0 | 0.29.0 |
+|--------|--------|--------|
+| 80×24  | 991    | **991** (byte-identical) |
+| 120×40 | 1830   | **1967** |
+| 200×60 | 3269   | **3551** |
+
+### Honesty rules this release had to get right
+
+**Detail's idiom is not portable.** Detail has no unit toggle; this screen does,
+and its own rule is that every number on a row shares one unit and one band. A
+raw `-93` beside a `+11dB est` cell is two units on one row, so the per-hop
+readings follow `signalDisplay`.
+
+**The chain sizes itself.** It cannot be left to `lr()`, which truncates the
+LEFT — where the chain lives — and returned `⚠n153↮n1`: half a failed pair,
+naming one node and implying another. Each degradation step drops a whole token.
+
+**A count is never shown without its window.** The event ring is bounded and
+session-scoped, so an unqualified "0 reroutes" would read as "this mesh is
+stable" when it may only mean "this add-on started four minutes ago". Count and
+span share one width gate, and the count is never divided into a rate, because
+the denominator would just be time-since-boot.
+
+**Sentinels are positive.** 127/126/125 mean "no reading"; treated as levels
+they rank as the strongest link on the mesh. They never render as a value and
+never enter a statistic.
+
+### What review removed
+
+A first cut published a per-repeater failure rate from
+`Σ timeoutResponse / Σ commandsTX` over the repeater's dependents. It is not a
+per-link quantity: those are per-node LIFETIME totals covering every route the
+node has ever used, so a node routed through two repeaters charged all of its
+failures to BOTH, and a repeater that joined a route a minute ago inherited
+everything from before it was involved — the same history the `↻` token on that
+row attributes elsewhere. The driver exposes no per-link counter, so the rate is
+gone rather than approximated. The aggregate now reports `worst -84 n5/8`, with
+the sample size beside the population so the claim carries its own weight.
+
+Review also caught the degradation ladder running backwards: chains were tried
+outermost and markers innermost, so the first fit was "widest chain, weakest
+marker" and a fully annotated chain rendered beside a bare `⚠` while the columns
+needed to name the failed pair sat free. Which link failed outranks what the
+healthy hops measured.
+
 ## 0.28.0 — 2026-08-02
 
 **Two screens now draw data they had already collected.**
