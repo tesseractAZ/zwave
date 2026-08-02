@@ -360,6 +360,23 @@ const MUTANTS = [
     repl: '      if (username.length > 0) out.push({ username, password });',
     what: 'a blank-password user row is rejected instead of authenticating on ""' },
 
+  /* ── v0.27 review round 1 ─────────────────────────────────────────── */
+  { id: 'cfg-params-column-width', file: 'src/telnet/screens/detail.ts',
+    find: '      for (const line of columnize(cfg.params, (prm, w) => configParamRow(prm, w), inner)) {',
+    repl: '      for (const line of columnize(cfg.params, (prm) => configParamRow(prm, inner), inner)) {',
+    what: 'config parameter rows are rendered at their COLUMN width, so values survive' },
+  { id: 'columnize-min-col', file: 'src/telnet/screens/detail.ts',
+    find: '  const MIN_COL = 56;',
+    repl: '  const MIN_COL = 34;',
+    what: 'the 80-col terminal stays single-column instead of collapsing names to stubs' },
+  { id: 'heatmap-disclosure-budget', file: 'src/zwave/../telnet/screens/heatmap.ts',
+    find: '  while (per > 0 && areas.reduce((n, a) => n + Math.min(a.cells.length, per), 0) + mightDisclose(per) > surplus) {',
+    repl: '  while (false as boolean) {',
+    what: 'the "+N more devices" row is budgeted, so the heatmap never overflows its frame' },
+  { id: 'rollup-one-score-colour', file: 'src/telnet/screens/overview.ts',
+    find: '      .map((g) => scoreColor(GRADE_FLOOR[g])(`${g} ${grades[g]}`))',
+    repl: '      .map((g) => (g === \'D\' ? c.red : scoreColor(GRADE_FLOOR[g]))(`${g} ${grades[g]}`))',
+    what: 'the roll-up grades through the roster\'s scoreColor, not a second mapping' },
   /* ── v0.26 review round 2 ─────────────────────────────────────────── */
   { id: 'controller-before-nevermeasured', file: 'src/zwave/health.ts',
     find: '  if (node.isController && (node.status === NodeStatus.Alive || node.status === NodeStatus.Awake)) {',

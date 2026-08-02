@@ -87,7 +87,18 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
     const more = areas.length - shown;
     body.push(c.grey(`…${more} more area${more === 1 ? '' : 's'} (taller terminal shows all)`));
   } else {
-    for (const a of areas) body.push(areaRow(a, W));
+    // EXPAND INTO SURPLUS (v0.27). The map is structurally one row per AREA, so
+    // 38 devices collapsed into ~8 rows and the rest of a tall frame was blank —
+    // measured 4% ink / 54 blank rows at 200x60. When rows are left over, spend
+    // them naming the DEVICES behind each area's grade, weakest first. These are
+    // real per-node readings that groupByArea already computed and then threw
+    // away; nothing here is padded or invented.
+    const surplus = Math.max(0, areaCap - areas.length);
+    const perArea = expansionBudget(areas, surplus);
+    for (const a of areas) {
+      body.push(areaRow(a, W));
+      for (const line of expandArea(a, perArea, W)) body.push(line);
+    }
   }
 
   return frame(view, data, {
@@ -411,3 +422,69 @@ function legendLine(W: number): string {
   return truncate(head(4), W);
 }
 
+/**
+ * How many device rows each area may draw, given `surplus` spare rows.
+ *
+ * Fair share, then a second pass so areas smaller than their share hand the
+ * remainder back rather than wasting it. Returns 0 when there is not enough
+ * room for even one device row per area — the map then renders exactly as it
+ * always did.
+ */
+function expansionBudget(areas: readonly AreaInfo[], surplus: number): number {
+  if (surplus < areas.length || areas.length === 0) return 0;
+  // ★ expandArea emits ONE MORE row than its budget whenever it has to disclose
+  //   "+N more devices". Budgeting only the device rows over-spent the surplus
+  //   by one row PER AREA, so the body overran the frame and chrome's overflow
+  //   note replaced the last rows — at 80x24 that dropped whole area strips and
+  //   told the operator to enlarge a terminal that had fit the map a release
+  //   earlier. Reserve the disclosure row for every area that might need one.
+  const mightDisclose = (per: number): number =>
+    areas.reduce((n, a) => n + (a.cells.length > per ? 1 : 0), 0);
+  let per = Math.floor(surplus / areas.length);
+  while (per > 0 && areas.reduce((n, a) => n + Math.min(a.cells.length, per), 0) + mightDisclose(per) > surplus) {
+    per -= 1;
+  }
+  if (per <= 0) return 0;
+  // Give back what small areas cannot use, then re-check the same budget.
+  const unused = areas.reduce((n, a) => n + Math.max(0, per - a.cells.length), 0);
+  if (unused > 0) {
+    const bumped = per + Math.floor(unused / areas.length);
+    const cost = areas.reduce((n, a) => n + Math.min(a.cells.length, bumped), 0) + mightDisclose(bumped);
+    if (cost <= surplus) per = bumped;
+  }
+  return Math.min(per, 12);
+}
+
+/**
+ * Device rows beneath one area strip: `  ▓ +14 dB  Kitchen Lamp`, weakest
+ * first, with a disclosed `+N` when the area holds more than the budget.
+ *
+ * Colour discipline matches the strip above it exactly — a routed reading is
+ * greyed and tagged, because it is the last-hop repeater→controller ACK and not
+ * the device's own link, and a dead/unknown node is never graded.
+ */
+function expandArea(a: AreaInfo, budget: number, W: number): string[] {
+  if (budget <= 0 || a.cells.length === 0) return [];
+  const show = a.cells.slice(0, budget);
+  const out: string[] = [];
+  for (const cell of show) {
+    const val =
+      cell.dead ? c.grey('dead ') :
+      cell.unknown ? c.grey('  —  ') :
+      cell.margin == null ? c.grey('  —  ') :
+      (cell.routed ? c.grey : marginColor(cell.margin))(
+        `${cell.margin >= 0 ? '+' : ''}${cell.margin}dB`.padStart(5));
+    const glyph = cell.dead || cell.unknown || cell.margin == null
+      ? c.grey('·')
+      : (cell.routed ? c.grey : marginColor(cell.margin))('▓');
+    const tag = cell.routed ? c.grey(' (last hop)') : '';
+    const nameW = Math.max(8, W - 14 - visLen(strip(tag)));
+    out.push('    ' + glyph + ' ' + val + '  ' + c.white(truncate(cell.name, nameW)) + tag);
+  }
+  const rest = a.cells.length - show.length;
+  if (rest > 0) out.push(c.grey(`      +${rest} more device${rest === 1 ? '' : 's'} in this area`));
+  return out;
+}
+
+const SGR_RE = /\x1b\[[0-9;]*m/g;
+const strip = (s: string): string => s.replace(SGR_RE, '');

@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.27.0 — 2026-08-02
+
+**The Configuration page is grouped — without renaming a single option.**
+
+Home Assistant does render nested `schema:` objects as collapsible panels, so
+grouping the fourteen options into `display:` / `access:` / `auth:` blocks looked
+like the obvious answer. It is unsafe, and the reason is worth stating plainly
+because the tidy version is the dangerous one.
+
+An add-on has **no options-migration hook**, so nesting a key is a **rename** —
+and no merge strategy saves it, deep or shallow. The operator's value sits at the
+old path, which the new schema no longer declares; the new path has never been
+written, so it resolves to its default; and the orphaned old key is discarded as
+unknown. Checked against a real deployment carrying
+`auth_enabled: true`, `auth_require_on_ingress: true` and
+`write_actions_enabled: true`, that regrouping would have returned the login gate
+to its `false` default while write actions stayed on — an unauthenticated LAN
+telnet listener offering lock/unlock and remove-failed-node — and done it
+invisibly, since `users` keeps its key so the form still shows populated rows and
+the "auth enabled but no users" warning never fires.
+
+Shadow-key migration is worse, not better: `bashio::config.exists` cannot
+distinguish a value cleared to `""` from an absent one, and `users` is a
+structured list that cannot be shadowed at all, so a restrictive merge locks the
+operator out of telnet, the direct port and the sidebar simultaneously.
+
+Structure therefore lives in the **label prefix** — `Display · `, `Access · `,
+`Login gate · `, `Advanced · ` — which groups every field visibly with zero
+migration risk. The reasoning is recorded in `translations/en.yaml` so a later
+release does not rediscover the hazard the hard way.
+
+**The screens now use the frames they are given.**
+
+Measured against a populated 39-node mesh, ink as a fraction of the frame with
+fully blank rows counted separately:
+
+| screen | 80x24 | 200x60 before | 200x60 after |
+|---|---|---|---|
+| Overview | unchanged | 27%, 16 blank | **25%, 0 blank** |
+| Heatmap | 16% → **38%** | 4%, 54 blank | **10%, 9 blank** |
+
+* **Overview** — the roster drew every node and then padded the remainder with
+  empty strings. A mesh roll-up (status counts, grade distribution, worst-node
+  queue) now claims those rows, funded *strictly by surplus*: it is drawn only
+  when every node already has a row and rows remain, so it can never push the
+  roster into scrolling. The NODE column's cap rose 40 → 64, since the fixed
+  columns and separators total 107 and the old cap froze content at 147, leaving
+  53 dead columns on every row at 200 wide. 160 columns is now fully used.
+* **Heatmap** — structurally one row per *area*, so 38 devices collapsed into
+  about eight rows however tall the terminal. Surplus rows now name the devices
+  behind each area's grade, weakest first, from readings `groupByArea` already
+  computed and discarded.
+* **Detail** — its entity and parameter lists are short rows that were drawn one
+  per line, wasting width and pushing the rest of the dossier out of the scroll
+  window. On a 10-entity, 18-parameter node they fall from 28 rows to 10.
+
+New shared primitives `hstack` and `splitCols` back the column work. `hstack`
+guarantees output height equals the tallest column, every row is exactly
+Σw + gaps visible columns, and each cell is truncated to its own width before
+being padded back — so a long line can never displace its neighbour, and an
+ANSI-aware pad keeps a cut cell from leaking colour across a boundary.
+`splitCols` returns nothing rather than dividing a frame below a usable pane
+width, because density bought by truncating values is not density.
+
+**Nothing here pads.** Blank rows that remain are honest: when every device is
+already on screen, or every node grades A and the worst-node list is genuinely
+empty, the frame is not filled to hide it. Two proposed additions were dropped
+on review — an RF-headroom distribution would have bucketed nodes by a last-hop
+ACK reading the Overview already refuses to health-colour, and an extra
+command-bar token would have changed what the command bar *drops* at 80 and 120
+columns, costing information on small terminals to decorate large ones.
+
+547 tests, up from 542.
+
 ## 0.26.1 — 2026-08-01
 
 ### Screenshot generator: attribute-safe escaping
