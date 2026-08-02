@@ -584,3 +584,41 @@ test('the heatmap does not label its own population with the Overview’s name',
   assert.ok(/DEVICES/.test(strip3), `heatmap still labels its count NODES: ${strip3}`);
   assert.ok(!/\bNODES\b/.test(strip3), `heatmap reuses the Overview's NODES label: ${strip3}`);
 });
+
+test('heatmap: surplus rows expand areas into their real DEVICES, never into padding', () => {
+  // The map is structurally one row per AREA, so 38 devices collapsed into ~8
+  // rows and a tall frame went mostly blank (measured 4% ink / 54 blank rows at
+  // 200x60). Surplus rows now name the devices behind each grade, weakest
+  // first — data groupByArea already computes and used to discard.
+  const AREAS = ['kitchen', 'garage', 'hallway', 'office'];
+  const nodes = Array.from({ length: 21 }, (_, i) => mkNode({
+    nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0,
+    area: AREAS[i % AREAS.length],
+    stats: { ...mkNode().stats, rssi: -60 - (i % 25) } as never,
+  }));
+  const ctx = (cols: number, rows: number): ScreenCtx => ({
+    view: mkView({ screen: 'heatmap', cols, rows }), data: mockData({ nodes }),
+    visibleNodes: nodes, filtering: false,
+  } as ScreenCtx);
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+  // Tall frame: device rows appear, and every one names a REAL node.
+  const tall = renderHeatmap(ctx(200, 60));
+  assert.equal(tall.length, 60, 'exact-rows contract broken');
+  const deviceRows = tall.map(strip).filter((r) => /^\s{4}\S\s+(\+|-|\s)?\d+dB|^\s{4}·\s+dead/.test(r));
+  assert.ok(deviceRows.length > 0, 'no device rows drawn despite ~47 surplus rows');
+  for (const r of deviceRows) {
+    assert.match(r, /Device \d+/, `a device row named no real node: ${JSON.stringify(r)}`);
+  }
+  for (const line of tall) {
+    assert.ok(strip(line).length <= 200, `row overflowed 200 cols: ${JSON.stringify(strip(line).slice(0, 50))}`);
+  }
+
+  // Short frame: NO expansion — the area strips must not lose rows to devices.
+  const short = renderHeatmap(ctx(80, 24));
+  assert.equal(short.length, 24);
+  const shortAreas = short.map(strip).filter((r) => AREAS.some((a) => r.startsWith(a)));
+  const tallAreas = tall.map(strip).filter((r) => AREAS.some((a) => r.startsWith(a)));
+  assert.equal(shortAreas.length, tallAreas.length,
+    'expansion cost the map one of its area strips');
+});
