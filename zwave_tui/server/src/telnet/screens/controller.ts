@@ -33,7 +33,7 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
-import { frame, shelf } from '../chrome';
+import { frame } from '../chrome';
 import { noiseColor } from '../bands';
 
 type ColorFn = (s: string) => string;
@@ -64,12 +64,12 @@ export function renderController(ctx: ScreenCtx): string[] {
     healthBlock(ctx, W),
   ];
 
-  // Shelf the sections into columns when the frame is wide (v0.28). Stacked,
-  // these four narrow blocks used one column of a 200-wide frame and ran off the
-  // bottom of a tall one — 11% ink with 54 blank rows at 200x80, the sparsest
-  // screen in the add-on. Below the threshold shelf() returns the identical
-  // stacked form, so narrow terminals are untouched.
-  const body: string[] = shelf(blocks, W, { minCol: 52 });
+  // A blank line between each section; frame() pads the remainder.
+  const body: string[] = [];
+  for (const b of blocks) {
+    if (body.length > 0) body.push('');
+    body.push(...b);
+  }
   // If the roll-up is taller than the frame body, mark the overflow instead of
   // letting frame() silently drop the trailing NETWORK HEALTH tallies.
   const bodyCap = Math.max(1, H - 3); // masthead + rule + command bar
