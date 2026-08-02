@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.28.0 — 2026-08-02
+
+**Two screens now draw data they had already collected.**
+
+The Interference screen holds a 200-bucket six-day noise-floor history and a
+24-hour diurnal timeout profile. Both are measured, both are persisted across
+restarts, and both were drawn as a single sparkline row — a resolution that
+cannot answer the question they are collected for. The Controller screen read
+only `controller()`, `nodes()` and `scoreFor()`, leaving the per-hour serial
+rates and the engine's mesh-scoped symptoms untouched.
+
+Where rows are genuinely spare, those series are now drawn properly:
+
+| screen | 80x24 | 120x40 | 200x60 |
+|---|---|---|---|
+| interference | 699c (unchanged) | 762 → **1266c** | 842 → **1693c** |
+| controller | 944c (unchanged) | 1414 → **1768c** | 1814 → **2328c** |
+
+*(non-space characters actually drawn, identical fixture)*
+
+`chartRows` in `gauges.ts` renders a series as N rows of block glyphs at
+sub-cell resolution. It scales over what is **drawn** — the rule `sparkline`
+already followed, so an extreme that has scrolled off cannot flatten the visible
+trend — and gives any present reading at least one eighth, so a real sample
+never renders as blank space.
+
+The noise chart keeps the fixed −110…−80 scale it shares with the fine trend so
+the two stay comparable, and widens to represent more of the retained series
+rather than only its newest 24 buckets. The diurnal chart sits above the
+existing heat strip on the same 24-hour axis: the strip answers *which* hour is
+hot, the chart answers *by how much*. On the Controller, **RECENT RATES** gives
+the per-hour view its lifetime counters cannot ("63 reply timeouts" says nothing
+about whether the link is failing now), and **ACTIVE MESH EVENTS** surfaces
+network-scoped symptoms that a per-node screen structurally cannot show.
+
+**What was tried and rejected.** Laying these screens out in side-by-side
+columns was implemented, measured, and reverted. Fixing its truncation bug was
+not enough — ink still fell (controller 1814c → 1194c), because these blocks are
+gauges, bar rows and field strips *designed* to use width, so narrowing them
+costs information whether it is cut or legitimately shrunk. Detail's entity and
+parameter lists were the right case for columns in 0.27; these are not. Their
+sparseness is vertical, and the answer is more data, not rearranged data.
+
+That ink count is the standing check for this class of change: layout alone
+cannot alter it, so a drop means characters were destroyed and a rise means
+information was added.
+
+Every addition is surplus-funded and absent below its threshold, so an 80x24
+terminal renders byte-identically to 0.27.0.
+
+554 tests, up from 551.
+
 ## 0.27.0 — 2026-08-02
 
 **The Configuration page is grouped — without renaming a single option.**

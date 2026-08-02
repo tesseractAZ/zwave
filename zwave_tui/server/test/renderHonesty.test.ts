@@ -17,7 +17,7 @@ import { test } from 'node:test';
 
 import { c, lr, truncate, visLen } from '../src/telnet/ansi';
 import { commandBar, fieldStrip, titleRule, frame, masthead } from '../src/telnet/chrome';
-import { brailleSparkline, litBars, meter, signalBars, sparkline, fmtElapsed, spinner } from '../src/telnet/gauges';
+import { brailleSparkline, litBars, meter, signalBars, sparkline, fmtElapsed, spinner, chartRows } from '../src/telnet/gauges';
 import { marginColor, noiseColor, rssiColor, rttColor, timeoutPctColor } from '../src/telnet/bands';
 import { WEAK_MARGIN_DB } from '../src/zwave/health';
 import { renderOverview } from '../src/telnet/screens/overview';
@@ -1289,4 +1289,32 @@ test('the Overview roll-up grades through the roster\'s own scoreColor', () => {
   assert.ok(gotSgr != null, `no coloured D segment in: ${JSON.stringify(strip(health!))}`);
   assert.equal(gotSgr, wantSgr,
     `grade D (score 55) was coloured SGR ${gotSgr}; the roster's scoreColor gives ${wantSgr}`);
+});
+
+test('chartRows: a present reading never renders as blank space', () => {
+  // The one-eighth floor is the same rule litBars() enforces: a real but tiny
+  // sample must not be indistinguishable from no sample. Pick a series whose
+  // minimum rounds to zero eighths without the floor.
+  const vals = [0, 0.02, 0.04, 5];
+  const rows = chartRows(vals, 4, 3).map(strip);
+  const bottom = rows[rows.length - 1];
+  for (let i = 0; i < vals.length; i++) {
+    assert.notEqual(bottom[i], ' ',
+      `sample ${vals[i]} (col ${i}) rendered as blank space: ${JSON.stringify(bottom)}`);
+  }
+});
+
+test('chartRows: scales over the DRAWN window, not samples that scrolled off', () => {
+  // Auto-scaling to off-screen data flattens the visible trend against an
+  // invisible extreme — the exact bug sparkline's comment documents. Only the
+  // last `width` samples may set the scale.
+  // The mutant swaps min(recent) for min(all), so the outlier must be LOW —
+  // a high one cannot move `lo` and the test would agree either way (the
+  // fixture-agreement trap).
+  const withDip = [-1000, 10, 11, 12, 13];   // dip is OUTSIDE the 4-wide window
+  const without  = [12,    10, 11, 12, 13];
+  const a = chartRows(withDip, 4, 4).map(strip).join('\n');
+  const b = chartRows(without,   4, 4).map(strip).join('\n');
+  assert.equal(a, b,
+    'a sample outside the drawn window changed the scale — it must not');
 });

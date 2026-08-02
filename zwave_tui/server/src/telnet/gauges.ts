@@ -245,9 +245,7 @@ export function chartRows(
     let cells = '';
     for (const v of recent) {
       const frac = flat ? 0.5 : clamp01((v - lo) / span);
-      // At least one eighth for any present reading: a real sample must never
-      // render as empty space, the same floor litBars() enforces.
-      const eighths = Math.max(1, Math.round(frac * height * 8));
+      const eighths = Math.round(frac * height * 8);
       const full = Math.floor(eighths / 8);
       if (fromBottom < full) cells += '█';
       else if (fromBottom === full) cells += BLOCKS[Math.max(0, (eighths % 8) - 1)];

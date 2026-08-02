@@ -360,6 +360,23 @@ const MUTANTS = [
     repl: '      if (username.length > 0) out.push({ username, password });',
     what: 'a blank-password user row is rejected instead of authenticating on ""' },
 
+  /* ── v0.28 charts + surplus-funded telemetry ──────────────────────── */
+  { id: 'chart-draws-window', file: 'src/telnet/gauges.ts',
+    find: '  const recent = vals.slice(-width);\n  const lo = opts.min ?? Math.min(...recent);',
+    repl: '  const recent = vals.slice(-width);\n  const lo = opts.min ?? Math.min(...vals);',
+    what: 'chartRows auto-scales over what is DRAWN, not over samples that scrolled off' },
+  { id: 'iv-chart-surplus-gate', file: 'src/telnet/screens/interference.ts',
+    find: '      const chartH = surplus >= 12 ? 6 : surplus >= 6 ? 4 : 0;',
+    repl: '      const chartH = 6;',
+    what: 'the noise chart is surplus-funded — it never appears on a short frame' },
+  { id: 'ctrl-rates-surplus-gate', file: 'src/telnet/screens/controller.ts',
+    find: '    ...(surplusRows(H) >= 4 ? [serialRateBlock(ctx, W)] : []),',
+    repl: '    ...(serialRateBlock(ctx, W) ? [serialRateBlock(ctx, W)] : []),',
+    what: 'RECENT RATES is surplus-funded — an 80x24 frame is unchanged' },
+  { id: 'ctrl-mesh-scope', file: 'src/telnet/screens/controller.ts',
+    find: '  const mesh = ctx.data.symptoms().filter((s) => s.nodeId == null);',
+    repl: '  const mesh = ctx.data.symptoms();',
+    what: 'ACTIVE MESH EVENTS shows only NETWORK-scoped symptoms, not per-node ones' },
   /* ── v0.27 review round 1 ─────────────────────────────────────────── */
   { id: 'cfg-params-column-width', file: 'src/telnet/screens/detail.ts',
     find: '      for (const line of columnize(cfg.params, (prm, w) => configParamRow(prm, w), inner)) {',
