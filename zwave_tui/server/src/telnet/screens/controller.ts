@@ -62,6 +62,11 @@ export function renderController(ctx: ScreenCtx): string[] {
     trafficBlock(ctrl, W),
     backgroundBlock(ctrl, data, W),
     healthBlock(ctx, W),
+    // Spend spare rows on data this screen has always had access to and never
+    // drew (v0.28). Both answer questions the lifetime counters above cannot,
+    // and both stay off a short frame entirely.
+    ...(surplusRows(H) >= 4 ? [serialRateBlock(ctx, W)] : []),
+    ...(surplusRows(H) >= 9 ? [meshSymptomBlock(ctx, W)] : []),
   ];
 
   // A blank line between each section; frame() pads the remainder.
@@ -545,4 +550,61 @@ function kv(key: string, value: string, keyW: number): string {
 function grid2(a: string, b: string, W: number): string {
   const leftW = Math.floor((W - 1) / 2);
   return padEnd(truncate(a, leftW), leftW) + ' ' + truncate(b, W - leftW - 1);
+}
+
+/** Rows this screen may spend beyond its compact form (measured at ~26). */
+function surplusRows(H: number): number {
+  return Math.max(0, (H - 3) - 26);
+}
+
+/**
+ * RECENT RATES — the same serial faults as CONTROLLER FRAMES, per hour.
+ *
+ * The counters above are LIFETIME: "63 reply timeouts" says nothing about
+ * whether the link is failing now or accumulated that over a month of healthy
+ * operation. The rates answer exactly that, and the screen already had them —
+ * `interference().serial` was read only by the Interference screen.
+ *
+ * A null rate means the window holds too little history to divide by; it is
+ * shown as "—", never as zero.
+ */
+function serialRateBlock(ctx: ScreenCtx, W: number): string[] {
+  const sr = ctx.data.interference().serial;
+  const out = [head('RECENT RATES (per hour)', W)];
+  if (sr.band === 'unknown' || sr.spanH <= 0) {
+    out.push('  ' + c.grey('◷ building — needs a longer window of controller samples'));
+    return out;
+  }
+  const cell = (label: string, v: number | null): string =>
+    c.grey(label + ' ') + (v == null ? c.grey('—') : c.white(v < 10 ? v.toFixed(1) : String(Math.round(v))));
+  out.push('  ' + [
+    cell('NAK', sr.nakPerH), cell('CAN', sr.canPerH),
+    cell('tmo-ACK', sr.tmoAckPerH), cell('reply-tmo', sr.tmoRespPerH),
+  ].join(c.grey('  ·  ')));
+  out.push('  ' + c.grey(`over ${sr.spanH.toFixed(0)}h — lifetime totals above cannot say whether a fault is CURRENT`));
+  return out;
+}
+
+/**
+ * ACTIVE MESH EVENTS — the engine's network-scoped symptoms (nodeId === null),
+ * which are exactly the ones a per-node screen can never show. Per-node
+ * symptoms are deliberately excluded: they belong on REMEDY, and duplicating
+ * them here would put the same finding in two places with two row budgets.
+ *
+ * Silence is reported as silence — a healthy mesh renders one honest line, not
+ * a padded panel.
+ */
+function meshSymptomBlock(ctx: ScreenCtx, W: number): string[] {
+  const mesh = ctx.data.symptoms().filter((s) => s.nodeId == null);
+  const out = [head('ACTIVE MESH EVENTS', W)];
+  if (mesh.length === 0) {
+    out.push('  ' + c.green('✓ ') + c.grey('no mesh-scoped symptoms open'));
+    return out;
+  }
+  for (const sym of mesh.slice(0, 4)) {
+    const sev = sym.severity === 'crit' ? c.red : sym.severity === 'warn' ? c.yellow : c.cyan;
+    out.push('  ' + sev('● ') + c.white(sym.kind) + c.grey('  ' + truncate(sym.narrative.split('.')[0], Math.max(20, W - 24))));
+  }
+  if (mesh.length > 4) out.push('  ' + c.grey(`+${mesh.length - 4} more — [7] REMEDY`));
+  return out;
 }

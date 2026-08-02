@@ -653,3 +653,61 @@ test('heatmap expansion budgets its "+N more" row — no false "enlarge the term
     assert.equal(strips, AREAS.length, `${cols}x${rows} lost ${AREAS.length - strips} area strip(s)`);
   }
 });
+
+test('controller: spare rows draw REAL unused data, and never on a short frame', () => {
+  // The screen read only controller() / nodes() / scoreFor(). Two things it
+  // always had access to and never drew answer questions its lifetime counters
+  // cannot: interference().serial gives per-hour RATES (a lifetime "63 reply
+  // timeouts" cannot say whether the link is failing NOW), and the engine's
+  // network-scoped symptoms are exactly the ones a per-node screen can't show.
+  const nodes = Array.from({ length: 12 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const data = mockData({ nodes }) as never as Record<string, unknown>;
+  data.controller = () => mkCtrl(NO_ERRORS);
+  data.interference = () => ({
+    noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' },
+    serial: { nakPerH: 0.4, canPerH: 3.2, tmoAckPerH: 0.1, tmoRespPerH: 4.8, band: 'healthy', spanH: 36 },
+    diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, narrative: '' },
+  });
+  data.symptoms = () => [{
+    kind: 'mesh-interference', nodeId: null, severity: 'warn', sinceMs: Date.now() - 9e5,
+    basis: 'inferred', evidence: [], narrative: 'Many nodes degraded together with no serial cause.',
+  }];
+  const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+  const render = (cols: number, rows: number): string[] => renderController({
+    view: mkView({ screen: 'controller', cols, rows }), data: data as never,
+    visibleNodes: nodes, filtering: false,
+  } as ScreenCtx);
+
+  const tall = render(200, 60).map(strip).join('\n');
+  assert.match(tall, /RECENT RATES/, 'per-hour serial rates were not drawn on a tall frame');
+  assert.match(tall, /4\.8/, 'the reply-timeout RATE value is missing');
+  assert.match(tall, /ACTIVE MESH EVENTS/, 'mesh-scoped symptoms were not drawn');
+  assert.match(tall, /mesh-interference/, 'the open mesh symptom is not named');
+
+  // A short frame must be untouched — these blocks are surplus-funded.
+  const small = render(80, 24);
+  assert.equal(small.length, 24);
+  const smallTxt = small.map(strip).join('\n');
+  assert.doesNotMatch(smallTxt, /RECENT RATES|ACTIVE MESH EVENTS/,
+    'a surplus-only block appeared on an 80x24 frame');
+  // NOT asserted: absence of the "…more (taller terminal)" note. That note is
+  // PRE-EXISTING and deliberate — the roll-up genuinely does not fit 24 rows,
+  // and the screen discloses it rather than silently dropping the tail. It
+  // appears identically on main with these blocks absent, so asserting it away
+  // would pin a behaviour this change neither caused nor should fix.
+});
+
+test('controller: a healthy mesh reports silence as silence, not a padded panel', () => {
+  const nodes = Array.from({ length: 12 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const data = mockData({ nodes }) as never as Record<string, unknown>;
+  data.controller = () => mkCtrl(NO_ERRORS);
+  data.symptoms = () => []; // healthy
+  const out = renderController({
+    view: mkView({ screen: 'controller', cols: 200, rows: 60 }), data: data as never,
+    visibleNodes: nodes, filtering: false,
+  } as ScreenCtx).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(out, /no mesh-scoped symptoms open/,
+    'an empty symptom set must say so in one line rather than render an empty panel');
+});
