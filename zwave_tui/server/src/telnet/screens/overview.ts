@@ -756,6 +756,20 @@ export function windowStart(selected: number, scroll: number, total: number, cap
 }
 
 /**
+ * The FLOOR of each grade's score band (health.ts gradeFor: A>=90, B>=80, C>=70,
+ * D>=55, else F), so the roll-up's distribution is coloured by the SAME
+ * scoreColor the roster cell uses.
+ *
+ * A private letter→colour table was a THIRD mapping and it disagreed with the
+ * roster. Inventing a midpoint instead was no better: a made-up 30 for grade D
+ * coloured it RED while the roster painted an actual 55-score D node YELLOW —
+ * the test caught exactly that. The band floor is the one representative score
+ * that is real ("at least this bad") rather than assumed, and it keeps every
+ * letter on the same side of scoreColor's thresholds as its members.
+ */
+const GRADE_FLOOR: Record<string, number> = { A: 90, B: 80, C: 70, D: 55, F: 0 };
+
+/**
  * Compact mesh roll-up for the Overview's surplus rows. Returns AT MOST
  * `budget` lines; returns [] when the budget cannot hold the smallest useful
  * form, so the caller simply keeps its blank padding.
@@ -786,17 +800,22 @@ function meshRollUp(ctx: ScreenCtx, W: number, budget: number): string[] {
 
   const out: string[] = [];
   out.push(c.grey('─'.repeat(Math.max(0, W))));
-  out.push(
-    c.cyanB(' MESH') + c.grey(`  ${members.length} nodes (excl. controller)`) +
-    c.grey('   ') + c.green(`${alive} alive`) +
-    (dead ? c.grey(' · ') + c.red(`${dead} dead`) : '') +
-    (asleep ? c.grey(' · ') + c.cyan(`${asleep} asleep`) : '') +
-    (unknown ? c.grey(' · ') + c.yellow(`${unknown} unknown`) : ''),
-  );
+  // Degrade by dropping WHOLE tokens with a disclosed `+N`, not by clipping.
+  // A hard truncate at W produced a complete-LOOKING status line with, say, the
+  // UNKNOWN count silently absent and nothing to signal the loss — exactly the
+  // failure fieldStrip exists to prevent, and the WORST line below already
+  // discloses its own remainder.
+  out.push(fieldStrip({ ...ctx.view, cols: W }, [
+    c.cyanB(' MESH') + c.grey(`  ${members.length} nodes (excl. controller)`),
+    c.green(`${alive} alive`),
+    ...(dead ? [c.red(`${dead} dead`)] : []),
+    ...(asleep ? [c.cyan(`${asleep} asleep`)] : []),
+    ...(unknown ? [c.yellow(`${unknown} unknown`)] : []),
+  ]));
   out.push(
     c.grey(' HEALTH ') +
     (['A', 'B', 'C', 'D', 'F'] as const)
-      .map((g) => gradeColor(g)(`${g} ${grades[g]}`))
+      .map((g) => scoreColor(GRADE_FLOOR[g])(`${g} ${grades[g]}`))
       .join(c.grey(' · ')),
   );
 
@@ -819,14 +838,14 @@ function meshRollUp(ctx: ScreenCtx, W: number, budget: number): string[] {
       const rest = worstAll.length - shown.length;
       out.push(c.grey(' WORST') + (rest > 0 ? c.grey(`  (${shown.length} of ${worstAll.length})`) : ''));
       for (const x of shown) {
-        out.push('   ' + gradeColor(x.grade)(`${x.grade} ${String(x.score).padStart(3)}`) +
+        out.push('   ' + scoreColor(x.score)(`${x.grade} ${String(x.score).padStart(3)}`) +
                  '  ' + c.white(truncate(x.name, Math.max(10, W - 14))));
       }
     } else {
       const packed = worstAll.slice(0, Math.min(room - 1, 5));
       out.push(
         c.grey(' WORST  ') +
-        packed.map((x) => gradeColor(x.grade)(`${truncate(x.name, 22)} ${x.score}`)).join(c.grey('  ')) +
+        packed.map((x) => scoreColor(x.score)(`${truncate(x.name, 22)} ${x.score}`)).join(c.grey('  ')) +
         (worstAll.length > packed.length ? c.grey(`  +${worstAll.length - packed.length}`) : ''),
       );
     }
@@ -834,7 +853,4 @@ function meshRollUp(ctx: ScreenCtx, W: number, budget: number): string[] {
   return out.slice(0, budget);
 }
 
-/** Grade → the roster's own grade colour (one source for the letter bands). */
-function gradeColor(g: string): (s: string) => string {
-  return g === 'A' ? c.green : g === 'B' ? c.green : g === 'C' ? c.yellow : g === 'D' ? c.yellow : c.red;
-}
+

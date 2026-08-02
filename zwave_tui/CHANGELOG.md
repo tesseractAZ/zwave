@@ -9,11 +9,11 @@ grouping the fourteen options into `display:` / `access:` / `auth:` blocks looke
 like the obvious answer. It is unsafe, and the reason is worth stating plainly
 because the tidy version is the dangerous one.
 
-An add-on has **no options-migration hook**, and Supervisor composes effective
-options as a *shallow merge of the new version's defaults under the operator's
-persisted options*. Nesting a key is therefore a **rename**: the new group
-arrives entirely from defaults, and the operator's stale top-level key is
-discarded as unknown. Checked against a real deployment carrying
+An add-on has **no options-migration hook**, so nesting a key is a **rename** —
+and no merge strategy saves it, deep or shallow. The operator's value sits at the
+old path, which the new schema no longer declares; the new path has never been
+written, so it resolves to its default; and the orphaned old key is discarded as
+unknown. Checked against a real deployment carrying
 `auth_enabled: true`, `auth_require_on_ingress: true` and
 `write_actions_enabled: true`, that regrouping would have returned the login gate
 to its `false` default while write actions stayed on — an unauthenticated LAN

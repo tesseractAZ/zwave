@@ -1267,3 +1267,26 @@ test('the Overview roll-up counts the same membership as the Controller screen',
   assert.ok(line, 'roll-up did not render');
   assert.match(line!, /\b11 nodes/, `roll-up counted the controller: ${line}`);
 });
+
+test('the Overview roll-up grades through the roster\'s own scoreColor', () => {
+  // A private letter→colour table was a THIRD mapping and it disagreed with the
+  // roster: scoreColor paints a 55-score node YELLOW (>= 40), while a
+  // hand-written table called grade D red — one node, two colours, one screen.
+  const nodes = Array.from({ length: 6 }, (_, i) =>
+    mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
+  const data = mockData({ nodes }) as never as Record<string, unknown>;
+  data.scoreFor = () => ({ score: 55, rating: 6, grade: 'D', state: 'ok', flags: [] });
+  const out = renderOverview({
+    view: mkView({ screen: 'overview', cols: 200, rows: 60 }),
+    data: data as never, visibleNodes: nodes, filtering: false,
+  } as ScreenCtx);
+
+  const health = out.find((r) => strip(r).includes('HEALTH'));
+  assert.ok(health, 'roll-up HEALTH line did not render');
+  // scoreColor(55) is c.yellow. The D segment must carry exactly that SGR.
+  const wantSgr = /\x1b\[([0-9;]*)m/.exec(c.yellow('x'))![1];
+  const gotSgr = /\x1b\[([0-9;]*)mD /.exec(health!)?.[1];
+  assert.ok(gotSgr != null, `no coloured D segment in: ${JSON.stringify(strip(health!))}`);
+  assert.equal(gotSgr, wantSgr,
+    `grade D (score 55) was coloured SGR ${gotSgr}; the roster's scoreColor gives ${wantSgr}`);
+});

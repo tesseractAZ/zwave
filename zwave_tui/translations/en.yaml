@@ -11,11 +11,13 @@
 #   deliberate, permanent decision, not a shortcut.
 #
 #   Home Assistant DOES render nested `schema:` objects as collapsible panels, so
-#   grouping the keys would look tidier. It is unsafe here: an add-on has NO
-#   options-migration hook, and Supervisor composes effective options as a
-#   SHALLOW merge of the new version's defaults under the operator's persisted
-#   options. Nesting a key is therefore a RENAME — the new group arrives entirely
-#   from defaults and the operator's stale top-level key is dropped as unknown.
+#   grouping the keys would look tidier. It is unsafe here for a reason that has
+#   nothing to do with merge depth (Supervisor deep-merges dicts): an add-on has
+#   NO options-migration hook, so nesting a key is a RENAME. The operator's value
+#   lives at the OLD path, which no longer exists in the new schema, while the
+#   new path has never been written and therefore resolves to its default. The
+#   old key is then dropped as unknown. No merge strategy recovers a value whose
+#   key the schema no longer declares.
 #
 #   Concretely, on an install with `auth_enabled: true`, `auth_require_on_ingress:
 #   true` and `write_actions_enabled: true` (verified against a real deployment),
@@ -43,7 +45,7 @@ configuration:
       You can switch any time inside the TUI — press T (shown as [T] UNITS on the
       command bar).
   write_actions_enabled:
-    name: Display · Enable write actions
+    name: Safety · Enable write actions
     description: >-
       Unlocks the Actions Menu (press A in the TUI) — ping, refresh values,
       re-interview, rebuild routes, and remove a failed node. Off keeps the

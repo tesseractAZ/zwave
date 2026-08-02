@@ -432,11 +432,26 @@ function legendLine(W: number): string {
  */
 function expansionBudget(areas: readonly AreaInfo[], surplus: number): number {
   if (surplus < areas.length || areas.length === 0) return 0;
+  // ★ expandArea emits ONE MORE row than its budget whenever it has to disclose
+  //   "+N more devices". Budgeting only the device rows over-spent the surplus
+  //   by one row PER AREA, so the body overran the frame and chrome's overflow
+  //   note replaced the last rows — at 80x24 that dropped whole area strips and
+  //   told the operator to enlarge a terminal that had fit the map a release
+  //   earlier. Reserve the disclosure row for every area that might need one.
+  const mightDisclose = (per: number): number =>
+    areas.reduce((n, a) => n + (a.cells.length > per ? 1 : 0), 0);
   let per = Math.floor(surplus / areas.length);
-  // Give back what small areas cannot use, capped so one huge area cannot eat
-  // the whole frame.
+  while (per > 0 && areas.reduce((n, a) => n + Math.min(a.cells.length, per), 0) + mightDisclose(per) > surplus) {
+    per -= 1;
+  }
+  if (per <= 0) return 0;
+  // Give back what small areas cannot use, then re-check the same budget.
   const unused = areas.reduce((n, a) => n + Math.max(0, per - a.cells.length), 0);
-  if (unused > 0) per += Math.floor(unused / areas.length);
+  if (unused > 0) {
+    const bumped = per + Math.floor(unused / areas.length);
+    const cost = areas.reduce((n, a) => n + Math.min(a.cells.length, bumped), 0) + mightDisclose(bumped);
+    if (cost <= surplus) per = bumped;
+  }
   return Math.min(per, 12);
 }
 

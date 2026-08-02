@@ -191,3 +191,45 @@ test('Detail shows a scroll position token only when the dossier overflows', () 
   const over = renderDetail(ctx(mkView(120, 16), big.data, big.nodes)).map(strip).join('\n');
   assert.match(over, /\d+–\d+\/\d+/, 'a "a–b/N" scroll token appears when overflowing');
 });
+
+test('CONFIG PARAMETERS keep their VALUES at every width (v0.27 columnise regression)', () => {
+  // Columnising PRE-RENDERED full-width rows deleted every value: configParamRow
+  // right-aligns the value at `inner` via lr(), so hstack's left-anchored cut at
+  // the narrower column width kept the label and dropped the number — silently,
+  // at 80 cols and wider. The section exists to show those values.
+  const params = Array.from({ length: 8 }, (_, i) => ({
+    key: `8-112-0-${i + 1}`, label: `Parameter ${i + 1}`, value: 100 + i,
+    valueLabel: null, unit: null, writeable: true, min: 0, max: 255,
+    property: i + 1, propertyKey: null, endpoint: 0, options: [],
+  }));
+  const { data, nodes } = mkData({ configParams: { status: 'ready', params } as never });
+  const strip = (x: string) => x.replace(/\x1b\[[0-9;]*m/g, '');
+
+  for (const cols of [60, 73, 80, 100, 120, 160, 200]) {
+    const out = renderDetail(ctx(mkView(cols, 60), data, nodes));
+    const text = out.map(strip).join('\n');
+    for (const p of params) {
+      assert.ok(text.includes(String(p.value)),
+        `at ${cols} cols the value ${p.value} for "${p.label}" was dropped from the dossier`);
+    }
+    assert.equal(out.length, 60, `${cols} cols broke the exact-rows contract`);
+  }
+});
+
+test('columnize keeps the 80-column terminal single-column (no name collapse)', () => {
+  // The split fired from 73 cols up, giving the DEFAULT terminal two ~37-column
+  // panes in which entity names became indistinguishable stubs — density bought
+  // with information at the one size every operator sees.
+  const entityStates = Array.from({ length: 6 }, (_, i) => ({
+    entityId: `sensor.kitchen_power_meter_${i}`, domain: 'sensor',
+    name: `Kitchen Power Meter Channel ${i}`, state: `${i * 11}`,
+    attrs: { unit_of_measurement: 'W' },
+  }));
+  const { data, nodes } = mkData({ entityStates: entityStates as never });
+  const strip = (x: string) => x.replace(/\x1b\[[0-9;]*m/g, '');
+  const intact = (cols: number): boolean =>
+    renderDetail(ctx(mkView(cols, 60), data, nodes)).map(strip).join('\n')
+      .includes('Kitchen Power Meter Channel 0');
+  assert.ok(intact(80), 'an 80-col terminal truncated entity names into stubs');
+  assert.ok(intact(100), 'a 100-col terminal truncated entity names into stubs');
+});
