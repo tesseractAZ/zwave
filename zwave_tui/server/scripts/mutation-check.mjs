@@ -270,6 +270,73 @@ const MUTANTS = [
     find: "  return bits.join(c.grey(' · ')) + c.grey('  —  the engine only recommends; you run the actions');",
     repl: "  return bits.join(c.grey(' · ')) + c.grey('  —  advisory only; nothing is acted on');",
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
+  /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
+  { id: 'topo-hop-sentinel', file: 'src/telnet/screens/topology.ts',
+    // The sentinels are POSITIVE (127/126/125), so passing one through does not
+    // merely show a wrong number — it ranks a missing reading as the strongest
+    // link on the mesh.
+    find: "  if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('—');\n  if (view.signalDisplay === 'dbm') return (neutral ? c.grey : rssiColor(rssi))(String(rssi));",
+    repl: "  if (rssi == null) return c.grey('—');\n  if (view.signalDisplay === 'dbm') return (neutral ? c.grey : rssiColor(rssi))(String(rssi));",
+    what: 'a per-hop sentinel renders as no-data instead of as a level' },
+  { id: 'topo-spine-sentinel', file: 'src/telnet/screens/topology.ts',
+    find: '    if (r != null && !RSSI_SENTINELS.has(r)) { // trap 1',
+    repl: '    if (r != null) { // trap 1',
+    what: 'sentinels are dropped before the repeater aggregate, not folded in' },
+  { id: 'topo-spine-stale', file: 'src/telnet/screens/topology.ts',
+    find: '    if (n.status === NodeStatus.Dead || n.status === NodeStatus.Unknown) continue; // trap 2',
+    repl: '',
+    what: "a dead node's last-seen reading stays out of the live aggregate" },
+  { id: 'topo-spine-no-rate', file: 'src/telnet/screens/topology.ts',
+    // Re-introduces the per-repeater failure rate the review killed. It is not a
+    // per-link quantity: timeoutResponse/commandsTX are per-node LIFETIME totals
+    // over every route the node has used, so a node routed via two repeaters
+    // charges all of its failures to BOTH, and a repeater that joined the route
+    // a minute ago inherits everything from before it was involved.
+    find: "  return '  ' + c.grey('· ') + parts.join(c.grey(' · '));",
+    repl: "  let tmo = 0, tx = 0;\n  for (const n of ctx.data.nodes()) { tmo += n.stats.timeoutResponse ?? 0; tx += n.stats.commandsTX ?? 0; }\n  parts.push(c.grey('tmo ') + `${((tmo / Math.max(1, tx)) * 100).toFixed(1)}%`);\n  return '  ' + c.grey('· ') + parts.join(c.grey(' · '));",
+    what: 'the repeater spine publishes no fabricated per-repeater failure rate' },
+  { id: 'topo-chain-marker-priority', file: 'src/telnet/screens/topology.ts',
+    // The shipped-then-caught inversion: chains OUTER / markers INNER makes the
+    // first fit "widest chain, weakest marker", so a fully annotated chain
+    // renders beside a bare ⚠ while the columns to NAME the failed pair sit free.
+    find: '  for (const marker of markers) {\n    for (const chain of chains) {',
+    repl: '  for (const chain of chains) {\n    for (const marker of markers) {',
+    what: 'the failed-pair identity outranks the per-hop readings under width pressure' },
+  { id: 'topo-hop-unit', file: 'src/telnet/screens/topology.ts',
+    // Detail's idiom is raw dBm; this screen has a unit toggle, so importing it
+    // unchanged puts two units on one row.
+    // The condition must be one TS cannot fold to a constant, or the margin
+    // branch becomes provably unreachable and the file stops compiling — which
+    // scores INVALID, not a kill. `view.cols > 0` is always true at runtime and
+    // opaque at compile time.
+    find: "  if (view.signalDisplay === 'dbm') return (neutral ? c.grey : rssiColor(rssi))(String(rssi));",
+    repl: "  if (view.cols > 0) return (neutral ? c.grey : rssiColor(rssi))(String(rssi));",
+    what: 'per-hop readings follow the dBm/margin toggle like the rest of the row' },
+  { id: 'topo-chain-budget', file: 'src/telnet/screens/topology.ts',
+    // Reverts to letting lr() blind-clip the chain, which cuts from the LEFT and
+    // leaves half a failed pair — naming an innocent node.
+    find: '  const budget = view.cols - visLen(head) - visLen(right) - 1;\n  return lr(head + chainStr(n, lwr, view, noise, stale || routed, budget), right, view.cols);',
+    repl: '  return lr(head + chainStr(n, lwr, view, noise, stale || routed, Number.MAX_SAFE_INTEGER), right, view.cols);',
+    what: 'the chain degrades in whole tokens instead of being blind-cut by lr()' },
+  { id: 'topo-churn-one-gate', file: 'src/telnet/screens/topology.ts',
+    // An earlier version of this mutant added a SECOND width test to the row
+    // token and survived — correctly. Below WIDE_COLS the reroute map is never
+    // populated at all, so the coupling is structural and a redundant gate is a
+    // no-op. What can actually break it is dropping the header span while the
+    // rows keep their tokens, leaving counts on screen with nothing to qualify
+    // them.
+    // `if (false)` makes the block unreachable and TS rejects it, scoring
+    // INVALID rather than a kill. `view.rows < 0` is false at runtime and
+    // opaque at compile time.
+    find: "  if (showChurn && churnSpanMs != null) {",
+    repl: "  if (showChurn && churnSpanMs != null && view.rows < 0) {",
+    what: 'a reroute count never renders without the observation window beside it' },
+  { id: 'topo-panel-surplus', file: 'src/telnet/screens/topology.ts',
+    // Unconditional disclosure grew the panel by a line at 80x24 and the tree
+    // lost a node row to pay for it.
+    find: '  if (canDisclose && shown.length < ranked.length) {',
+    repl: '  if (shown.length < ranked.length) {',
+    what: 'the "+N more" line is surplus-funded and never costs a node row' },
   { id: 'topology-scroll-clamp', file: 'src/telnet/screens/topology.ts',
     find: '    view.topologyScroll = scroll; // clamp + write back (detail.ts\'s pattern)',
     repl: '',
