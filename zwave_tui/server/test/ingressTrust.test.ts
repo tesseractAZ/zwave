@@ -13,6 +13,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
+import { ingressRedirectTarget } from '../src/auth';
 import {
   isSupervisorSource,
   pinSupervisorAddress,
@@ -415,4 +416,85 @@ test('an ACTIVE operator is never evicted by the idle sweep', async () => {
 
   assert.equal(survived, true,
     'an actively-typing operator was disconnected — the sweep is ignoring inbound data');
+});
+
+/* ── the ingress landing redirect ────────────────────────────────────────
+ *
+ * The sidebar panel rendered a bare "404: Not Found" inside an otherwise
+ * healthy Home Assistant. The panel registration was correct — `get_panels`
+ * showed local_zwave_tui the same shape as the working Power panel — and the
+ * add-on served every route (/ → 302, /console → 200). The 404 came from the
+ * REDIRECT TARGET: HA loads the panel at /api/hassio_ingress/<token>/, and
+ * `reply.redirect('/console')` is an absolute path, so the browser threw the
+ * prefix away and asked HA itself for /console, which HA does not serve.
+ *
+ * It looked like a broken panel because the address bar stayed on
+ * /local_zwave_tui the whole time — the iframe navigated, not the page.
+ *
+ * The redirect is built by hand rather than tested through a live Fastify
+ * instance so this stays a unit test; the shape below is exactly what
+ * index.ts does.
+ */
+
+// Import the REAL function. A local re-implementation here would only prove the
+// rule is self-consistent, and would leave the mutant for it alive.
+const ingressRedirect = ingressRedirectTarget;
+
+test('the landing redirect keeps the ingress prefix', () => {
+  assert.equal(
+    ingressRedirect('/api/hassio_ingress/10QhLe0v5RyjceI9Gm_rjN7txRGcCDchKw7tpxs1zbw'),
+    '/api/hassio_ingress/10QhLe0v5RyjceI9Gm_rjN7txRGcCDchKw7tpxs1zbw/console',
+    'dropping the prefix sends the browser to HA’s own /console, which 404s',
+  );
+});
+
+test('a trailing slash on the ingress path does not double up', () => {
+  // HA has sent the path both ways; `//console` is not a path the proxy maps.
+  assert.equal(ingressRedirect('/api/hassio_ingress/ABC/'), '/api/hassio_ingress/ABC/console');
+  assert.equal(ingressRedirect('/api/hassio_ingress/ABC//'), '/api/hassio_ingress/ABC/console');
+});
+
+test('direct (non-ingress) access still lands on /console', () => {
+  // Port 8788 reached without HA in front carries no header at all.
+  for (const absent of [undefined, null, 123, ['/a', '/b']]) {
+    assert.equal(ingressRedirect(absent), '/console', `header ${JSON.stringify(absent)} must degrade to /console`);
+  }
+});
+
+test('a protocol-relative ingress path cannot become an open redirect', () => {
+  // `//evil.com` in a Location sends the browser to ANOTHER ORIGIN. CodeQL did
+  // NOT flag this — it flagged the ReDoS beside it — so a green scan was not
+  // evidence the input path was safe.
+  for (const hostile of ['//evil.com', '///evil.com', '//evil.com/api/hassio_ingress/X']) {
+    assert.equal(ingressRedirect(hostile), '/console', `${hostile} must not survive into a Location`);
+  }
+});
+
+test('CR/LF/backslash in the ingress path is refused, not sanitised', () => {
+  for (const bad of ['/api/x\r\nLocation: //evil.com', '/api/x\nSet-Cookie: a=b', '/api\\evil']) {
+    assert.equal(ingressRedirect(bad), '/console');
+  }
+});
+
+test('a non-rooted or over-long path is refused', () => {
+  assert.equal(ingressRedirect('api/hassio_ingress/X'), '/console', 'must be rooted');
+  assert.equal(ingressRedirect('https://evil.com'), '/console', 'absolute URL is not a path');
+  assert.equal(ingressRedirect('/' + 'a'.repeat(300)), '/console', 'over the length cap');
+  assert.equal(ingressRedirect('/'.repeat(50)), '/console', 'all-slashes trims to nothing');
+});
+
+test('trailing slashes are trimmed within the length cap', () => {
+  assert.equal(ingressRedirect('/api/hassio_ingress/ABC' + '/'.repeat(40)), '/api/hassio_ingress/ABC/console');
+});
+
+test('a long run of slashes is refused promptly, never backtracked over', () => {
+  // The original trimmed with /\/+$/, which CodeQL scored 7.5 for polynomial
+  // ReDoS on a user-provided value. Two things now stop that: the length cap
+  // rejects the input before any scanning, and the trim itself is a linear
+  // charCodeAt walk rather than a regex. This asserts the OBSERVABLE property —
+  // a hostile input returns immediately, and returns the safe fallback.
+  const t0 = Date.now();
+  assert.equal(ingressRedirect('/a' + '/'.repeat(100_000)), '/console', 'over the cap ⇒ fallback');
+  const ms = Date.now() - t0;
+  assert.ok(ms < 250, `took ${ms}ms — the input is being scanned when it should be rejected`);
 });
