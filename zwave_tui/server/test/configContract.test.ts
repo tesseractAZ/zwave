@@ -345,3 +345,16 @@ test('no workflow uses a floating action tag', () => {
     }
   }
 });
+
+test('the release workflow resolves against the version being released', () => {
+  // The resolve job compares the requested version against config.yaml. On a
+  // tag push the default checkout IS the tag, so this was invisible; on a
+  // workflow_dispatch the default is main, and the guard then refused every
+  // version except the one currently on main — disabling the re-release path
+  // it exists to serve. Re-running the failed v0.29.0 release is what exposed
+  // it: "tag v0.29.0 does not match config.yaml version '0.29.3'".
+  const pub = wf('publish-release.yml');
+  const resolve = pub.slice(pub.indexOf('  resolve:'), pub.indexOf('  test:'));
+  assert.match(resolve, /ref:\s*\$\{\{\s*inputs\.version\s*&&/,
+    'the resolve job must check out the REQUESTED tag on a dispatch, not the default branch');
+});
