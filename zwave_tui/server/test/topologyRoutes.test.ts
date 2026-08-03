@@ -289,3 +289,32 @@ test('the frame stays exactly rows tall and within cols at every size', () => {
     }
   }
 });
+
+test('a driver 0 is a missing reading, not the strongest link on the mesh', () => {
+  // FOUND ON THE LIVE MESH, 2026-08-02. Node 30 came back with
+  // repeaterRSSI [0, 0] while every genuine reading on the network sat between
+  // -68 and -86 dBm. 0 is not in the documented sentinel set (127/126/125), so
+  // every call site that ENUMERATED those markers let it through, and it
+  // rendered as "+100" — the strongest link on a screen whose real hops read
+  // +14..+32.
+  //
+  // The guard is now the domain rule (a reading is a finite NEGATIVE number),
+  // which cannot go stale the next time the driver adds a marker.
+  const n = mkNode({ nodeId: 30, name: 'Dining Room Lamp', stats: { ...mkNode().stats, lwr: route([3, 5], -68, [0, 0]) } });
+  const reps = [3, 5].map((id) => mkNode({ nodeId: id, name: `R${id}` }));
+  const out = joined(ctxFor([n, ...reps], { cols: 200, rows: 40 }));
+
+  assert.ok(/n3\(—\)/.test(out) && /n5\(—\)/.test(out), `a 0 hop must read as no-data, got:\n${out}`);
+  assert.ok(!/\+100/.test(out), 'a 0 reading was rendered as a +100 dB margin');
+  assert.ok(!/n[35]\(0\)/.test(out), 'the raw 0 leaked into the chain');
+});
+
+test('a 0 reading never enters the repeater aggregate', () => {
+  const rep = mkNode({ nodeId: 12, name: 'Repeater' });
+  const zero = mkNode({ nodeId: 5, name: 'Zero', stats: { ...mkNode().stats, lwr: route([12], -70, [0]) } });
+  const real = mkNode({ nodeId: 6, name: 'Real', stats: { ...mkNode().stats, lwr: route([12], -70, [-74]) } });
+  const out = joined(ctxFor([rep, zero, real], { cols: 200, rows: 40, signalDisplay: 'dbm' }));
+
+  assert.ok(/worst\s+-74\s+n1\/2/.test(out), `only the real reading counts, got:\n${out}`);
+  assert.ok(!/worst\s+0\b/.test(out), 'a 0 became the reported worst reading');
+});

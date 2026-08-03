@@ -29,7 +29,7 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
-import { noiseColor, marginColor } from '../bands';
+import { noiseColor, marginColor, rssiReading } from '../bands';
 import { frame, fieldStrip, field } from '../chrome';
 
 /* ── layout constants ──────────────────────────────────────────────────── */
@@ -44,8 +44,6 @@ const MIN_CELLS = 3; // keep at least this much heat-strip space before adding w
 /** dB margin that maps to a full-green cell — the top of the heat scale. */
 const MARGIN_FULL = 25;
 
-/** RSSI values the driver uses as "no measurement" sentinels. */
-const RSSI_SENTINELS = new Set([127, 126, 125]);
 
 /** Unique key standing in for a null area so it can live in a string-keyed Map. */
 const NO_AREA = ' no-area';
@@ -157,8 +155,8 @@ interface AreaInfo {
  */
 function nodeMargin(n: NodeSnapshot, noise: number): number | null {
   if (n.status !== NodeStatus.Alive && n.status !== NodeStatus.Awake) return null;
-  const rssi = n.stats.rssi;
-  if (rssi == null || RSSI_SENTINELS.has(rssi)) return null;
+  const rssi = rssiReading(n.stats.rssi);
+  if (rssi == null) return null;
   return Math.round(rssi - noise);
 }
 

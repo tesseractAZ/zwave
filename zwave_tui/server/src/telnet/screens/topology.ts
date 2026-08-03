@@ -43,13 +43,11 @@ import {
 } from '../../types';
 import { centeredNotice } from './overview';
 import { frame } from '../chrome';
-import { rssiColor, marginColor, WEAK_MARGIN_DB } from '../bands';
+import { rssiColor, marginColor, rssiReading, WEAK_MARGIN_DB } from '../bands';
 
 /** A colour wrapper (matches the ansi `c.*` span helpers / gauges ColorFn). */
 type ColorFn = (s: string) => string;
 
-/** Driver "no reading" RSSI sentinels — shown as an em-dash, never as a level. */
-const RSSI_SENTINELS = new Set([127, 126, 125]);
 
 /**
  * Width at which the row can afford per-hop readings and the reroute tokens.
@@ -372,8 +370,8 @@ function nodeLine(
  * No usable reading → dim placeholder bars (keeps the column aligned).
  */
 function routeSignalBars(view: ViewState, lwr: RouteStat | null, noise: number, neutral = false): string {
-  const rssi = lwr?.rssi ?? null;
-  if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('▁▃▅▇');
+  const rssi = rssiReading(lwr?.rssi);
+  if (rssi == null) return c.grey('▁▃▅▇');
   const margin = Math.round(rssi - noise);
   let frac: number;
   if (margin >= 17) frac = 1; // 4 bars
@@ -405,9 +403,10 @@ function hopReading(
   noise: number,
   neutral: boolean,
 ): string {
-  if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('—');
-  if (view.signalDisplay === 'dbm') return (neutral ? c.grey : rssiColor(rssi))(String(rssi));
-  const margin = Math.round(rssi - noise);
+  const v = rssiReading(rssi);
+  if (v == null) return c.grey('—');
+  if (view.signalDisplay === 'dbm') return (neutral ? c.grey : rssiColor(v))(String(v));
+  const margin = Math.round(v - noise);
   return (neutral ? c.grey : marginColor(margin))(`${margin >= 0 ? '+' : ''}${margin}`);
 }
 
@@ -519,8 +518,8 @@ function signalCell(
   routed = false,
   hasRealNoise = true,
 ): string {
-  const rssi = lwr?.rssi ?? null;
-  if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('—');
+  const rssi = rssiReading(lwr?.rssi);
+  if (rssi == null) return c.grey('—');
   const neutral = stale || routed;
   if (view.signalDisplay === 'dbm') {
     return (neutral ? c.grey : rssiColor(rssi))(`${rssi}dBm`);
@@ -632,7 +631,7 @@ function spineDetail(view: ViewState, ctx: ScreenCtx, repeaterId: number, noise:
     deps += 1; // every dependent, matching the row's own "carries N nodes"
     if (n.status === NodeStatus.Dead || n.status === NodeStatus.Unknown) continue; // trap 2
     const r = lwr.repeaterRSSI?.[i];
-    if (r != null && !RSSI_SENTINELS.has(r)) { // trap 1
+    if (rssiReading(r) != null) { // trap 1
       readings.push(r);
       if (r - noise < WEAK_MARGIN_DB) weak += 1;
     }

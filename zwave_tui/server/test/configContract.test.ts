@@ -215,3 +215,133 @@ test('flush cadences: the SD-wear defaults are the ones production actually gets
   assert.match(index, /historyFlushMs: config\.historyFlushMs/, 'index.ts no longer forwards historyFlushMs');
   assert.match(index, /evidenceFlushMs: config\.evidenceFlushMs/, 'index.ts no longer forwards evidenceFlushMs');
 });
+
+/* ── the release relay ───────────────────────────────────────────────────
+ *
+ * v0.29.2. The pipeline is a RELAY — release.yml opens a PR whose subject
+ * starts "Release v"; tag-release.yml matches that subject, reads the version
+ * out of config.yaml and dispatches publish-release.yml. Every link is a
+ * string match against another file, and none of it was checked.
+ *
+ * It had already failed silently: v0.29.0 and v0.29.1 both merged to main and
+ * sat UNTAGGED because no link existed at all, while `publish-release.yml`
+ * waited for a tag that nothing pushed. A broken relay does not error — it
+ * just quietly stops releasing, which is the hardest kind of failure to
+ * notice. These read the workflows as DATA and pin the joins.
+ */
+
+const wf = (name: string): string =>
+  readFileSync(new URL(`../../../.github/workflows/${name}`, import.meta.url), 'utf8');
+
+test('tag-release watches the path that actually holds the version', () => {
+  const tr = wf('tag-release.yml');
+  assert.match(tr, /paths:\s*\n\s*-\s*'zwave_tui\/config\.yaml'/,
+    'tag-release.yml watches a path that is not the add-on config — moving or ' +
+    'renaming config.yaml would stop every release with no error');
+  assert.match(tr, /zwave_tui\/config\.yaml/,
+    'tag-release.yml must read the version from the add-on config');
+});
+
+test('tag-release keys on the subject release.yml actually writes', () => {
+  // If these two strings drift, releases stop happening and nothing fails.
+  assert.match(wf('tag-release.yml'), /startsWith\(github\.event\.head_commit\.message,\s*'Release v'\)/);
+  assert.match(wf('release.yml'), /git commit -m "Release v\$\{NEXT\}"/,
+    'release.yml must write a subject tag-release.yml recognises');
+});
+
+test('tag-release dispatches a workflow that exists and takes a version', () => {
+  const m = /gh workflow run ([\w.-]+\.yml)/.exec(wf('tag-release.yml'));
+  assert.ok(m, 'tag-release.yml dispatches nothing — a tag would be created but no release cut');
+  const target = wf(m![1]); // throws if the file is missing
+  assert.match(target, /workflow_dispatch:/,
+    `${m![1]} has no workflow_dispatch trigger, so the dispatch would fail`);
+  assert.match(target, /version:/,
+    `${m![1]} does not accept the version input tag-release.yml passes`);
+});
+
+test('release.yml bumps BOTH files the version contract pins together', () => {
+  // Bumping only config.yaml (which is all the power equivalent needs) would
+  // open a release PR that fails its own CI on the version-drift assertion above.
+  const r = wf('release.yml');
+  assert.match(r, /zwave_tui\/config\.yaml/);
+  assert.match(r, /zwave_tui\/server\/package\.json/,
+    'release.yml must bump server/package.json too — configContract pins it to config.yaml');
+});
+
+test('config.yaml and the publisher agree on the image', () => {
+  // v0.29.2 turned on GHCR publishing, so the old assertion here ("this add-on
+  // publishes no container image") is no longer the invariant — this is.
+  //
+  // The dangerous state is a MISMATCH, and it is asymmetric:
+  //   • `image:` present with no publisher, or pointing at a name nothing
+  //     pushes  ⇒ Supervisor pulls a tag that does not exist and EVERY install
+  //     and update fails.
+  //   • a publisher with no `image:` key ⇒ harmless. That is the rollout order
+  //     on purpose: publish first, verify the packages exist and are public,
+  //     THEN point config.yaml at them.
+  const code = (name: string): string =>
+    wf(name).split('\n').map((l) => l.replace(/#.*$/, '')).join('\n');
+  const pub = code('publish-release.yml');
+  const declared = /^image:\s*(\S+)/m.exec(read('config.yaml'))?.[1];
+
+  const pushed = [...pub.matchAll(/ghcr\.io\/[^\s:]*\/\$\{\{[^}]*\}\}-([a-z0-9-]+):/g)]
+    .map((m) => m[1]);
+  if (declared) {
+    assert.ok(pushed.length, 'config.yaml declares image: but publish-release.yml pushes nothing');
+    const suffix = /\{arch\}-([a-z0-9-]+)\s*$/.exec(declared)?.[1];
+    assert.ok(suffix, `image: '${declared}' is not the {arch}-<name> form Supervisor expands`);
+    assert.ok(pushed.includes(suffix!),
+      `config.yaml pulls '${suffix}' but the workflow pushes ${JSON.stringify([...new Set(pushed)])}`);
+  }
+  // Whenever it does publish, it needs the scope to do so.
+  if (pushed.length) {
+    assert.match(pub, /packages:\s*write/,
+      'publish-release.yml pushes to GHCR without packages: write');
+  }
+});
+
+test('every workflow file is structurally parseable YAML', () => {
+  // The relay tests above all PASSED against a release.yml that GitHub could
+  // not parse at all: an inline multi-line PR body had escaped its `run: |`
+  // block, putting prose at column 0. Regex joins prove the links point at each
+  // other; they say nothing about whether the file loads. An unparseable
+  // workflow does not error loudly — it simply never runs.
+  //
+  // No YAML dependency here, so this checks the property that actually broke:
+  // outside a block scalar, a non-comment line at column 0 must be a `key:`.
+  for (const name of ['ci.yml', 'codeql.yml', 'publish-release.yml', 'release.yml', 'tag-release.yml']) {
+    const lines = wf(name).split('\n');
+    let blockIndent: number | null = null;
+    lines.forEach((line, i) => {
+      if (!line.trim() || line.trimStart().startsWith('#')) return;
+      const indent = line.length - line.trimStart().length;
+      if (blockIndent != null) {
+        if (indent > blockIndent) return;   // still inside the block scalar
+        blockIndent = null;                 // dedented back out
+      }
+      if (/[|>][-+]?\s*$/.test(line)) { blockIndent = indent; return; }
+      if (indent === 0) {
+        assert.match(line, /^[A-Za-z_][\w-]*:/,
+          `${name}:${i + 1} — column-0 line is not a YAML key: ${JSON.stringify(line.slice(0, 60))}`);
+      }
+    });
+  }
+});
+
+test('no workflow uses a floating action tag', () => {
+  // dependabot.yml opens with "Every workflow pins its actions by commit SHA
+  // rather than by a floating tag" — and nothing enforced it. The two workflows
+  // added in v0.29.2 were copied from a sibling repo and arrived on
+  // `actions/checkout@v5`: unpinned, AND a different major than the v7.0.1 the
+  // rest of the repo runs. A floating tag is the exact supply-chain hole the
+  // pinning policy exists to close, and it had landed inside the release
+  // machinery itself.
+  for (const name of ['ci.yml', 'codeql.yml', 'publish-release.yml', 'release.yml', 'tag-release.yml']) {
+    for (const line of wf(name).split('\n')) {
+      const m = /^\s*-?\s*uses:\s*(\S+)/.exec(line);
+      if (!m) continue;
+      assert.match(m[1], /@[0-9a-f]{40}$/,
+        `${name}: '${m[1]}' is not pinned to a 40-char commit SHA`);
+    }
+  }
+});

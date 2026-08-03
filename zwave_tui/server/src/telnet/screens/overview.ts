@@ -36,7 +36,7 @@ import {
 } from '../ansi';
 import { masthead, titleRule, fieldStrip, field, commandBar, linkState, type Keycap } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
-import { noiseColor, rssiColor, marginColor, rttColor, timeoutPctColor, WEAK_MARGIN_DB } from '../bands';
+import { noiseColor, rssiColor, marginColor, rttColor, timeoutPctColor, WEAK_MARGIN_DB, rssiReading } from '../bands';
 import { meter, signalBars, litBars, sparkline, vblock, fmtElapsed, spinner } from '../gauges';
 import {
   NodeStatus,
@@ -509,7 +509,8 @@ function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDi
   // cached reading as a live signal contradicts the ✕/'—' the same row shows
   // (matches the heatmap's no-reading guard + the score's DEAD→0 gate).
   const stale = n.status === NodeStatus.Dead || n.status === NodeStatus.Unknown;
-  if (rssi == null || RSSI_SENTINELS.has(rssi) || stale) return dash();
+  const rssiV = rssiReading(rssi);
+  if (rssiV == null || stale) return dash();
   // For a ROUTED node, `stats.rssi` is the controller-measured ACK RSSI of the
   // LAST hop (repeater→controller), NOT the device's own signal — health-colouring
   // it "would be confidently wrong" (health.ts). Show it in neutral grey so it
@@ -520,9 +521,9 @@ function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDi
   let colorFn: (s: string) => string;
   let frac: number;
   if (mode === 'dbm') {
-    text = `${rssi}dBm`;
-    colorFn = rssiColor(rssi);
-    frac = bandFrac(rssi, -88, -70);
+    text = `${rssiV}dBm`;
+    colorFn = rssiColor(rssiV);
+    frac = bandFrac(rssiV, -88, -70);
   } else {
     // ROUND before formatting. The driver's noise floor is fractional
     // (-95.062 live), so `rssi - noise` produced "+35.062dB" — 9 chars, which
@@ -530,7 +531,7 @@ function signalDisplay(n: NodeSnapshot, noise: number, mode: ViewState['signalDi
     // UNIT and leaving a bare number that reads as an exact measurement. This
     // is the exact defect class the release exists to remove, found on the live
     // 39-node mesh; no synthetic fixture has a fractional floor.
-    const margin = Math.round(rssi - noise);
+    const margin = Math.round(rssiV - noise);
     text = `${margin >= 0 ? '+' : ''}${margin}dB`;
     colorFn = marginColor(margin);
     // The yellow anchor is the SHARED weak-margin threshold, not a private
@@ -566,7 +567,7 @@ function sparkCell(data: DataProvider, nodeId: number, width: number): GraphicCe
   // Drop RSSI sentinels (125/126/127) from the trend, and color the sparkline by
   // the LAST sample's ABSOLUTE band (rssiColor) — not the relative-window default,
   // which would paint a healthy-but-flat node red and contradict every other column.
-  const hist = data.history(nodeId).rssi.filter((v) => !RSSI_SENTINELS.has(v));
+  const hist = data.history(nodeId).rssi.filter((v) => rssiReading(v) != null);
   const color = hist.length ? rssiColor(hist[hist.length - 1]) : undefined;
   const colored = sparkline(hist, width, color ? { color } : {});
   return { colored, plain: stripAnsi(colored) }; // exactly `width` visible cells
@@ -729,7 +730,6 @@ export function centeredNotice(
 
 /* ── shared helpers ────────────────────────────────────────────────────── */
 
-const RSSI_SENTINELS = new Set([127, 126, 125]);
 
 function dead(n: NodeSnapshot): boolean {
   return n.status === NodeStatus.Dead || n.status === NodeStatus.Unknown;

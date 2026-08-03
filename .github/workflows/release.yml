@@ -1,0 +1,156 @@
+name: Release
+
+# One-click release, mirroring the power add-on's pipeline.
+#
+#   Actions → Release → "Run workflow"
+#     1. Compute the next version (semver bump, or an explicit override)
+#     2. Refuse if that tag already exists, so re-runs are idempotent
+#     3. Bump `version:` in zwave_tui/config.yaml AND zwave_tui/server/package.json
+#     4. Prepend a CHANGELOG section (your notes, or the commit log since the last tag)
+#     5. Open a `release/vX.Y.Z` PR with auto-merge enabled
+#
+# `main` requires a PR, so this cannot push straight to it. Once the PR merges,
+# `tag-release.yml` creates the tag and starts `publish-release.yml`.
+#
+# The two version files are bumped TOGETHER on purpose: the suite pins them to
+# each other (configContract: "server/package.json version tracks the add-on
+# version"), so bumping only config.yaml — which is all the power equivalent
+# needs — would open a PR that fails its own CI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (used when 'version' is empty)"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: "Explicit version, e.g. 0.30.0 — overrides 'bump'"
+        type: string
+        required: false
+      notes:
+        description: "Release notes (markdown). Leave empty to generate from the commit log."
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write   # open + auto-merge the release PR
+
+jobs:
+  release:
+    name: Open the release PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Compute the next version
+        id: v
+        env:
+          IN_VERSION: ${{ inputs.version }}
+          IN_BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          cur=$(grep -E '^version:' zwave_tui/config.yaml \
+            | sed -E 's/version:[[:space:]]*"?([^"#]+)"?.*/\1/' | tr -d '[:space:]')
+          if [[ ! "$cur" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Could not parse the current version (got '$cur')"; exit 1
+          fi
+          if [[ -n "${IN_VERSION:-}" ]]; then
+            next="$IN_VERSION"
+          else
+            IFS=. read -r MA MI PA <<<"$cur"
+            case "$IN_BUMP" in
+              major) next="$((MA+1)).0.0" ;;
+              minor) next="${MA}.$((MI+1)).0" ;;
+              *)     next="${MA}.${MI}.$((PA+1))" ;;
+            esac
+          fi
+          if [[ ! "$next" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid target version '$next' (expected X.Y.Z)"; exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v${next}" >/dev/null 2>&1; then
+            echo "::error::Tag v${next} already exists — pick another version."; exit 1
+          fi
+          echo "current=$cur" >> "$GITHUB_OUTPUT"
+          echo "next=$next"   >> "$GITHUB_OUTPUT"
+          echo "Releasing ${cur} → ${next}"
+
+      - name: Bump both version files + CHANGELOG
+        env:
+          NEXT: ${{ steps.v.outputs.next }}
+          CURRENT: ${{ steps.v.outputs.current }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          # config.yaml — the version Home Assistant reads.
+          sed -i -E "s/^version:.*/version: \"${NEXT}\"/" zwave_tui/config.yaml
+          # server/package.json — pinned to it by configContract.test.ts.
+          node -e '
+            const fs = require("fs");
+            const p = "zwave_tui/server/package.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            j.version = process.env.NEXT;
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+          '
+          body="${NOTES:-}"
+          if [[ -z "$body" ]]; then
+            prev=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            range=${prev:+${prev}..HEAD}
+            body=$(git log --no-merges --pretty='- %s' ${range:-HEAD} | head -40)
+            [[ -n "$body" ]] || body="- Maintenance release."
+          fi
+          printf '# Changelog\n\n## %s — %s\n\n%s\n\n' \
+            "$NEXT" "$(date -u +%Y-%m-%d)" "$body" > /tmp/head.md
+          tail -n +3 zwave_tui/CHANGELOG.md >> /tmp/head.md
+          mv /tmp/head.md zwave_tui/CHANGELOG.md
+          echo "--- bumped ---"
+          grep -E '^version:' zwave_tui/config.yaml
+          node -p "require('./zwave_tui/server/package.json').version"
+
+      - name: Open the release PR (auto-merge)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT: ${{ steps.v.outputs.next }}
+        run: |
+          set -euo pipefail
+          branch="release/v${NEXT}"
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$branch"
+          git add zwave_tui/config.yaml zwave_tui/server/package.json zwave_tui/CHANGELOG.md
+          # The subject MUST start with "Release v" — tag-release.yml keys off it.
+          git commit -m "Release v${NEXT}"
+          git push -u origin "$branch"
+          # Build the body in a file: an inline multi-line string here breaks out
+          # of the `run: |` block and makes the whole workflow unparseable.
+          {
+            printf 'Automated version bump to `v%s`.\n\n' "${NEXT}"
+            printf 'On merge, `tag-release.yml` tags it and starts `publish-release.yml`.\n'
+          } > /tmp/pr-body.md
+          pr_url="$(gh pr create --base main --head "$branch" \
+            --title "Release v${NEXT}" \
+            --body-file /tmp/pr-body.md)"
+          echo "PR_URL=$pr_url" >> "$GITHUB_ENV"
+          # Degrade gracefully if repo-level auto-merge is off — the PR is still
+          # open and mergeable by hand, and steps 2-3 still run on merge.
+          gh pr merge --squash --auto "$pr_url" \
+            || echo "::warning::Auto-merge unavailable — merge the PR manually."
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## 🚀 Release ${{ steps.v.outputs.next }}"
+            echo
+            echo "PR: ${PR_URL:-(see the PR list)}"
+            echo
+            echo "On merge: **tag-release.yml** tags \`v${{ steps.v.outputs.next }}\` and starts"
+            echo "**publish-release.yml**, which cuts the GitHub Release."
+            echo
+            echo "> Source build — no container image is published."
+          } >> "$GITHUB_STEP_SUMMARY"

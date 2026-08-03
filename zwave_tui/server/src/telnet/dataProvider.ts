@@ -32,7 +32,7 @@ import type {
   Symptom,
   SymptomKind,
 } from '../types';
-import { scoreNode, DEFAULT_NOISE_FLOOR } from '../zwave/health';
+import { scoreNode, DEFAULT_NOISE_FLOOR, rssiReading } from '../zwave/health';
 
 /**
  * The subset of the `zwave/zwaveData` layer this provider consumes. The data
@@ -89,8 +89,6 @@ export interface CreateTuiDataProviderOptions {
   log: (msg: string) => void;
 }
 
-/** RSSI sentinels the driver uses for "no reading" — excluded from the median. */
-const RSSI_SENTINELS = new Set([127, 126, 125]);
 
 /** A neutral score returned for a node we have not scored yet. */
 const UNKNOWN_SCORE: HealthResult = {
@@ -105,7 +103,7 @@ const UNKNOWN_SCORE: HealthResult = {
 function computeNoiseFloor(controller: ControllerSnapshot | null): number {
   const raw = controller?.backgroundRSSI ?? [];
   const vals = raw.filter(
-    (v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v) && v < 0,
+    (v) => rssiReading(v) != null,
   );
   if (vals.length === 0) return DEFAULT_NOISE_FLOOR;
   const sorted = [...vals].sort((a, b) => a - b);
@@ -172,7 +170,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     cachedScores = scores;
     cachedNoiseFloor = noise;
     cachedHasNoise = (controller?.backgroundRSSI ?? []).some(
-      (v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v) && v < 0,
+      (v) => rssiReading(v) != null,
     );
     cachedLastUpdated = zwaveData.lastUpdated?.() ?? cachedLastUpdated;
     cachedReady = zwaveData.ready?.() ?? nodes.length > 0;
