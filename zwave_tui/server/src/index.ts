@@ -20,7 +20,7 @@ import fastifyCors from '@fastify/cors';
 
 import { config } from './config';
 import { createLogger } from './logger';
-import { createAuth, isAllowedOrigin, isSupervisorSource, pinSupervisorAddress } from './auth';
+import { createAuth, ingressRedirectTarget, isAllowedOrigin, isSupervisorSource, pinSupervisorAddress } from './auth';
 import { createAuthPolicy, describeTelnetAuth } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
@@ -163,7 +163,18 @@ async function main(): Promise<void> {
   });
 
   // Ingress landing → the terminal console.
-  app.get('/', (_req, reply) => reply.redirect('/console'));
+  //
+  // The redirect MUST carry the ingress prefix. Home Assistant loads the panel
+  // at `/api/hassio_ingress/<token>/`, and a bare `/console` is an absolute-path
+  // redirect: the browser drops the prefix and asks HA itself for `/console`,
+  // which HA does not serve. The sidebar panel therefore rendered a bare
+  // "404: Not Found" inside an otherwise-working Home Assistant — the address
+  // bar still on /local_zwave_tui, so the failure looked like a broken panel
+  // registration rather than a redirect that had thrown its own path away.
+  //
+  // The rest of the console page was already ingress-safe (relative asset URLs,
+  // a WS URL derived from location.pathname); this one line was not.
+  app.get('/', (req, reply) => reply.redirect(ingressRedirectTarget(req.headers['x-ingress-path'])));
   app.get('/api/version', () => ({ version: config.version }));
   app.get('/api/health', (_req, reply) => {
     const healthy = client.ready() && provider.ready() && !provider.lastError();
