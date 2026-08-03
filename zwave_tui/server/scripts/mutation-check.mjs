@@ -271,12 +271,18 @@ const MUTANTS = [
     repl: "  return bits.join(c.grey(' · ')) + c.grey('  —  advisory only; nothing is acted on');",
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
   /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
+  { id: 'ingress-open-redirect', file: 'src/auth.ts',
+    // Drops the protocol-relative guard: `//evil.com` then reaches Location and
+    // the browser leaves for another origin.
+    find: '  if (header.charCodeAt(0) !== 0x2f || header.charCodeAt(1) === 0x2f) return FALLBACK;',
+    repl: '  if (header.charCodeAt(0) !== 0x2f) return FALLBACK;',
+    what: 'a protocol-relative ingress path cannot become an open redirect' },
   { id: 'ingress-landing-prefix', file: 'src/auth.ts',
     // Reverts to the absolute-path redirect that made the HA sidebar panel show
     // a bare "404: Not Found": the browser drops the ingress prefix and asks HA
     // itself for /console.
-    find: "  const prefix = typeof header === 'string' ? header.replace(/\\/+$/, '') : '';",
-    repl: "  const prefix = '';",
+    find: '  let end = header.length;\n  while (end > 0 && header.charCodeAt(end - 1) === 0x2f) end -= 1;\n  return end === 0 ? FALLBACK : `${header.slice(0, end)}/console`;',
+    repl: '  return `${header}/console`;',
     what: 'the ingress landing redirect keeps the prefix HA proxied it under' },
   { id: 'ws-stop-error-listener', file: 'src/ha/haWsClient.ts',
     // removeAllListeners() strips the 'error' handler; close() on a CONNECTING

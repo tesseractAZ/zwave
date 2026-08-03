@@ -187,6 +187,34 @@ export function createAuth(opts: AuthOptions): Auth {
  * "404: Not Found" inside an otherwise-working sidebar.
  */
 export function ingressRedirectTarget(header: unknown): string {
-  const prefix = typeof header === 'string' ? header.replace(/\/+$/, '') : '';
-  return `${prefix}/console`;
+  const FALLBACK = '/console';
+  if (typeof header !== 'string' || header.length === 0) return FALLBACK;
+
+  // The header is ATTACKER-CONTROLLABLE — it is whatever arrived on the socket,
+  // and this value goes straight into a Location. Three ways that bites, all of
+  // which the first cut of this fix had:
+  //
+  //  1. OPEN REDIRECT. `//evil.com` is a protocol-relative URL, so
+  //     `Location: //evil.com/console` sends the browser to ANOTHER ORIGIN. A
+  //     leading single slash is required and a second one disqualifies it.
+  //     (CodeQL did not flag this one; it flagged 3 below. Worth remembering
+  //     that a clean scan is not the same as a safe input path.)
+  //  2. HEADER/PATH INJECTION via CR, LF or a backslash.
+  //  3. POLYNOMIAL ReDoS. Trailing slashes used to be trimmed with
+  //     `/\/+$/`, which backtracks quadratically on a long run of '/'
+  //     (CodeQL js/polynomial-redos, security-severity 7.5 — this gate is what
+  //     caught it).
+  //
+  // A real ingress path is `/api/hassio_ingress/<token>`; anything that does
+  // not look like one is ignored rather than sanitised, because a redirect is
+  // not worth guessing at.
+  if (header.length > 256) return FALLBACK;
+  if (header.charCodeAt(0) !== 0x2f || header.charCodeAt(1) === 0x2f) return FALLBACK;
+  if (/[\r\n\\]/.test(header)) return FALLBACK;
+
+  // Trailing-slash trim WITHOUT a regex: scan back to the last non-slash and
+  // slice once. Linear, and no backtracking to exploit.
+  let end = header.length;
+  while (end > 0 && header.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return end === 0 ? FALLBACK : `${header.slice(0, end)}/console`;
 }

@@ -27,6 +27,20 @@ test and the mutant target the SAME code: the first version of the test
 re-implemented the rule in the test file, which proves only that the rule is
 self-consistent and would have let the mutant survive.
 
+**That header is attacker-controllable, and the first cut of this fix handled it
+badly in three ways.** CodeQL's gate caught one — `js/polynomial-redos`,
+security-severity 7.5: trailing slashes were trimmed with `/\/+$/`, which
+backtracks quadratically on a long run of `/` supplied by the caller. Reviewing
+it turned up a worse one the scan did NOT flag: `//evil.com` is a
+protocol-relative URL, so `Location: //evil.com/console` would have sent the
+browser to another origin — an open redirect, introduced by the fix. A clean
+scan is not the same as a safe input path.
+
+The header is now validated rather than sanitised: rooted single slash only
+(a second one disqualifies it), no CR/LF/backslash, a 256-character cap, and a
+linear `charCodeAt` trim instead of a regex. Anything that does not look like an
+ingress path falls back to `/console` — a redirect is not worth guessing at.
+
 Direct (non-ingress) access on :8788 carries no header and still lands on
 `/console`.
 

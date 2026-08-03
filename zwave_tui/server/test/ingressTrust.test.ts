@@ -460,3 +460,41 @@ test('direct (non-ingress) access still lands on /console', () => {
     assert.equal(ingressRedirect(absent), '/console', `header ${JSON.stringify(absent)} must degrade to /console`);
   }
 });
+
+test('a protocol-relative ingress path cannot become an open redirect', () => {
+  // `//evil.com` in a Location sends the browser to ANOTHER ORIGIN. CodeQL did
+  // NOT flag this — it flagged the ReDoS beside it — so a green scan was not
+  // evidence the input path was safe.
+  for (const hostile of ['//evil.com', '///evil.com', '//evil.com/api/hassio_ingress/X']) {
+    assert.equal(ingressRedirect(hostile), '/console', `${hostile} must not survive into a Location`);
+  }
+});
+
+test('CR/LF/backslash in the ingress path is refused, not sanitised', () => {
+  for (const bad of ['/api/x\r\nLocation: //evil.com', '/api/x\nSet-Cookie: a=b', '/api\\evil']) {
+    assert.equal(ingressRedirect(bad), '/console');
+  }
+});
+
+test('a non-rooted or over-long path is refused', () => {
+  assert.equal(ingressRedirect('api/hassio_ingress/X'), '/console', 'must be rooted');
+  assert.equal(ingressRedirect('https://evil.com'), '/console', 'absolute URL is not a path');
+  assert.equal(ingressRedirect('/' + 'a'.repeat(300)), '/console', 'over the length cap');
+  assert.equal(ingressRedirect('/'.repeat(50)), '/console', 'all-slashes trims to nothing');
+});
+
+test('trailing slashes are trimmed within the length cap', () => {
+  assert.equal(ingressRedirect('/api/hassio_ingress/ABC' + '/'.repeat(40)), '/api/hassio_ingress/ABC/console');
+});
+
+test('a long run of slashes is refused promptly, never backtracked over', () => {
+  // The original trimmed with /\/+$/, which CodeQL scored 7.5 for polynomial
+  // ReDoS on a user-provided value. Two things now stop that: the length cap
+  // rejects the input before any scanning, and the trim itself is a linear
+  // charCodeAt walk rather than a regex. This asserts the OBSERVABLE property —
+  // a hostile input returns immediately, and returns the safe fallback.
+  const t0 = Date.now();
+  assert.equal(ingressRedirect('/a' + '/'.repeat(100_000)), '/console', 'over the cap ⇒ fallback');
+  const ms = Date.now() - t0;
+  assert.ok(ms < 250, `took ${ms}ms — the input is being scanned when it should be rejected`);
+});
