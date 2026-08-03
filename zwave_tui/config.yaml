@@ -1,24 +1,27 @@
 name: "Z-Wave TUI"
-version: "0.29.3"
+version: "0.29.4"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
 arch:
   - aarch64
   - amd64
-# No `image:` key YET — this is the middle of a deliberate two-step rollout.
+# Prebuilt multi-arch images, published by publish-release.yml on every release
+# tag and verified anonymously pullable before this key was added.
 #
-# As of v0.29.2 `publish-release.yml` builds and pushes multi-arch images to
-# ghcr.io/tesseractaz/{arch}-zwave-tui on every release tag, but this add-on is
-# still a SOURCE build: Supervisor runs the Dockerfile locally, so anyone can
-# install straight from this repository with no registry involved.
+# `{arch}` is expanded by Supervisor to aarch64/amd64, matching the two packages
+# the workflow pushes. Home Assistant now PULLS the add-on instead of running the
+# Dockerfile locally, so installs and updates take seconds rather than minutes of
+# on-device npm build.
 #
-# The order is not incidental. Adding `image:` before the images exist and are
-# PUBLIC makes Supervisor pull a tag that isn't there, and every install and
-# update fails — so the key goes in only after a release has published the
-# packages and they have been flipped Private → Public (GHCR packages default to
-# private, and Home Assistant pulls anonymously). configContract.test.ts pins
-# this: if `image:` is present it must name what the workflow actually pushes.
+# The order this arrived in was deliberate and is worth preserving: the images
+# were published FIRST, made public, and proven pullable with an anonymous
+# registry token, and only then was this key added. Declaring `image:` against a
+# package that is missing or private makes Supervisor pull a tag it cannot fetch,
+# and EVERY install and update fails — whereas publishing images nobody consumes
+# is harmless. configContract.test.ts pins the pair: if this key is present it
+# must name exactly what the workflow pushes.
+image: ghcr.io/tesseractaz/{arch}-zwave-tui
 startup: services
 boot: auto
 stage: experimental
