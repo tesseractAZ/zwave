@@ -271,6 +271,13 @@ const MUTANTS = [
     repl: "  return bits.join(c.grey(' · ')) + c.grey('  —  advisory only; nothing is acted on');",
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
   /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
+  { id: 'ingress-landing-prefix', file: 'src/auth.ts',
+    // Reverts to the absolute-path redirect that made the HA sidebar panel show
+    // a bare "404: Not Found": the browser drops the ingress prefix and asks HA
+    // itself for /console.
+    find: "  const prefix = typeof header === 'string' ? header.replace(/\\/+$/, '') : '';",
+    repl: "  const prefix = '';",
+    what: 'the ingress landing redirect keeps the prefix HA proxied it under' },
   { id: 'ws-stop-error-listener', file: 'src/ha/haWsClient.ts',
     // removeAllListeners() strips the 'error' handler; close() on a CONNECTING
     // socket then emits 'error', and an 'error' event with NO listener is

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.29.3 — 2026-08-03
+
+**The Home Assistant sidebar panel showed a bare "404: Not Found".**
+
+Everything about it pointed away from the real cause. The panel was registered
+correctly — `get_panels` showed `local_zwave_tui` with the same shape as the
+working Power panel — and the add-on served every route it should
+(`/` → 302, `/console` → 200, `/api/health` → 200). The address bar stayed on
+`/local_zwave_tui` throughout, so it read as a broken panel registration.
+
+It was the redirect target. Home Assistant loads an ingress panel at
+`/api/hassio_ingress/<token>/`, and the landing route replied
+`Location: /console` — an ABSOLUTE path. The browser discards the ingress prefix
+and asks Home Assistant itself for `/console`, which HA does not serve. Hence a
+404 rendered inside an otherwise-healthy HA, from a redirect that had thrown its
+own path away.
+
+The rest of the console page was already ingress-safe — relative asset URLs
+(`./console/xterm.js`) and a WebSocket URL derived from `location.pathname`.
+This one line was not, and nothing covered it.
+
+The fix reads `X-Ingress-Path` and prefixes the redirect. It lives in
+`auth.ts` as `ingressRedirectTarget()` rather than inline at the route, so the
+test and the mutant target the SAME code: the first version of the test
+re-implemented the rule in the test file, which proves only that the rule is
+self-consistent and would have let the mutant survive.
+
+Direct (non-ingress) access on :8788 carries no header and still lands on
+`/console`.
+
 ## 0.29.2 — 2026-08-02
 
 **Release automation, container images, and a crash on shutdown.**

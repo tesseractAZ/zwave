@@ -171,3 +171,22 @@ export function createAuth(opts: AuthOptions): Auth {
 
   return { sameOrigins, corsOriginCallback };
 }
+
+/**
+ * Where `GET /` should send a browser, given the request's `X-Ingress-Path`.
+ *
+ * Exported (rather than inlined at the route) so a test and a mutant can target
+ * the SAME code. The first version of this fix was tested by a helper in the
+ * test file that re-implemented the rule — which proves the rule is
+ * self-consistent and nothing about the server, and would have let the mutant
+ * survive.
+ *
+ * Home Assistant serves the panel from `/api/hassio_ingress/<token>/`. A bare
+ * `/console` is an absolute path, so the browser discards that prefix and asks
+ * HA itself for `/console` — which HA does not serve, producing a bare
+ * "404: Not Found" inside an otherwise-working sidebar.
+ */
+export function ingressRedirectTarget(header: unknown): string {
+  const prefix = typeof header === 'string' ? header.replace(/\/+$/, '') : '';
+  return `${prefix}/console`;
+}

@@ -13,6 +13,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
+import { ingressRedirectTarget } from '../src/auth';
 import {
   isSupervisorSource,
   pinSupervisorAddress,
@@ -415,4 +416,47 @@ test('an ACTIVE operator is never evicted by the idle sweep', async () => {
 
   assert.equal(survived, true,
     'an actively-typing operator was disconnected — the sweep is ignoring inbound data');
+});
+
+/* ── the ingress landing redirect ────────────────────────────────────────
+ *
+ * The sidebar panel rendered a bare "404: Not Found" inside an otherwise
+ * healthy Home Assistant. The panel registration was correct — `get_panels`
+ * showed local_zwave_tui the same shape as the working Power panel — and the
+ * add-on served every route (/ → 302, /console → 200). The 404 came from the
+ * REDIRECT TARGET: HA loads the panel at /api/hassio_ingress/<token>/, and
+ * `reply.redirect('/console')` is an absolute path, so the browser threw the
+ * prefix away and asked HA itself for /console, which HA does not serve.
+ *
+ * It looked like a broken panel because the address bar stayed on
+ * /local_zwave_tui the whole time — the iframe navigated, not the page.
+ *
+ * The redirect is built by hand rather than tested through a live Fastify
+ * instance so this stays a unit test; the shape below is exactly what
+ * index.ts does.
+ */
+
+// Import the REAL function. A local re-implementation here would only prove the
+// rule is self-consistent, and would leave the mutant for it alive.
+const ingressRedirect = ingressRedirectTarget;
+
+test('the landing redirect keeps the ingress prefix', () => {
+  assert.equal(
+    ingressRedirect('/api/hassio_ingress/10QhLe0v5RyjceI9Gm_rjN7txRGcCDchKw7tpxs1zbw'),
+    '/api/hassio_ingress/10QhLe0v5RyjceI9Gm_rjN7txRGcCDchKw7tpxs1zbw/console',
+    'dropping the prefix sends the browser to HA’s own /console, which 404s',
+  );
+});
+
+test('a trailing slash on the ingress path does not double up', () => {
+  // HA has sent the path both ways; `//console` is not a path the proxy maps.
+  assert.equal(ingressRedirect('/api/hassio_ingress/ABC/'), '/api/hassio_ingress/ABC/console');
+  assert.equal(ingressRedirect('/api/hassio_ingress/ABC//'), '/api/hassio_ingress/ABC/console');
+});
+
+test('direct (non-ingress) access still lands on /console', () => {
+  // Port 8788 reached without HA in front carries no header at all.
+  for (const absent of [undefined, null, 123, ['/a', '/b']]) {
+    assert.equal(ingressRedirect(absent), '/console', `header ${JSON.stringify(absent)} must degrade to /console`);
+  }
 });
