@@ -271,6 +271,21 @@ const MUTANTS = [
     repl: "  return bits.join(c.grey(' · ')) + c.grey('  —  advisory only; nothing is acted on');",
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
   /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
+  { id: 'ws-stop-error-listener', file: 'src/ha/haWsClient.ts',
+    // removeAllListeners() strips the 'error' handler; close() on a CONNECTING
+    // socket then emits 'error', and an 'error' event with NO listener is
+    // re-thrown by EventEmitter as an UNCAUGHT exception on a later tick —
+    // outside the surrounding try. CI caught this crashing a release build.
+    find: "        this.ws.on('error', () => {});",
+    repl: '',
+    what: 'stop() absorbs the close-while-connecting error instead of crashing' },
+  { id: 'rssi-domain-rule', file: 'src/zwave/health.ts',
+    // Reverts the canonical guard to enumerating the DOCUMENTED markers. That is
+    // what every call site did before, and it is why a driver-supplied 0 —
+    // observed live on 2026-08-02 — rendered as the strongest link on the mesh.
+    find: "  return typeof v === 'number' && Number.isFinite(v) && v < 0 ? v : null;",
+    repl: "  return typeof v === 'number' && Number.isFinite(v) && !RSSI_SENTINELS.has(v) ? v : null;",
+    what: 'a reading is defined by the domain rule (negative dBm), not a marker list' },
   { id: 'telnet-auth-banner', file: 'src/auth/loginPolicy.ts',
     // The startup line announced "(no auth — trusted LAN only)" on EVERY boot,
     // including one with the login gate on and write actions enabled — a false
@@ -282,11 +297,14 @@ const MUTANTS = [
     // The sentinels are POSITIVE (127/126/125), so passing one through does not
     // merely show a wrong number — it ranks a missing reading as the strongest
     // link on the mesh.
-    find: "  if (rssi == null || RSSI_SENTINELS.has(rssi)) return c.grey('—');\n  if (view.signalDisplay === 'dbm') return (neutral ? c.grey : rssiColor(rssi))(String(rssi));",
-    repl: "  if (rssi == null) return c.grey('—');\n  if (view.signalDisplay === 'dbm') return (neutral ? c.grey : rssiColor(rssi))(String(rssi));",
+    // Re-anchored in v0.29.2: the guard is now the shared rssiReading() domain
+    // rule. The old anchor named RSSI_SENTINELS and went MISSING on the refactor.
+    find: "  const v = rssiReading(rssi);\n  if (v == null) return c.grey('—');",
+    repl: "  const v = rssi == null ? null : rssi;\n  if (v == null) return c.grey('—');",
     what: 'a per-hop sentinel renders as no-data instead of as a level' },
   { id: 'topo-spine-sentinel', file: 'src/telnet/screens/topology.ts',
-    find: '    if (r != null && !RSSI_SENTINELS.has(r)) { // trap 1',
+    // Re-anchored in v0.29.2 (was RSSI_SENTINELS.has(r)).
+    find: '    if (rssiReading(r) != null) { // trap 1',
     repl: '    if (r != null) { // trap 1',
     what: 'sentinels are dropped before the repeater aggregate, not folded in' },
   { id: 'topo-spine-stale', file: 'src/telnet/screens/topology.ts',
@@ -316,8 +334,9 @@ const MUTANTS = [
     // branch becomes provably unreachable and the file stops compiling — which
     // scores INVALID, not a kill. `view.cols > 0` is always true at runtime and
     // opaque at compile time.
-    find: "  if (view.signalDisplay === 'dbm') return (neutral ? c.grey : rssiColor(rssi))(String(rssi));",
-    repl: "  if (view.cols > 0) return (neutral ? c.grey : rssiColor(rssi))(String(rssi));",
+    // Re-anchored in v0.29.2: hopReading now renders the VALIDATED value `v`.
+    find: "  if (view.signalDisplay === 'dbm') return (neutral ? c.grey : rssiColor(v))(String(v));",
+    repl: "  if (view.cols > 0) return (neutral ? c.grey : rssiColor(v))(String(v));",
     what: 'per-hop readings follow the dBm/margin toggle like the rest of the row' },
   { id: 'topo-chain-budget', file: 'src/telnet/screens/topology.ts',
     // Reverts to letting lr() blind-clip the chain, which cuts from the LEFT and
@@ -420,8 +439,9 @@ const MUTANTS = [
 
   /* ── v0.24.1: found by LIVE verification, not by any fixture ────────── */
   { id: 'margin-fractional-floor', file: 'src/telnet/screens/overview.ts',
-    find: '    const margin = Math.round(rssi - noise);',
-    repl: '    const margin = rssi - noise;',
+    // Re-anchored in v0.29.2 (overview now bands the VALIDATED rssiV).
+    find: '    const margin = Math.round(rssiV - noise);',
+    repl: '    const margin = rssiV - noise;',
     what: 'a fractional noise floor never truncates a margin into a unitless number' },
 
   /* ── v0.24.3 security posture ──────────────────────────────────────── */

@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.29.2 — 2026-08-02
+
+**Release automation, container images, and a crash on shutdown.**
+
+The release pipeline had a missing link, and it was not theoretical: v0.29.0 and
+v0.29.1 both merged to main and sat UNTAGGED and unreleased, because
+`publish-release.yml` only fires on a pushed tag and nothing pushed one. Tagging
+was a manual step that looked automatic. `tag-release.yml` now closes it —
+a "Release v…" commit touching config.yaml creates the tag and starts the
+release. It dispatches explicitly rather than relying on the tag push, because a
+tag pushed with GITHUB_TOKEN does not trigger other workflows; miss that and you
+get a tag with no release, which is a silent half-failure. `release.yml` adds the
+one-click bump (both version files — the suite pins them together).
+
+`publish-release.yml` now also builds and pushes **multi-arch GHCR images**
+(amd64 + aarch64 on native runners), reading BUILD_FROM from build.yaml rather
+than a hardcoded matrix so an image can't be built on a different base than a
+source install gets. The `.docx`/`.pdf` manual was already attached to every
+Release and still is. `image:` is deliberately NOT set in config.yaml yet — see
+the note there for why the order matters.
+
+**A crash on shutdown, found by CI failing the v0.29.0 release.** `stop()` called
+`removeAllListeners()` and then `close()`; on a socket still CONNECTING, ws emits
+'error', and an 'error' event with no listener is re-thrown by EventEmitter as an
+uncaught exception on a later tick — outside the try that wrapped the close. So
+shutting down while a reconnect was mid-handshake killed the process, which is
+exactly the flapping-Core churn this client exists to survive.
+
+Also: seven contract tests now pin the release relay itself — the watched path,
+the "Release v" subject shared by two workflows, that the dispatched workflow
+exists and takes a version, that both version files move together, that
+config.yaml and the publisher agree on the image name, that every workflow
+parses, and that no action is on a floating tag. Every one of those joins is a
+string match against another file, and none of them was checked before.
+
+
+**A driver `0` was being drawn as the strongest link on the mesh.**
+
+Found the moment the TUI became reachable for testing. Live on the 39-node
+network, node 30 reported `repeaterRSSI [0, 0]` — and Topology rendered it as
+`n3(+100)→n5(+100)`, a +100 dB margin on a row whose genuine hops read +14 to
++32. Every real reading on the mesh sits between -68 and -86 dBm; there is
+nothing between -67 and -1.
+
+`0` is the driver's other "no reading" placeholder, and it is not in the
+documented set (127 not-available / 126 receiver-saturated / 125 no-signal). So
+every call site that ENUMERATED those markers let it through, and a positive
+value passed to a margin calculation ranks as the best link on the network —
+the exact defect the sentinel guard exists to prevent, one value short.
+
+The guard was also duplicated in **seven files**, and only `dataProvider.ts`
+had it right: it alone tested `v < 0`. The domain rule had already been
+discovered once and never propagated, so the same question — "is this a
+reading?" — had two different answers in one codebase. `health.ts` even
+documented the correct intent (*"a finite RSSI in real dBm range"*) while
+checking only the marker list.
+
+There is now ONE definition, `rssiReading()`, and it tests the DOMAIN RULE
+rather than a list: a reading is a finite negative number. A marker list can
+only ever be as current as the last driver release; the physics cannot go
+stale. Every screen, sort key, history filter and statistic routes through it,
+and the six duplicate definitions are deleted.
+
+Beyond Topology, this also fixed: the Overview signal cell, the Heatmap margin,
+Detail's per-hop chain and both history sparklines, the health score's RSSI
+gate, and the `sort by signal` key — where a `0` sorted as the single strongest
+node on the mesh, i.e. the opposite end of the list from where an unknown
+belongs.
+
 ## 0.29.1 — 2026-08-02
 
 **The startup log told the truth about the telnet listener's auth posture.**

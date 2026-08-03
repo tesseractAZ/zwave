@@ -18,7 +18,7 @@
  */
 
 import { c } from './ansi';
-import { WEAK_MARGIN_DB } from '../zwave/health';
+import { WEAK_MARGIN_DB, rssiReading } from '../zwave/health';
 
 /**
  * Re-exported so render code takes the weak-margin threshold from HERE and
@@ -28,7 +28,7 @@ import { WEAK_MARGIN_DB } from '../zwave/health';
  * symptoms.ts keeps a private copy of the same 7 (render code must not import
  * the symptom engine); bands.test.ts pins the two to the same value.
  */
-export { WEAK_MARGIN_DB };
+export { WEAK_MARGIN_DB, rssiReading };
 
 export type ColorFn = (s: string) => string;
 
