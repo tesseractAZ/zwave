@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.29.5 — 2026-08-03
+
+**Security: `fast-uri` host confusion (2x HIGH, GHSA-7p8r-x3mc-p8w7).**
+
+Dependabot raised two high-severity alerts against `fast-uri`, reachable twice
+in the tree: `fastify → @fastify/ajv-compiler → ajv → fast-uri@3.1.4` and
+`fastify → fast-json-stringify → fast-uri@4.1.1`. The flaw is host confusion via
+a **backslash authority introducer** — a URL parser can be talked into reading a
+different host than a reader expects.
+
+That is the same class of bug fixed by hand in v0.29.3, where the ingress
+redirect had to start rejecting `\` and `//` prefixes precisely so a header
+could not redirect a browser to another origin. Worth noting the app's own guard
+was written before the library one surfaced: the validation there does not defer
+to `fast-uri` for the security decision.
+
+Patched to 3.1.5 / 4.1.2 via the lockfile only. Fastify itself stays at 5.10.0 —
+no runtime or API change — and `npm audit --omit=dev` now reports 0
+vulnerabilities.
+
 ## 0.29.4 — 2026-08-03
 
 **Home Assistant now pulls a prebuilt image instead of building on your Pi.**
