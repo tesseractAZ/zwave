@@ -36,7 +36,18 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
     steps:
+      # Check out the version being RELEASED, not the default branch.
+      #
+      # On a tag push these are the same thing, so this looked fine. On a
+      # workflow_dispatch they are not: the default checkout is main, so the
+      # config.yaml-vs-tag guard below compared the REQUESTED version against
+      # MAIN's config.yaml and refused everything except the version currently
+      # on main — breaking the exact path that exists for re-releasing an older
+      # tag. Found by using it: re-running the failed v0.29.0 release died with
+      # "tag v0.29.0 does not match zwave_tui/config.yaml version '0.29.3'".
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.version && format('refs/tags/v{0}', inputs.version) || github.ref }}
 
       - id: v
         # INPUT_VERSION is passed through the ENVIRONMENT, never interpolated
