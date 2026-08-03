@@ -284,8 +284,12 @@ test('config.yaml and the publisher agree on the image', () => {
   const pub = code('publish-release.yml');
   const declared = /^image:\s*(\S+)/m.exec(read('config.yaml'))?.[1];
 
-  const pushed = [...pub.matchAll(/ghcr\.io\/[^\s:]*\/\$\{\{[^}]*\}\}-([a-z0-9-]+):/g)]
-    .map((m) => m[1]);
+  // Collapse `${{ … }}` FIRST. The owner segment is
+  // `${{ steps.owner.outputs.name }}` — it contains SPACES, so a `[^\s:]*`
+  // pattern silently matches nothing and the check passes vacuously in the one
+  // direction that matters (image: declared, publisher pushing something else).
+  const expanded = pub.replace(/\$\{\{[^}]*\}\}/g, 'X');
+  const pushed = [...expanded.matchAll(/ghcr\.io\/X\/X-([a-z0-9-]+):/g)].map((m) => m[1]);
   if (declared) {
     assert.ok(pushed.length, 'config.yaml declares image: but publish-release.yml pushes nothing');
     const suffix = /\{arch\}-([a-z0-9-]+)\s*$/.exec(declared)?.[1];

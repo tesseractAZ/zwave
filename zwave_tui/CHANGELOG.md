@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.29.4 — 2026-08-03
+
+**Home Assistant now pulls a prebuilt image instead of building on your Pi.**
+
+`publish-release.yml` has published multi-arch GHCR images since v0.29.2, but
+`config.yaml` deliberately carried no `image:` key while they were still private.
+Both packages are public now and were verified anonymously pullable before this
+key was added, so Supervisor pulls `ghcr.io/tesseractaz/{arch}-zwave-tui` and an
+update takes seconds rather than minutes of on-device npm build.
+
+The ORDER matters and is recorded in config.yaml so a future change keeps it.
+The failure is asymmetric: publishing images nobody consumes is harmless, while
+declaring `image:` against a package that is missing or private makes Supervisor
+pull a tag it cannot fetch and EVERY install and update fails. So: publish, make
+public, prove the pull, then point at it.
+
+Verifying that pull took three wrong attempts, all mine, and each one looked
+like a broken package:
+
+  • a bare manifest GET returns 401 even for a PUBLIC image — the Registry v2
+    flow answers with WWW-Authenticate and expects you to fetch a token. What
+    distinguishes public from private is whether an ANONYMOUS token is granted.
+  • with a token it returned 404, because the Accept header omitted
+    `application/vnd.oci.image.manifest.v1+json`. buildx with provenance:false
+    pushes a plain image manifest, not an index, and the registry 404s when it
+    cannot satisfy the offered types.
+  • the contract test then failed for a fourth reason: its regex matched the
+    owner segment with `[^\s:]*`, but `${{ steps.owner.outputs.name }}` contains
+    SPACES, so it matched nothing and would have passed vacuously in exactly the
+    direction that matters. GitHub expressions are now collapsed before matching,
+    and the guard is re-verified against a planted mismatch.
+
 ## 0.29.3 — 2026-08-03
 
 **The Home Assistant sidebar panel showed a bare "404: Not Found".**
