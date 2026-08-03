@@ -26,6 +26,7 @@ export type { InputEvent } from '../types';
 import type { InputEvent } from '../types';
 import { sortedSymptoms, symptomKey } from './screens/remedy';
 import type { Symptom } from '../zwave/symptoms';
+import { rssiReading } from '../zwave/health';
 
 /** Result of dispatching one key. */
 export interface KeyResult {
@@ -43,14 +44,12 @@ export interface KeyResult {
 /** The sort keys, in the order `s` cycles through them. */
 const SORT_ORDER: ViewState['sortKey'][] = ['health', 'id', 'name', 'rssi', 'seen'];
 
-/** RSSI sentinels the driver uses for "no reading" — never sort/score on them. */
-const RSSI_SENTINELS = new Set([127, 126, 125]);
 
 function effectiveRssi(n: NodeSnapshot): number {
-  const r = n.stats.rssi;
-  // null / sentinel → treat as worst so "weakest first" surfaces the unknowns.
-  if (r == null || RSSI_SENTINELS.has(r)) return -999;
-  return r;
+  // No reading → sort as WORST, so "weakest first" surfaces the unknowns. A
+  // driver 0 used to pass the sentinel check and sort as the single strongest
+  // node on the mesh.
+  return rssiReading(n.stats.rssi) ?? -999;
 }
 
 /**

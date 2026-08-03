@@ -40,10 +40,8 @@ import { centeredNotice } from './overview';
 import { downsampleMean } from './interference';
 import { frame, hstack, splitCols, type Keycap, type StackCol } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
-import { rssiColor, marginColor, rttColor, timeoutPctColor } from '../bands';
+import { rssiColor, marginColor, rttColor, timeoutPctColor, rssiReading } from '../bands';
 
-/** Driver RSSI sentinels (not-available / saturated / no-signal) — never real dBm. */
-const RSSI_SENTINELS = new Set([127, 126, 125]);
 
 /** protocolDataRate → human label (shared vocabulary with the Overview). */
 const DATA_RATE_LABEL: Record<number, string> = { 1: '9.6k', 2: '40k', 3: '100k', 4: 'LR' };
@@ -192,7 +190,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     // the historical trends below stay, being clearly past readings.
     if (rssi != null && !routed) pushG(snrRow(Math.round(rssi - noise), data.hasRealNoise(), inner));
     const hist = data.history(n.nodeId);
-    const rssiHist = hist.rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
+    const rssiHist = hist.rssi.filter((v) => rssiReading(v) != null);
     const rttHist = hist.rtt.filter((v) => Number.isFinite(v) && v >= 0);
     // Same stale rule as the RTT/RSSI/Timeouts rows around them: a DEAD/UNKNOWN
     // node's history rings end at its last healthy answer (kept on purpose,
@@ -206,7 +204,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     pushG(trendRow('Signal', rssiHist, 'dBm', trendColor(rssiHist, rssiColor), inner));
     pushG(trendRow('Latency', rttHist, 'ms', trendColor(rttHist, rttColor), inner));
     // Long-horizon coarse RSSI trend (~2h, 1 pt/min); needs a few points first.
-    const longRssi = data.historyLong(n.nodeId).rssi.filter((v) => Number.isFinite(v) && !RSSI_SENTINELS.has(v));
+    const longRssi = data.historyLong(n.nodeId).rssi.filter((v) => rssiReading(v) != null);
     if (longRssi.length >= 3) pushG(trendRow('Sig 2h', longRssi, 'dBm', trendColor(longRssi, rssiColor), inner));
 
     // Response-timeout % via the SHARED responseTimeoutPct — the same figure the
@@ -714,7 +712,7 @@ function routeChain(route: RouteStat, bars: boolean, stale = false, hopAnn = tru
   const parts: string[] = [c.grey('controller')];
   reps.forEach((r, i) => {
     const hop = route.repeaterRSSI?.[i];
-    const valid = hop != null && Number.isFinite(hop) && !RSSI_SENTINELS.has(hop);
+    const valid = rssiReading(hop) != null;
     // Same stale rule as the rate + route RSSI in the row above: pushRoute
     // threaded `stale` in but never passed it here, so a dead node's PER-HOP
     // readings stayed health-green inside a row already greyed around them.
@@ -846,8 +844,7 @@ function flagColor(flags: string[]): (s: string) => string {
 /* ── small utilities ─────────────────────────────────────────────────────── */
 
 function validRssi(v: number | null | undefined): number | null {
-  if (v == null || !Number.isFinite(v) || RSSI_SENTINELS.has(v)) return null;
-  return v;
+  return rssiReading(v);
 }
 
 function dead(n: NodeSnapshot): boolean {

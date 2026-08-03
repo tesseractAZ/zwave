@@ -1,17 +1,24 @@
 name: "Z-Wave TUI"
-version: "0.29.1"
+version: "0.29.2"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
 arch:
   - aarch64
   - amd64
-# NO `image:` key, on purpose. This add-on is built FROM SOURCE on your own Home
-# Assistant host — Supervisor runs the Dockerfile locally — so anyone can install
-# it straight from this repository with no container registry involved. The first
-# install takes a few minutes while the server's dependencies build; updates after
-# that are quick. (A future release may publish pre-built multi-arch images to
-# skip the on-device build.)
+# No `image:` key YET — this is the middle of a deliberate two-step rollout.
+#
+# As of v0.29.2 `publish-release.yml` builds and pushes multi-arch images to
+# ghcr.io/tesseractaz/{arch}-zwave-tui on every release tag, but this add-on is
+# still a SOURCE build: Supervisor runs the Dockerfile locally, so anyone can
+# install straight from this repository with no registry involved.
+#
+# The order is not incidental. Adding `image:` before the images exist and are
+# PUBLIC makes Supervisor pull a tag that isn't there, and every install and
+# update fails — so the key goes in only after a release has published the
+# packages and they have been flipped Private → Public (GHCR packages default to
+# private, and Home Assistant pulls anonymously). configContract.test.ts pins
+# this: if `image:` is present it must name what the workflow actually pushes.
 startup: services
 boot: auto
 stage: experimental

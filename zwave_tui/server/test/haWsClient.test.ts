@@ -202,3 +202,43 @@ test('stop() is final: no zombie reconnect after stop', async () => {
     await m.close();
   }
 });
+
+test('stop() while the socket is still CONNECTING does not crash the process', async () => {
+  // Found by CI on the v0.29.0 release build, not by this suite: the flapping-
+  // Core test above tore down mid-handshake and the run died with
+  // "WebSocket was closed before the connection was established".
+  //
+  // stop() calls removeAllListeners() and then close(). On a CONNECTING socket
+  // ws emits 'error' — and with the handler just removed, EventEmitter RE-THROWS
+  // it as an uncaught exception on a later tick, which the try/catch around
+  // close() never sees. In production that is a crash on shutdown whenever a
+  // reconnect happens to be in flight, i.e. exactly during the churn this
+  // client exists to survive.
+  //
+  // A plain TCP listener accepts the connection and never completes the upgrade,
+  // so the client is reliably still CONNECTING when stop() lands.
+  const { createServer } = await import('node:net');
+  // Hold the accepted sockets: srv.close() waits for open connections, and the
+  // client's socket is still open by design here, so without destroying them
+  // the close callback never fires and the test file hangs.
+  const accepted: Array<{ destroy: () => void }> = [];
+  const srv = createServer((sock) => { accepted.push(sock); /* never respond */ });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const port = (srv.address() as { port: number }).port;
+
+  const seen: unknown[] = [];
+  const onUncaught = (e: unknown) => seen.push(e);
+  process.on('uncaughtException', onUncaught);
+  const c = createHaWsClient({ url: `ws://127.0.0.1:${port}`, token: 't', log: () => {} });
+  try {
+    c.start();
+    await sleep(150);   // handshake is open and unanswered
+    c.stop();
+    await sleep(500);   // give the async 'error' a chance to surface
+    assert.deepEqual(seen, [], `stop() raised: ${seen.map(String).join('; ')}`);
+  } finally {
+    process.off('uncaughtException', onUncaught);
+    for (const sock of accepted) sock.destroy();
+    await new Promise<void>((r) => srv.close(() => r()));
+  }
+});

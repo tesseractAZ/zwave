@@ -154,11 +154,31 @@ function mean(xs: number[]): number {
   return s / xs.length;
 }
 
-/** A finite RSSI in real dBm range, or null if absent / a sentinel. */
+/**
+ * A received-signal reading in real dBm, or null when the driver supplied none.
+ *
+ * THE CANONICAL TEST — every screen, sort key and statistic goes through this.
+ *
+ * Received signal strength on this radio is always NEGATIVE. The driver marks
+ * "no reading" with reserved POSITIVE values, and the documented set
+ * (127 not-available / 126 receiver-saturated / 125 no-signal) is not the whole
+ * story: a live probe of the mesh on 2026-08-02 found `repeaterRSSI` entries of
+ * plain `0` on two hops, amid real readings clustered between -68 and -86.
+ * Every call site that enumerated the reserved values let that 0 through, and
+ * it rendered as a +100 dB margin — the strongest link on the mesh — on a row
+ * whose genuine hops read +14 to +32.
+ *
+ * Enumerating markers can only ever be as current as the last driver release.
+ * The domain rule cannot go stale, so the test is the RULE: a reading is a
+ * finite negative number. `RSSI_SENTINELS` is kept below purely as documentation
+ * of the named cases.
+ */
+export function rssiReading(v: number | null | undefined): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v < 0 ? v : null;
+}
+
 function validRssi(v: number | null | undefined): number | null {
-  if (v == null || !Number.isFinite(v)) return null;
-  if (RSSI_SENTINELS.has(v)) return null;
-  return v;
+  return rssiReading(v);
 }
 
 /** A..F grade band from a 0..100 score. */

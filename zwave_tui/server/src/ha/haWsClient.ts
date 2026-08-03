@@ -326,6 +326,16 @@ class HaWebSocketClient implements HaWsClient {
     if (this.ws) {
       try {
         this.ws.removeAllListeners();
+        // `close()` on a socket still CONNECTING makes ws emit 'error'
+        // ("WebSocket was closed before the connection was established"), and
+        // removeAllListeners() has just stripped the handler for it. An 'error'
+        // event with NO listener is re-thrown by EventEmitter as an UNCAUGHT
+        // exception on a later tick — outside this try, which is why the
+        // surrounding catch never saw it. Shutting down while a reconnect was
+        // mid-handshake therefore crashed the process: exactly the flapping-Core
+        // case this client exists to survive. Keep a no-op listener across the
+        // close so the event is absorbed.
+        this.ws.on('error', () => {});
         this.ws.close();
       } catch {
         /* ignore */

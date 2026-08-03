@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreNode } from '../src/zwave/health';
+import { scoreNode, rssiReading } from '../src/zwave/health';
 import { NodeStatus, type NodeSnapshot, type NodeStats } from '../src/types';
 
 const emptyStats = (over: Partial<NodeStats> = {}): NodeStats => ({
@@ -140,4 +140,20 @@ test('the CONTROLLER grades A/100, not F — its branch precedes the never-measu
   // A DEAD controller is still dead — the branch is gated on Alive/Awake.
   const dead = scoreNode(makeNode({ nodeId: 1, isController: true, status: NodeStatus.Dead, stats: emptyStats() }), NOISE);
   assert.equal(dead.state, 'dead');
+});
+
+test('rssiReading is the single definition of "is this a reading"', () => {
+  // The list of reserved markers can only ever be as current as the last driver
+  // release: 0 was NOT in the documented set (127/126/125) and reached the
+  // screen as a +100 dB margin. The domain rule cannot go stale — received
+  // signal strength on this radio is always negative.
+  for (const real of [-1, -50, -68, -86, -128]) {
+    assert.equal(rssiReading(real), real, `${real} dBm is a real reading`);
+  }
+  for (const marker of [0, 125, 126, 127, 1, 100]) {
+    assert.equal(rssiReading(marker), null, `${marker} is not a reading`);
+  }
+  for (const absent of [null, undefined, NaN, Infinity, -Infinity]) {
+    assert.equal(rssiReading(absent as number | null | undefined), null, `${String(absent)} is not a reading`);
+  }
 });
