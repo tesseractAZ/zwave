@@ -119,6 +119,10 @@ export interface AutoPingDecision {
   deadListening: number;
   /** Listening nodes total — the storm-guard denominator. */
   listening: number;
+  /** Nodes past the stale window and off cooldown (before the one-per-tick cap). */
+  staleDue: number;
+  /** Stalest candidate's silence in ms, or null when nothing is due/known. */
+  stalestMs: number | null;
 }
 
 /**
@@ -168,7 +172,8 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const { now, nodes, controller, config, booting } = input;
   const listeningNodes = nodes.filter(isPingCandidate);
   const dead = listeningNodes.filter((n) => n.status === NodeStatus.Dead);
-  const base = { ping: [] as number[], stale: [] as number[], deadListening: dead.length, listening: listeningNodes.length };
+  const base = { ping: [] as number[], stale: [] as number[], deadListening: dead.length,
+    listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
   if (!config.enabled) return { ...base, suppressed: 'disabled' };
   // Auto-ping is a write. It obeys the master switch even when its own is on —
@@ -229,6 +234,8 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
       })
       .sort((a, b) => (a.seen ?? 0) - (b.seen ?? 0)); // stalest first
     if (due.length) stale.push(due[0].id);
+    base.staleDue = due.length;
+    base.stalestMs = due.length ? (due[0].seen == null ? null : now - due[0].seen) : null;
   }
 
   return { ...base, ping, stale, suppressed: 'none' };
@@ -284,6 +291,10 @@ export function noteAttempt(state: AutoPingState, nodeId: number, now: number): 
  *  it. */
 export const BOOT_WINDOW_MS = 5 * 60_000;
 
+/** Re-state an UNCHANGED decision at most this often, so a steady state is
+ *  still visible without the log becoming a per-minute drumbeat. */
+export const TRACE_HEARTBEAT_MS = 30 * 60_000;
+
 export interface AutoPingRunnerOptions {
   nodes: () => NodeSnapshot[];
   controller: () => ControllerSnapshot | null;
@@ -291,6 +302,8 @@ export interface AutoPingRunnerOptions {
   ping: (nodeId: number) => Promise<unknown>;
   /** Writes into the event ring so an autonomous action is never invisible. */
   log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string) => void;
+  /** Optional server logger — carries the per-tick trace at debug level. */
+  log2?: { debug?: (msg: string) => void };
   config: AutoPingConfig;
   tickMs?: number;
   now?: () => number;
@@ -301,6 +314,8 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
   const startedAt = now();
   const state = createAutoPingState();
   let lastSuppression: AutoPingSuppression | null = null;
+  let lastTrace = '';
+  let lastTraceAt = 0;
 
   const tick = (): void => {
     const t = now();
@@ -316,6 +331,33 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // post-start window, so it counts as booting rather than as "no nodes".
       booting: !o.ready() || t - startedAt < BOOT_WINDOW_MS,
     });
+
+    // DECISION TRACE.
+    //
+    // v0.31.1. Until now the runner spoke only when it ACTED, which made "there
+    // was nothing to do" and "this is broken" produce byte-identical logs — an
+    // empty one. That is exactly the state the feature was found in: enabled,
+    // healthy, and silently doing nothing, with no way to tell which gate was
+    // closing without reading the source and guessing.
+    //
+    // Emitted on CHANGE (so a transition is never missed) plus a slow heartbeat
+    // (so a steady state is still visible), at info level — the operator should
+    // not have to raise log_level to find out whether an autonomous feature is
+    // alive. `log.debug` carries every tick for real debugging.
+    const trace =
+      `auto-ping: candidates=${decision.listening} dead=${decision.deadListening} ` +
+      `stale-due=${decision.staleDue}` +
+      (decision.stalestMs != null ? ` stalest=${Math.round(decision.stalestMs / 60_000)}m` : '') +
+      ` -> ${decision.suppressed === 'none'
+        ? `probing ${decision.ping.length + decision.stale.length}`
+        : 'suppressed: ' + decision.suppressed}`;
+    o.log2?.debug?.(trace);
+    const changed = trace !== lastTrace;
+    if (changed || t - lastTraceAt >= TRACE_HEARTBEAT_MS) {
+      o.log('info', null, trace);
+      lastTrace = trace;
+      lastTraceAt = t;
+    }
 
     // A storm is the one suppression worth saying out loud, and worth saying
     // ONCE — it means a quarter of the mesh is down, which the operator wants to

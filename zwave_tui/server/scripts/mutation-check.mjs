@@ -272,6 +272,18 @@ const MUTANTS = [
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
   /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
   /* ── auto-ping: the engine's first autonomous write ─────────────────── */
+  { id: 'autoping-trace', file: 'src/zwave/autoPing.ts',
+    // Reverts to the state the feature was FOUND in: enabled, healthy, and
+    // logging nothing — so "nothing to do" and "broken" were byte-identical.
+    find: '      o.log(\'info\', null, trace);',
+    repl: '',
+    what: 'the runner states why it did nothing, not only when it acts' },
+  { id: 'autoping-trace-throttle', file: 'src/zwave/autoPing.ts',
+    // Without the change/heartbeat gate the trace fires every tick and buries
+    // the log it exists to clarify.
+    find: '    if (changed || t - lastTraceAt >= TRACE_HEARTBEAT_MS) {',
+    repl: '    if (true) {',
+    what: 'an unchanged decision is not re-logged every tick' },
   { id: 'stale-rate-limit', file: 'src/zwave/autoPing.ts',
     // 36 mains nodes coming due together would fire 36 probes in one second.
     find: '    if (due.length) stale.push(due[0].id);',

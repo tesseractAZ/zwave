@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.31.1 — 2026-08-04
+
+**The auto-ping runner now says why it did nothing.**
+
+v0.31.0 shipped enabled, healthy, and doing nothing — and there was no way to
+tell that from the outside. The runner spoke only when it ACTED, so "there was
+nothing to do" and "this is broken" produced byte-identical logs: an empty one.
+Diagnosing it meant reading the source and guessing, and two of those guesses
+were wrong.
+
+Found by using it. With `auto_ping_enabled: true` on a live 39-node mesh, zero
+probes fired. Forcing `auto_ping_stale_min` down to 2 and leaving it ~11 minutes
+still produced zero — while the driver reported node 32 silent for 15.5 HOURS.
+The boot log confirmed the runner had started (its config line prints from inside
+the start branch), driver-ws was live with a 39-node state dump, statistics were
+subscribed, and there were no errors on either boot. Everything observable said
+healthy; nothing observable said what the runner was deciding.
+
+Each tick now emits its decision and its inputs:
+
+    auto-ping: candidates=36 dead=0 stale-due=12 stalest=931m -> probing 1
+    auto-ping: candidates=36 dead=0 stale-due=0 -> suppressed: boot-window
+
+Emitted on CHANGE, so a transition is never missed, plus a 30-minute heartbeat so
+a steady state stays visible — at info level, because an operator should not have
+to raise log_level to find out whether an autonomous feature is alive. Every tick
+also goes to `log.debug` for real debugging.
+
+The underlying cause of the no-op is NOT fixed here, deliberately. The earlier
+hypothesis (that `mergedStats` masks staleness by taking the max of a
+counter-derived stamp and the driver's own lastSeen) is weakened by the 2-minute
+result: if staleness were merely being masked, a 2-minute window should still
+have caught nearly every node. Instrument first, then fix what the instrument
+shows — shipping a fix now would risk "fixing" the wrong thing and calling it
+verified.
+
 ## 0.31.0 — 2026-08-03
 
 **A node nobody talks to was never proven alive.**

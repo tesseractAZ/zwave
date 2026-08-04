@@ -400,3 +400,75 @@ test('staleMs = 0 disables the liveness probe entirely', () => {
   const nodes = [node(1, { isController: true }), seen(95, 500 * 60 * MIN)];
   assert.deepEqual(tick(s, nodes, T, { config: staleCfg({ staleMs: 0 }) }).stale, []);
 });
+
+/* ── the decision trace ───────────────────────────────────────────────── */
+
+test('the runner reports WHY it did nothing, not just when it acts', async () => {
+  // The defect this exists for: an enabled, healthy runner that emitted an
+  // EMPTY log whether it had nothing to do or was broken. Those two states must
+  // never again look identical.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const info: string[] = [];
+  const nodes = mesh(20, [dead(7)]);
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (sev, _n, text) => { if (sev === 'info') info.push(text); },
+    config: staleCfg(), tickMs: 1_000_000, now: () => clock,
+  });
+
+  clock = T + MIN;            // inside the boot window
+  h.tick();
+  assert.equal(info.length, 1, 'the very first decision must be stated');
+  assert.match(info[0], /suppressed: boot-window/, `got: ${info[0]}`);
+  assert.match(info[0], /candidates=\d+/, 'the trace must carry its inputs');
+
+  clock = T + BOOT_WINDOW_MS + MIN;   // gate opens — a CHANGE, so it re-states
+  h.tick();
+  assert.ok(info.length >= 2, 'a change of decision must be reported');
+  assert.doesNotMatch(info[info.length - 1], /boot-window/);
+  h.stop();
+});
+
+test('an unchanged decision is not repeated every tick', async () => {
+  // Emitting the same line every 60s would bury the log it exists to clarify.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const info: string[] = [];
+  // Every node heard from a minute ago ⇒ nothing due, nothing changes. (A mesh
+  // of all-null lastSeen is NOT steady: each tick probes one and puts it on
+  // cooldown, so stale-due genuinely counts down and the trace SHOULD change.)
+  const nodes = [node(1, { isController: true }), seen(10, MIN), seen(11, MIN), seen(12, MIN)];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (sev, _n, text) => { if (sev === 'info') info.push(text); },
+    config: staleCfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  // Start PAST the boot window — otherwise the gate opening mid-run is itself a
+  // change, and the run is not the steady state this test is about.
+  clock = T + BOOT_WINDOW_MS + MIN;
+  h.tick();
+  const first = info.length;
+  for (let i = 2; i <= 6; i++) { clock = T + BOOT_WINDOW_MS + i * MIN; h.tick(); }
+  assert.equal(info.length, first, 'a steady state must not re-log every tick');
+  h.stop();
+});
+
+test('a steady state is still re-stated on the heartbeat', async () => {
+  // Silence must never be the only evidence that the runner is alive.
+  const { startAutoPing, TRACE_HEARTBEAT_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const info: string[] = [];
+  const nodes = [node(1, { isController: true }), seen(10, MIN), seen(11, MIN)];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (sev, _n, text) => { if (sev === 'info') info.push(text); },
+    config: staleCfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  h.tick();
+  const first = info.length;
+  clock = T + TRACE_HEARTBEAT_MS + MIN;
+  h.tick();
+  assert.equal(info.length, first + 1, 'the heartbeat must re-state an unchanged decision');
+  h.stop();
+});
