@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.30.0"
+version: "0.31.0"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
@@ -79,6 +79,7 @@ options:
   auto_ping_enabled: false
   auto_ping_after_min: 10
   auto_ping_max_attempts: 3
+  auto_ping_stale_min: 240
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled: true
   # ── Login gate (guards DIRECT/telnet; HA-sidebar access is already authed) ──
@@ -102,6 +103,7 @@ schema:
   auto_ping_enabled: bool
   auto_ping_after_min: int(2,120)
   auto_ping_max_attempts: int(1,10)
+  auto_ping_stale_min: int(0,1440)
   telnet_enabled: bool
   auth_enabled: bool
   auth_require_on_ingress: bool

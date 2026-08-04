@@ -272,6 +272,29 @@ const MUTANTS = [
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
   /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
   /* ── auto-ping: the engine's first autonomous write ─────────────────── */
+  { id: 'stale-rate-limit', file: 'src/zwave/autoPing.ts',
+    // 36 mains nodes coming due together would fire 36 probes in one second.
+    find: '    if (due.length) stale.push(due[0].id);',
+    repl: '    for (const d of due) stale.push(d.id);',
+    what: 'at most ONE liveness probe per tick' },
+  { id: 'stale-cooldown', file: 'src/zwave/autoPing.ts',
+    // An unreachable node never refreshes lastSeen, so without the cooldown it
+    // stays permanently due and is re-probed on EVERY tick, forever.
+    find: '        const last = input.state.lastStaleAt.get(x.id);\n        return last == null || now - last >= config.staleMs;',
+    repl: '        return true;',
+    what: 'an unreachable node is probed once per window, not every tick' },
+  { id: 'stale-skips-dead', file: 'src/zwave/autoPing.ts',
+    // A Dead node belongs to the remediation path, which has its own dwell,
+    // backoff and attempt cap. Probing it here would bypass all three.
+    find: '      .filter((n) => n.status !== NodeStatus.Dead) // the dead path owns those',
+    repl: '      .filter(() => true) // the dead path owns those',
+    what: 'the liveness probe leaves Dead nodes to the remediation path' },
+  { id: 'stale-window', file: 'src/zwave/autoPing.ts',
+    // Dropping the age test probes every node on every tick regardless of when
+    // it was last heard from — the opposite of a per-node cadence.
+    find: '      .filter((x) => x.seen == null || now - x.seen >= config.staleMs)',
+    repl: '      .filter(() => true)',
+    what: 'only nodes silent past the window get a liveness probe' },
   { id: 'autoping-master-gate', file: 'src/zwave/autoPing.ts',
     // Firing with write actions off would make the add-on's own read-only claim
     // false — the worst kind of defect here.

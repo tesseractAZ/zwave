@@ -71,6 +71,15 @@ configuration:
     description: >-
       Attempts per dead episode, spaced 10/30/60 minutes apart. After this the
       engine stops and leaves the node to you. A recovery resets the count.
+  auto_ping_stale_min:
+    name: Safety · Liveness probe after (minutes of silence)
+    description: >-
+      Probe a MAINS node this long after ITS OWN last contact (0 disables).
+      Z-Wave marks a node Dead only when a send to it FAILS — a device nobody
+      addresses is never proven alive, so an unplugged outlet can read "Alive"
+      indefinitely. Measured from each node's own last-seen time, so a chatty
+      device keeps resetting its clock and is never probed. One probe per tick,
+      stalest first, under the same suppressors as auto-ping.
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled:
     name: Access · Enable telnet TUI

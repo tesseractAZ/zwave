@@ -64,6 +64,15 @@ export interface AutoPingConfig {
   afterMs: number;
   /** Attempts per dead episode, after which we stop and leave it to a human. */
   maxAttempts: number;
+  /**
+   * Probe a MAINS node this long after its own last contact (0 = off).
+   *
+   * Measured from each node's `lastSeen`, so it is self-balancing: a device that
+   * reports on its own keeps resetting the clock and is never probed, while a
+   * silent one is checked on a fixed cadence. On the live mesh 10 of 38 nodes
+   * had been silent for 35.7 HOURS while all reporting Alive.
+   */
+  staleMs: number;
 }
 
 export interface AutoPingState {
@@ -73,10 +82,12 @@ export interface AutoPingState {
   lastPingAt: Map<number, number>;
   /** nodeId → epoch ms this node was first seen Dead (episode start). */
   deadSince: Map<number, number>;
+  /** nodeId → epoch ms of the last STALE (liveness) probe. */
+  lastStaleAt: Map<number, number>;
 }
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map() };
 }
 
 export interface AutoPingInput {
@@ -91,8 +102,17 @@ export interface AutoPingInput {
 }
 
 export interface AutoPingDecision {
-  /** Nodes to ping on this tick. */
+  /** Dead nodes to probe on this tick (remediation). */
   ping: number[];
+  /**
+   * At most ONE stale node to probe on this tick (liveness verification).
+   *
+   * Deliberately one: 36 mains nodes coming due together would otherwise fire
+   * 36 probes in a single second. Spreading them one per tick turns that into a
+   * trickle the mesh does not notice, and the stalest goes first so nobody is
+   * starved by the cap.
+   */
+  stale: number[];
   /** Why nothing was pinged (or 'none' when the gates all passed). */
   suppressed: AutoPingSuppression;
   /** Listening nodes currently Dead — the storm-guard numerator. */
@@ -148,7 +168,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const { now, nodes, controller, config, booting } = input;
   const listeningNodes = nodes.filter(isPingCandidate);
   const dead = listeningNodes.filter((n) => n.status === NodeStatus.Dead);
-  const base = { ping: [] as number[], deadListening: dead.length, listening: listeningNodes.length };
+  const base = { ping: [] as number[], stale: [] as number[], deadListening: dead.length, listening: listeningNodes.length };
 
   if (!config.enabled) return { ...base, suppressed: 'disabled' };
   // Auto-ping is a write. It obeys the master switch even when its own is on —
@@ -179,7 +199,39 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
     if (last != null && now - last < wait) continue;
     ping.push(n.nodeId);
   }
-  return { ...base, ping, suppressed: 'none' };
+
+  /* ── liveness: a node nobody talks to is never proven alive ───────────
+   *
+   * Z-Wave JS sets Dead REACTIVELY — only when a transmission FAILS. A node
+   * nobody addresses produces no transmissions, so no failures, so it reports
+   * Alive indefinitely; a mains device could be unplugged and still read Alive
+   * until something tries to reach it. Measured on the live mesh: 10 of 38
+   * nodes silent for 35.7 hours, every one of them status Alive.
+   *
+   * This converts silence into evidence. The node either answers (refreshing
+   * lastSeen, and its route/RSSI statistics with it) or the send fails and the
+   * driver marks it Dead — at which point the remediation path above owns it.
+   */
+  const stale: number[] = [];
+  if (config.staleMs > 0) {
+    const due = listeningNodes
+      .filter((n) => n.status !== NodeStatus.Dead) // the dead path owns those
+      .map((n) => ({ id: n.nodeId, seen: n.stats?.lastSeen ?? null }))
+      // A node with no lastSeen yet has never been heard from at all, which is
+      // the strongest reason to ask — treat it as maximally stale.
+      .filter((x) => x.seen == null || now - x.seen >= config.staleMs)
+      // One probe per node per staleMs. Without this a genuinely unreachable
+      // node never refreshes lastSeen, stays permanently "due", and would be
+      // re-probed on EVERY tick.
+      .filter((x) => {
+        const last = input.state.lastStaleAt.get(x.id);
+        return last == null || now - last >= config.staleMs;
+      })
+      .sort((a, b) => (a.seen ?? 0) - (b.seen ?? 0)); // stalest first
+    if (due.length) stale.push(due[0].id);
+  }
+
+  return { ...base, ping, stale, suppressed: 'none' };
 }
 
 /**
@@ -207,6 +259,11 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
   for (const id of [...state.deadSince.keys()]) if (!seen.has(id)) state.deadSince.delete(id);
   for (const id of [...state.attempts.keys()]) if (!seen.has(id)) state.attempts.delete(id);
   for (const id of [...state.lastPingAt.keys()]) if (!seen.has(id)) state.lastPingAt.delete(id);
+}
+
+/** Record that a STALE liveness probe was issued. */
+export function noteStale(state: AutoPingState, nodeId: number, now: number): void {
+  state.lastStaleAt.set(nodeId, now);
 }
 
 /** Record that an auto-ping was issued (called by the runner, not the decider). */
@@ -269,6 +326,18 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
         'that is a controller-level event, not per-device, so probing them would only add traffic');
     }
     lastSuppression = decision.suppressed;
+
+    for (const nodeId of decision.stale) {
+      noteStale(state, nodeId, t);
+      o.log('info', nodeId,
+        `auto-ping: node ${nodeId} has not been heard from in ` +
+        `${Math.round(o.config.staleMs / 60_000)}m — liveness probe`);
+      void o.ping(nodeId).catch(() => {
+        // A failed liveness probe is the POINT: the driver marks the node Dead
+        // and the remediation path takes over with its own dwell and backoff.
+        o.log('warn', nodeId, `auto-ping: node ${nodeId} did not answer its liveness probe`);
+      });
+    }
 
     for (const nodeId of decision.ping) {
       const attempt = (state.attempts.get(nodeId) ?? 0) + 1;

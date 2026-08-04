@@ -11,6 +11,7 @@ import { test } from 'node:test';
 
 import {
   createAutoPingState,
+  noteStale,
   decideAutoPings,
   noteAttempt,
   trackEpisodes,
@@ -27,7 +28,7 @@ function node(id: number, over: Partial<NodeSnapshot> = {}): NodeSnapshot {
     nodeId: id, deviceId: 'd' + id, name: `Node ${id}`, area: null, status: NodeStatus.Alive,
     statusLabel: 'alive', ready: true, isRouting: true, isListening: true, isLongRange: false,
     isController: id === 1, isSecure: true, securityClass: 'S2', manufacturer: null, model: null,
-    battery: null, firmware: null, stats: {} as never, entities: [],
+    battery: null, firmware: null, stats: { lastSeen: null } as never, entities: [],
     ...over,
   };
 }
@@ -35,7 +36,7 @@ const dead = (id: number, over: Partial<NodeSnapshot> = {}) =>
   node(id, { status: NodeStatus.Dead, ...over });
 
 const cfg = (over: Partial<AutoPingConfig> = {}): AutoPingConfig => ({
-  enabled: true, writeActions: true, afterMs: 10 * MIN, maxAttempts: 3, ...over,
+  enabled: true, writeActions: true, afterMs: 10 * MIN, maxAttempts: 3, staleMs: 0, ...over,
 });
 
 /** A mesh with `live` healthy listening nodes plus whatever else is passed. */
@@ -308,3 +309,94 @@ test('the runner announces a storm once, not on every tick', async () => {
   h.stop();
 });
 
+
+/* ── liveness probe: silence is not evidence of life ──────────────────── */
+
+const seen = (id: number, agoMs: number | null, over: Partial<NodeSnapshot> = {}) =>
+  node(id, { stats: { lastSeen: agoMs == null ? null : T - agoMs } as never, ...over });
+
+const STALE = 240 * MIN;
+const staleCfg = (over: Partial<AutoPingConfig> = {}) => cfg({ staleMs: STALE, ...over });
+
+test('probes a mains node that has been silent past the window', () => {
+  // Z-Wave marks a node Dead only when a SEND FAILS. A node nobody addresses is
+  // never proven alive — measured on the live mesh: 10 of 38 silent for 35.7h,
+  // every one reporting Alive.
+  const s = createAutoPingState();
+  const nodes = [node(1, { isController: true }), seen(50, 5 * 60 * MIN)];
+  const d = tick(s, nodes, T, { config: staleCfg() });
+  assert.deepEqual(d.stale, [50]);
+});
+
+test('a chatty node is never probed — the clock is per-node', () => {
+  // This is what makes the cadence self-balancing: a device that reports on its
+  // own keeps resetting its own last-contact time and costs nothing.
+  const s = createAutoPingState();
+  const nodes = [node(1, { isController: true }), seen(51, 30 * MIN)];
+  const d = tick(s, nodes, T, { config: staleCfg() });
+  assert.deepEqual(d.stale, [], 'a node heard from 30m ago is not stale at 240m');
+});
+
+test('a node never heard from at all is treated as maximally stale', () => {
+  const s = createAutoPingState();
+  const nodes = [node(1, { isController: true }), seen(52, null)];
+  const d = tick(s, nodes, T, { config: staleCfg() });
+  assert.deepEqual(d.stale, [52], 'no lastSeen is the strongest reason to ask');
+});
+
+test('at most ONE liveness probe per tick, stalest first', () => {
+  // 36 mains nodes coming due together would otherwise fire 36 probes in one
+  // second. The cap turns that into a trickle; ordering stops anyone starving.
+  const s = createAutoPingState();
+  const nodes = [
+    node(1, { isController: true }),
+    seen(60, 5 * 60 * MIN),
+    seen(61, 40 * 60 * MIN),   // stalest
+    seen(62, 9 * 60 * MIN),
+  ];
+  const d = tick(s, nodes, T, { config: staleCfg() });
+  assert.equal(d.stale.length, 1, 'never more than one liveness probe per tick');
+  assert.deepEqual(d.stale, [61], 'the stalest node goes first');
+});
+
+test('an unreachable node is not re-probed every tick', () => {
+  // THE flooding failure mode: a node that never answers never refreshes
+  // lastSeen, so it stays permanently "due" and would be probed on every tick
+  // forever.
+  const s = createAutoPingState();
+  const nodes = [node(1, { isController: true }), seen(70, 5 * 60 * MIN)];
+  assert.deepEqual(tick(s, nodes, T, { config: staleCfg() }).stale, [70]);
+  noteStale(s, 70, T);
+  assert.deepEqual(tick(s, nodes, T + 60 * MIN, { config: staleCfg() }).stale, [], 'inside the cooldown');
+  assert.deepEqual(tick(s, nodes, T + STALE + MIN, { config: staleCfg() }).stale, [70], 'one probe per window');
+});
+
+test('the liveness probe never touches sleeping or dead nodes', () => {
+  const s = createAutoPingState();
+  const nodes = [
+    node(1, { isController: true }),
+    seen(80, 50 * 60 * MIN, { isListening: false }),                  // battery
+    seen(81, 50 * 60 * MIN, { status: NodeStatus.Dead }),             // remediation owns it
+  ];
+  const d = tick(s, nodes, T, { config: staleCfg() });
+  assert.deepEqual(d.stale, [], 'battery sleeps by design; a Dead node belongs to the other path');
+});
+
+test('the liveness probe obeys every gate auto-ping obeys', () => {
+  const nodes = [node(1, { isController: true }), seen(90, 50 * 60 * MIN)];
+  for (const [label, over] of [
+    ['write actions off', { config: staleCfg({ writeActions: false }) }],
+    ['own switch off', { config: staleCfg({ enabled: false }) }],
+    ['boot window', { booting: true, config: staleCfg() }],
+    ['rebuilding', { controller: { isRebuildingRoutes: true } as unknown as ControllerSnapshot, config: staleCfg() }],
+  ] as const) {
+    const s = createAutoPingState();
+    assert.deepEqual(tick(s, nodes, T, over as never).stale, [], `must be suppressed: ${label}`);
+  }
+});
+
+test('staleMs = 0 disables the liveness probe entirely', () => {
+  const s = createAutoPingState();
+  const nodes = [node(1, { isController: true }), seen(95, 500 * 60 * MIN)];
+  assert.deepEqual(tick(s, nodes, T, { config: staleCfg({ staleMs: 0 }) }).stale, []);
+});
