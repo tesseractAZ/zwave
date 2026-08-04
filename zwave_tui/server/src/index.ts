@@ -126,6 +126,7 @@ async function main(): Promise<void> {
       ready: () => provider.ready(),
       ping: (n) => actions.ping(n),
       log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
+      log2: log,
       config: {
         enabled: config.autoPing.enabled,
         writeActions: config.writeActions,
