@@ -131,11 +131,15 @@ async function main(): Promise<void> {
         writeActions: config.writeActions,
         afterMs: config.autoPing.afterMs,
         maxAttempts: config.autoPing.maxAttempts,
+        staleMs: config.autoPing.staleMs,
       },
     });
     log(
       `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed ` +
-        `(max ${config.autoPing.maxAttempts}/outage, backoff 10/30/60m; suppressed on storm, rebuild and restart)`,
+        `(max ${config.autoPing.maxAttempts}/outage, backoff 10/30/60m; suppressed on storm, rebuild and restart)` +
+        (config.autoPing.staleMs > 0
+          ? `; liveness probe after ${Math.round(config.autoPing.staleMs / 60_000)}m of silence`
+          : '; liveness probe off'),
     );
   } else if (config.autoPing.enabled) {
     // Its own switch is on but the master gate is not. Say so, rather than

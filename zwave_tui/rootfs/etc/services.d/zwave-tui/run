@@ -44,6 +44,7 @@ else
 fi
 export AUTO_PING_AFTER_MS="$(( $(bashio::config 'auto_ping_after_min') * 60000 ))"
 export AUTO_PING_MAX_ATTEMPTS="$(bashio::config 'auto_ping_max_attempts')"
+export AUTO_PING_STALE_MS="$(( $(bashio::config 'auto_ping_stale_min') * 60000 ))"
 
 # ── Write-action safety gates ────────────────────────────────────────────────
 if bashio::config.true 'write_actions_enabled'; then

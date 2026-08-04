@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.31.0 — 2026-08-03
+
+**A node nobody talks to was never proven alive.**
+
+Z-Wave JS sets `Dead` REACTIVELY — only when a transmission to a node FAILS. It
+is not a timeout. A device nobody addresses produces no transmissions, therefore
+no failures, therefore reports Alive indefinitely: a mains outlet could be
+physically unplugged and still read "Alive" until something happened to reach it.
+v0.30.0's auto-ping only helps AFTER a node has been proven dead that way, so for
+a device nobody uses the trigger may simply never arrive.
+
+Measured on the live 39-node mesh, and this is what prompted the feature:
+
+    10 of 38 nodes silent for 35.7 HOURS — every one reporting Alive
+    (n17 n23 n24 n30 n31 n40 n44 n45 n49 n50, all mains, all status=4)
+
+Their `lastSeen` values cluster within TWO SECONDS of each other at
+2026-08-02T15:37 — a batch event (the last controller restart), after which none
+of them was ever heard from again.
+
+`auto_ping_stale_min` (default 240) closes it. Each mains node is probed that
+long after ITS OWN last contact, so the cadence is self-balancing: a device that
+reports on its own keeps resetting its clock and is never probed, while a silent
+one is checked every four hours. Silence becomes evidence — the node either
+answers (refreshing lastSeen, and its route/RSSI statistics with it) or the send
+fails and the driver marks it Dead, at which point v0.30.0's remediation path
+takes over with its own dwell, backoff and attempt cap.
+
+Guards, each tested and mutation-covered:
+
+  • ONE probe per tick, stalest first — 36 mains nodes coming due together would
+    otherwise fire 36 sends in a single second; ordering stops any node starving
+  • one probe per node per window: an unreachable node never refreshes lastSeen,
+    so without this it stays permanently "due" and would be re-probed on EVERY
+    tick, forever
+  • a node with no lastSeen at all is treated as maximally stale — never having
+    been heard from is the strongest reason to ask
+  • Dead nodes are skipped: they belong to the remediation path, and probing them
+    here would bypass its dwell, backoff and cap
+  • mains only, and the same storm / boot-window / rebuild / write-actions gates
+  • `auto_ping_stale_min: 0` disables it outright
+
 ## 0.30.0 — 2026-08-03
 
 **The engine acts for the first time — narrowly, and off by default.**
