@@ -506,3 +506,77 @@ test('rtt-degraded still fires for a node that talks less often than the dwell (
   assert.ok(out.some((s) => s.kind === 'rtt-degraded'),
     'a sparsely-reporting node with a sustained bad RTT never surfaced');
 });
+
+/* ── route-churn: a SymptomKind that existed but was never emitted ────────
+ *
+ * v0.29.6. `route-churn` had a full planner card (planner.ts) and outcomes
+ * handling since the planner was written, but NO detector ever produced it —
+ * `grep "kind: 'route-churn'"` over src/ returned 0 — so REMEDY could never
+ * surface it and the card was unreachable. The evidence had been collected the
+ * whole time: `dRouteChanges` is an event-accumulator drain on every sample,
+ * exactly like `dFlaps`.
+ */
+
+test('route-churn fires on ≥4 LWR route changes in the window', () => {
+  const nodes = [node(1), node(7)];
+  const inp = (now: number) =>
+    input({ nodes, recent: new Map([[7, window(now, 8, { dRouteChanges: 1 })]]), now });
+  const fired = settle(inp, new Map(), T, 6);
+  const rc = fired.find((s) => s.kind === 'route-churn');
+  assert.ok(rc, 'route-churn never fired despite sustained re-routing');
+  assert.equal(rc!.severity, 'warn');
+  assert.equal(rc!.basis, 'measured', 'route changes are counted events, not inferred');
+  assert.match(rc!.evidence[0].value, /in 10m/);
+});
+
+test('route-churn does NOT fire on normal healing (below the threshold)', () => {
+  // One to three re-routes IS the mesh working. Firing there would make every
+  // ordinary heal look like a fault.
+  //
+  // The fixture SLIDES with `now`: three changes always sitting in the last
+  // three minutes. That matters — a fixture pinned at T ages out of the recency
+  // window as settle() advances, so the RECENCY conjunct blocks it and the
+  // threshold is never the thing under test. (The mutation harness caught
+  // exactly that: `ROUTE_CHURN_WINDOW = 1` survived the pinned version.)
+  const nodes = [node(1), node(7)];
+  const inp = (now: number) =>
+    input({
+      nodes,
+      recent: new Map([[7, [
+        ev({ dRouteChanges: 1, t: now - 3 * MIN }),
+        ev({ dRouteChanges: 1, t: now - 2 * MIN }),
+        ev({ dRouteChanges: 1, t: now - 1 * MIN }),
+      ]]]),
+      now,
+    });
+  const fired = settle(inp, new Map(), T, 6);
+  assert.equal(fired.filter((s) => s.kind === 'route-churn').length, 0,
+    'sustained 3-in-window is below the threshold and must stay quiet');
+});
+
+test('route-churn never fires for a Long-Range node', () => {
+  // LR holds ONE direct link to the controller and has no mesh routes to churn.
+  // The planner card already says a report there is a data quirk — firing would
+  // make the screen argue with itself.
+  const nodes = [node(1), node(9, { isLongRange: true })];
+  const inp = (now: number) =>
+    input({ nodes, recent: new Map([[9, window(now, 8, { dRouteChanges: 1 })]]), now });
+  const fired = settle(inp, new Map(), T, 6);
+  assert.equal(fired.filter((s) => s.kind === 'route-churn').length, 0,
+    'a Long-Range node has no routes to churn');
+});
+
+test('route-churn de-asserts when the churn stops (recency conjunct)', () => {
+  // Changes inside the 10-min lookback but outside the 5-min recency slice must
+  // not keep an old burst asserted — the same rule dead-flap follows.
+  const nodes = [node(1), node(7)];
+  const stale = [
+    ...window(T, 12, { dRouteChanges: 0 }).slice(0, -3),
+    ev({ dRouteChanges: 3, t: T - 9 * MIN }),
+    ev({ dRouteChanges: 2, t: T - 8 * MIN }),
+  ];
+  const inp = (now: number) => input({ nodes, recent: new Map([[7, stale]]), now });
+  const fired = settle(inp, new Map(), T, 6);
+  assert.equal(fired.filter((s) => s.kind === 'route-churn').length, 0,
+    'a stale churn burst must not stay asserted');
+});

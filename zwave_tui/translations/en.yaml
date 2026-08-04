@@ -51,6 +51,26 @@ configuration:
       re-interview, rebuild routes, and remove a failed node. Off keeps the
       add-on a pure read-only monitor. It is safe to leave on: every command must
       still be armed by typing the word CONFIRM before it runs.
+  # ── Self-healing (auto-ping) ───────────────────────────────────────────────
+  auto_ping_enabled:
+    name: Safety · Auto-ping a node that goes offline
+    description: >-
+      OFF by default. When a MAINS-POWERED node has been Dead for the dwell
+      below, the engine pings it once to try to wake it. Sleeping and battery
+      devices are never touched — asleep is not dead, and a ping cannot reach
+      one before its own wakeup. Requires "Enable write actions". Suppressed
+      during a route rebuild, in the restart window, and whenever a quarter of
+      the mesh is down at once (that is a controller problem, not a device one).
+      Every attempt is recorded, so REMEDY shows whether it actually works.
+  auto_ping_after_min:
+    name: Safety · Auto-ping after (minutes offline)
+    description: >-
+      How long a node must be continuously Dead before the first auto-ping.
+  auto_ping_max_attempts:
+    name: Safety · Auto-ping attempts per outage
+    description: >-
+      Attempts per dead episode, spaced 10/30/60 minutes apart. After this the
+      engine stops and leaves the node to you. A recovery resets the count.
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled:
     name: Access · Enable telnet TUI

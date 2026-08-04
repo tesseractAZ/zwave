@@ -25,6 +25,7 @@ import { createAuthPolicy, describeTelnetAuth } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
 import { createActionRunner } from './zwave/zwaveActions';
+import { startAutoPing } from './zwave/autoPing';
 import { createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
 import { registerWsConsole } from './telnet/wsConsole';
 import { startTelnetServer } from './telnet/server';
@@ -113,6 +114,35 @@ async function main(): Promise<void> {
       ? 'write actions ENABLED (each requires a typed CONFIRM) — ping/refresh/re-interview/heal/rebuild/remove'
       : 'write actions disabled (read-only) — set write_actions_enabled to unlock',
   );
+
+  // 4c) Auto-ping — the ONE thing this engine does without a human pressing a
+  //     key. Off unless BOTH its own switch and write_actions_enabled are on;
+  //     see autoPing.ts for why ping specifically, and for every suppressor.
+  let autoPing: { stop: () => void } | null = null;
+  if (config.autoPing.enabled && config.writeActions) {
+    autoPing = startAutoPing({
+      nodes: () => provider.nodes(),
+      controller: () => provider.controller(),
+      ready: () => provider.ready(),
+      ping: (n) => actions.ping(n),
+      log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
+      config: {
+        enabled: config.autoPing.enabled,
+        writeActions: config.writeActions,
+        afterMs: config.autoPing.afterMs,
+        maxAttempts: config.autoPing.maxAttempts,
+      },
+    });
+    log(
+      `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed ` +
+        `(max ${config.autoPing.maxAttempts}/outage, backoff 10/30/60m; suppressed on storm, rebuild and restart)`,
+    );
+  } else if (config.autoPing.enabled) {
+    // Its own switch is on but the master gate is not. Say so, rather than
+    // leaving the operator to wonder why nothing ever happens.
+    log.warn('auto-ping is enabled but write_actions_enabled is OFF — it will not act');
+  }
+  void autoPing;
 
   // 5) Auth — the CORS allow-list + the /console/ws upgrade origin check.
   //    (The write-token gate this used to bootstrap was removed in v0.24.4:

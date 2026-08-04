@@ -34,6 +34,17 @@ else
   export TELNET_ENABLED=0
 fi
 
+# ── Self-healing (auto-ping) ────────────────────────────────────────────────
+# Same bool dance as every other flag: omitting the export makes the option DEAD
+# (the server would only ever see its code default, which is `false`).
+if bashio::config.true 'auto_ping_enabled'; then
+  export AUTO_PING_ENABLED=1
+else
+  export AUTO_PING_ENABLED=0
+fi
+export AUTO_PING_AFTER_MS="$(( $(bashio::config 'auto_ping_after_min') * 60000 ))"
+export AUTO_PING_MAX_ATTEMPTS="$(bashio::config 'auto_ping_max_attempts')"
+
 # ── Write-action safety gates ────────────────────────────────────────────────
 if bashio::config.true 'write_actions_enabled'; then
   export WRITE_ACTIONS_ENABLED=1

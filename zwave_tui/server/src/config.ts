@@ -127,6 +127,11 @@ export const config = {
    * Defaults OFF: v0.1 is a pure read-only monitor. Run script exports `1`/`0`.
    */
   writeActions: process.env.WRITE_ACTIONS_ENABLED === '1',
+  autoPing: {
+    enabled: process.env.AUTO_PING_ENABLED === '1',
+    afterMs: Number(process.env.AUTO_PING_AFTER_MS ?? 10 * 60_000),
+    maxAttempts: Number(process.env.AUTO_PING_MAX_ATTEMPTS ?? 3),
+  },
 
   /**
    * TUI login gate. Direct LAN access (telnet :2324, or :8788 hit directly)

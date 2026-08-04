@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.29.5"
+version: "0.30.0"
 slug: zwave_tui
 description: "Telnet control-room TUI for Z-Wave mesh/node health"
 url: https://github.com/tesseractAZ/zwave
@@ -73,6 +73,12 @@ options:
   # ── Display & safety ───────────────────────────────────────────────────────
   signal_display: margin
   write_actions_enabled: false
+  # ── Self-healing (auto-ping) ───────────────────────────────────────────────
+  # OFF by default. This is the ONLY thing the engine does without a human
+  # pressing a key, and it still obeys write_actions_enabled.
+  auto_ping_enabled: false
+  auto_ping_after_min: 10
+  auto_ping_max_attempts: 3
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled: true
   # ── Login gate (guards DIRECT/telnet; HA-sidebar access is already authed) ──
@@ -93,6 +99,9 @@ schema:
   # schema order, and matching the two keeps the file readable.
   signal_display: list(margin|dbm)
   write_actions_enabled: bool
+  auto_ping_enabled: bool
+  auto_ping_after_min: int(2,120)
+  auto_ping_max_attempts: int(1,10)
   telnet_enabled: bool
   auth_enabled: bool
   auth_require_on_ingress: bool

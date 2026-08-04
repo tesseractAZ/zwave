@@ -271,6 +271,60 @@ const MUTANTS = [
     repl: "  return bits.join(c.grey(' · ')) + c.grey('  —  advisory only; nothing is acted on');",
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
   /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
+  /* ── auto-ping: the engine's first autonomous write ─────────────────── */
+  { id: 'autoping-master-gate', file: 'src/zwave/autoPing.ts',
+    // Firing with write actions off would make the add-on's own read-only claim
+    // false — the worst kind of defect here.
+    find: "  if (!config.writeActions) return { ...base, suppressed: 'write-actions-off' };",
+    repl: '',
+    what: 'auto-ping obeys write_actions_enabled, not just its own switch' },
+  { id: 'autoping-asleep-guard', file: 'src/zwave/autoPing.ts',
+    // Dropping the listening test lets it probe sleeping battery devices, which
+    // cannot answer before their wakeup interval and lose charge failing.
+    find: '  return !n.isController && n.isListening === true;',
+    repl: '  return !n.isController;',
+    what: 'auto-ping never touches a sleeping or battery node' },
+  { id: 'autoping-storm-guard', file: 'src/zwave/autoPing.ts',
+    find: "  if (dead.length >= stormLimit) return { ...base, suppressed: 'storm' };",
+    repl: '',
+    what: 'a mesh-wide outage suppresses auto-ping instead of flooding the controller' },
+  { id: 'autoping-boot-window', file: 'src/zwave/autoPing.ts',
+    // Every node reads Dead until the first roster poll lands after a restart.
+    find: "  if (booting) return { ...base, suppressed: 'boot-window' };",
+    repl: '',
+    what: 'auto-ping stays quiet in the post-restart window' },
+  { id: 'autoping-dwell', file: 'src/zwave/autoPing.ts',
+    find: '    if (started == null || now - started < config.afterMs) continue;',
+    repl: '    if (started == null) continue;',
+    what: 'auto-ping waits its configured dwell before the first probe' },
+  { id: 'autoping-attempt-cap', file: 'src/zwave/autoPing.ts',
+    find: '    if (tries >= config.maxAttempts) continue;',
+    repl: '',
+    what: 'auto-ping stops at the attempt cap instead of retrying forever' },
+  { id: 'autoping-episode-reset', file: 'src/zwave/autoPing.ts',
+    // Without the clear, a node that recovers keeps its exhausted budget and is
+    // never helped again.
+    find: '      state.deadSince.delete(n.nodeId);\n      state.attempts.delete(n.nodeId);',
+    repl: '      state.deadSince.delete(n.nodeId);',
+    what: 'recovery clears the attempt budget so a later failure is helped' },
+  { id: 'autoping-storm-floor', file: 'src/zwave/autoPing.ts',
+    // Without the absolute floor, one dead node on a 4-node mesh reads as a
+    // storm and disables the feature where it is cheapest to act.
+    find: '  const stormLimit = Math.max(STORM_MIN_NODES, Math.ceil(listeningNodes.length * STORM_FRACTION));',
+    repl: '  const stormLimit = Math.ceil(listeningNodes.length * STORM_FRACTION);',
+    what: 'a tiny mesh uses the absolute storm floor, not the bare fraction' },
+  { id: 'route-churn-lr-guard', file: 'src/zwave/symptoms.ts',
+    // Long-Range holds ONE direct link and has no mesh routes to churn; the
+    // planner card says a report there is a data quirk. Without the guard the
+    // detector contradicts the card it feeds.
+    find: '    if (!node.isLongRange) {\n      const churn = windowRouteChanges(samples, now);',
+    repl: '    if (true) {\n      const churn = windowRouteChanges(samples, now);',
+    what: 'route-churn never fires for a Long-Range node' },
+  { id: 'route-churn-threshold', file: 'src/zwave/symptoms.ts',
+    // Dropping the threshold to 1 makes ordinary mesh healing look like a fault.
+    find: 'const ROUTE_CHURN_WINDOW = 4; // ≥4 LWR changes in the window',
+    repl: 'const ROUTE_CHURN_WINDOW = 1; // ≥4 LWR changes in the window',
+    what: 'route-churn ignores ordinary re-routing below its threshold' },
   { id: 'ingress-open-redirect', file: 'src/auth.ts',
     // Drops the protocol-relative guard: `//evil.com` then reaches Location and
     // the browser leaves for another origin.
