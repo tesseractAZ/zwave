@@ -472,3 +472,26 @@ test('a steady state is still re-stated on the heartbeat', async () => {
   assert.equal(info.length, first + 1, 'the heartbeat must re-state an unchanged decision');
   h.stop();
 });
+
+test('an autonomous action is visible in the SERVER log, not only the event ring', async () => {
+  // The bug this pins: `log` writes to the in-memory event ring behind the login
+  // gate, while operators grep the container log. Auto-ping used only the ring,
+  // so 34 real probes were invisible from outside and the feature was diagnosed
+  // as a no-op — the evidence existed, in a place the diagnosis never looked.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const ring: string[] = [];
+  const server: string[] = [];
+  const nodes = [node(1, { isController: true }), seen(77, 500 * MIN)];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => ring.push(text),
+    log2: Object.assign((m: string) => server.push(m), { debug: () => {} }),
+    config: staleCfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN;
+  h.tick();
+  assert.ok(ring.some((m) => /liveness probe/.test(m)), 'must reach the event ring');
+  assert.ok(server.some((m) => /liveness probe/.test(m)), 'must ALSO reach the server log');
+  h.stop();
+});
