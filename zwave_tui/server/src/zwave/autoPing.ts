@@ -302,8 +302,18 @@ export interface AutoPingRunnerOptions {
   ping: (nodeId: number) => Promise<unknown>;
   /** Writes into the event ring so an autonomous action is never invisible. */
   log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string) => void;
-  /** Optional server logger — carries the per-tick trace at debug level. */
-  log2?: { debug?: (msg: string) => void };
+  /**
+   * Optional SERVER logger (stdout / add-on log), distinct from `log` above.
+   *
+   * These are two different destinations and conflating them cost real time:
+   * `log` writes to the in-memory event ring behind the login gate (the TUI Log
+   * screen), while this writes to the container log an operator actually greps.
+   * Auto-ping originally used only the ring, so every probe it fired was
+   * invisible from outside — the feature was diagnosed as a no-op purely because
+   * the evidence was in a place the diagnosis never looked. An autonomous action
+   * must be visible in BOTH.
+   */
+  log2?: ((msg: string) => void) & { debug?: (msg: string) => void };
   config: AutoPingConfig;
   tickMs?: number;
   now?: () => number;
@@ -355,6 +365,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
     const changed = trace !== lastTrace;
     if (changed || t - lastTraceAt >= TRACE_HEARTBEAT_MS) {
       o.log('info', null, trace);
+      o.log2?.(trace);
       lastTrace = trace;
       lastTraceAt = t;
     }
@@ -371,25 +382,30 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
 
     for (const nodeId of decision.stale) {
       noteStale(state, nodeId, t);
-      o.log('info', nodeId,
-        `auto-ping: node ${nodeId} has not been heard from in ` +
-        `${Math.round(o.config.staleMs / 60_000)}m — liveness probe`);
+      const msg = `auto-ping: node ${nodeId} has not been heard from in ` +
+        `${Math.round(o.config.staleMs / 60_000)}m — liveness probe`;
+      o.log('info', nodeId, msg);
+      o.log2?.(msg);
       void o.ping(nodeId).catch(() => {
         // A failed liveness probe is the POINT: the driver marks the node Dead
         // and the remediation path takes over with its own dwell and backoff.
-        o.log('warn', nodeId, `auto-ping: node ${nodeId} did not answer its liveness probe`);
+        const m = `auto-ping: node ${nodeId} did not answer its liveness probe`;
+        o.log('warn', nodeId, m); o.log2?.(m);
       });
     }
 
     for (const nodeId of decision.ping) {
       const attempt = (state.attempts.get(nodeId) ?? 0) + 1;
       noteAttempt(state, nodeId, t);
-      o.log('info', nodeId,
-        `auto-ping: node ${nodeId} has been Dead past the dwell — probing (attempt ${attempt}/${o.config.maxAttempts})`);
+      const msg = `auto-ping: node ${nodeId} has been Dead past the dwell — ` +
+        `probing (attempt ${attempt}/${o.config.maxAttempts})`;
+      o.log('info', nodeId, msg);
+      o.log2?.(msg);
       // Fire and forget: the ping runner records its own outcome into the M5
       // ledger, and a failed probe is information, not an error to escalate.
       void o.ping(nodeId).catch(() => {
-        o.log('warn', nodeId, `auto-ping: node ${nodeId} did not answer the probe`);
+        const m = `auto-ping: node ${nodeId} did not answer the probe`;
+        o.log('warn', nodeId, m); o.log2?.(m);
       });
     }
   };

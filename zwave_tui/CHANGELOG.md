@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.31.2 — 2026-08-04
+
+**Auto-ping was working the whole time. Its evidence was in the wrong place.**
+
+v0.31.1 shipped a decision trace on the belief that auto-ping was a no-op. It was
+not. It had been probing correctly since it was enabled:
+
+    34 of 36 ping buttons pressed, at exactly one-minute intervals, all at :19s
+    — the one-per-tick rate limit and tick offset, behaving as designed
+
+And it worked. Ten nodes that had been silent for 35.7 HOURS were probed and
+ANSWERED; their driver `lastSeen` now carries the probe timestamps
+(n17 20:24:19, n24 20:25:19, n23 20:26:19, n49 20:28:19 — consecutive minutes).
+The operator's original premise — that a quiet node comes back when pinged — is
+confirmed by data.
+
+The defect was observability, and it is real. `logAction()` writes ONLY to the
+in-memory event ring behind the login gate (the TUI Log screen); it never touches
+stdout. Auto-ping logged exclusively there, so every probe it fired was invisible
+to anyone reading the add-on log — which is where an operator looks, and where
+the diagnosis looked. The feature was declared broken because its evidence sat
+somewhere the investigation never went.
+
+Every autonomous action and every decision trace now goes to BOTH: the event ring
+for the Log screen, and the server log for `ha addons logs`. A mutant pins it,
+because ring-only logging is precisely the state that produced a confident wrong
+conclusion.
+
+Three separate measurement errors this session reached the same shape — a query
+truncated by recorder retention read as "no dead episodes", a counter comparison
+over an idle mesh read as "inconclusive", and a log grep in the wrong stream read
+as "zero probes". In each case the system was fine and the instrument was wrong.
+
 ## 0.31.1 — 2026-08-04
 
 **The auto-ping runner now says why it did nothing.**

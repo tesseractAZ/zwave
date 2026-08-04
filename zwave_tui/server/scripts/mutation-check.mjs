@@ -272,6 +272,13 @@ const MUTANTS = [
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
   /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
   /* ── auto-ping: the engine's first autonomous write ─────────────────── */
+  { id: 'autoping-stdout', file: 'src/zwave/autoPing.ts',
+    // Reverts to ring-only logging — the state in which 34 real probes were
+    // invisible to anyone reading the add-on log, and the feature was diagnosed
+    // as a no-op because the evidence sat behind the login gate.
+    find: '      o.log(\'info\', nodeId, msg);\n      o.log2?.(msg);',
+    repl: '      o.log(\'info\', nodeId, msg);',
+    what: 'an autonomous action reaches the SERVER log, not only the event ring' },
   { id: 'autoping-trace', file: 'src/zwave/autoPing.ts',
     // Reverts to the state the feature was FOUND in: enabled, healthy, and
     // logging nothing — so "nothing to do" and "broken" were byte-identical.
