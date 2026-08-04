@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.30.0 — 2026-08-03
+
+**The engine acts for the first time — narrowly, and off by default.**
+
+Everything this engine did until now was advisory: detect, explain, recommend,
+and a human presses the key. `auto_ping_enabled` breaks that rule on purpose and
+in exactly one place, so the rule stays meaningful everywhere else.
+
+Ping is the right and only candidate: it is already the one action the TUI runs
+WITHOUT a typed CONFIRM, because it is idempotent and has nothing to undo. A ping
+to a live node is a no-op; to a dead one it is a probe. Nothing here can remove a
+node, rewrite a route, or change a device's configuration.
+
+**The 10-minute dwell is measured, not guessed.** Six dead episodes on the live
+mesh across three days:
+
+    West Closet Motion      0.8 min  -> self-recovered
+    Hallway Closet Motion   1.5 min  -> self-recovered
+    Dining Room Lamp        5.0 min  -> self-recovered
+    Garage Workroom         5.1 min  -> self-recovered
+    Garage Workroom       361.4 min  -> cleared by hand
+    Hallway Closet Motion 531.4 min  -> cleared by hand
+
+The distribution has a clean gap: self-healing finishes inside ~5 minutes, while
+a stuck node runs SIX TO NINE HOURS. A 10-minute dwell sits in that gap — long
+enough never to interrupt the mesh healing itself, short enough to turn a
+six-hour outage into a ten-minute one. All four affected nodes are mains-powered
+and expose a working ping button, so all four would have been eligible.
+
+That evidence was nearly missed. A 14-day history query returned almost nothing
+and was reported as "this mesh never fails" — but the recorder silently DEGRADES
+a query whose start predates retention, returning one synthesized row per entity
+instead of an error. The tell is cheap: a SHORTER window returning MORE rows
+means the longer one is lying (3 days = 534 rows; 7 days = 153).
+
+Whether a ping actually clears those long outages remains unproven, so the
+feature instruments itself: every attempt lands in the M5 ledger against the
+node's open episode, and `efficacyFor('dead-flap', 'ping')` turns "usually wakes
+them up" into a measured recovery rate on REMEDY. If that rate comes back poor,
+the honest answer is to switch this off, and the data will say so.
+
+Gates, every one of them tested and mutation-covered:
+
+  • `auto_ping_enabled` — OFF by default
+  • obeys `write_actions_enabled` even when its own switch is on: auto-ping is a
+    write, and a read-only add-on that pings would be lying
+  • MAINS-POWERED nodes only. ASLEEP IS NOT DEAD — battery and FLiRS devices
+    sleep by design and answer on their own wakeup; a ping cannot reach one
+    before then and spends charge to fail. `isListening === null` means "not
+    interviewed", which is not a licence to probe on an assumption
+  • 10-minute dwell, then 10/30/60-minute backoff, capped at 3 per outage
+  • STORM GUARD: a quarter of the mesh Dead at once is a controller wedge or a
+    driver restart, not per-device failure — probing 20 nodes into a struggling
+    controller only adds traffic. Absolute floor of 4, so 1-of-4 on a small mesh
+    is not a "storm"
+  • suppressed in the restart window and while routes are rebuilding
+  • recovery clears the attempt budget, so a device that fails again next month
+    is helped again rather than inheriting an exhausted one
+
+**Also: `route-churn` finally has a detector.** The SymptomKind, its planner card
+and its outcomes handling have existed since the planner was written, but nothing
+ever emitted it — `grep "kind: 'route-churn'"` returned 0 — so REMEDY could never
+surface route churn and the card was unreachable. The evidence was being
+collected the whole time: `dRouteChanges` is an event-accumulator drain on every
+sample, exactly like `dFlaps`. Fires at ≥4 LWR changes in 10m with the same dwell
+and recency conjunct dead-flap uses, and never for Long-Range nodes — they hold
+one direct link with no routes to churn, which the planner card already says.
+
+### What the harness caught (all self-inflicted)
+
+An off-by-one against this file's own docstring: `BACKOFF_MS[tries]` made the
+first gap 30 minutes while the ladder documented 10/30/60.
+
+The sleeping-node guard — the most safety-critical one — was **unprotected**, and
+it took three rounds to make it testable. The check lived in an `isEligible()`
+helper, in the decision filter, AND in `trackEpisodes`; each was individually
+sufficient, so removing any one changed nothing observable and no test could pin
+it. Duplicated safety checks are not defence in depth: they are three places to
+believe a rule is enforced while none of them provably is. Collapsed to one
+`isPingCandidate` predicate used by both call sites.
+
+And the first runner test asserted that nothing was pinged after stopping the
+handle before its timer could fire — true, and proof of nothing. The runner now
+exposes `tick()` so a test drives it deterministically.
+
 ## 0.29.5 — 2026-08-03
 
 **Security: `fast-uri` host confusion (2x HIGH, GHSA-7p8r-x3mc-p8w7).**

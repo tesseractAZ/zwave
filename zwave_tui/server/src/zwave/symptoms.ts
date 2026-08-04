@@ -99,6 +99,11 @@ const CHRONIC_DAYS_MS = 2 * 24 * 60_000 * 60; // 2 days sustained → chronic
 const RTT_Z = 4; // z-score over route-stratified baseline
 const WEAK_MARGIN_DB = 7; // direct-node weak-signal margin
 const FLAPS_WINDOW = 3; // ≥3 Alive↔Dead transitions in the window
+// Route churn: the mesh re-deciding how to reach a node. A single change is
+// normal (that IS the mesh healing); repeated changes inside one window mean it
+// cannot settle. Set above FLAPS_WINDOW because a route change is a cheaper,
+// more common event than a Dead transition — 2 would fire on healthy re-routing.
+const ROUTE_CHURN_WINDOW = 4; // ≥4 LWR changes in the window
 const S2_WINDOW_MS = 30 * 60_000; // S2 SPAN-resync lookback (sparser than counters)
 const S2_ABS = 12; // resyncs in the window before it is a symptom (occasional resync is normal S2)
 const S2_WARN_MULT = 3; // 3× the threshold escalates watch → warn
@@ -189,6 +194,14 @@ function windowFlaps(samples: EvidenceSample[], now: number, windowMs = WINDOW_M
   let f = 0;
   for (const s of samples) if (now - s.t <= windowMs) f += s.dFlaps;
   return f;
+}
+
+/** Windowed LWR route-change count — the `dRouteChanges` event-accumulator
+ *  drain, summed the same way windowFlaps sums `dFlaps`. */
+function windowRouteChanges(samples: EvidenceSample[], now: number, windowMs = WINDOW_MS): number {
+  let r = 0;
+  for (const s of samples) if (now - s.t <= windowMs) r += s.dRouteChanges;
+  return r;
 }
 
 /** Windowed S2 SPAN-resync count. `null` samples mean the log lane was NOT
@@ -312,6 +325,33 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
     }
 
     // s2-desync — S2 SPAN-resync storm (v0.26). Nonce desync surfaces ONLY in
+    // route-churn — the mesh cannot settle on a path to this node.
+    //
+    // v0.29.6: this SymptomKind has existed since the planner was written, with
+    // a full remediation card and outcomes handling — but nothing ever emitted
+    // it, so the card was unreachable and REMEDY could never surface churn. The
+    // evidence was already being collected the whole time: `dRouteChanges` is an
+    // event-accumulator drain on every sample, exactly like `dFlaps`.
+    //
+    // Long-Range nodes are EXCLUDED. They hold one direct link to the controller
+    // and have no mesh routes to churn, so a change there is a data quirk — the
+    // planner card already says so, and firing on it would make the screen argue
+    // with itself.
+    if (!node.isLongRange) {
+      const churn = windowRouteChanges(samples, now);
+      const b = churn >= ROUTE_CHURN_WINDOW && hadRecent(samples, now, DWELL_MS, (x) => x.dRouteChanges);
+      markDegrading(id, b);
+      const since = dwell(state, key(id, 'route-churn'), b, now);
+      if (since != null) {
+        breaching = true;
+        out.push({
+          kind: 'route-churn', nodeId: id, severity: 'warn', sinceMs: since, basis: 'measured',
+          evidence: [{ label: 'LWR route changes', value: `${churn} in 10m` }],
+          narrative: `${node.name} keeps being re-routed — the mesh cannot settle on a stable path. Usually one intermediate repeater is marginal, or there is intermittent interference on that path. A rebuild re-shuffles the same unstable links and the churn returns.`,
+        });
+      }
+    }
+
     // driver log events (no statistics counter moves), fed via the driver-ws
     // log listener into the same event-accumulator discipline as flaps. An
     // occasional resync is normal S2 behaviour after a missed frame; a storm
