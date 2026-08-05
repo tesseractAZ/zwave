@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createEvidenceStore, COARSE_BUCKET_MS, type EvidenceStoreOptions } from '../src/zwave/evidenceStore';
-import { NodeStatus, type NodeStats } from '../src/types';
+import { createEvidenceStore, COARSE_BUCKET_MS, routeKeyOfLwr, isRouteChange, type EvidenceStoreOptions } from '../src/zwave/evidenceStore';
+import { NodeStatus, type NodeStats, type RouteStat } from '../src/types';
 
 function freshPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'zwave-ev-'));
@@ -533,4 +533,64 @@ test('reset() drops rings AND counter baselines (post-reset first sample re-base
   assert.equal(s.all().size, 0);
   const post = s.record(6, stats({ commandsTX: 200, timeoutResponse: 12 }), NodeStatus.Alive, FRESH, FIXED + 2 * TICK);
   assert.equal(post.dTx, null, 'baselines cleared — no bogus delta leaks across the reset');
+});
+
+/* ── route identity: unknown is not a route ───────────────────────────────
+ *
+ * These pin the fix for a FALSE-POSITIVE engine, not a dead detector. A second
+ * copy of the route-key function in zwaveData collapsed "no LWR data" and
+ * "direct" to the same key, so a routed node whose `lwr` blinked scored two
+ * route changes — one for the disappearance, one for the return — without the
+ * mesh re-routing anything. route-churn fires at four, so two driver hiccups
+ * could have lit up every routed node at once with a fabricated symptom.
+ */
+
+const lwr = (...repeaters: number[]): RouteStat => ({
+  repeaters, protocolDataRate: 3, rssi: -60, repeaterRSSI: [], routeFailedBetween: null,
+});
+
+test('routeKeyOfLwr: direct and unknown are DIFFERENT things', () => {
+  // The whole defect in one assertion: these two must never be equal.
+  assert.notEqual(routeKeyOfLwr(lwr()), routeKeyOfLwr(null));
+  assert.equal(routeKeyOfLwr(lwr()), 'direct', 'a direct link is a known fact about the mesh');
+  assert.equal(routeKeyOfLwr(null), null, 'no lwr is a fact about our knowledge, not the mesh');
+  assert.equal(routeKeyOfLwr(undefined), null);
+});
+
+test('routeKeyOfLwr: the repeater chain is what identifies a route', () => {
+  assert.equal(routeKeyOfLwr(lwr(3, 7)), routeKeyOfLwr(lwr(3, 7)), 'same chain, same key');
+  assert.notEqual(routeKeyOfLwr(lwr(3, 7)), routeKeyOfLwr(lwr(7, 3)), 'order is part of the path');
+  assert.notEqual(routeKeyOfLwr(lwr(3, 7)), routeKeyOfLwr(lwr(3)), 'a dropped hop is a new route');
+});
+
+test('isRouteChange: counts a real re-route', () => {
+  assert.equal(isRouteChange(lwr(), lwr(3)), true, 'direct -> via a repeater');
+  assert.equal(isRouteChange(lwr(3), lwr()), true, 'via a repeater -> direct');
+  assert.equal(isRouteChange(lwr(3, 7), lwr(4, 7)), true, 'a different chain');
+});
+
+test('isRouteChange: an unchanged route is not a change', () => {
+  assert.equal(isRouteChange(lwr(3, 7), lwr(3, 7)), false);
+  assert.equal(isRouteChange(lwr(), lwr()), false, 'direct stayed direct');
+});
+
+test('isRouteChange: LOSING SIGHT of a route is not a re-route', () => {
+  // The bug. Both of these scored 1 before the fix, so a single blink of the
+  // driver`s lwr field scored 2 — half of route-churn`s threshold, per node,
+  // for a mesh that never moved a single packet onto a different path.
+  assert.equal(isRouteChange(lwr(3, 7), null), false, 'the route data vanished');
+  assert.equal(isRouteChange(null, lwr(3, 7)), false, 'the route data came back');
+  assert.equal(isRouteChange(lwr(), null), false, 'direct -> unknown');
+  assert.equal(isRouteChange(null, lwr()), false, 'unknown -> direct');
+});
+
+test('isRouteChange: two unknowns are not a change either', () => {
+  assert.equal(isRouteChange(null, null), false);
+});
+
+test('isRouteChange: the first statistics event has nothing to compare against', () => {
+  // `prev` is undefined until a node has reported twice; that must not read as
+  // a route change, or every node would score one at startup.
+  assert.equal(isRouteChange(undefined, lwr(3)), false);
+  assert.equal(isRouteChange(undefined, lwr()), false);
 });

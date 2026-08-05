@@ -59,6 +59,8 @@ export interface WindowMetrics {
   flaps: number; // Σ dFlaps (Alive↔Dead transitions) — dead-flap recovery
   s2: number; // Σ dS2Resync over samples where the log lane WAS listening
   s2Known: number; // COUNT of those samples — the s2 branch's own evidence floor
+  routeChanges: number; // Σ dRouteChanges (LWR re-routes) — route-churn recovery
+  routeKnown: number; // COUNT of samples whose route was VISIBLE — the route branch's evidence floor
   rssiMedian: number | null; // median of FRESH rssi readings — weak-signal recovery
   rssiN: number; // COUNT of non-null fresh rssi readings behind rssiMedian (its evidence floor)
   rttMedian: number | null; // median of FRESH rtt readings — rtt-degraded recovery
@@ -153,6 +155,7 @@ function median(vals: number[]): number | null {
  *  information); flaps are event-driven counts; rateKbps is the worst seen. */
 export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetrics {
   let tx = 0, rx = 0, timeouts = 0, flaps = 0, s2 = 0, s2Known = 0, n = 0, freshN = 0;
+  let routeChanges = 0, routeKnown = 0;
   const rssis: number[] = [], rtts: number[] = [];
   let rateKbpsMin: number | null = null;
   for (const s of samples) {
@@ -165,6 +168,15 @@ export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetri
     // only listening samples, and count HOW MANY — the s2 verdict needs its
     // own liveness evidence, not the HA-stats freshN of a different transport.
     if (s.dS2Resync != null) { s2 += s.dS2Resync; s2Known += 1; }
+    // Route churn needs the SAME visibility discipline as the S2 lane, for a
+    // reason created by the route-key fix itself: a node whose `lwr` goes dark
+    // now (correctly) scores ZERO route changes, because a route we cannot see
+    // has not moved. Counting only the changes would make that silence
+    // indistinguishable from a settled path, and the after-window of a blinded
+    // node would score as a cure. `routeKnown` is the count of samples where a
+    // route was actually on record.
+    if (typeof s.dRouteChanges === 'number') routeChanges += s.dRouteChanges;
+    if (s.routeKey != null) routeKnown += 1;
     // rssi/rtt/rateKbps are re-sampled from the driver's cached stats and carry
     // NEW information ONLY when the sample is fresh — a re-read of the same cached
     // value is not an observation (evidenceStore: "route fields meaningful ONLY
@@ -180,7 +192,7 @@ export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetri
   return {
     samples: n, freshN,
     tx, rx, timeouts, rate: tx >= minTx ? timeouts / tx : null,
-    flaps, s2, s2Known,
+    flaps, s2, s2Known, routeChanges, routeKnown,
     rssiMedian: median(rssis), rssiN: rssis.length,
     rttMedian: median(rtts), rttN: rtts.length,
     rateKbpsMin,
@@ -213,7 +225,7 @@ function comparable(a: WindowMetrics, b: WindowMetrics): boolean {
 // a different scale. Scoring every episode by the timeout rate (the original M5
 // behaviour) meant non-timeout kinds could never register improvement. Each kind
 // is mapped to the signal its recovery actually moves.
-type RecoveryMetric = 'timeout' | 'flap' | 'rssi' | 'rtt' | 'rate' | 's2' | 'none';
+type RecoveryMetric = 'timeout' | 'flap' | 'rssi' | 'rtt' | 'rate' | 's2' | 'route' | 'none';
 
 function metricOf(kind: SymptomKind): RecoveryMetric {
   switch (kind) {
@@ -231,10 +243,19 @@ function metricOf(kind: SymptomKind): RecoveryMetric {
       return 'rtt'; // round-trip time dropping
     case 'rate-fallback':
       return 'rate'; // negotiated rate back to 100k
+    case 'route-churn':
+      return 'route'; // LWR re-routes subsiding
     default:
-      // chatty-device, route-churn, ghost-suspect, controller-degraded,
-      // edge-cluster, mesh-interference: not scorable by a single per-node
-      // recovery window (multi-node or mesh-scoped) → always unverifiable.
+      // chatty-device, ghost-suspect, controller-degraded, edge-cluster,
+      // mesh-interference: not scorable by a single per-node recovery window
+      // (multi-node or mesh-scoped) → always unverifiable.
+      //
+      // route-churn USED to sit in this list under that same justification, and
+      // the justification was simply wrong for it: it is emitted per node, with
+      // a nodeId, backed by a per-node event accumulator — structurally
+      // identical to s2-desync, which was always scored. Its remedies being
+      // physical is no reason to refuse to measure them; weak-signal and
+      // s2-desync are physical too and are scored on their own signal.
       return 'none';
   }
 }
@@ -289,6 +310,19 @@ function scoreRecovery(m: RecoveryMetric, before: WindowMetrics, after: WindowMe
       if (after.freshN < MIN_LIVE) return 'unverifiable';
       if (after.s2 > before.s2) return 'worse';
       return after.s2 === 0 ? 'improved' : 'no-change';
+    }
+    case 'route': {
+      // Same discipline as 's2', and for the same reason. Re-routes are event
+      // drains, so the before-window needs only prior evidence (≥1 change) —
+      // but BOTH windows must also prove the route was VISIBLE, or a node whose
+      // `lwr` went dark scores a run of zeros and reads as settled. And the
+      // after-window must prove the node is still alive: a node that stopped
+      // talking altogether cannot re-route, and that is not a cure either.
+      if (before.routeChanges < 1 || before.routeKnown < 1) return 'unverifiable';
+      if (after.routeKnown < MIN_LIVE) return 'unverifiable'; // route invisible ⇒ unknown, never "improved"
+      if (after.freshN < MIN_LIVE) return 'unverifiable';
+      if (after.routeChanges > before.routeChanges) return 'worse';
+      return after.routeChanges === 0 ? 'improved' : 'no-change';
     }
     case 'rssi': {
       if (before.rssiMedian == null || after.rssiMedian == null || before.rssiN < MIN_OBS || after.rssiN < MIN_OBS) return 'unverifiable';

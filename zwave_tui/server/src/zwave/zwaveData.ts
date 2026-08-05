@@ -57,6 +57,7 @@ import {
   type ControllerSample,
   type RouteFailureEvent,
   type NodeCoverage,
+  isRouteChange,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, type BaselineStore } from './baselines';
@@ -2170,7 +2171,13 @@ class ZwaveDataImpl implements ZwaveData {
     this.histDirty = true;
     // Log a route change (repeater chain differs) so the mesh's re-routing is
     // visible — and count it into the evidence accumulator (route churn).
-    if (prev && routeKey(prev.lwr) !== routeKey(stats.lwr)) {
+    //
+    // BOTH sides must be KNOWN — see `isRouteChange`. The driver may report
+    // statistics with no `lwr` at all, and a route we cannot see has not moved;
+    // we have merely stopped watching it. Counting the disappearance and the
+    // reappearance would score two changes for zero re-routing, and route-churn
+    // fires at four.
+    if (isRouteChange(prev?.lwr, stats.lwr)) {
       this.pushEvent('net', 'info', 'route', nodeId, `route → ${fmtRoute(stats.lwr)}`);
       this.routeChangeAccum.set(nodeId, (this.routeChangeAccum.get(nodeId) ?? 0) + 1);
     }
@@ -2573,10 +2580,9 @@ export function mapConfigParams(raw: Record<string, RawConfigParam> | null | und
   return params;
 }
 
-/** Stable key of a route's repeater chain, for change detection. */
-function routeKey(r: RouteStat | null): string {
-  return r ? r.repeaters.join('>') : '';
-}
+// Route-change detection uses the shared `routeKeyOfLwr` (evidenceStore) — the
+// local copy that lived here collapsed "no LWR data" and "direct" to the same
+// key, so a blinking `lwr` scored phantom route changes.
 /** Human route summary for the log ("direct" or "3→7→…"). */
 function fmtRoute(r: RouteStat | null): string {
   if (!r) return 'unknown';

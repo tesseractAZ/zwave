@@ -51,7 +51,7 @@
 
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { uptime as osUptime } from 'node:os';
-import { NodeStatus, type NodeStats, type ControllerSnapshot } from '../types';
+import { NodeStatus, type NodeStats, type RouteStat, type ControllerSnapshot } from '../types';
 
 /** The controller serial-link counters (nullable on the snapshot; non-null here). */
 type CtrlStats = NonNullable<ControllerSnapshot['statistics']>;
@@ -375,11 +375,51 @@ function cleanRssi(v: number | null | undefined): number | null {
   return v;
 }
 
-function routeKeyOf(stats: NodeStats): string | null {
-  const lwr = stats.lwr;
+/**
+ * The ONE definition of "which path is this node reached by".
+ *
+ * NULL MEANS UNKNOWN, AND UNKNOWN IS NOT A ROUTE. The driver may report node
+ * statistics with no `lwr` at all — after a re-interview, on a partial stats
+ * event, or simply before the first successful transmission. That is LOST
+ * VISIBILITY, not a change of path, and the distinction is the whole point of
+ * returning `null` rather than a string: `'direct'` is a fact about the mesh,
+ * `null` is a fact about our knowledge of it. This is the same discipline as
+ * `dS2Resync: null` ("the log lane was not listening") versus `0` ("it was
+ * listening and saw nothing").
+ *
+ * It lives here, exported, because a SECOND copy in zwaveData used to collapse
+ * both cases to `''`. Under that copy a routed node whose `lwr` blinked scored
+ * TWO route changes — one when the data vanished and one when it returned —
+ * and route-churn fires at four. Two driver hiccups could therefore light up
+ * every routed node at once with an entirely fabricated symptom. Two
+ * definitions of one concept is a bug with a delay on it.
+ */
+export function routeKeyOfLwr(lwr: RouteStat | null | undefined): string | null {
   if (!lwr) return null;
   const reps = Array.isArray(lwr.repeaters) ? lwr.repeaters : [];
   return reps.length === 0 ? 'direct' : 'r' + reps.join('-');
+}
+
+/**
+ * Did the mesh actually re-route this node between two statistics events?
+ *
+ * A pure predicate rather than an inline comparison at the call site, because
+ * the call site is a private method on the live data layer and a guard nothing
+ * can reach is a guard nothing can prove. The rule it encodes — a change is
+ * only a change when BOTH endpoints are known — is the entire fix, so it gets
+ * to be a function with tests rather than two `!= null` clauses in a condition.
+ */
+export function isRouteChange(
+  before: RouteStat | null | undefined,
+  after: RouteStat | null | undefined,
+): boolean {
+  const a = routeKeyOfLwr(before);
+  const b = routeKeyOfLwr(after);
+  return a != null && b != null && a !== b;
+}
+
+function routeKeyOf(stats: NodeStats): string | null {
+  return routeKeyOfLwr(stats.lwr);
 }
 
 function numOrNull(v: unknown): number | null {

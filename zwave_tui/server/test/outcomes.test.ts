@@ -11,6 +11,7 @@ import type { SymptomKind } from '../src/zwave/symptoms';
 // default to "no data" so the timeout-metric tests are unaffected.
 const W = (tx: number, timeouts: number, rx = tx, over: Partial<WindowMetrics> = {}): WindowMetrics =>
   ({ tx, rx, timeouts, rate: tx >= 5 ? timeouts / tx : null, samples: 6, freshN: 6, flaps: 0, s2: 0, s2Known: 6,
+     routeChanges: 0, routeKnown: 6,
      rssiMedian: null, rssiN: 0, rttMedian: null, rttN: 0, rateKbpsMin: null, ...over });
 // Windows that carry a specific non-timeout recovery signal, with enough observations
 // of THAT signal to clear its evidence floor (MIN_OBS / MIN_LIVE = 3).
@@ -551,4 +552,67 @@ test('save() is dirty-gated — an idle store does not rewrite the file (v0.26 r
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/* ── route-churn is scorable, and blindness is never a cure ───────────────
+ *
+ * route-churn used to map to the 'none' metric — permanently unverifiable —
+ * justified in a comment as "multi-node or mesh-scoped". That was simply wrong
+ * for it: it is emitted per node, with a nodeId, off a per-node event
+ * accumulator, structurally identical to s2-desync which was always scored.
+ */
+
+test('route-churn now scores on its own signal instead of being unverifiable', () => {
+  const o = createOutcomeStore();
+  const before = W(50, 0, 50, { routeChanges: 9, routeKnown: 6, freshN: 6 });
+  o.open(21, 'route-churn', 1000, before);
+  const settled = o.resolve(21, 'route-churn', 2000, W(50, 0, 50, { routeChanges: 0, routeKnown: 6, freshN: 6 }));
+  assert.equal(settled?.verdict, 'improved', 'a node that stopped re-routing has measurably recovered');
+});
+
+test('route-churn: a route we can no longer SEE is not a settled route', () => {
+  // The trap the route-key fix creates. Before that fix a blinded node scored
+  // phantom CHANGES; after it, a blinded node scores a clean run of ZEROS —
+  // which would read as a cure with no evidence behind it whatsoever.
+  const o = createOutcomeStore();
+  const before = W(50, 0, 50, { routeChanges: 9, routeKnown: 6, freshN: 6 });
+
+  o.open(22, 'route-churn', 1000, before);
+  const blind = o.resolve(22, 'route-churn', 2000, W(50, 0, 50, { routeChanges: 0, routeKnown: 0, freshN: 6 }));
+  assert.equal(blind?.verdict, 'unverifiable', 'zero changes with no visible route scored as a recovery');
+
+  // A before-window with no route ever on record cannot anchor a verdict either.
+  o.open(23, 'route-churn', 1000, W(50, 0, 50, { routeChanges: 0, routeKnown: 0, freshN: 6 }));
+  const noBase = o.resolve(23, 'route-churn', 2000, W(50, 0, 50, { routeChanges: 0, routeKnown: 6, freshN: 6 }));
+  assert.equal(noBase?.verdict, 'unverifiable');
+});
+
+test('route-churn: a node that went SILENT has not settled its route', () => {
+  // Zero re-routes because zero traffic. Same discipline as the flap and s2
+  // branches: absence of failure is only recovery when the node is still live.
+  const o = createOutcomeStore();
+  o.open(24, 'route-churn', 1000, W(50, 0, 50, { routeChanges: 9, routeKnown: 6, freshN: 6 }));
+  const quiet = o.resolve(24, 'route-churn', 2000, W(50, 0, 50, { routeChanges: 0, routeKnown: 6, freshN: 0 }));
+  assert.equal(quiet?.verdict, 'unverifiable');
+});
+
+test('route-churn: still churning is no-change, churning MORE is worse', () => {
+  const o = createOutcomeStore();
+  const before = W(50, 0, 50, { routeChanges: 9, routeKnown: 6, freshN: 6 });
+
+  o.open(25, 'route-churn', 1000, before);
+  const same = o.resolve(25, 'route-churn', 2000, W(50, 0, 50, { routeChanges: 5, routeKnown: 6, freshN: 6 }));
+  assert.equal(same?.verdict, 'no-change', 'fewer re-routes but still re-routing is not a fix');
+
+  o.open(26, 'route-churn', 1000, before);
+  const worse = o.resolve(26, 'route-churn', 2000, W(50, 0, 50, { routeChanges: 20, routeKnown: 6, freshN: 6 }));
+  assert.equal(worse?.verdict, 'worse');
+});
+
+test('windowMetrics counts route visibility separately from route changes', () => {
+  const s = (dRouteChanges: number, routeKey: string | null): EvidenceSample =>
+    ({ dRouteChanges, routeKey, fresh: true } as unknown as EvidenceSample);
+  const m = windowMetrics([s(1, 'r3-7'), s(0, null), s(2, 'direct'), s(0, null)]);
+  assert.equal(m.routeChanges, 3, 'changes sum across the window');
+  assert.equal(m.routeKnown, 2, 'only the samples that actually had a route on record');
 });

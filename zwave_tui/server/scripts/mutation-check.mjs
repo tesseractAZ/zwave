@@ -271,6 +271,33 @@ const MUTANTS = [
     repl: "  return bits.join(c.grey(' · ')) + c.grey('  —  advisory only; nothing is acted on');",
     what: 'REMEDY does not claim nothing is acted on while its own bar runs actions' },
   /* ── v0.29 topology: per-hop readings, churn, surplus accounting ────── */
+  /* ── route identity: unknown is not a route ─────────────────────────── */
+  { id: 'route-unknown-is-direct', file: 'src/zwave/evidenceStore.ts',
+    // Restores the exact conflation the second copy of this function had in
+    // zwaveData: no LWR data reads as a direct link. A routed node whose `lwr`
+    // blinks then scores two route changes for zero re-routing, and route-churn
+    // fires at four.
+    find: "  if (!lwr) return null;\n  const reps = Array.isArray(lwr.repeaters) ? lwr.repeaters : [];",
+    repl: "  if (!lwr) return 'direct';\n  const reps = Array.isArray(lwr.repeaters) ? lwr.repeaters : [];",
+    what: 'an absent route reads as UNKNOWN, never as a direct link' },
+  { id: 'route-change-null-guard', file: 'src/zwave/evidenceStore.ts',
+    // Drops the both-sides-known requirement, so losing sight of a route (and
+    // regaining it) each count as a re-route.
+    find: '  return a != null && b != null && a !== b;',
+    repl: '  return a !== b;',
+    what: 'a route change needs BOTH endpoints known, not just a differing key' },
+  { id: 'route-metric-unscorable', file: 'src/zwave/outcomes.ts',
+    // Puts route-churn back in the never-scorable bucket, where it sat behind a
+    // justification ("multi-node or mesh-scoped") that was false for it.
+    find: "    case 'route-churn':\n      return 'route'; // LWR re-routes subsiding",
+    repl: "    case 'route-churn':\n      return 'none';",
+    what: 'route-churn recoveries are measured, not written off as unverifiable' },
+  { id: 'route-known-gate', file: 'src/zwave/outcomes.ts',
+    // Drops the visibility floor, so a node whose route went dark scores its
+    // run of zeros as a cure.
+    find: "      if (after.routeKnown < MIN_LIVE) return 'unverifiable';",
+    repl: '',
+    what: 'a route that went INVISIBLE is unknown, never a settled route' },
   /* ── auto-ping: the engine's first autonomous write ─────────────────── */
   { id: 'autoping-stdout', file: 'src/zwave/autoPing.ts',
     // Reverts to ring-only logging — the state in which 34 real probes were
