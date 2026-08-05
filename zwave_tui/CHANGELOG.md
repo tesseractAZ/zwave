@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.32.0 — 2026-08-04
+
+**`route-churn` fired on a definition, not on the mesh.**
+
+The detector shipped in v0.29.6 and has never fired on the reference mesh. Why
+it has not fired is still unmeasured — a stable mesh genuinely may not re-route
+four times in ten minutes. What the investigation did establish is separate and
+worse: the detector's input carried a **false-positive** vector, so the quiet
+was not evidence of correctness. The codebase held TWO definitions of the
+concept it counts.
+
+`zwaveData` kept a private `routeKey()` that collapsed **"no LWR data"** and
+**"direct link"** to the same empty string, while `evidenceStore.routeKeyOf()`
+correctly distinguished `null` from `'direct'`. Under the private copy, a routed
+node whose `lwr` blinked scored **two** route changes — one when the data
+vanished, one when it returned — for a mesh that had re-routed nothing.
+`route-churn` fires at four in ten minutes, so two driver hiccups could have lit
+up every routed node at once with an entirely fabricated symptom.
+
+The two definitions are now one exported function. `routeKeyOfLwr` returns
+`null` for absent statistics, `'direct'` for an empty chain, `'r<a>-<b>'`
+otherwise; `isRouteChange` requires both endpoints known and different. A route
+that cannot be seen has not moved — `'direct'` is a fact about the mesh, `null`
+is a fact about our knowledge of it. This is the discipline `dS2Resync` already
+carried, where a dark log lane records `null` rather than a fabricated `0`.
+
+**`route-churn` recoveries are now measured instead of written off.**
+
+The symptom mapped to the `none` recovery metric — permanently `unverifiable` —
+justified in a comment as *"multi-node or mesh-scoped"*. That justification was
+false for it: `route-churn` is emitted per node, with a `nodeId`, off a per-node
+event accumulator, structurally identical to `s2-desync`, which was always
+scored. Its remedies being physical is no reason to refuse to measure them;
+`weak-signal` and `s2-desync` are physical too.
+
+It now scores on the `route` metric — re-routes subsiding — gated on
+`routeKnown`, the count of samples where a route was actually on record. That
+gate exists because the route-key fix creates the hole it closes: a node whose
+`lwr` goes dark now correctly scores ZERO changes, and without the gate that
+clean run of zeros would read as a cure with no evidence behind it. The
+after-window additionally requires the node to still be alive, since a node that
+stopped talking cannot re-route and has not settled anything.
+
+Six mutants pin this release, all killing: the route-key conflation, the
+both-endpoints-known guard, the metric mapping, the visibility floor, and the
+two pre-existing detector guards. 640 tests.
+
+**What was measured, and what it does not show.** Polling every node's
+last-working-route on the reference mesh — 14 samples over 7.8 minutes, 494
+node-transitions — found **zero** re-routes and **zero** visibility blinks. The
+mesh is quiet. That does NOT downgrade the defect: an `lwr` blink is least
+likely in steady state and most likely at a driver restart or a re-interview,
+which is precisely the moment it would hit many nodes at once and manufacture
+the mass false positive. A steady-state window cannot sample the failure mode.
+It also cannot settle whether four-in-ten-minutes is the right threshold; that
+needs the engine's own long-horizon evidence, which now records it correctly.
+
+Documentation: §7.2.3 listed `route-churn` as **declared, not built** eleven
+releases after it was built; the recovery-metric table omitted `s2` entirely.
+Both corrected, and §7.2.4 gains the detector's firing conditions and the route
+identity contract.
+
 ## 0.31.2 — 2026-08-04
 
 **Auto-ping was working the whole time. Its evidence was in the wrong place.**

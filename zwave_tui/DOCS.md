@@ -2065,8 +2065,8 @@ Every burst-prone detector now conjoins its windowed threshold with
 const b = flaps >= FLAPS_WINDOW && hadRecent(samples, now, DWELL_MS, (s) => s.dFlaps);
 ```
 
-`dead-flap` (flaps), `return-path-degraded` (timeouts) and `s2-desync`
-(resyncs) carry it; `rtt-degraded` gets the equivalent by requiring its newest
+`dead-flap` (flaps), `return-path-degraded` (timeouts), `s2-desync`
+(resyncs) and `route-churn` (re-routes) carry it; `rtt-degraded` gets the equivalent by requiring its newest
 fresh reading to itself fall inside the dwell horizon. A storm that ends
 therefore de-asserts and clears its dwell entry, and only a condition that is
 *still happening* can mature. `symptoms.test.ts` pins both directions — a stale
@@ -2074,7 +2074,7 @@ burst must not fire, an active one must.
 
 #### 7.2.3 The 14 `SymptomKind`s
 
-The `SymptomKind` union declares **14** kinds. Twelve have live detector bodies in `detectSymptoms`; two (`quiet-node`, `route-churn`) are declared in the union but have **no detector implemented yet** — they are reserved names from the DESIGN table awaiting the driver-WS cadence/route-scheme data:
+The `SymptomKind` union declares **14** kinds. Thirteen have live detector bodies in `detectSymptoms`; one (`quiet-node`) is declared in the union but has **no detector implemented yet** — a reserved name from the DESIGN table awaiting the driver-WS cadence data:
 
 | # | kind | scope | severity | basis | implemented? |
 | --- | --- | --- | --- | --- | --- |
@@ -2083,7 +2083,7 @@ The `SymptomKind` union declares **14** kinds. Twelve have live detector bodies 
 | 3 | `dead-flap` | node | crit | measured | yes |
 | 4 | `quiet-node` | node | — | — | **declared, not built** |
 | 5 | `rate-fallback` | node | watch/warn | measured | yes |
-| 6 | `route-churn` | node | — | — | **declared, not built** |
+| 6 | `route-churn` | node | warn | measured | yes (v0.29.6) |
 | 7 | `rtt-degraded` | node | watch | measured | yes |
 | 8 | `weak-signal` | node | watch | measured/inferred | yes |
 | 9 | `chatty-device` | node | watch | measured | yes |
@@ -2178,6 +2178,35 @@ b = rr >= rxMedian * RX_FLOOD_MULT (20) && rr >= 6   // ≥6 reports/min AND ≫
 ```
 
 The offending node id is captured as `floodNode` for the correlation ladder. `chatty-device` is a *cause hypothesis* and is exempt from `subsumedBy` demotion (§7.5).
+
+**`route-churn`** — warn, measured, **v0.29.6**.
+
+```
+NOT node.isLongRange
+  AND windowRouteChanges(samples, now, WINDOW_MS (10 min)) >= ROUTE_CHURN_WINDOW (4)
+  AND hadRecent(samples, now, DWELL_MS, s => s.dRouteChanges)
+```
+
+Fed by `dRouteChanges`, an event-accumulator drain filled in `zwaveData` when a
+node's statistics arrive with a **different last-working-route repeater chain**
+than the previous event.
+
+Long-Range nodes are excluded: they hold a single direct link to the controller
+and have no mesh route to churn, so a reported change there is a data quirk. The
+planner card carries the same guard, and firing here would make the screen argue
+with itself.
+
+**Route identity — `routeKeyOfLwr` (v0.32.0).** A route change is only counted
+when **both** endpoints are known. `routeKeyOfLwr` returns `null` for statistics
+that carry no `lwr` at all, `'direct'` for an empty repeater chain, and
+`'r<a>-<b>'` otherwise — and `isRouteChange(before, after)` requires two non-null
+keys that differ. The distinction is load-bearing: a second copy of this function
+in `zwaveData` used to collapse *no route data* and *direct link* to the same
+key, so a node whose `lwr` blinked scored **two** route changes — one when the
+data vanished, one when it returned — with the mesh having re-routed nothing.
+This detector fires at four, so two driver hiccups could light up every routed
+node at once with a fabricated symptom. `'direct'` is a fact about the mesh;
+`null` is a fact about our knowledge of it.
 
 **`s2-desync`** — watch (warn at ≥3×), measured, **v0.26**.
 
@@ -2593,7 +2622,7 @@ type Verdict = 'improved' | 'no-change' | 'worse' | 'refused-misdiagnosis' | 'un
 
 A window carries **every** recovery signal, because a symptom's recovery shows up in a *different* signal depending on its kind (§9.4). The timeout family's signal is **timeouts/tx**, consistent with the load-bearing fact that `commandsDroppedTX` does *not* count RF ACK failures — `timeoutResponse` (a `Get` whose reply never arrived, node stays Alive) is the measurable per-command degradation `WindowMetrics.rate` is computed from. RSSI, RTT, and the negotiated PHY rate are all re-sampled from the driver's cached stats, so they are folded **only from `fresh` samples** — a re-read of the same cached value between stats events is not a new observation. Crucially, a *fresh* sample can still carry a **null** rssi/rtt (the no-signal sentinels 125/126/127, or a null rtt), so `freshN` (fresh-sample count) is **not** the count of usable readings; `rssiN`/`rttN` carry the true per-signal observation counts, which is what §9.4's evidence floors gate on. `flaps` is an event-drain count, folded over **all** samples (a flap is concrete whether or not a stats event landed).
 
-`windowMetrics(samples, minTx = 5)` sums `dTx/dRx/dTimeout` and `dFlaps`, and — under the `fresh` gate — medians `rssi`/`rtt` (tracking `rssiN`/`rttN`) and mins `rateKbps`. Below five commands a per-command timeout rate is not meaningful, so `rate` stays `null` rather than manufacturing a value — a `null` rate downstream forces an `unverifiable` verdict, never a false claim. The same fail-closed rule applies to every other metric: a window with no fresh rate reading has `rateKbpsMin == null`, and a median backed by fewer than `MIN_OBS` readings is rejected — both → `unverifiable`, never a verdict fabricated from stale or single-sample data.
+`windowMetrics(samples, minTx = 5)` sums `dTx/dRx/dTimeout`, `dFlaps` and `dRouteChanges`, counts the samples whose measurement lane was live (`s2Known`, `routeKnown`), and — under the `fresh` gate — medians `rssi`/`rtt` (tracking `rssiN`/`rttN`) and mins `rateKbps`. Below five commands a per-command timeout rate is not meaningful, so `rate` stays `null` rather than manufacturing a value — a `null` rate downstream forces an `unverifiable` verdict, never a false claim. The same fail-closed rule applies to every other metric: a window with no fresh rate reading has `rateKbpsMin == null`, and a median backed by fewer than `MIN_OBS` readings is rejected — both → `unverifiable`, never a verdict fabricated from stale or single-sample data.
 
 ### 9.2 The episode lifecycle
 
@@ -2689,7 +2718,11 @@ return scoreRecovery(metricOf(ep.kind), ep.before, ep.after, cfg.releaseRate, cf
 | `rssi` | `weak-signal` | signal strength rises ≥ 4 dB |
 | `rtt` | `rtt-degraded` | round-trip time drops ≥ 25% AND ≥ 20 ms |
 | `rate` | `rate-fallback` | negotiated PHY rate climbs back to ≥ 100k |
+| `s2` | `s2-desync` | SPAN resyncs subside, **and the log lane was listening** (`s2Known`) |
+| `route` | `route-churn` | LWR re-routes subside, **and a route stayed visible** (`routeKnown`) |
 | `none` | `chatty-device`, `ghost-suspect`, `mesh-interference`, … | no per-node recovery window → always `unverifiable` |
+
+Two of these carry a **second** floor beyond "did the count fall", because for both the measurement itself can switch off. `s2Known` counts samples where the driver-WS log lane was actually listening; `routeKnown` counts samples where a route was actually on record. Without them, a lane that stopped listening or a node whose `lwr` went dark produces a clean run of zeros and scores as a cure the remedy never earned. Absence of evidence is not evidence of recovery — the same rule that makes `dS2Resync` nullable rather than zero.
 
 `scoreRecovery` holds one branch per metric, and **every branch keeps the same honesty contract**: an evidence-poor or incomparable before/after pair is `unverifiable` (never a fabricated win), a genuine regression is `worse`, and "improvement" always requires a threshold crossing plus a minimum effect size — never a raw count nudging in the right direction.
 
