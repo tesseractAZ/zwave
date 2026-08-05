@@ -28,9 +28,9 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, normalize } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -817,22 +817,156 @@ if (only && run.length === 0) {
  * ever asserting anything about lr(). A mutant must be VALID CODE that is
  * caught by an ASSERTION, or it proves nothing.
  */
+// tsc is invoked DIRECTLY rather than through `npm run typecheck`: the npm
+// wrapper costs ~0.16s of pure process startup (0.34s vs 0.18s measured), and
+// this runs once per mutant — ~24s of the run spent launching a package manager
+// to launch a compiler. The flags are kept identical to the npm script so the
+// harness and CI check exactly the same thing.
+const TSC = join(ROOT, 'node_modules', '.bin', 'tsc');
 const compiles = () => {
   try {
-    execFileSync('npm', ['run', 'typecheck'], { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
+    execFileSync(TSC, ['--noEmit', '-p', 'tsconfig.test.json'],
+      { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
     return true;
   } catch {
     return false;
   }
 };
 
-const suiteFails = () => {
+const TEST_DIR = join(ROOT, 'test');
+const allTestFiles = () =>
+  readdirSync(TEST_DIR).filter((f) => f.endsWith('.test.ts')).sort().map((f) => join(TEST_DIR, f));
+
+/**
+ * Run an explicit set of test files.
+ *
+ * Returns `null` when green, or the set of test files that reported a failure
+ * when red. Naming the catcher is what makes a kill-fast mapping miss
+ * ACTIONABLE: the run can then print "not caught by X — actually caught by Y"
+ * instead of leaving the table to be fixed by guesswork.
+ */
+const testsFail = (files) => {
   try {
-    execFileSync('npm', ['test'], { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
-    return false; // exit 0 → all green → mutant SURVIVED
-  } catch {
-    return true;
+    execFileSync(process.execPath, ['--import', 'tsx', '--test', ...files],
+      { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
+    return null; // exit 0 → green
+  } catch (e) {
+    const out = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    // Failure stacks point back into the test file that raised them.
+    const seen = [...out.matchAll(/test\/([A-Za-z0-9_.-]+)\.test\.ts/g)].map((m) => m[1]);
+    return [...new Set(seen)];
   }
+};
+
+const suiteFails = () => testsFail(allTestFiles()) != null;
+
+/**
+ * KILL-FAST: the cheap test files that most plausibly cover a mutant.
+ *
+ * A kill is a kill no matter WHICH test catches it, so a red result from a
+ * single file is already a final verdict and the other 36 files add nothing. A
+ * GREEN result proves nothing, so survival still has to face the whole suite —
+ * the `SURVIVED` verdict is never reached by a shortcut.
+ *
+ * This is a pure latency optimisation with no effect on any verdict. It matters
+ * because the suite is startup-bound, not compute-bound: one file runs in
+ * ~0.18s while all 37 take ~13s, since each pays the tsx/TypeScript loader cost
+ * again. With 151 of 153 mutants killed, nearly every mutant takes the fast
+ * path and the full run drops from ~33 minutes to ~2.
+ *
+ * The mapping is a heuristic (source basename → same-named test file, or an
+ * explicit `tests: [...]` on the mutant). A wrong guess costs only time, and
+ * the run REPORTS every miss so the mapping can be tightened rather than
+ * silently decaying back to full-suite speed.
+ */
+/**
+ * Source file → the test files that actually cover it.
+ *
+ * The default guess is "same basename", which holds for the engine modules
+ * (evidenceStore.ts → evidenceStore.test.ts) but not for the TUI, whose tests
+ * are named after what they assert rather than what they import — the screens
+ * are covered by renderContract/renderHonesty plus a per-screen file. Without
+ * this table 81 of 153 mutants fall straight through to the full suite.
+ *
+ * A wrong or missing entry costs TIME, never correctness: the full suite still
+ * runs whenever the targeted files come back green, and every miss is printed
+ * at the end so the table can be corrected instead of quietly rotting.
+ */
+/**
+ * Per-mutant overrides — the test file that PROVABLY catches each one.
+ *
+ * Harvested, not guessed: the run reports "tried [X] → actually caught by [Y]"
+ * for every kill-fast miss, and these are those answers written back. The
+ * surprises are the useful part — most of the TUI's safety mutants are caught
+ * by `renderHonesty` (a cross-screen invariant suite) and the whole telnet/
+ * sanitisation family by `ingressTrust`, which despite its name is the trust-
+ * BOUNDARY suite: blank passwords, C1 control bytes, per-host socket caps,
+ * idle reclamation. Neither is discoverable from a file name.
+ *
+ * Stale entries are self-correcting: a wrong name simply fails to catch, the
+ * full suite runs, and the miss report names the new catcher.
+ */
+const MUTANT_TESTS = {
+  'litbars-floor': ['renderHonesty'],
+  'meter-endpoints': ['renderHonesty'],
+  'spark-window': ['renderHonesty'],
+  'topology-scroll-key': ['renderHonesty'],
+  'remedy-cursor-key': ['renderHonesty'],
+  'key-scope-o': ['renderHonesty'],
+  'key-scope-slash': ['renderHonesty'],
+  'esc-clears-filter': ['renderHonesty'],
+  'log-sanitize': ['renderHonesty'],
+  'login-exact-rows': ['renderHonesty'],
+  'log-keycap-priority': ['renderHonesty'],
+  'remedy-anchor': ['sessionActions'],
+  'remedy-anchor-resolve': ['sessionActions'],
+  'menu-refusal-reason': ['sessionActions'],
+  'login-narrow': ['renderHonesty'],
+  'blank-password': ['ingressTrust'],
+  'chart-null-gap': ['renderHonesty'],
+  'chart-draws-window': ['renderHonesty'],
+  'c1-backstop': ['ingressTrust'],
+  'errmsg-sanitized': ['ingressTrust'],
+  'backoff-reserve': ['ingressTrust'],
+  'telnet-per-ip': ['ingressTrust'],
+  'idle-sweep': ['ingressTrust'],
+  'idle-rx-stamp': ['ingressTrust'],
+  'telnet-keepalive': ['ingressTrust'],
+  'actions-sanitize': ['ingressTrust'],
+  'sdkversion-sanitize': ['ingressTrust'],
+};
+
+const SOURCE_TESTS = {
+  'src/telnet/screens/topology.ts': ['topologyRoutes', 'renderContract', 'renderHonesty'],
+  'src/telnet/screens/controller.ts': ['controllerHeatmapScreen', 'renderContract', 'renderHonesty'],
+  'src/telnet/screens/heatmap.ts': ['controllerHeatmapScreen', 'renderContract', 'renderHonesty'],
+  'src/telnet/screens/detail.ts': ['detailScreen', 'renderContract', 'renderHonesty'],
+  'src/telnet/screens/overview.ts': ['overviewScreen', 'renderContract', 'renderHonesty'],
+  'src/telnet/screens/remedy.ts': ['remedyScreen', 'renderContract', 'renderHonesty'],
+  'src/telnet/screens/login.ts': ['loginPolicy', 'renderContract'],
+  'src/telnet/screens/interference.ts': ['interferenceScreen', 'renderContract', 'renderHonesty'],
+  'src/telnet/screens/log.ts': ['logScreen', 'logFilter', 'logNav', 'renderContract'],
+  'src/telnet/screens/actionsMenu.ts': ['actionsMenuScreen', 'actionsCatalog'],
+  'src/telnet/session.ts': ['sessionActions', 'input', 'renderContract'],
+  'src/telnet/server.ts': ['sessionActions', 'renderContract'],
+  'src/telnet/ansi.ts': ['chrome', 'gauges', 'renderHonesty'],
+  'src/telnet/bands.ts': ['gauges', 'renderHonesty', 'chrome'],
+  'src/telnet/chrome.ts': ['chrome', 'renderContract', 'renderHonesty'],
+  'src/auth.ts': ['ingressTrust', 'loginPolicy'],
+  'src/index.ts': ['configContract'],
+  'src/config.ts': ['configContract'],
+  'src/zwave/zwaveData.ts': ['zwaveData', 'zwaveDataChurn', 'evidenceStore'],
+};
+
+const fastTestsFor = (m) => {
+  // Normalised: at least one mutant addresses its file through a `..` segment
+  // (src/zwave/../telnet/…), which would miss the table on a raw string match.
+  const key = normalize(m.file);
+  const names = (Array.isArray(m.tests) && m.tests.length ? m.tests : null)
+    ?? MUTANT_TESTS[m.id]
+    ?? SOURCE_TESTS[key]
+    ?? [basename(key).replace(/\.tsx?$/, '')];
+  return names.map((n) => join(TEST_DIR, `${n}.test.ts`)).filter((p) => existsSync(p));
 };
 
 // BASELINE FIRST. Every verdict below is "the suite went red BECAUSE of the
@@ -856,6 +990,7 @@ const equivalent = [];
 const missing = [];
 const invalid = [];
 const relabel = [];
+const mappingMisses = []; // kill-fast guessed wrong; only a speed signal, never a verdict
 
 // A mutant left applied is worse than no run at all: it looks like a real
 // regression, and if committed it SHIPS one. Three layers, because the first
@@ -934,12 +1069,28 @@ for (const m of run) {
   writeFileSync(path, original.replace(m.find, m.repl));
   let red;
   let valid;
+  let missedBy = null; // fast set that failed to catch a mutant the full suite killed
   try {
     valid = compiles();
-    red = valid ? suiteFails() : false;
+    if (!valid) {
+      red = false;
+    } else {
+      // Cheap targeted files first — a red here is already a kill.
+      const fast = fastTestsFor(m);
+      red = fast.length > 0 && testsFail(fast) != null;
+      // Green (or nothing to run) proves nothing: SURVIVED must face everything.
+      if (!red) {
+        const caught = testsFail(allTestFiles());
+        red = caught != null;
+        if (red && fast.length > 0) {
+          missedBy = { tried: fast.map((f) => basename(f, '.test.ts')).join(', '), caughtBy: caught.join(', ') };
+        }
+      }
+    }
   } finally {
     restore();
   }
+  if (missedBy) mappingMisses.push({ id: m.id, ...missedBy });
   if (!valid) {
     invalid.push(m);
     console.log(`INVALID   ${m.id.padEnd(26)} — the mutant does not compile; a broken build is not a kill`);
@@ -964,6 +1115,15 @@ for (const m of run) {
 
 console.log(`\n${killed} killed · ${survived.length} survived · ${equivalent.length} equivalent · ` +
   `${missing.length} missing · ${invalid.length} invalid · ${relabel.length} relabel`);
+if (mappingMisses.length) {
+  // NOT a failure — every verdict above is unchanged. It only means these
+  // mutants paid for the full suite because their targeted file did not catch
+  // them. Add a `tests: [...]` to each and the run gets its speed back.
+  console.log(`\n${mappingMisses.length} kill-fast mapping miss(es) — verdicts unaffected, speed lost:`);
+  for (const x of mappingMisses) {
+    console.log(`  ${x.id.padEnd(26)} tried [${x.tried}] → actually caught by [${x.caughtBy}]`);
+  }
+}
 if (survived.length || missing.length || invalid.length || relabel.length) {
   console.log('\nA SURVIVED entry is a fix no test protects. A MISSING entry means this');
   console.log('file has drifted from the code. An INVALID entry is a mutant that does not');
