@@ -495,3 +495,35 @@ test('an autonomous action is visible in the SERVER log, not only the event ring
   assert.ok(server.some((m) => /liveness probe/.test(m)), 'must ALSO reach the server log');
   h.stop();
 });
+
+test('the probe log line reports MEASURED silence, never just the threshold', async () => {
+  // The line used to print `staleMs` itself, so every probe claimed exactly
+  // "240m" regardless of truth. That constant hid a 7-hour lastSeen parsing
+  // skew for a full day: nodes 11 hours silent were logged as "240m", and
+  // nothing in the log could contradict it. The message now carries the
+  // node's measured silence with the threshold alongside for context.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  // The background nodes need FRESH lastSeen — a null lastSeen means "never
+  // heard", which sorts as maximally stale and would outrank the node under
+  // test (that ordering is correct behaviour, pinned elsewhere).
+  const fresh = (id: number) => node(id, { stats: { lastSeen: T + 4 * MIN } as never });
+  const nodes = [node(1, { isController: true }), fresh(100), fresh(101),
+    node(9, { stats: { lastSeen: T - 700 * MIN } as never })];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+    config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN;
+  h.tick();
+  h.stop();
+  const probe = lines.find((l) => l.includes('liveness probe'));
+  assert.ok(probe, 'a stale node past the threshold must be probed');
+  const silence = 700 + BOOT_WINDOW_MS / MIN + 1;
+  assert.ok(probe!.includes(`unheard for ${Math.round(silence)}m`),
+    `measured silence (~${silence}m) must appear, got: ${probe}`);
+  assert.ok(probe!.includes('threshold 240m'), 'the threshold is context, labelled as such');
+  assert.ok(!/unheard for 240m/.test(probe!), 'the measured value must not equal-by-construction the threshold');
+});
