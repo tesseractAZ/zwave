@@ -37,7 +37,12 @@ import type {
 } from '../src/types';
 import type { Symptom } from '../src/zwave/symptoms';
 
-const OUT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../docs/screenshots');
+// REPO-ROOT docs/screenshots — the path README.md embeds. From
+// zwave_tui/server/scripts/ that is THREE levels up; `../../` lands on
+// zwave_tui/docs, which silently creates a second screenshots tree that
+// nothing references (found 2026-08-05: a regeneration "succeeded" while the
+// published images stayed v0.24-era).
+const OUT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../../docs/screenshots');
 const COLS = 104;
 const ROWS = 22;
 /**

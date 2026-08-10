@@ -1,8 +1,8 @@
 # Z-Wave TUI — Complete System & Engine Reference
 
-This is the definitive technical reference for the **Z-Wave TUI** Home Assistant add-on: a telnet/xterm control-room TUI plus a learned, **advisory-only** remediation engine for a Z-Wave JS mesh. It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the screens and endpoints it produces, the configuration knobs that tune it, and its edge-case guards.
+This is the definitive technical reference for the **Z-Wave TUI** Home Assistant add-on: a telnet/xterm control-room TUI plus a learned remediation engine for a Z-Wave JS mesh — advisory in all but one deliberate, narrow case (auto-ping, §11.12). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the screens and endpoints it produces, the configuration knobs that tune it, and its edge-case guards.
 
-The add-on is a Node/TypeScript server (`server/`) that talks to Home Assistant's Z-Wave JS integration over the HA Core WebSocket (the node roster, live statistics, and — gated behind a typed CONFIRM — mutating actions: mesh maintenance plus, as of v0.23, operator device control + config writes) and, read-only, to the Z-Wave JS **driver** WebSocket (the real background-RSSI noise floor and capability flags that HA does not expose). It persists a per-node evidence time-series on `/data`, learns each node's "normal", detects mesh symptoms, turns them into grounded recommendations, and learns which of those actually help — surfaced across eight terminal screens over a telnet server (`:2324`) and an xterm.js `/console` (HA ingress, `:8788`). **Nothing is ever executed automatically:** every mutating action goes through the operator's type-CONFIRM Actions Menu.
+The add-on is a Node/TypeScript server (`server/`) that talks to Home Assistant's Z-Wave JS integration over the HA Core WebSocket (the node roster, live statistics, and — gated behind a typed CONFIRM — mutating actions: mesh maintenance plus, as of v0.23, operator device control + config writes) and, read-only, to the Z-Wave JS **driver** WebSocket (the real background-RSSI noise floor and capability flags that HA does not expose). It persists a per-node evidence time-series on `/data`, learns each node's "normal", detects mesh symptoms, turns them into grounded recommendations, and learns which of those actually help — surfaced across eight terminal screens over a telnet server (`:2324`) and an xterm.js `/console` (HA ingress, `:8788`). **Every operator action goes through the type-CONFIRM Actions Menu.** The single exception is **auto-ping** (§11.12): an opt-in, off-by-default liveness/remediation probe — the one write the engine issues without a human present, chosen because a ping is idempotent and has nothing to undo. Everything else the engine produces is a recommendation a person must confirm.
 
 > Every constant, threshold, formula, path, and config key below was written directly from the source. Where a value is a tunable default, that is noted. The engine's design rationale lives in `DESIGN.md` and its Z-Wave protocol research (with citations) in `RESEARCH.md`; for the install quick-start and option list, see `README.md` and the **Configuration, Deployment, Security & Operations** chapter.
 
@@ -30,7 +30,7 @@ The add-on is a Node/TypeScript server (`server/`) that talks to Home Assistant'
 The Z-Wave TUI add-on is a single Node/TypeScript process (`server/src/index.ts` →
 `main()`) that turns Home Assistant's `zwave_js/*` WebSocket surface into a live,
 keyboard-driven control-room dashboard — served two ways from one shared data
-cache — with a learned, **advisory-only** remediation engine bolted onto the same
+cache — with a learned remediation engine (advisory in all but the auto-ping case, §11.12) bolted onto the same
 evidence pipeline. This chapter traces every byte from the two upstream
 WebSocket surfaces down to a rendered ANSI frame, and back up through the single
 authenticated path that any mutating action must ride.
@@ -356,13 +356,17 @@ recorded for the sibling ecoflow-panel add-on's mDNS/IPv6 trap.)
 
 ### 1.8 Where actions and the advisory engine sit
 
-The M3–M6 engine is grafted onto the same evidence pipeline but is **advisory-only
+The M3–M6 engine is grafted onto the same evidence pipeline and is **advisory
 by the owner's decision** (DESIGN §1, tenet 1; RESEARCH §0). `zwaveData` runs the
 detectors each evidence tick (`runEngine`), exposes ranked `symptoms()`, engine
 readiness, learned `efficacyFor()`, and the M6 `interference()` view up through the
-provider to the Remedy and Interference screens — but **nothing auto-executes**.
-The designed-but-not-built `executor.ts` / `auto_remediation` / `auto_safe` tiers
-appear in the DESIGN §2 diagram marked *DEFERRED — not built*.
+provider to the Remedy and Interference screens — and none of it executes its
+own recommendations. The designed-but-not-built `executor.ts` /
+`auto_remediation` / `auto_safe` tiers appear in the DESIGN §2 diagram marked
+*DEFERRED — not built*. One autonomous write DOES ship outside that pipeline:
+**auto-ping** (§11.12, v0.30) — opt-in, off by default, ping-only — which reads
+the same provider snapshots but never touches the planner or its
+recommendations.
 
 Every mutating action instead flows through the one authenticated path: the
 human type-CONFIRM Actions Menu → `createActionRunner` (`zwaveActions`) → HA Core
@@ -593,7 +597,7 @@ The mutating surface lives in `zwaveActions.ts` (`createActionRunner`) and is ga
 - **Ping** is not a `zwave_js/*` WS command — it is a **button entity press**. `pingEntityOf(nodeId)` resolves the node's discovered `button.*_ping` entity, and the action calls `call_service { domain: 'button', service: 'press', service_data: { entity_id } }` (zwaveActions.ts:68). It is treated as safe/idempotent. (The `zwave_js.ping` HA *service* is deprecated and returns nothing; the raw `invoke_cc_api` NOP-ping can mark a marginal node DEAD, so the button entity is the sanctioned path.)
 - **Heal / "rebuild routes"** is `zwave_js/rebuild_node_routes { device_id }` (zwaveActions.ts:76), with the network-wide `begin_rebuilding_routes { entry_id }` / `stop_rebuilding_routes { entry_id }` variants.
 
-Per RESEARCH.md §3.2, through today's HA-WS channel `rebuild_node_routes` and `begin_rebuilding_routes` are the *only* executable route remediations (active health checks, priority routes, neighbors, and background RSSI all require the driver-WS phase). Critically, **a route rebuild is never a runnable recommendation**: it cannot fix a physical link, it deletes manual priority routes, and it throws on Long-Range nodes — so the engine may *recommend* richly while its executable **remediation** actions stay limited to ping / refresh / re-interview / rebuild / remove-failed, all routed through the human type-CONFIRM Actions Menu (the engine is advisory-only; nothing auto-executes). Operator device control + config writes (below) are a separate, non-remediation surface — also human-gated, never engine-initiated.
+Per RESEARCH.md §3.2, through today's HA-WS channel `rebuild_node_routes` and `begin_rebuilding_routes` are the *only* executable route remediations (active health checks, priority routes, neighbors, and background RSSI all require the driver-WS phase). Critically, **a route rebuild is never a runnable recommendation**: it cannot fix a physical link, it deletes manual priority routes, and it throws on Long-Range nodes — so the engine may *recommend* richly while its executable **remediation** actions stay limited to ping / refresh / re-interview / rebuild / remove-failed, all routed through the human type-CONFIRM Actions Menu — except the ping verb, which auto-ping (§11.12, opt-in) may also fire autonomously. Operator device control + config writes (below) are a separate, non-remediation surface — also human-gated, never engine-initiated.
 
 **Two menus, two blast radii (v0.24).** `buildMenu({scope})` builds either the **device** menu or the **network** menu, never a mix. A single combined menu was dishonest: its header read `target #8 Kitchen Lamp` and the rows beneath it included `Rebuild ALL routes`, an action that touches every node in the mesh. One menu, one scope, one blast radius — the device menu names its target, the network menu says `whole mesh`, and every catalog action is reachable from exactly one of them.
 
@@ -606,7 +610,7 @@ Both are **operator** ops, not remediations: `run(..., learn=false)` skips the M
 
 ### 2.9 Config knobs
 
-**How the Configuration page is grouped — and why it is not nested (v0.27).** The fourteen options are grouped visually by a prefix on each translation label (`Display · `, `Safety · `, `Access · `, `Login gate · `, `Advanced · `). Home Assistant *does* render nested `schema:` objects as collapsible panels, so grouping the keys themselves would look tidier. It is unsafe, and the tidy version is the dangerous one.
+**How the Configuration page is grouped — and why it is not nested (v0.27).** The options (eighteen as of v0.30) are grouped visually by a prefix on each translation label (`Display · `, `Safety · `, `Access · `, `Login gate · `, `Advanced · `). Home Assistant *does* render nested `schema:` objects as collapsible panels, so grouping the keys themselves would look tidier. It is unsafe, and the tidy version is the dangerous one.
 
 An add-on has **no options-migration hook**, so nesting a key is a **rename** — and no merge strategy saves it, deep or shallow. The operator's value sits at the old path, which the new schema no longer declares; the new path has never been written, so it resolves to its default; and the orphaned old key is discarded as unknown. On a deployment carrying `auth_enabled: true`, `auth_require_on_ingress: true` and `write_actions_enabled: true`, regrouping those under an `access:`/`auth:` block would return the login gate to its `false` default **while write actions stayed on** — an unauthenticated LAN telnet listener offering lock/unlock and remove-failed-node — and do it invisibly, since `users` keeps its key so the form still shows populated rows and the "auth enabled but no users" warning never fires.
 
@@ -711,7 +715,7 @@ The telnet parser (`server.ts`, `parseInput`) strips IAC framing, decodes NAWS w
 
 `SORT_ORDER = ['health', 'id', 'name', 'rssi', 'seen']`. `visibleNodes()` applies the substring filter (over name / id / manufacturer / model / status label) first, then sorts: `health` worst-first by `data.scoreFor().score`, `rssi` weakest-first, `seen` most-stale-first, each with a `nodeId` tiebreak. RSSI sorting/scoring skips the driver sentinels `{127, 126, 125}` — `effectiveRssi()` maps a null or sentinel reading to `-999` so unknown-signal nodes surface at the "weakest" end rather than being treated as strong.
 
-**Mutating keys are recognized but inert when write actions are off.** `applyKey`'s `p/i/h/R/x` case logs *"'x' is a mutating action — enable write_actions_enabled in the add-on config to unlock"* and returns no-redraw, so the muscle-memory is correct even though nothing actuates. When `write_actions_enabled` is set, the session intercepts these **before** `applyKey` and routes them through `beginAction()` → the type-CONFIRM modal. This is the engine's owner-mandated **advisory-only** posture in the UI layer: every mutating path terminates at a human typing the confirm word, never an auto-execution.
+**Mutating keys are recognized but inert when write actions are off.** `applyKey`'s `p/i/h/R/x` case logs *"'x' is a mutating action — enable write_actions_enabled in the add-on config to unlock"* and returns no-redraw, so the muscle-memory is correct even though nothing actuates. When `write_actions_enabled` is set, the session intercepts these **before** `applyKey` and routes them through `beginAction()` → the type-CONFIRM modal. This is the engine's owner-mandated **advisory** posture in the UI layer: every operator-initiated mutating path terminates at a human typing the confirm word. (The one non-UI exception, auto-ping, is documented in §11.12.)
 
 **The Actions Menu (v0.23) — mesh actions + device control + config.** Opening the menu (`a`) on a node builds a frozen snapshot (`openMenu`) of four labelled groups: **DEVICE ACTIONS** (the mesh-maintenance catalog), **SYSTEM-WIDE** (rebuild-all / stop), **DEVICE CONTROLS** (one row per controllable entity × verb, from `buildEntityRows(data.entityStates(node))`), and **CONFIGURATION** (one row per *writeable* parameter, from `buildConfigRows(data.configParams(node).params)`). Each `MenuItem` carries a `payload` (`catalog` | `entity` | `config`) that `selectMenuItem` dispatches on: a catalog/entity row arms the type-CONFIRM directly; a **config** row first opens the **value picker** (`ParamEdit`) — an enum parameter lists its `states` (↑↓ to choose, cursor starting on the current value); a numeric one accepts typed digits validated against `min`/`max` (with a signed-32-bit sanity floor when the device reports no bounds) — and only then arms the CONFIRM. The menu window-scrolls around the cursor so a long list (many entities + parameters) always keeps the highlight on screen. A degenerate enum (empty/non-numeric `states`) safely falls back to numeric entry rather than presenting an empty option list.
 
@@ -1335,7 +1339,7 @@ Two field families carry the design's hardest-won lessons:
 
 - **`dFlaps` / `dRouteChanges` are event-accumulated, never level-sampled.** The `status` column is *dwell context only.* Sub-window Alive↔Dead flaps are invisible to level-sampling by construction, so the caller accumulates them from `zwave_js/subscribe_node_status` events (`flapAccum` in `zwaveData.ts:1150` / `:1577`) and from the route-change diff (`routeChangeAccum`, `:1766`), then **drains** them into each sample. The header calls this "the design review's core catch." Because they are drains, `dFlaps` and `dRouteChanges` are always concrete integers, even when the counter deltas are `null`.
 
-`rssi`/`rtt` are re-sampled driver EMAs and carry information **only when `fresh`** — otherwise they are pseudo-replicated identical readings that would collapse downstream MAD (median absolute deviation) to 0. `rssi` is passed through `cleanRssi()`, which nulls the driver sentinels (`RSSI_SENTINEL_MIN = 125`: 125 no-signal, 126 saturated, 127 not-available) and any non-finite value. `rateKbps` maps `lwr.protocolDataRate` through `RATE_KBPS = { 1: 9.6, 2: 40, 3: 100, 4: 100 }` (4 = Long-Range 100k). `routeKey` is `'direct'` when there are no repeaters, else `'r' + repeaters.join('-')`.
+`rssi`/`rtt` are re-sampled driver EMAs and carry information **only when `fresh`** — otherwise they are pseudo-replicated identical readings that would collapse downstream MAD (median absolute deviation) to 0. `rssi` is passed through `cleanRssi()`, which nulls the driver sentinels (`RSSI_SENTINEL_MIN = 125`: 125 no-signal, 126 saturated, 127 not-available) and any non-finite value. `rateKbps` maps `lwr.protocolDataRate` through `RATE_KBPS = { 1: 9.6, 2: 40, 3: 100, 4: 100 }` (4 = Long-Range 100k). `routeKey` comes from the shared `routeKeyOfLwr` (v0.32.0 — the ONE definition of route identity): **`null` when the driver reported no `lwr` at all** (lost visibility is a fact about our knowledge, not the mesh), `'direct'` for an empty repeater chain, else `'r' + repeaters.join('-')`. Route-change counting (`isRouteChange`) requires BOTH endpoints known — a route that cannot be seen has not moved.
 
 ### 5.3 Counter discipline (cumulative → delta, four guards)
 
@@ -2254,7 +2258,7 @@ This is deterministic host↔stick evidence (not per-node RF), and its narrative
 
 ### 7.3 The correlation gate — mesh event or N faults?
 
-The gate answers *"is this a mesh-wide RF event, or a coincidental pile of independent faults?"* It runs on a **raw, pre-dwell substrate** (`degradingNow`) so it has its *own* dwell decoupled from per-node dwell — the design-review point that "the gate must not wait two stacked dwells to fire". `degradingNow` is populated by `markDegrading` from `dead-flap`, `return-path-degraded` (relative or absolute), `rate-fallback`, and matured `weak-signal` — deliberately *not* `rtt-degraded`, `ghost-suspect`, or `chatty-device`.
+The gate answers *"is this a mesh-wide RF event, or a coincidental pile of independent faults?"* It runs on a **raw, pre-dwell substrate** (`degradingNow`) so it has its *own* dwell decoupled from per-node dwell — the design-review point that "the gate must not wait two stacked dwells to fire". `degradingNow` is populated by `markDegrading` from `dead-flap`, `return-path-degraded` (relative or absolute), `rate-fallback`, matured `weak-signal`, and (v0.32.0) `route-churn` — deliberately *not* `rtt-degraded`, `ghost-suspect`, or `chatty-device`.
 
 **Breadth over active nodes, with hard floors and hysteresis:**
 
@@ -2607,6 +2611,8 @@ interface WindowMetrics {
   rate: number | null;          // timeouts / tx, or null when tx < minTx (never a fabricated 0/0)
   // ── other recovery signals ──
   flaps: number;                // Σ dFlaps (Alive↔Dead transitions) — dead-flap recovery
+  s2: number;                   // Σ dS2Resync over samples where the log lane WAS listening (v0.26)
+  s2Known: number;              // COUNT of those samples — the s2 verdict's own evidence floor
   rssiMedian: number | null;    // median of FRESH rssi readings — weak-signal recovery
   rssiN: number;                // COUNT of fresh rssi readings behind rssiMedian (its evidence floor)
   rttMedian: number | null;     // median of FRESH rtt readings — rtt-degraded recovery
@@ -3147,7 +3153,9 @@ Every other chapter of this reference describes how the TUI *reads* the mesh. Th
 1. a **master gate** (`write_actions_enabled`) that must be flipped on at all, and
 2. a **deliberate, per-action, type-`CONFIRM` modal** that no timer, engine, or streaming event can bypass.
 
-This is the concrete expression of the add-on's founding constraint: **the remediation engine is advisory-only by the owner's decision.** Nothing auto-executes. The M2–M6 engine detects symptoms, learns action efficacy, and (M4) *ranks candidate remedies* — but the act of mutating the mesh always routes through the human-driven Actions Menu described here. The designed-but-unbuilt `executor` / `auto_remediation` / `auto_safe` tiers would have their own gate; today there is no code path from a detector to a WS command. The only trigger is a person typing `CONFIRM` and pressing Enter.
+This is the concrete expression of the add-on's founding constraint: **the remediation engine is advisory by the owner's decision.** The M2–M6 engine detects symptoms, learns action efficacy, and (M4) *ranks candidate remedies* — and the act of executing a *recommendation* always routes through the human-driven Actions Menu described here. The designed-but-unbuilt `executor` / `auto_remediation` / `auto_safe` tiers would have their own gate.
+
+One deliberate exception exists since v0.30: **auto-ping** (§11.12) is a code path from a detector (Dead-past-dwell, or silent-past-threshold) to a WS `button.press` ping, with no human in the loop. It is off by default, double-gated behind `write_actions_enabled`, and restricted to the one verb that is idempotent and has nothing to undo. Every other mutating verb — every action this chapter catalogues — fires only when a person types `CONFIRM` and presses Enter.
 
 The chapter closes with the **authentication** layer that decides who is allowed to sit at that keyboard in the first place.
 
@@ -3458,6 +3466,37 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 | Per-source-IP telnet cap (4) + idle reclaim + TCP keepalive | `telnet/server.ts` | One host taking every telnet slot; silent sockets holding slots forever |
 | Login buffers length-bounded, input ignored while verifying | `session.ts:237, 262, 264` | Buffer abuse; keys racing an in-flight scrypt |
 
+### 11.12 Auto-ping — the one autonomous write (v0.30)
+
+Everything else in this reference is advisory: the engine detects, explains, and recommends, and a human presses the key. **Auto-ping breaks that rule on purpose and narrowly, so the rule stays meaningful everywhere else.** It is the only code path in the shipped build from a detector to a WS command with no human in the loop.
+
+**Why ping, and only ping.** Ping is already the one action the TUI runs *without* a typed CONFIRM, because it is idempotent and has nothing to undo: a ping to a live node is a no-op, and a ping to a dead one is a probe. Nothing in this module can remove a node, rewrite a route, or change a device's configuration. Execution reuses the ordinary `ActionRunner` ping verb (§11.2) — a `button.press` over the authenticated HA WS — so auto-ping holds no privileged channel of its own.
+
+**Two probe kinds** (`server/src/zwave/autoPing.ts`):
+
+1. **Remediation probe** — a mains node reported `Dead` for longer than the dwell is pinged, up to a per-episode budget with escalating backoff. Either the node answers (and the driver clears `Dead`) or the attempt budget exhausts and the node is left to the human remediation path with its evidence intact.
+2. **Liveness probe** — Z-Wave JS sets `Dead` *reactively*, only when a transmission fails; a node nobody addresses can be unplugged for hours while still reading Alive (measured on the reference mesh: 10 of 38 nodes silent 35.7 h, all "Alive"). So a mains node silent past a threshold is pinged to convert silence into evidence: an answer refreshes `lastSeen` (and route/RSSI statistics with it); a failure flips the node to `Dead`, where the remediation path owns it.
+
+**The decision is a pure function.** `decideAutoPings(input) → { ping[], stale[], suppressed, … }` takes a snapshot and returns what to do plus why; the runner (`startAutoPing`, one 60 s tick) performs the side effects. Every gate below is therefore directly unit- and mutation-tested.
+
+**Gates and constants** (defaults; `config.yaml`):
+
+| Gate | Value | Why |
+|---|---|---|
+| Own switch `auto_ping_enabled` | **`false`** — opt-in | An autonomous write must be a decision, not a surprise |
+| Master gate `write_actions_enabled` | must *also* be on | Auto-ping is a write and obeys the master switch like every other; "write actions off" stays a true statement |
+| Candidate rule | `!isController && isListening === true` | ASLEEP IS NOT DEAD: battery/FLiRS devices answer on their own wakeup interval; a ping spends their charge to fail. `isListening: null` (not interviewed) is left alone rather than probed on an assumption |
+| Dead dwell `auto_ping_after_min` | 10 m (2–120) | Measured on the reference mesh: self-healing episodes resolve inside ~5 m, stuck ones run 6–9 h — 10 m sits in the gap |
+| Attempt budget `auto_ping_max_attempts` | 3 per dead episode (1–10) | Then stop and leave it to a human; recovery clears the episode so a later failure gets a fresh budget |
+| Backoff between attempts | 10 / 30 / 60 m | A node that did not answer seconds ago will not answer now; avoid avoidable RF |
+| Liveness threshold `auto_ping_stale_min` | 240 m, `0` = off (0–1440) | Measured from each node's own `lastSeen`, so it is self-balancing: chatty devices are never probed |
+| Liveness rate cap | **one probe per tick**, stalest first | 36 nodes coming due together must trickle, not burst; per-node re-probe no sooner than the threshold |
+| Boot window | 5 m after start (or roster not ready) | Right after start every node can read Dead; without this the engine would ping the whole mesh on every restart |
+| Rebuild suppression | `isRebuildingRoutes` ⇒ do nothing | A rebuild drops nodes in and out by design |
+| Storm guard | ≥ 25 % of listening nodes Dead (min 4) ⇒ do nothing, warn once | A quarter of the mesh dead is a controller-level event; probing adds traffic to a struggling controller |
+
+**Observability.** The runner emits a decision trace — `auto-ping: candidates=N dead=N stale-due=N [stalest=Nm] -> probing N | suppressed: <reason>` — to both the event ring and the server log, on every state change plus a 30-minute heartbeat, so "there was nothing to do" and "this is broken" never produce identical (empty) logs. Every probe line reports the node's **measured** silence with the threshold alongside (v0.32.1) — never the threshold alone, which once masked a timestamp-parsing skew by printing a constant. All outcomes are recorded through the M5 ledger, so `efficacyFor('dead-flap','ping')` turns "usually wakes them up" into a measured recovery rate on the REMEDY screen; if the rate comes back poor, the honest response is to switch the feature off — and the data will say so.
+
 ## 12. Configuration, Deployment, Security & Operations
 
 Everything the add-on lets an operator tune, every internal path it writes, how a
@@ -3534,6 +3573,10 @@ advanced ones. Every option below is a **tunable default** unless noted.
 | `users` | `[]` | repeatable `{username: str, password: password}` | `ZWAVE_USERS` (JSON) | `config.auth.users` | See §12.2.1 — lifted with `jq`, not `bashio::config`. |
 | `auth_max_attempts` | `3` | `int(1,10)` | `AUTH_MAX_ATTEMPTS` | `config.auth.maxAttempts` | Failures before the connection is dropped. |
 | `auth_idle_lock_min` | `0` | `int(0,240)` | `AUTH_IDLE_LOCK_MIN` | `config.auth.idleLockMin` | Minutes of no keystrokes ⇒ re-lock; `0` disables. |
+| `auto_ping_enabled` | `false` | `bool` | `AUTO_PING_ENABLED` (numeric-bool) | `config.autoPing.enabled` | The engine's ONE autonomous write (§11.12). Also requires `write_actions_enabled` — the master gate is never bypassed. |
+| `auto_ping_after_min` | `10` | `int(2,120)` | `AUTO_PING_AFTER_MS` (run script ×60000) | `config.autoPing.afterMs` | Dwell before a Dead mains node's first probe; backoff 10/30/60 m between attempts. |
+| `auto_ping_max_attempts` | `3` | `int(1,10)` | `AUTO_PING_MAX_ATTEMPTS` | `config.autoPing.maxAttempts` | Probes per dead episode, then the node is left to the human path. Recovery resets the budget. |
+| `auto_ping_stale_min` | `240` | `int(0,1440)` | `AUTO_PING_STALE_MS` (run script ×60000) | `config.autoPing.staleMs` | Liveness probe after this much per-node silence; `0` disables the liveness lane. One probe per tick, stalest first. |
 | `refresh_interval` | `2` | `int(1,30)` | `REFRESH_INTERVAL_MS` | `config.refreshMs` | **seconds → ms**: run script does `* 1000`. Cheap render/roster cadence. |
 | `route_poll_interval` | `10` | `int(5,120)` | `ROUTE_POLL_INTERVAL_MS` | `config.routePollMs` | **seconds → ms**. Expensive route/controller-stats cadence; also the evidence-sample tick. |
 | `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. |
@@ -3774,16 +3817,18 @@ true`** — the sidebar panel is restricted to Home Assistant **administrators**
 > and a `hassio` config-entry reload all leave it unchanged. Verify with the
 > `get_panels` WebSocket command, not by reading this file.
 
-**Every mutation is human-gated, and the engine is advisory-only.** When write
+**Every operator mutation is human-gated; the engine is advisory except auto-ping (§11.12).** When write
 actions are enabled, each action — mesh maintenance (ping / refresh / re-interview /
 rebuild-routes / remove-failed), **v0.23 device control** (on/off/toggle, open/close,
 lock/unlock), and **config writes** — still requires the operator to open the Actions
 Menu and type the literal word **CONFIRM** (only a bare `p` ping shortcut is
 immediate). Device control + config writes are operator ops, never engine
-remediation, so they are never attributed to the learning ledger. The learned engine **recommends but never executes** —
+remediation, so they are never attributed to the learning ledger. The learned engine **recommends but does not execute its recommendations** —
 the executor / `auto_remediation` / `auto_safe` tiers are *designed* (`DESIGN.md`
-§3.5) but **not built**; there is no automatic-remediation path in the shipped
-build. As a corollary of that design, a **route rebuild is never surfaced as a
+§3.5) but **not built**. The one automatic path in the shipped build is
+**auto-ping** (§11.12): a separate module that never reads the planner's
+recommendations, restricted to the idempotent ping verb, off by default and
+double-gated behind `write_actions_enabled`. As a corollary of that design, a **route rebuild is never surfaced as a
 runnable engine recommendation**: it cannot fix a physical link, it deletes
 manual priority routes, and it *throws* on Long-Range nodes — so the planner's
 protocol/topology gates strip it. (The manual `R` "rebuild ALL" key still exists

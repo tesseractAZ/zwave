@@ -408,3 +408,51 @@ test('log-stream storm guard: a hot stream stops OUR subscription and stays quie
     await srv.close();
   }
 });
+
+/* ── v0.32.1 — the two defects found in the 2026-08-05 live log ─────────── */
+
+test('parseLastSeen: a timezone-NAKED ISO date-time is UTC, not local', () => {
+  // Measured live: the driver reported "2026-08-06T04:25:48.921" for a node
+  // heard at 21:25 MST — 04:25 UTC with the Z missing. Date.parse reads a
+  // no-offset date-time as LOCAL, which shifted every lastSeen 7 hours into
+  // the future on the plant (TZ=America/Phoenix) and corrupted every silence
+  // computation downstream: the 240-minute liveness probe behaved as an
+  // 11-hour one, while logging "240m" for every node.
+  const naked = '2026-08-06T04:25:48.921';
+  assert.equal(parseLastSeen(naked), Date.parse(naked + 'Z'),
+    'no offset ⇒ interpret as UTC');
+  // Seconds precision, no millis — same rule.
+  assert.equal(parseLastSeen('2026-08-06T04:25:48'), Date.parse('2026-08-06T04:25:48Z'));
+  // An EXPLICIT offset is honoured untouched — if a future driver starts
+  // sending proper offsets, we must not double-shift it.
+  assert.equal(parseLastSeen('2026-08-06T04:25:48.921Z'), Date.parse('2026-08-06T04:25:48.921Z'));
+  assert.equal(parseLastSeen('2026-08-06T04:25:48-07:00'), Date.parse('2026-08-06T04:25:48-07:00'));
+  // Date-only strings are already UTC per ECMA-262 — the regex must not
+  // touch them (appending Z to a date-only string would be a parse error).
+  assert.equal(parseLastSeen('2026-08-06'), Date.parse('2026-08-06'));
+});
+
+test('stop() while the socket is still CONNECTING does not crash the process', async () => {
+  // The 2026-08-05 21:25 crash: SIGTERM arrived while the driver socket was
+  // mid-reconnect; teardownSocket stripped the listeners and terminate()d a
+  // CONNECTING socket, and ws emits 'error' ("closed before the connection
+  // was established") on a LATER tick — an unhandled 'error' event, which
+  // killed Node mid-shutdown. The fix is a no-op error listener attached
+  // after removeAllListeners; this test fails as an uncaughtException crash
+  // without it.
+  const died: unknown[] = [];
+  const onUncaught = (e: unknown) => { died.push(e); };
+  process.on('uncaughtException', onUncaught);
+  try {
+    // 192.0.2.1 is TEST-NET-1 (RFC 5737): guaranteed unroutable, so the socket
+    // sits in CONNECTING until it times out — exactly the crash window.
+    const c = createDriverWsClient({ url: 'ws://192.0.2.1:3000', callbacks: {} });
+    c.start();
+    await sleep(50);          // let connect() create the socket
+    c.stop();                 // terminate() a CONNECTING socket
+    await sleep(200);         // the fatal 'error' fired on a later tick
+    assert.deepEqual(died, [], 'teardown must not leak an unhandled error event');
+  } finally {
+    process.off('uncaughtException', onUncaught);
+  }
+});

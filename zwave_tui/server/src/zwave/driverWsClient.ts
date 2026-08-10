@@ -194,11 +194,27 @@ function cleanDbm(v: unknown): number | null {
   return v;
 }
 
-/** zwave-js-server serializes lastSeen as an ISO string (sometimes epoch). */
+/**
+ * zwave-js-server serializes lastSeen as an ISO string (sometimes epoch).
+ *
+ * THE STRING CARRIES NO TIMEZONE, AND IT IS UTC. Measured live 2026-08-05: the
+ * driver reported `"2026-08-06T04:25:48.921"` for a node heard 21 minutes
+ * earlier at 21:25 MST — that is 04:25 UTC with the `Z` missing. ECMA-262
+ * parses a date-TIME string without an offset as LOCAL time, so on a plant in
+ * MST every naked timestamp landed SEVEN HOURS IN THE FUTURE. A future
+ * lastSeen makes a node's computed silence negative, which quietly corrupts
+ * every consumer of "how long since this node spoke" — the liveness probe's
+ * due test, the displayed last-seen, the evidence samples.
+ *
+ * So: an ISO date-time with no explicit offset gets `Z` appended before
+ * parsing. Strings that DO carry an offset (`Z` or ±hh:mm) are honoured as-is
+ * — if a future driver starts emitting proper offsets, nothing changes.
+ */
+const ISO_NO_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
 export function parseLastSeen(v: unknown): number | null {
   if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
   if (typeof v === 'string') {
-    const t = Date.parse(v);
+    const t = Date.parse(ISO_NO_OFFSET.test(v) ? v + 'Z' : v);
     if (Number.isFinite(t) && t > 0) return t;
   }
   return null;
@@ -287,6 +303,19 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     }
     if (ws) {
       ws.removeAllListeners();
+      // The no-op error listener is NOT optional. `terminate()` on a socket
+      // still in CONNECTING makes ws emit 'error' ("WebSocket was closed
+      // before the connection was established") ASYNCHRONOUSLY — on a later
+      // tick, via emitErrorAndClose — so the try/catch below never sees it,
+      // and with the listeners stripped above the EventEmitter re-throws it
+      // as an uncaught exception. That exact sequence crashed the add-on
+      // mid-shutdown on 2026-08-05 21:25 (HA core restart → watchdog SIGTERM
+      // while the driver socket was mid-reconnect → teardown → crash). The
+      // store saves survived (they run synchronously before the event loop
+      // turns), but the process died with a stack instead of exiting cleanly,
+      // aborting the rest of shutdown (app.close, exit 0). Same defect class
+      // as haWsClient.stop() (v0.29 fix); this is the second copy.
+      ws.on('error', () => { /* teardown: outcome irrelevant */ });
       try {
         ws.terminate();
       } catch {

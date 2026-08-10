@@ -298,6 +298,27 @@ const MUTANTS = [
     find: "      if (after.routeKnown < MIN_LIVE) return 'unverifiable';",
     repl: '',
     what: 'a route that went INVISIBLE is unknown, never a settled route' },
+  /* ── v0.32.1: the 2026-08-05 live-log defects ────────────────────────── */
+  { id: 'lastseen-utc', file: 'src/zwave/driverWsClient.ts', tests: ['driverWsClient'],
+    // Reverts to parsing a timezone-naked driver timestamp as LOCAL time — the
+    // 7-hour skew that made every lastSeen sit in the future and turned the
+    // 240-minute liveness probe into an 11-hour one.
+    find: "    const t = Date.parse(ISO_NO_OFFSET.test(v) ? v + 'Z' : v);",
+    repl: '    const t = Date.parse(v);',
+    what: 'a timezone-naked driver timestamp is parsed as UTC, not local' },
+  { id: 'teardown-error-listener', file: 'src/zwave/driverWsClient.ts', tests: ['driverWsClient'],
+    // Removes the no-op error listener, restoring the crash: terminate() on a
+    // CONNECTING socket emits an async unhandled 'error' that killed the
+    // process mid-shutdown on 2026-08-05 21:25.
+    find: "      ws.on('error', () => { /* teardown: outcome irrelevant */ });",
+    repl: '',
+    what: 'tearing down a CONNECTING socket cannot crash the process' },
+  { id: 'probe-silence-honest', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Reverts the probe log to printing the THRESHOLD as if it were the
+    // measurement — the constant "240m" that hid the timezone skew for a day.
+    find: "      const silence = decision.stalestMs == null\n        ? 'never (no lastSeen on record)'\n        : `${Math.round(decision.stalestMs / 60_000)}m`;",
+    repl: "      const silence = `${Math.round(o.config.staleMs / 60_000)}m`;",
+    what: 'the probe line reports measured silence, not the threshold' },
   /* ── auto-ping: the engine's first autonomous write ─────────────────── */
   { id: 'autoping-stdout', file: 'src/zwave/autoPing.ts',
     // Reverts to ring-only logging — the state in which 34 real probes were

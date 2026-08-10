@@ -266,6 +266,7 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
   for (const id of [...state.deadSince.keys()]) if (!seen.has(id)) state.deadSince.delete(id);
   for (const id of [...state.attempts.keys()]) if (!seen.has(id)) state.attempts.delete(id);
   for (const id of [...state.lastPingAt.keys()]) if (!seen.has(id)) state.lastPingAt.delete(id);
+  for (const id of [...state.lastStaleAt.keys()]) if (!seen.has(id)) state.lastStaleAt.delete(id);
 }
 
 /** Record that a STALE liveness probe was issued. */
@@ -382,8 +383,17 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
 
     for (const nodeId of decision.stale) {
       noteStale(state, nodeId, t);
-      const msg = `auto-ping: node ${nodeId} has not been heard from in ` +
-        `${Math.round(o.config.staleMs / 60_000)}m — liveness probe`;
+      // MEASURED silence, never the threshold. This line used to print
+      // `config.staleMs` — so every probe claimed exactly "240m" regardless of
+      // truth, which hid a 7-hour timestamp-parsing skew for a full day: nodes
+      // 11 hours silent were logged as "240m", and the constant reading gave
+      // no hint the number was fabricated. decision.stale holds at most ONE
+      // node (the queue head), so stalestMs is exactly this node's silence.
+      const silence = decision.stalestMs == null
+        ? 'never (no lastSeen on record)'
+        : `${Math.round(decision.stalestMs / 60_000)}m`;
+      const msg = `auto-ping: node ${nodeId} unheard for ${silence} ` +
+        `(threshold ${Math.round(o.config.staleMs / 60_000)}m) — liveness probe`;
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       void o.ping(nodeId).catch(() => {

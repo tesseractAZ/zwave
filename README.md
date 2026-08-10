@@ -1,9 +1,10 @@
 # Z-Wave TUI
 
 A telnet **control-room terminal UI** for a Home Assistant Z-Wave JS mesh — and a
-**learned, advisory-only remediation engine** that watches that mesh over time,
-learns each node's normal, and turns anomalies into grounded, ranked
-recommendations. Nothing is ever acted on automatically.
+**learned remediation engine** that watches that mesh over time, learns each
+node's normal, and turns anomalies into grounded, ranked recommendations.
+Recommendations are never acted on automatically; the one autonomous write is
+the opt-in, off-by-default **auto-ping** (see *Write actions & safety*).
 
 It talks to the **Home Assistant Core WebSocket** (the node roster, live
 statistics, and — behind a typed confirmation — maintenance, device-control, and
@@ -35,7 +36,7 @@ its own directory, so everything the image needs sits inside `zwave_tui/`.
 ## The advisory engine
 
 Beyond the live dashboard, the engine runs a pipeline that turns raw statistics
-into diagnoses and recommendations — **advisory-only, everything grounded in
+into diagnoses and recommendations — **advisory, everything grounded in
 measured evidence:**
 
 1. **Evidence store** — a persistent per-node time-series on `/data` (a fine ring
@@ -65,8 +66,10 @@ measured evidence:**
    driver WebSocket, since HA strips it), controller serial-link health shown
    apart, a diurnal timeout heatmap, and a persisted multi-day noise-floor trend.
 
-**Read-only by default; nothing auto-executes.** Every mesh-mutating action is
-human-gated behind a typed `CONFIRM` (see [Write actions & safety](#write-actions--safety)).
+**Read-only by default.** Every operator action is human-gated behind a typed
+`CONFIRM`; the engine's recommendations are never self-executed. The one
+autonomous write — the opt-in **auto-ping** probe — is documented in
+[Write actions & safety](#write-actions--safety).
 
 ## Screens & keys
 
@@ -170,9 +173,21 @@ can never offer you an action that touches all 39 nodes.
 Every row is badged **SAFE / CAUTION / DESTRUCTIVE** (unlocking a lock or opening a
 garage is DESTRUCTIVE), and selecting any of them opens a modal that requires you
 to type the literal word **`CONFIRM`** before it runs (only a bare `p` ping stays
-immediate). Every outcome is logged. The *engine* never executes anything itself —
-it only recommends; device control and config writes are **operator** actions, and
-are never fed to the learning ledger. If you expose the LAN telnet port on an
+immediate). Every outcome is logged. The *engine* never executes its
+recommendations; device control and config writes are **operator** actions, and
+are never fed to the learning ledger.
+
+**Auto-ping — the one autonomous write (v0.30, opt-in).** With
+`auto_ping_enabled` on (and only under the master `write_actions_enabled` gate),
+the engine probes a mains node that has been **Dead past a dwell** (default
+10 min, 3 attempts with 10/30/60 min backoff), and issues a **liveness probe** to
+a mains node **silent past a threshold** (default 240 min — Z-Wave JS marks Dead
+only reactively, so an unplugged device can read "Alive" for hours until
+something talks to it). It is restricted to ping because ping is idempotent and
+has nothing to undo; battery/sleeping devices are never probed; a boot window,
+a rebuild suppressor, and a mesh-storm guard (≥25 % dead ⇒ stand down) bound it.
+Off by default; every decision is traced to the log and every outcome feeds the
+learning ledger. If you expose the LAN telnet port on an
 untrusted network, enable the optional **login gate** (plaintext or `scrypt:`
 passwords, with a per-peer backoff). The sidebar console is **restricted to Home
 Assistant administrators** — the same position the official Z-Wave JS add-on

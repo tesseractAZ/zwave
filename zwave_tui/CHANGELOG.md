@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.32.1 — 2026-08-05
+
+Three defects found by reading one evening's live log, plus the documentation
+debt an adversarial docs audit surfaced.
+
+- **Driver `lastSeen` timestamps are UTC without an offset — parse them that
+  way.** zwave-js-server serializes `lastSeen` as an ISO date-time with no
+  timezone suffix; `Date.parse` reads such strings as LOCAL time, so on any
+  host west of UTC every timestamp landed hours in the future (seven, on the
+  reference plant). Computed silence was wrong by that offset everywhere it was
+  used — most visibly, the 240-minute liveness probe behaved as an 11-hour one.
+  `parseLastSeen` now appends `Z` to offset-less date-times; explicit offsets
+  are honoured untouched.
+- **Shutdown can no longer crash on a mid-reconnect driver socket.**
+  `terminate()` on a CONNECTING WebSocket emits `'error'` asynchronously; with
+  listeners already stripped, that became an uncaught exception that killed the
+  process mid-shutdown (observed after a watchdog SIGTERM during an HA Core
+  restart). `teardownSocket` now parks a no-op error listener first — the same
+  fix `haWsClient.stop()` received in v0.29.
+- **The liveness-probe log line reports MEASURED silence.** It used to print
+  the configured threshold as if it were the measurement, so every probe
+  claimed exactly "240m" — a constant that masked the timezone skew for a full
+  day. The line now carries the node's actual silence with the threshold
+  alongside, so a wrong number can contradict itself in the log.
+- Stale-probe cooldown bookkeeping is now swept when a node leaves the roster
+  (a small leak, found while pinning the above).
+- **Docs:** DOCS.md gains §11.12 — the full auto-ping register section the
+  v0.30.0 release owed — and every "nothing auto-executes / advisory-only"
+  absolute (intro, §1.8, §3, §11, §12.8, README) is corrected to name the one
+  deliberate exception. §12.2 adds the four `auto_ping_*` option rows; §5.2,
+  §7.3 and §9.1 catch up to v0.32.0's route-identity and s2-lane fields.
+- **Screenshots regenerated** from the current renderer — and the generator's
+  output path fixed: it wrote to `zwave_tui/docs/` (which nothing references)
+  instead of the repo-root `docs/screenshots/` the README embeds, so a
+  "successful" regeneration silently changed nothing.
+
 ## 0.32.0 — 2026-08-04
 
 **`route-churn` fired on a definition, not on the mesh.**
