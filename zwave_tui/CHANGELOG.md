@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.32.1 — 2026-08-05
+## 0.32.1 — 2026-08-10
 
 Three defects found by reading one evening's live log, plus the documentation
 debt an adversarial docs audit surfaced.
