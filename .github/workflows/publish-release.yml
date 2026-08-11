@@ -1,17 +1,16 @@
 name: Publish release
 
-# Cut a GitHub Release on a `v*.*.*` tag push — release notes from the
-# CHANGELOG + the printable manual (.docx editable, .pdf reader-friendly) as
-# assets. Deliberately does NOT publish a container image: this add-on is
-# deployed by SOURCE BUILD (Supervisor builds it on the user's own device), so
-# no GHCR package is ever pushed.
+# Cut a GitHub Release on a `v*.*.*` tag push: run the server tests, build and
+# push the MULTI-ARCH GHCR images (aarch64 + amd64 — installs pull these, per
+# config.yaml's `image:` key; since v0.29.2 there is no on-device build), build
+# the printable manual (.docx editable, .pdf reader-friendly), and create the
+# Release with the CHANGELOG notes + manual attached.
 #
-# NB the repo is PUBLIC, so a Release and its manual ARE public.
+# NB the repo is PUBLIC, so a Release, its manual, and the images ARE public.
 #
-# To cut a release: after the version's PR is merged to main (subject `vX.Y…`,
-# never `Release v`), push the tag at that merge commit:
-#     git tag v0.21.0 <merge-sha> && git push origin v0.21.0
-# This workflow then builds the manual and creates the Release.
+# The tag itself comes from the relay: squash-merge with a subject starting
+# `Release vX.Y.Z` and tag-release.yml pushes the tag automatically — no manual
+# tagging. (A merge whose subject does not start `Release v` releases nothing.)
 
 on:
   push:
@@ -306,7 +305,7 @@ jobs:
               echo "## ✅ v${V} released"
               echo
               echo "A public GitHub Release was cut with the CHANGELOG notes and the"
-              echo "printable manual (.docx + .pdf) attached. No container image was"
-              echo "published — Supervisor builds the add-on from source on the host."
+              echo "printable manual (.docx + .pdf) attached, and the multi-arch"
+              echo "GHCR images (aarch64 + amd64) for this version were pushed."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

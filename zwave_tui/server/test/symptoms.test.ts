@@ -509,7 +509,7 @@ test('rtt-degraded still fires for a node that talks less often than the dwell (
 
 /* ── route-churn: a SymptomKind that existed but was never emitted ────────
  *
- * v0.29.6. `route-churn` had a full planner card (planner.ts) and outcomes
+ * v0.30.0. `route-churn` had a full planner card (planner.ts) and outcomes
  * handling since the planner was written, but NO detector ever produced it —
  * `grep "kind: 'route-churn'"` over src/ returned 0 — so REMEDY could never
  * surface it and the card was unreachable. The evidence had been collected the

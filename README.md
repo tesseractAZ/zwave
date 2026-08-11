@@ -25,8 +25,9 @@ browser console.
 
 The Home Assistant add-on — including the Node/TypeScript server — lives in
 [`./zwave_tui`](./zwave_tui); the server source is under
-[`./zwave_tui/server`](./zwave_tui/server). Home Assistant builds an add-on from
-its own directory, so everything the image needs sits inside `zwave_tui/`.
+[`./zwave_tui/server`](./zwave_tui/server). Everything the image needs sits
+inside `zwave_tui/` — CI builds the multi-arch image from that one directory,
+and installs pull it from GHCR.
 
 > **Works with any Z-Wave JS network.** Nothing about a specific controller or
 > mesh is hard-coded: the `zwave_js` config-entry id is **auto-discovered** at
@@ -46,9 +47,11 @@ measured evidence:**
    several distinct days before its detectors may fire; symptomatic windows are
    quarantined so a fault can't teach the baseline to accept itself.
 3. **Symptom detectors** — degraded return path, dead-flapping, rate fallback,
-   high RTT, weak signal, a chatty flooder, a suspected ghost, controller
-   serial-link strain, **S2 nonce-resync storms** (a marginal *secure* link, which
-   no statistics counter can see — it is read from the driver's own log stream),
+   high RTT, weak signal, **route churn** (the mesh cannot settle on a stable
+   path — usually one marginal repeater), a chatty flooder, a suspected ghost,
+   controller serial-link strain, **S2 nonce-resync storms** (a marginal *secure*
+   link, which no statistics counter can see — it is read from the driver's own
+   log stream),
    and correlation across nodes: an **edge-cluster** (a small group sharing one
    repeater) and a mesh-wide interference event, which *subsume* the per-node
    symptoms beneath them so you see one cause, not N faults.
@@ -83,7 +86,7 @@ dismisses with `q` / `Esc`.
 | 3 | **Controller** | Node-1 radio health, background-RSSI noise floor, controller counters, rebuild progress. |
 | 4 | **Topology** | Hop-grouped route tree + repeater load + Long-Range star. |
 | 5 | **Heatmap** | Nodes by HA area, cells graded by SNR-margin bucket. |
-| 6 | **Log** | Driver/value/notification events + command outcomes; scroll, filter, red-latch-until-ack. |
+| 6 | **Log** | Driver/value/notification events + command outcomes; scroll, filter; error events latch red so they cannot scroll away unseen. |
 | 7 | **Remedy** | The engine's diagnoses + ranked recommendations, with learned "helped X%" efficacy. |
 | 8 | **Interference** | Noise floor + recent/multi-day trend, serial-link health, diurnal timeout heatmap. |
 
@@ -203,10 +206,9 @@ already set up.
    ```
    https://github.com/tesseractAZ/zwave
    ```
-2. Install **Z-Wave TUI** from the store. There is **no prebuilt image** — Supervisor
-   builds the add-on on your own device from `zwave_tui/Dockerfile`, so the **first install
-   takes a few minutes** (later updates are quicker). Nothing is pulled from a
-   container registry.
+2. Install **Z-Wave TUI** from the store. Supervisor pulls a **prebuilt multi-arch
+   image** from GHCR (`ghcr.io/tesseractaz/{arch}-zwave-tui`), so install and
+   updates take seconds — no on-device build.
 3. Start it. **No configuration is required:** the add-on auto-discovers your
    `zwave_js` config entry and builds the node roster from the device/entity
    registries.
@@ -225,20 +227,25 @@ expose the telnet port on a network you don't fully trust.
 
 ## Releasing a new version
 
-*(Maintainer notes.)* This add-on is built from source and publishes **no**
-container image. A release is a versioned record plus the downloadable manual.
-To cut one:
+*(Maintainer notes.)* Releases are fully automated by a three-workflow relay:
 
-1. Bump `version:` in `zwave_tui/config.yaml` and add a `## X.Y.Z — DATE` section
-   to `zwave_tui/CHANGELOG.md`, then merge that to `main` (a normal `vX.Y…` PR
-   subject — CI gates it).
-2. Push the tag at the merge commit:
-   ```bash
-   git tag v0.23.0 <merge-sha> && git push origin v0.23.0
-   ```
-3. **`publish-release.yml`** (on the `vX.Y.Z` tag) runs the server tests, builds
-   the printable manual (`.docx` + `.pdf`), and cuts a **GitHub Release**
-   with the CHANGELOG notes and the manual attached. No GHCR image is pushed.
+1. Bump the version in **both** `zwave_tui/config.yaml` (`version:`) **and**
+   `zwave_tui/server/package.json` — CI enforces the lock-step
+   (`configContract.test.ts`) and `tag-release.yml` refuses to tag on drift —
+   add a `## X.Y.Z — DATE` section to `zwave_tui/CHANGELOG.md`, then
+   squash-merge with a subject that **starts with `Release vX.Y.Z`** — that
+   prefix is the trigger; CI gates the PR as usual. (**`release.yml`** is the
+   one-click alternative: a `workflow_dispatch` that performs both bumps, writes
+   the CHANGELOG section, and opens that release PR for you.)
+2. **`tag-release.yml`** sees the merge subject and pushes the `vX.Y.Z` tag
+   automatically — no manual tagging.
+3. On that tag, **`publish-release.yml`** runs the server tests, builds and
+   pushes the **multi-arch GHCR images** (`aarch64` + `amd64`), builds the
+   printable manual (`.docx` + `.pdf`), and cuts a **GitHub Release** with the
+   CHANGELOG notes and the manual attached.
+
+A merge whose subject does *not* start with `Release v` changes `main` without
+releasing anything — docs and tooling changes ride along until the next release.
 
 `ci.yml` (typecheck + tests + docs build + docker smoke build) is the required
 gate on every PR; `codeql.yml` runs the self-contained CodeQL security check.
@@ -251,7 +258,7 @@ gate on every PR; `codeql.yml` runs the self-contained CodeQL security check.
   the Dockerfile and source sat at the repository root, where a store install
   could never find them.
 - `zwave_tui/server/` — TypeScript backend run directly with `tsx` (no build step).
-  `npm test` runs the suite (508 node:test cases); `npm run typecheck` is the CI
+  `npm test` runs the suite (600+ node:test cases); `npm run typecheck` is the CI
   gate; `npm start` runs the server.
 - `node server/scripts/mutation-check.mjs` (from `zwave_tui/`) reverts each behavioural fix one at a time
   and requires the suite to go red. A green suite proves the tests run; this
