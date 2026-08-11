@@ -380,6 +380,11 @@ even when execution is fully disabled.
 
 ### 3.5 `executor.ts` (DEFERRED — not built; owner chose advisory-only)
 
+> **Since written (v0.30, 2026-08):** one narrow autonomous write ships OUTSIDE
+> this design — **auto-ping** (`autoPing.ts`, DOCS.md §11.12): opt-in, off by
+> default, ping-only, and it never reads the planner's recommendations. It is
+> not this executor; everything below about the executor tiers remains accurate.
+
 > **As-built status.** M4 shipped the planner (§3.4) + advisory REMEDY surface;
 > **M5 (v0.16) shipped the learning loop (§3.6) — also advisory-only.** In
 > `advise` mode there is **no new execution path**: the planner surfaces

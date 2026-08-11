@@ -327,7 +327,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
     // s2-desync — S2 SPAN-resync storm (v0.26). Nonce desync surfaces ONLY in
     // route-churn — the mesh cannot settle on a path to this node.
     //
-    // v0.29.6: this SymptomKind has existed since the planner was written, with
+    // v0.30.0: this SymptomKind has existed since the planner was written, with
     // a full remediation card and outcomes handling — but nothing ever emitted
     // it, so the card was unreachable and REMEDY could never surface churn. The
     // evidence was already being collected the whole time: `dRouteChanges` is an

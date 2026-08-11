@@ -152,5 +152,5 @@ jobs:
             echo "On merge: **tag-release.yml** tags \`v${{ steps.v.outputs.next }}\` and starts"
             echo "**publish-release.yml**, which cuts the GitHub Release."
             echo
-            echo "> Source build — no container image is published."
+            echo "> On merge, the relay tags the release and publishes the GHCR images."
           } >> "$GITHUB_STEP_SUMMARY"

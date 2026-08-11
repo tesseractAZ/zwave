@@ -40,7 +40,7 @@ debt an adversarial docs audit surfaced.
 
 **`route-churn` fired on a definition, not on the mesh.**
 
-The detector shipped in v0.29.6 and has never fired on the reference mesh. Why
+The detector shipped in v0.30.0 and has never fired on the reference mesh. Why
 it has not fired is still unmeasured — a stable mesh genuinely may not re-route
 four times in ten minutes. What the investigation did establish is separate and
 worse: the detector's input carried a **false-positive** vector, so the quiet
@@ -93,8 +93,8 @@ the mass false positive. A steady-state window cannot sample the failure mode.
 It also cannot settle whether four-in-ten-minutes is the right threshold; that
 needs the engine's own long-horizon evidence, which now records it correctly.
 
-Documentation: §7.2.3 listed `route-churn` as **declared, not built** eleven
-releases after it was built; the recovery-metric table omitted `s2` entirely.
+Documentation: §7.2.3 listed `route-churn` as **declared, not built** two minor
+versions after it was built; the recovery-metric table omitted `s2` entirely.
 Both corrected, and §7.2.4 gains the detector's firing conditions and the route
 identity contract.
 

@@ -1337,7 +1337,7 @@ Two field families carry the design's hardest-won lessons:
 
 - **`dTimeout` is the primary reliability signal, not `dDropTx`.** Per `RESEARCH.md §0`, `commandsDroppedTX` does **not** count RF ACK failures — an RF failure marks the node **DEAD** while that counter stays 0. The real RF-failure signals are (a) `dFlaps` (Alive↔Dead status transitions) and (b) `dTimeout` (a `Get` whose reply never arrived, with the node staying Alive). The TUI's reliability metric is therefore `timeoutResponse/commandsTX` (shown as **TMO**), and `dDropTx` is captured only for completeness.
 
-- **`dFlaps` / `dRouteChanges` are event-accumulated, never level-sampled.** The `status` column is *dwell context only.* Sub-window Alive↔Dead flaps are invisible to level-sampling by construction, so the caller accumulates them from `zwave_js/subscribe_node_status` events (`flapAccum` in `zwaveData.ts:1150` / `:1577`) and from the route-change diff (`routeChangeAccum`, `:1766`), then **drains** them into each sample. The header calls this "the design review's core catch." Because they are drains, `dFlaps` and `dRouteChanges` are always concrete integers, even when the counter deltas are `null`.
+- **`dFlaps` / `dRouteChanges` are event-accumulated, never level-sampled.** The `status` column is *dwell context only.* Sub-window Alive↔Dead flaps are invisible to level-sampling by construction, so the caller accumulates them from `zwave_js/subscribe_node_status` events (`flapAccum` in `zwaveData.ts`) and from the route-change diff (`routeChangeAccum`, gated by `isRouteChange` — both endpoints known), then **drains** them into each sample. The header calls this "the design review's core catch." Because they are drains, `dFlaps` and `dRouteChanges` are always concrete integers, even when the counter deltas are `null`.
 
 `rssi`/`rtt` are re-sampled driver EMAs and carry information **only when `fresh`** — otherwise they are pseudo-replicated identical readings that would collapse downstream MAD (median absolute deviation) to 0. `rssi` is passed through `cleanRssi()`, which nulls the driver sentinels (`RSSI_SENTINEL_MIN = 125`: 125 no-signal, 126 saturated, 127 not-available) and any non-finite value. `rateKbps` maps `lwr.protocolDataRate` through `RATE_KBPS = { 1: 9.6, 2: 40, 3: 100, 4: 100 }` (4 = Long-Range 100k). `routeKey` comes from the shared `routeKeyOfLwr` (v0.32.0 — the ONE definition of route identity): **`null` when the driver reported no `lwr` at all** (lost visibility is a fact about our knowledge, not the mesh), `'direct'` for an empty repeater chain, else `'r' + repeaters.join('-')`. Route-change counting (`isRouteChange`) requires BOTH endpoints known — a route that cannot be seen has not moved.
 
@@ -1847,7 +1847,7 @@ server-sent data, and §6.6's payload-safety rule applies unchanged.
 M3 is the layer that turns the raw evidence stream (Chapter 6, `evidenceStore.ts`) into *meaning*. It has two halves, each a self-contained module:
 
 - **`server/src/zwave/baselines.ts`** — the learned "normal" for every node. It persists per-node × per-time-of-day statistics so that a relative detector can ask *"is this node worse than its own history?"* rather than guessing at absolute thresholds.
-- **`server/src/zwave/symptoms.ts`** — a set of pure detector functions that read live evidence + baselines and emit a ranked list of provenance-carrying `Symptom` rows. It is **advisory-only**: it *describes* what it sees and never acts. Every mutating action still flows through the human type-CONFIRM Actions Menu (Chapter 8/M4).
+- **`server/src/zwave/symptoms.ts`** — a set of pure detector functions that read live evidence + baselines and emit a ranked list of provenance-carrying `Symptom` rows. It is **advisory**: it *describes* what it sees and never acts. Every operator action flows through the human type-CONFIRM Actions Menu (Chapter 8/M4); the one autonomous write, auto-ping, is a separate module (§11.12) that does not read these detectors' output.
 
 The two modules are joined by a feedback loop: symptoms decide which nodes are *quarantined*, and baselines refuse to learn from a quarantined node (so the "normal" never chases the pathology). This chapter documents both halves, the exact statistics, every threshold, and the correlation ladder that collapses N per-node faults into one mesh event.
 
@@ -2087,7 +2087,7 @@ The `SymptomKind` union declares **14** kinds. Thirteen have live detector bodie
 | 3 | `dead-flap` | node | crit | measured | yes |
 | 4 | `quiet-node` | node | — | — | **declared, not built** |
 | 5 | `rate-fallback` | node | watch/warn | measured | yes |
-| 6 | `route-churn` | node | warn | measured | yes (v0.29.6) |
+| 6 | `route-churn` | node | warn | measured | yes (v0.30.0) |
 | 7 | `rtt-degraded` | node | watch | measured | yes |
 | 8 | `weak-signal` | node | watch | measured/inferred | yes |
 | 9 | `chatty-device` | node | watch | measured | yes |
@@ -2183,7 +2183,7 @@ b = rr >= rxMedian * RX_FLOOD_MULT (20) && rr >= 6   // ≥6 reports/min AND ≫
 
 The offending node id is captured as `floodNode` for the correlation ladder. `chatty-device` is a *cause hypothesis* and is exempt from `subsumedBy` demotion (§7.5).
 
-**`route-churn`** — warn, measured, **v0.29.6**.
+**`route-churn`** — warn, measured, **v0.30.0**.
 
 ```
 NOT node.isLongRange
@@ -2346,7 +2346,7 @@ All `symptoms.ts` thresholds ship as documented compile-time constants (shareabi
 
 Baseline constants (`baselines.ts`): `N_BANDS = 6`, `MIN_OBS = 20`, `MIN_DAYS = 3`, `DECAY = 0.01`, `DAYS_RING = 10`, `RSSI_MAD_FLOOR = 3 dB`, `RTT_MAD_FLOOR = 8 ms`, RSSI bins 2 dB over [−120, −20] (50 bins), the RTT edge set of §7.1.3, `SCHEMA_V = 1`, `DEFAULT_MAX_AGE_MS = 30 days`, `DEFAULT_BOOT_GRACE_MS = 180 s`.
 
-> **Advisory-only, by owner decision.** Nothing in M3 executes. `detectSymptoms` returns a ranked, provenance-carrying description; the planner/executor tiers (`auto_remediation`, `auto_safe`) are designed but not built, and every mutating action still passes through the human type-CONFIRM Actions Menu. In particular, a route rebuild is never a runnable recommendation here — it cannot fix a physical link, it deletes manual priority routes, and it throws on Long-Range nodes.
+> **Advisory-only, by owner decision.** Nothing in M3 executes. `detectSymptoms` returns a ranked, provenance-carrying description; the planner/executor tiers (`auto_remediation`, `auto_safe`) are designed but not built, and every operator action passes through the human type-CONFIRM Actions Menu (auto-ping, the one autonomous write, bypasses neither this module nor the planner — §11.12). In particular, a route rebuild is never a runnable recommendation here — it cannot fix a physical link, it deletes manual priority routes, and it throws on Long-Range nodes.
 
 ## 8. The Remediation Planner (M4)
 
@@ -2557,7 +2557,7 @@ The REMEDY render enforces the same rule inline (§8.8): a subsumed symptom's ro
 
 `renderRemedy(ctx)` turns `data.symptoms()` into the advisory screen. It is where the plan meets the operator, and it is engineered so the single most important fact — a critical symptom and its honesty tags — can never be pushed off a non-scrolling terminal.
 
-**Severity sort.** Symptoms are sorted worst-first by `bySeverity`, using `SEV_RANK = { crit: 0, warn: 1, watch: 2 }` with newest-breaching (`b.sinceMs - a.sinceMs`) as the tiebreak. This guarantees "a low-severity watch can never bury a critical off the bottom." The right-hand status and a `summaryLine` (`N critical · N warning · N watch  —  advisory only; nothing is acted on`) head the body.
+**Severity sort.** Symptoms are sorted worst-first by `bySeverity`, using `SEV_RANK = { crit: 0, warn: 1, watch: 2 }` with newest-breaching (`b.sinceMs - a.sinceMs`) as the tiebreak. This guarantees "a low-severity watch can never bury a critical off the bottom." The right-hand status and a `summaryLine` (`N critical · N warning · N watch  —  the engine only recommends; you run the actions`) head the body.
 
 **Per-symptom block (`symptomBlock`).** Each symptom renders as: a header line (`SEV_TAG` + a compact basis **glyph** + kind + who + dwell age), an evidence line (leading with the full `measured`/`inferred` word, then `label value` pairs), one wrapped narrative line, then the plan. The basis glyph — `◆` green for `measured`, `◇` yellow for `inferred` — is placed immediately after the severity tag precisely so it survives truncation at 40 columns; it is "the only measured-vs-inferred guardrail and must never be clipped off the row."
 
@@ -2573,7 +2573,7 @@ The REMEDY render enforces the same rule inline (§8.8): a subsumed symptom's ro
 
 **Three distinct empty states.** When `symptoms.length === 0`, the screen never renders a generic "all clear." It reads `data.engineStatus()` and distinguishes: **engine disabled** (`● Engine disabled` — no baselines store configured, nothing is being diagnosed), **still learning** (`◷ Learning — ready/total nodes have a graduated baseline` — detectors may not fire until a node's normal is learned over several distinct days, "by design, not a fault"), and **genuinely healthy** (`✓ All clear — N nodes learned, no symptoms detected`). Rendering these identically would let "learning" masquerade as "healthy," so they are kept separate.
 
-The whole surface reiterates the engine's contract in its own chrome: the summary line ends "advisory only; nothing is acted on," and the key bar offers only screen navigation and `Q` BACK — there is no "run" key on REMEDY. Executable candidates are run, if at all, through the separate Actions Menu with type-CONFIRM.
+The whole surface reiterates the engine's contract in its own chrome: the summary line ends "the engine only recommends; you run the actions," and the key bar offers only screen navigation and `Q` BACK — there is no "run" key on REMEDY. Executable candidates are run, if at all, through the separate Actions Menu with type-CONFIRM.
 
 ## 9. The Outcome-Learning Loop (M5)
 
@@ -2581,7 +2581,7 @@ The remediation engine's fourth stage (evidence → baselines → symptoms → *
 
 Two properties define this milestone and everything below follows from them:
 
-1. **Advisory-only.** Per the owner's decision, the engine executes nothing. There is no `executor.ts` and no `auto_remediation` tier this milestone (DESIGN §3.5). The ledger's "action arm" is therefore not populated by the engine — it is populated by whatever the operator ran through the pre-existing type-CONFIRM Actions Menu (v0.9). The learned numbers flow *back into* the planner as advice; they never trigger anything.
+1. **Advisory.** Per the owner's decision, the engine never executes its recommendations. There is no `executor.ts` and no `auto_remediation` tier this milestone (DESIGN §3.5). The ledger's "action arm" is therefore not populated by the engine — it is populated by whatever the operator ran through the pre-existing type-CONFIRM Actions Menu (v0.9). The learned numbers flow *back into* the planner as advice; they never trigger anything.
 2. **The unit is an episode, not an action.** The ledger records **every** symptom episode whether or not an action was taken. Episodes that resolve untouched are the **control arm** — the spontaneous-recovery base rate the mesh self-heals at. Without that control arm you cannot honestly say an action "helped," because a Z-Wave Plus mesh self-heals via explorer frames on its own (RESEARCH §5; the patio-light switches that healed unaided are the canonical example, and the "regression-to-the-mean trap" the guards below defend against).
 
 ### 9.1 Data shapes
@@ -2676,7 +2676,7 @@ The ledger keeps two decayed tallies per symptom kind, plus a false-positive cou
 | `action: Map<string, Tally>` | `${kind}\|${act}` (`aKey`) | Action arm — episodes attributed to a given `(kind, action)` |
 | `fp: Map<SymptomKind, number>` | `kind` | `refused-misdiagnosis` count (detector false positives) |
 
-**Populating the action arm (operator actions).** Because nothing auto-executes, the action arm is fed by the ActionRunner's structured `onOutcome` hook. The wiring is: `createActionRunner.run()` fires `o.onOutcome?.(kind, nodeId, true)` on success / `…, false)` on failure (zwaveActions.ts:56/61) → `index.ts:103` routes it to `zwaveData.recordActionOutcome(kind, nodeId, ok)` → `outcomes.recordAction(...)`. `recordActionOutcome` applies three conservative filters *before* the ledger sees it:
+**Populating the action arm.** Every mutating verb flows through the ActionRunner, so the action arm is fed by its structured `onOutcome` hook — operator actions from the type-CONFIRM menu, and (since v0.30) auto-ping's probes, which reuse the same ping verb (§11.12). The wiring is: `createActionRunner.run()` fires `o.onOutcome?.(kind, nodeId, true)` on success / `…, false)` on failure (zwaveActions.ts:56/61) → `index.ts:103` routes it to `zwaveData.recordActionOutcome(kind, nodeId, ok)` → `outcomes.recordAction(...)`. `recordActionOutcome` applies three conservative filters *before* the ledger sees it:
 
 - **Mesh-wide actions dropped.** `nodeId == null` (rebuildAll / stopRebuild) is not attributed — it cannot be credited to any one node's episode without confounding.
 - **Only successful actions count.** `if (!ok) return;` A failed action was not "taken."
@@ -3546,13 +3546,14 @@ writeActions:            process.env.WRITE_ACTIONS_ENABLED === '1',     // absen
 telnet.enabled:          process.env.TELNET_ENABLED       !== '0',     // absent ⇒ ON  (fail-open)
 auth.enabled:            process.env.AUTH_ENABLED          === '1',     // absent ⇒ OFF
 auth.requireOnIngress:   process.env.AUTH_REQUIRE_ON_INGRESS === '1',   // absent ⇒ OFF
+autoPing.enabled:        process.env.AUTO_PING_ENABLED     === '1',     // absent ⇒ OFF (fail-closed, v0.30)
 ```
 
-Write-actions and the login gate default **off** when their env var is missing;
-telnet defaults **on**. That asymmetry is intentional: a forgotten
+Write-actions, the login gate, and auto-ping default **off** when their env var
+is missing; telnet defaults **on**. That asymmetry is intentional: a forgotten
 `WRITE_ACTIONS_ENABLED` leaves the add-on a read-only monitor, while a forgotten
 `TELNET_ENABLED` still serves the TUI. Because the run script *always* exports
-`1`/`0` for all four, the code-side default only ever binds in bare-metal dev; in
+`1`/`0` for all five, the code-side default only ever binds in bare-metal dev; in
 the add-on the exported value wins. The comment "OMITTING the export entirely
 makes the option DEAD (server only ever sees its code default)" is the invariant
 that keeps the two ends in lock-step.

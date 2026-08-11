@@ -2,10 +2,10 @@
 #
 # Adding this repo's URL under Settings → Add-ons → Add-on Store → ⋮ →
 # Repositories makes "Z-Wave TUI" (in ./zwave_tui) installable as a first-class
-# store add-on. Home Assistant manages it natively from there: because the add-on
-# ships no `image:` key, Supervisor BUILDS it from this repository's Dockerfile on
-# your own host, and the Update button rebuilds it whenever `version:` in
-# zwave_tui/config.yaml bumps. No container registry is involved.
+# store add-on. Home Assistant manages it natively from there: the add-on's
+# `image:` key points at the prebuilt multi-arch GHCR images, so install and the
+# Update button PULL the published image for `version:` in zwave_tui/config.yaml
+# — no on-device build (since v0.29.2).
 name: tesseractAZ Z-Wave TUI
 url: https://github.com/tesseractAZ/zwave
 maintainer: Eric Paschal (https://github.com/tesseractAZ)
