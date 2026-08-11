@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.32.2 — 2026-08-11
+
+- **Liveness probe default halved: 240 → 120 minutes** (`auto_ping_stale_min`).
+  With the v0.32.1 timestamp fix proven live (every probe at 120–121 % of the
+  threshold, one per node per cycle), the owner chose a two-hour check-in: a
+  silently failed mains device is now discovered within two hours instead of
+  four. Still self-balancing — a device that reports on its own is never probed
+  — and still one probe per tick, stalest first.
+
 ## 0.32.1 — 2026-08-10
 
 Three defects found by reading one evening's live log, plus the documentation

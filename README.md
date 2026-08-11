@@ -184,7 +184,7 @@ are never fed to the learning ledger.
 `auto_ping_enabled` on (and only under the master `write_actions_enabled` gate),
 the engine probes a mains node that has been **Dead past a dwell** (default
 10 min, 3 attempts with 10/30/60 min backoff), and issues a **liveness probe** to
-a mains node **silent past a threshold** (default 240 min — Z-Wave JS marks Dead
+a mains node **silent past a threshold** (default 120 min — Z-Wave JS marks Dead
 only reactively, so an unplugged device can read "Alive" for hours until
 something talks to it). It is restricted to ping because ping is idempotent and
 has nothing to undo; battery/sleeping devices are never probed; a boot window,

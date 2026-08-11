@@ -3489,7 +3489,7 @@ Everything else in this reference is advisory: the engine detects, explains, and
 | Dead dwell `auto_ping_after_min` | 10 m (2–120) | Measured on the reference mesh: self-healing episodes resolve inside ~5 m, stuck ones run 6–9 h — 10 m sits in the gap |
 | Attempt budget `auto_ping_max_attempts` | 3 per dead episode (1–10) | Then stop and leave it to a human; recovery clears the episode so a later failure gets a fresh budget |
 | Backoff between attempts | 10 / 30 / 60 m | A node that did not answer seconds ago will not answer now; avoid avoidable RF |
-| Liveness threshold `auto_ping_stale_min` | 240 m, `0` = off (0–1440) | Measured from each node's own `lastSeen`, so it is self-balancing: chatty devices are never probed |
+| Liveness threshold `auto_ping_stale_min` | 120 m, `0` = off (0–1440) | Measured from each node's own `lastSeen`, so it is self-balancing: chatty devices are never probed |
 | Liveness rate cap | **one probe per tick**, stalest first | 36 nodes coming due together must trickle, not burst; per-node re-probe no sooner than the threshold |
 | Boot window | 5 m after start (or roster not ready) | Right after start every node can read Dead; without this the engine would ping the whole mesh on every restart |
 | Rebuild suppression | `isRebuildingRoutes` ⇒ do nothing | A rebuild drops nodes in and out by design |
@@ -3577,7 +3577,7 @@ advanced ones. Every option below is a **tunable default** unless noted.
 | `auto_ping_enabled` | `false` | `bool` | `AUTO_PING_ENABLED` (numeric-bool) | `config.autoPing.enabled` | The engine's ONE autonomous write (§11.12). Also requires `write_actions_enabled` — the master gate is never bypassed. |
 | `auto_ping_after_min` | `10` | `int(2,120)` | `AUTO_PING_AFTER_MS` (run script ×60000) | `config.autoPing.afterMs` | Dwell before a Dead mains node's first probe; backoff 10/30/60 m between attempts. |
 | `auto_ping_max_attempts` | `3` | `int(1,10)` | `AUTO_PING_MAX_ATTEMPTS` | `config.autoPing.maxAttempts` | Probes per dead episode, then the node is left to the human path. Recovery resets the budget. |
-| `auto_ping_stale_min` | `240` | `int(0,1440)` | `AUTO_PING_STALE_MS` (run script ×60000) | `config.autoPing.staleMs` | Liveness probe after this much per-node silence; `0` disables the liveness lane. One probe per tick, stalest first. |
+| `auto_ping_stale_min` | `120` | `int(0,1440)` | `AUTO_PING_STALE_MS` (run script ×60000) | `config.autoPing.staleMs` | Liveness probe after this much per-node silence; `0` disables the liveness lane. One probe per tick, stalest first. |
 | `refresh_interval` | `2` | `int(1,30)` | `REFRESH_INTERVAL_MS` | `config.refreshMs` | **seconds → ms**: run script does `* 1000`. Cheap render/roster cadence. |
 | `route_poll_interval` | `10` | `int(5,120)` | `ROUTE_POLL_INTERVAL_MS` | `config.routePollMs` | **seconds → ms**. Expensive route/controller-stats cadence; also the evidence-sample tick. |
 | `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. |

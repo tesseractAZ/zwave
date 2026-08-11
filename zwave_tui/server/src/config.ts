@@ -131,7 +131,7 @@ export const config = {
     enabled: process.env.AUTO_PING_ENABLED === '1',
     afterMs: Number(process.env.AUTO_PING_AFTER_MS ?? 10 * 60_000),
     maxAttempts: Number(process.env.AUTO_PING_MAX_ATTEMPTS ?? 3),
-    staleMs: Number(process.env.AUTO_PING_STALE_MS ?? 240 * 60_000),
+    staleMs: Number(process.env.AUTO_PING_STALE_MS ?? 120 * 60_000),
   },
 
   /**
