@@ -1024,14 +1024,18 @@ test('the Log command bar sheds its LEAST useful keys first', () => {
     assert.ok(!/\[[^\]]*$/.test(bar), `the Log bar ends mid-keycap at cols=${cols}: ${bar}`);
   }
 
-  // At 60 cols two caps must go. They must be the two highest priorities
-  // ([D] DATE = 4, [O] ERRORS = 3) — and navigation must survive them.
+  // At 60 cols the optional caps must go highest-priority-first —
+  // [M] ACK (5, v0.33) before [D] DATE (4) before [O] ERRORS (3) — and
+  // navigation must survive all of them.
   const tight = barAt(60);
-  assert.match(tight, /\+2$/, `expected two caps dropped at 60 cols: ${tight}`);
-  assert.ok(!tight.includes('[D]') && !tight.includes('[O]'),
-    `dropped the wrong caps at 60 cols: ${tight}`);
+  assert.match(tight, /\+\d$/, `expected dropped caps disclosed at 60 cols: ${tight}`);
+  assert.ok(!tight.includes('[M]') && !tight.includes('[D]'),
+    `the highest-priority caps must go first at 60 cols: ${tight}`);
   assert.ok(tight.includes('[↑↓] MOVE') && tight.includes('[⏎] DEVICE'),
     `shed navigation before the optional filters: ${tight}`);
+  // And on a WIDE bar, the ack cap is advertised — the v0.33 interaction is
+  // discoverable, not folklore.
+  assert.ok(barAt(100).includes('[M] ACK'), `wide bar must advertise the ack key: ${barAt(100)}`);
 });
 
 test('when even the PROTECTED caps overflow, [Q] is the last one standing', () => {

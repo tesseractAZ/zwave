@@ -281,6 +281,16 @@ function applyLogKey(view: ViewState, ev: InputEvent, data: DataProvider): KeyRe
       view.logScroll = 0;
       view.logAnchorSeq = null;
       return REDRAW;
+    case 'm':
+    case 'M': { // acknowledge the selected error — release its RED latch (v0.33)
+      // Not a mesh write (no RF, no HA call), so it is not behind the
+      // write-actions gate: it records "a human has seen this" on the shared
+      // ring, for every session. The provider refuses non-errors and repeats,
+      // so a redraw happens only when the latch actually released.
+      const sel = list[view.logCursor];
+      if (sel && data.ackEvent?.(sel.seq)) return REDRAW;
+      return NOOP;
+    }
     case 'd':
     case 'D': { // cycle the date-range filter — reset to newest + follow
       const i = LOG_RANGE_ORDER.indexOf(view.logRange);

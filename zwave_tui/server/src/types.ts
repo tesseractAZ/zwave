@@ -229,6 +229,15 @@ export interface DataProvider {
   nodeById(nodeId: number): NodeSnapshot | undefined;
   controller(): ControllerSnapshot | null;
   events(): LogEvent[];
+  /**
+   * Acknowledge an error event by its `seq` — release its RED latch (v0.33).
+   * Returns true only when the event exists, is an error, and was not already
+   * acked. The ring is ONE shared control-room log, so an ack clears the latch
+   * for every session — acknowledged means a human has seen it, not this
+   * terminal has. Optional so read-only harnesses/mocks need not provide it;
+   * the Log screen no-ops when it is absent.
+   */
+  ackEvent?(seq: number): boolean;
   scoreFor(nodeId: number): HealthResult;
   noiseFloor(): number; // representative background RSSI (dBm) for SNR-margin math
   hasRealNoise(): boolean; // true when noiseFloor() is a real reading, not the fallback

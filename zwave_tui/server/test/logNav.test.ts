@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyKey, logLayout, syncLogCursor } from '../src/telnet/input';
 import { LOG_RANGE_ORDER } from '../src/types';
-import type { InputEvent } from '../src/types';
+import type { InputEvent, LogEvent } from '../src/types';
 import { anchorAt, mkEvent, mkNode, mkView, mockData } from './_logHelpers';
 
 const arrow = (dir: 'up' | 'down' | 'left' | 'right'): InputEvent => ({ type: 'arrow', dir });
@@ -165,4 +165,80 @@ test('navigation on an empty log never throws and leaves the cursor at 0', () =>
     assert.doesNotThrow(() => applyKey(v, k, data));
   }
   assert.equal(v.logCursor, 0);
+});
+
+/* ── v0.33: the error-ack latch release ────────────────────────────────
+ *
+ * `acked` existed since v0.8 and was RENDERED two-tone, but nothing ever set
+ * it — errors latched bold-red forever, while the README advertised an ack
+ * interaction that did not exist. These pin the real one.
+ */
+
+function ackableData(events: LogEvent[]) {
+  const acked: number[] = [];
+  const data = mockData({ events });
+  (data as { ackEvent?: (seq: number) => boolean }).ackEvent = (seq: number) => {
+    const ev = events.find((e) => e.seq === seq);
+    if (!ev || ev.severity !== 'error' || ev.acked) return false;
+    ev.acked = true;
+    acked.push(seq);
+    return true;
+  };
+  return { data, acked };
+}
+
+test("M acks the SELECTED error and redraws — the latch releases", () => {
+  const events = [
+    mkEvent({ seq: 30, severity: 'error', text: 'boom' }),
+    mkEvent({ seq: 20, severity: 'info' }),
+  ];
+  const { data, acked } = ackableData(events);
+  const view = mkView({ screen: 'log' });
+  anchorAt(view, events, 0);
+  const r = applyKey(view, { type: 'char', ch: 'M' } as InputEvent, data, () => {});
+  assert.equal(r.redraw, true, 'a released latch must repaint');
+  assert.deepEqual(acked, [30]);
+  assert.equal(events[0].acked, true);
+});
+
+test('M on a non-error is a NOOP — nothing to acknowledge', () => {
+  const events = [mkEvent({ seq: 30, severity: 'info' })];
+  const { data, acked } = ackableData(events);
+  const view = mkView({ screen: 'log' });
+  anchorAt(view, events, 0);
+  const r = applyKey(view, { type: 'char', ch: 'm' } as InputEvent, data, () => {});
+  assert.equal(r.redraw, false);
+  assert.deepEqual(acked, []);
+});
+
+test('M on an ALREADY-acked error is a NOOP — the refusal is the idempotence', () => {
+  const events = [mkEvent({ seq: 30, severity: 'error', acked: true })];
+  const { data, acked } = ackableData(events);
+  const view = mkView({ screen: 'log' });
+  anchorAt(view, events, 0);
+  const r = applyKey(view, { type: 'char', ch: 'M' } as InputEvent, data, () => {});
+  assert.equal(r.redraw, false);
+  assert.deepEqual(acked, []);
+});
+
+test('M acks the event under the CURSOR, not the newest — selection is the target', () => {
+  const events = [
+    mkEvent({ seq: 30, severity: 'error', text: 'newest' }),
+    mkEvent({ seq: 20, severity: 'error', text: 'older' }),
+  ];
+  const { data, acked } = ackableData(events);
+  const view = mkView({ screen: 'log' });
+  anchorAt(view, events, 1);
+  applyKey(view, { type: 'char', ch: 'M' } as InputEvent, data, () => {});
+  assert.deepEqual(acked, [20], 'the older, selected event — never the head');
+  assert.equal(events[0].acked, undefined, 'the newest error keeps its latch');
+});
+
+test('M without a provider ackEvent (read-only mock) is a safe NOOP', () => {
+  const events = [mkEvent({ seq: 30, severity: 'error' })];
+  const data = mockData({ events }); // no ackEvent
+  const view = mkView({ screen: 'log' });
+  anchorAt(view, events, 0);
+  const r = applyKey(view, { type: 'char', ch: 'M' } as InputEvent, data, () => {});
+  assert.equal(r.redraw, false);
 });

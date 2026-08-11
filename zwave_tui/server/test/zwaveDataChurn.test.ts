@@ -267,3 +267,31 @@ test('a DARK S2 log lane records UNKNOWN, not a fabricated zero (v0.26 review)',
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/* ── v0.33: ackEvent — the RED-latch release at the data layer ──────────── */
+
+test('ackEvent releases exactly one error latch, refuses non-errors, repeats, and ghosts', async () => {
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha);
+  try {
+    // Produce one error and one info event through the real path.
+    zd.logAction('error', 7, 'boom');
+    zd.logAction('info', 7, 'fine');
+    const evs = zd.events();
+    const err = evs.find((e) => e.severity === 'error' && e.text === 'boom')!;
+    const info = evs.find((e) => e.severity === 'info' && e.text === 'fine')!;
+    assert.ok(err && info, 'both events must be on the ring');
+    assert.equal(err.acked, undefined, 'an error arrives latched (unacked)');
+
+    assert.equal(zd.ackEvent(info.seq), false, 'a non-error has no latch to release');
+    assert.equal(info.acked, undefined);
+
+    assert.equal(zd.ackEvent(err.seq), true, 'the first ack releases the latch');
+    assert.equal(err.acked, true);
+    assert.equal(zd.ackEvent(err.seq), false, 're-acking an acked error is refused');
+
+    assert.equal(zd.ackEvent(999_999_999), false, 'a seq not on the ring is refused');
+  } finally {
+    zd.stop();
+  }
+});

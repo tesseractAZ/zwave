@@ -86,7 +86,7 @@ dismisses with `q` / `Esc`.
 | 3 | **Controller** | Node-1 radio health, background-RSSI noise floor, controller counters, rebuild progress. |
 | 4 | **Topology** | Hop-grouped route tree + repeater load + Long-Range star. |
 | 5 | **Heatmap** | Nodes by HA area, cells graded by SNR-margin bucket. |
-| 6 | **Log** | Driver/value/notification events + command outcomes; scroll, filter; error events latch red so they cannot scroll away unseen. |
+| 6 | **Log** | Driver/value/notification events + command outcomes; scroll, filter; error events latch **bold-red until acknowledged** (`M` releases the latch, for every session). |
 | 7 | **Remedy** | The engine's diagnoses + ranked recommendations, with learned "helped X%" efficacy. |
 | 8 | **Interference** | Noise floor + recent/multi-day trend, serial-link health, diurnal timeout heatmap. |
 
