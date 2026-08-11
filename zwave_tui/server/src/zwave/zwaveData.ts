@@ -302,6 +302,8 @@ export interface ZwaveData {
   logAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void;
   /** Event + command log ring (newest first). */
   events(): LogEvent[];
+  /** Release an error event's RED latch by seq (v0.33) — see the impl. */
+  ackEvent(seq: number): boolean;
   /** The resolved config-entry id (null until discovered). */
   getEntryId(): string | null;
   /** Engine-detected symptoms (M3), ranked. */
@@ -1660,6 +1662,21 @@ class ZwaveDataImpl implements ZwaveData {
   /** Rolling event/command log (newest first) for the Log screen. */
   events(): LogEvent[] {
     return this.logRing;
+  }
+
+  /**
+   * Release an error event's RED latch (v0.33 — the `acked` field existed since
+   * v0.8 and was rendered two-tone, but nothing ever set it: errors latched
+   * bold-red forever). Keyed by `seq` because the ring head-inserts — an index
+   * would drift under the caller, the same hazard the log cursor's anchor
+   * solved. Error-only and idempotent by refusal: acking a non-error or an
+   * already-acked event returns false so the caller can no-op honestly.
+   */
+  ackEvent(seq: number): boolean {
+    const ev = this.logRing.find((e) => e.seq === seq);
+    if (!ev || ev.severity !== 'error' || ev.acked) return false;
+    ev.acked = true;
+    return true;
   }
 
   private pushEvent(

@@ -46,6 +46,8 @@ export interface ZwaveDataSource {
   controller(): ControllerSnapshot | null;
   /** Driver-event + operator-command log ring. */
   events(): LogEvent[];
+  /** Release an error's RED latch by seq (shared across sessions). */
+  ackEvent?(seq: number): boolean;
   /** Has the first roster load completed? Falls back to "roster non-empty". */
   ready?(): boolean;
   /** Last fatal error string, if any. */
@@ -206,6 +208,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     nodeById: (nodeId) => cachedById.get(nodeId),
     controller: () => cachedController,
     events: () => cachedEvents,
+    ackEvent: (seq) => zwaveData.ackEvent?.(seq) ?? false,
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,
     hasRealNoise: () => cachedHasNoise,

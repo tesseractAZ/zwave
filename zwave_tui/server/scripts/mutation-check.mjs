@@ -256,8 +256,8 @@ const MUTANTS = [
     find: "  while (out.length < o.rows) out.push('');", repl: '',
     what: 'renderLogin returns EXACTLY view.rows lines like every other path' },
   { id: 'log-keycap-priority', file: 'src/telnet/screens/log.ts',
-    find: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE', 2], ['⏎', 'DEVICE', 1], ['D', 'DATE', 4],\n      ['O', 'ERRORS', 3], ['1-8', 'SCREENS'], ['Q', 'CLOSE'],",
-    repl: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE'], ['⏎', 'DEVICE'], ['D', 'DATE'],\n      ['O', 'ERRORS'], ['1-8', 'SCREENS'], ['Q', 'CLOSE'],",
+    find: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE', 2], ['⏎', 'DEVICE', 1], ['M', 'ACK', 5], ['D', 'DATE', 4],\n      ['O', 'ERRORS', 3], ['1-8', 'SCREENS'], ['Q', 'CLOSE'],",
+    repl: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE'], ['⏎', 'DEVICE'], ['M', 'ACK'], ['D', 'DATE'],\n      ['O', 'ERRORS'], ['1-8', 'SCREENS'], ['Q', 'CLOSE'],",
     what: "the Log bar sheds its least-useful caps first, not navigation" },
   { id: 'controller-role-collision', file: 'src/telnet/screens/controller.ts',
     find: '  const tight = W < 72;', repl: '  const tight = false;',
@@ -298,6 +298,25 @@ const MUTANTS = [
     find: "      if (after.routeKnown < MIN_LIVE) return 'unverifiable';",
     repl: '',
     what: 'a route that went INVISIBLE is unknown, never a settled route' },
+  /* ── v0.33: the error-ack latch release ──────────────────────────────── */
+  { id: 'ack-writes-latch', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // The pre-v0.33 state: the acked field exists, renders two-tone, and
+    // nothing ever sets it — errors latch bold-red forever.
+    find: '    if (!ev || ev.severity !== \'error\' || ev.acked) return false;\n    ev.acked = true;',
+    repl: '    if (!ev || ev.severity !== \'error\' || ev.acked) return false;',
+    what: 'acking an error actually releases its RED latch' },
+  { id: 'ack-error-only', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Lets any severity be "acknowledged" — an info event has no latch, and a
+    // true return would repaint for nothing.
+    find: "    if (!ev || ev.severity !== 'error' || ev.acked) return false;",
+    repl: '    if (!ev || ev.acked) return false;',
+    what: 'only an ERROR carries a latch to release' },
+  { id: 'ack-selected-not-head', file: 'src/telnet/input.ts', tests: ['logNav'],
+    // Acks the newest event instead of the one under the cursor — the same
+    // target-drift class as the v0.9 menu-target finding.
+    find: '      const sel = list[view.logCursor];\n      if (sel && data.ackEvent?.(sel.seq)) return REDRAW;',
+    repl: '      const sel = list[0];\n      if (sel && data.ackEvent?.(sel.seq)) return REDRAW;',
+    what: 'M acks the SELECTED event, never the newest' },
   /* ── v0.32.1: the 2026-08-05 live-log defects ────────────────────────── */
   { id: 'lastseen-utc', file: 'src/zwave/driverWsClient.ts', tests: ['driverWsClient'],
     // Reverts to parsing a timezone-naked driver timestamp as LOCAL time — the

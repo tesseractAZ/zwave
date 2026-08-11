@@ -72,7 +72,7 @@ export function renderLog(ctx: ScreenCtx): string[] {
     rightStatus: rightStatus(view, events.length),
     body,
     keys: [
-      ['↑↓', 'MOVE'], ['␣/b', 'PAGE', 2], ['⏎', 'DEVICE', 1], ['D', 'DATE', 4],
+      ['↑↓', 'MOVE'], ['␣/b', 'PAGE', 2], ['⏎', 'DEVICE', 1], ['M', 'ACK', 5], ['D', 'DATE', 4],
       ['O', 'ERRORS', 3], ['1-8', 'SCREENS'], ['Q', 'CLOSE'],
     ],
   });

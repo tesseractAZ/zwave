@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.33.0 — 2026-08-11
+
+**The error-ack latch is real now.** Since v0.8 the Log screen declared
+`acked?: boolean` and rendered errors two-tone (bold-red unacked, plain red
+acked) — but nothing ever set the field, so errors latched bold-red forever
+and the advertised acknowledgement did not exist (found by the v0.32.1 docs
+verification; the README was corrected then, the interaction lands now).
+
+- **`M` on the Log screen acknowledges the selected error**, releasing its RED
+  latch to plain red. Keyed by the event's `seq`, so the head-inserting ring
+  cannot drift the target under the cursor (the same anchor discipline the log
+  cursor itself uses).
+- Error-only and once-only **by refusal**: acking a non-error, a repeat, or a
+  seq no longer on the ring returns false and the screen does not repaint.
+- The latch is **shared**: the ring is one control-room log, so an ack records
+  "a human has seen this" for every session — telnet and ingress alike.
+- Not a mesh write (no RF, no HA call), so it deliberately sits outside the
+  `write_actions_enabled` gate.
+- The command bar advertises `[M] ACK` (drop priority 5 — first shed on narrow
+  terminals, disclosed in the `+N` counter like every shed cap).
+
 ## 0.32.2 — 2026-08-11
 
 - **Liveness probe default halved: 240 → 120 minutes** (`auto_ping_stale_min`).
