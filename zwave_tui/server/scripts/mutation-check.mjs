@@ -298,6 +298,27 @@ const MUTANTS = [
     find: "      if (after.routeKnown < MIN_LIVE) return 'unverifiable';",
     repl: '',
     what: 'a route that went INVISIBLE is unknown, never a settled route' },
+  /* ── v0.34 audit fixes: span, ranking, and the production bridge ─────── */
+  { id: 'stability-span-is-min', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Restores the max-span label: credits every node with the OLDEST node's
+    // window, so the claim outruns its weakest evidence — the exact thing the
+    // panel's own docstring promises it cannot do.
+    find: '  const hours = Math.min(...rows.map((r) => r.hours));',
+    repl: '  const hours = Math.max(...rows.map((r) => r.hours));',
+    what: 'the measured span is the SHORTEST node window, never the longest' },
+  { id: 'stability-rank-by-rate', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Ranks by raw count again: 10 re-routes over 10 days outranks 4 over 2
+    // hours, putting the genuinely unstable node second.
+    find: '    .sort((a, b) => perDayOf(b) - perDayOf(a) || b.changes - a.changes || a.node.nodeId - b.node.nodeId);',
+    repl: '    .sort((a, b) => b.changes - a.changes || a.node.nodeId - b.node.nodeId);',
+    what: 'ranking uses the per-day RATE the row displays, not the raw count' },
+  { id: 'bridge-forwards-ack', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    // Re-opens the production bridge hole in the very function index.ts calls:
+    // the shipped M key silently does nothing while every unit test still
+    // passes against its own hand-rolled source.
+    find: '    ackEvent: (seq) => zd.ackEvent(seq),',
+    repl: '    ackEvent: () => false,',
+    what: 'the production bridge forwards ackEvent to the data layer' },
   /* ── v0.34: route stability — measured, leftover-funded ──────────────── */
   { id: 'stability-zero-is-finding', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
     // Renders "every path held" over an EMPTY measurement — the exact
@@ -312,10 +333,11 @@ const MUTANTS = [
     repl: '  const stability = routeStabilityPanel(view, ctx, endNodes, nameBudget, Math.max(3, padRows));',
     what: 'the stability panel is funded ONLY by rows the tree left blank' },
   { id: 'stability-rank-worst-first', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
-    // Ranks fewest-first, burying the unstable node under the quiet ones.
-    find: '  const ranked = rows.filter((r) => r.changes > 0).sort((a, b) => b.changes - a.changes || a.node.nodeId - b.node.nodeId);',
-    repl: '  const ranked = rows.filter((r) => r.changes > 0).sort((a, b) => a.changes - b.changes || a.node.nodeId - b.node.nodeId);',
-    what: 'the node that re-routed most ranks first' },
+    // DIRECTION (its sibling stability-rank-by-rate pins the METRIC): ranks
+    // calmest-first, burying the unstable node under the quiet ones.
+    find: '    .sort((a, b) => perDayOf(b) - perDayOf(a) || b.changes - a.changes || a.node.nodeId - b.node.nodeId);',
+    repl: '    .sort((a, b) => perDayOf(a) - perDayOf(b) || a.changes - b.changes || a.node.nodeId - b.node.nodeId);',
+    what: 'the node that re-routed most ranks FIRST, not last' },
   /* ── v0.33: the error-ack latch release ──────────────────────────────── */
   { id: 'ack-writes-latch', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     // The pre-v0.33 state: the acked field exists, renders two-tone, and

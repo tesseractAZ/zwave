@@ -581,7 +581,15 @@ function routeStabilityPanel(
   // than render a confident zero over an empty measurement.
   if (rows.length === 0) return [];
 
-  const hours = Math.max(...rows.map((r) => r.hours));
+  // The SHORTEST window, not the longest. The label sits next to a count of
+  // ALL nodes, so it must be the window every one of them actually has —
+  // per-node coarse rings start at each node's own first fold, so a node
+  // included yesterday holds far less than its siblings. Taking the max
+  // credited the whole fleet with the oldest node's history, which is the
+  // precise way this panel could 'outrun its window' — the thing its own
+  // docstring promises it cannot do. Worst-of is the project's rule for a
+  // chained claim (DESIGN §3.4).
+  const hours = Math.min(...rows.map((r) => r.hours));
   const span = hours >= 48 ? `${Math.round(hours / 24)}d` : `${Math.round(hours)}h`;
   const total = rows.reduce((a, r) => a + r.changes, 0);
   const lines = [groupHeader(view, 'Route stability', rows.length)];
@@ -595,20 +603,28 @@ function routeStabilityPanel(
     return lines.slice(0, budget);
   }
 
-  const ranked = rows.filter((r) => r.changes > 0).sort((a, b) => b.changes - a.changes || a.node.nodeId - b.node.nodeId);
+  // Rank by the SAME per-day rate the row displays. Sorting by raw count
+  // contradicted this panel's own stated reason for showing a rate: 10
+  // re-routes over 10 days (1/day) outranked 4 over 2 hours (48/day), so
+  // 'worst-first' put the worst node second.
+  const perDayOf = (r: { changes: number; hours: number }): number =>
+    r.changes / Math.max(1 / 24, r.hours / 24);
+  const ranked = rows
+    .filter((r) => r.changes > 0)
+    .sort((a, b) => perDayOf(b) - perDayOf(a) || b.changes - a.changes || a.node.nodeId - b.node.nodeId);
   const capacity = Math.max(1, budget - 2); // header + the disclosure line
   const canDisclose = ranked.length > capacity;
   const shown = canDisclose ? ranked.slice(0, capacity - 1) : ranked.slice(0, capacity);
-  const max = ranked[0].changes;
+  const max = perDayOf(ranked[0]);
 
   for (const r of shown) {
     // Per-DAY rate, not the raw count: a 6-hour-old store and a 6-day-old one
     // are not comparable by total, and the detector's own threshold is a RATE.
-    const perDay = r.changes / Math.max(1 / 24, r.hours / 24);
+    const perDay = perDayOf(r);
     const tone = perDay >= 12 ? c.red : perDay >= 4 ? c.yellow : c.green;
     const left = '  ' + c.white(`n${r.node.nodeId}`) + ' ' + c.white(truncate(r.node.name, nameBudget));
     const right =
-      meter(r.changes / max, 8, { color: tone }) +
+      meter(perDayOf(r) / max, 8, { color: tone }) +
       ' ' +
       tone(`${r.changes} re-route${r.changes === 1 ? '' : 's'}`) +
       c.grey(` · ${perDay < 1 ? '<1' : Math.round(perDay)}/day`);

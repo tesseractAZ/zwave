@@ -399,3 +399,40 @@ test('render contract holds with the panel across sizes', () => {
     for (const l of out) assert.ok(visLen(l) <= cols, `width at ${cols}x${rows}: ${strip(l)}`);
   }
 });
+
+/* ── v0.34 audit fixes: the three defects the fixtures hid ───────────────── */
+
+test('the span is the SHORTEST window — a claim cannot outrun its weakest node', () => {
+  // Every earlier fixture passed a CONSTANT `hours`, where max === min, so a
+  // max-vs-min swap was invisible to the whole suite. Per-node coarse rings
+  // start at each node's own first fold, so this case is ordinary, not exotic:
+  // one long-lived node and two recently-included ones.
+  const nodes = bigMesh().slice(0, 3);
+  const hoursById: Record<number, number> = { 2: 240, 3: 0.5, 4: 0.5 };
+  const out = lines(withStability(nodes, (id) => ({ changes: 0, hours: hoursById[id] ?? 0.5 }),
+    { cols: 200, rows: 80 }));
+  const body = out.join('\n');
+  assert.match(body, /every path held/);
+  assert.ok(!/10d measured/.test(body),
+    `must not credit 3 nodes with the oldest node's 10-day window: ${body.match(/every path held[^\n]*/)?.[0]}`);
+  assert.match(body, /1h measured/, 'the shortest window is the honest one');
+});
+
+test('ranking is by the per-DAY RATE the row displays, not the raw count', () => {
+  // 10 re-routes over 10 days = 1/day; 4 over 2 hours = 48/day. Sorting by raw
+  // count puts the genuinely unstable node SECOND — contradicting the panel's
+  // own reason for showing a rate at all.
+  const nodes = bigMesh().slice(0, 4);
+  const spec: Record<number, { changes: number; hours: number }> = {
+    2: { changes: 10, hours: 240 }, // 1/day
+    3: { changes: 4, hours: 2 },    // 48/day — the real problem
+    4: { changes: 0, hours: 240 },
+    5: { changes: 0, hours: 240 },
+  };
+  const out = lines(withStability(nodes, (id) => spec[id] ?? { changes: 0, hours: 240 },
+    { cols: 200, rows: 80 }));
+  const n3 = out.findIndex((l) => /\bn3\b/.test(l) && /re-route/.test(l));
+  const n2 = out.findIndex((l) => /\bn2\b/.test(l) && /re-route/.test(l));
+  assert.ok(n3 >= 0 && n2 >= 0, 'both churning nodes must be listed');
+  assert.ok(n3 < n2, `48/day must rank above 1/day — got n3 at ${n3}, n2 at ${n2}`);
+});

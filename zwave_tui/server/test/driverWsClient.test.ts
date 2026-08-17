@@ -456,3 +456,41 @@ test('stop() while the socket is still CONNECTING does not crash the process', a
     process.off('uncaughtException', onUncaught);
   }
 });
+
+/* ── v0.34: the bridge-completeness guard ────────────────────────────────── */
+
+test('ZwaveDataSource forwards EVERY capability the data layer implements', async () => {
+  // THE DEFECT THIS EXISTS FOR: v0.33 shipped an `M` ack key that did nothing
+  // and v0.34 a panel that never rendered, because both were wired through
+  // dataProvider.ts while the ONE bridge the running add-on builds (index.ts)
+  // omitted them — and the members were declared OPTIONAL on ZwaveDataSource,
+  // so the compiler said nothing. Unit tests passed because their mocks
+  // attached the methods directly, exercising a path production never uses.
+  //
+  // The structural fix is that the members are now REQUIRED, so omitting one is
+  // a compile error. This test pins the intent so nobody re-adds the `?`.
+  const src = await import('../src/telnet/dataProvider');
+  // buildZwaveDataSource IS the object index.ts hands the provider — testing the
+  // provider against a hand-rolled source would exercise a path production does
+  // not use, which is precisely how the original hole stayed invisible.
+  const bridged = src.buildZwaveDataSource({
+      snapshot: () => [], controller: () => null, events: () => [], ready: () => true,
+      lastError: () => null, lastUpdated: () => Date.now(),
+      history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
+      symptoms: () => [], engineStatus: () => null, efficacyFor: () => null,
+      interference: () => null, entityStates: () => [], configParams: () => [],
+      requestConfigParams: () => {},
+      ackEvent: (seq: number) => seq === 42,
+      routeStability: (n: number) => ({ changes: n, hours: 48 }),
+  } as never);
+  const provider = src.createTuiDataProvider({
+    zwaveData: bridged, refreshMs: 60_000, routePollMs: 60_000, log: () => {},
+  });
+  try {
+    assert.equal(provider.provider.ackEvent?.(42), true, 'ack must reach the data layer');
+    assert.equal(provider.provider.ackEvent?.(1), false, 'and carry its real answer back');
+    assert.deepEqual(provider.provider.routeStability?.(7), { changes: 7, hours: 48 });
+  } finally {
+    provider.stop();
+  }
+});

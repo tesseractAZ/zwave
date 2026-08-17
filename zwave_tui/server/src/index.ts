@@ -26,7 +26,7 @@ import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
 import { createActionRunner } from './zwave/zwaveActions';
 import { startAutoPing } from './zwave/autoPing';
-import { createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
+import { buildZwaveDataSource, createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
 import { registerWsConsole } from './telnet/wsConsole';
 import { startTelnetServer } from './telnet/server';
 import type { LogEvent } from './types';
@@ -68,23 +68,8 @@ async function main(): Promise<void> {
 
   // 3) Bridge ZwaveData → ZwaveDataSource. events() serves the live ring that
   //    feeds the Log screen; everything else maps straight through.
-  const source: ZwaveDataSource = {
-    snapshot: () => zwaveData.snapshot(),
-    controller: () => zwaveData.controller(),
-    events: (): LogEvent[] => zwaveData.events(),
-    ready: () => zwaveData.ready(),
-    lastError: () => zwaveData.lastError(),
-    lastUpdated: () => zwaveData.lastUpdated(),
-    history: (n) => zwaveData.history(n),
-    historyLong: (n) => zwaveData.historyLong(n),
-    symptoms: () => zwaveData.symptoms(),
-    engineStatus: () => zwaveData.engineStatus(),
-    efficacyFor: (kind, action) => zwaveData.efficacyFor(kind, action),
-    interference: () => zwaveData.interference(),
-    entityStates: (n) => zwaveData.entityStates(n),
-    configParams: (n) => zwaveData.configParams(n),
-    requestConfigParams: (n) => zwaveData.requestConfigParams(n),
-  };
+  const source: ZwaveDataSource = buildZwaveDataSource(zwaveData as unknown as ZwaveDataSource);
+
 
   // 4) Shared, timer-refreshed render cache both transports read.
   const { provider, stop: stopProvider } = createTuiDataProvider({

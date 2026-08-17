@@ -15,8 +15,10 @@ time; nothing read it back to a human.
   `every path held — 38 node(s), 3d measured, zero re-routes`.
   **Zero is a finding, not an empty state** — one confident line rather than 38
   rows each restating "0". When paths HAVE moved it ranks the culprits
-  worst-first with a per-DAY rate, because a 6-hour store and a 6-day store are
-  not comparable by raw count and the detector's own threshold is a rate.
+  worst-first BY that per-DAY rate — the same number the row displays — because a
+  6-hour store and a 6-day store are not comparable by raw count and the
+  detector's own threshold is a rate. (Sorting by raw count put 10 re-routes over
+  10 days above 4 over 2 hours, i.e. worst-SECOND.)
 - An EMPTY measurement renders nothing at all. A confident "every path held"
   over no data would be exactly the fabrication the engine's collapse-method
   discipline exists to prevent; a mutant restores it and dies.
@@ -25,12 +27,28 @@ time; nothing read it back to a human.
   exist, and the frame is byte-identical to before — the same rule the repeater
   panel follows since v0.29.
 
-Vertical pad at 200x80 drops from 32 blank rows to 28. The remainder is
+**Also fixes a defect v0.33.0 shipped:** `M` never worked. `ackEvent` was
+implemented, wired through `dataProvider.ts`, unit-tested and mutation-proven —
+and dead in production, because the running add-on builds its own
+`ZwaveDataSource` in `index.ts` and that bridge omitted the method, so
+`zwaveData.ackEvent?.(seq) ?? false` returned `false` on every real keypress.
+Three things had to line up: the source members were declared OPTIONAL (so the
+compiler stayed silent), the tests attached the methods to their own mocks (so
+they exercised a path production never uses), and the live check confirmed the
+add-on booted rather than that the key worked. `routeStability` was about to
+ship through the same hole. The members are now REQUIRED — omitting one is a
+compile error — and the bridge is extracted as `buildZwaveDataSource` so a test
+can reach the object production actually runs.
+
+Vertical pad at 200x80, measured against the 38-end-node fixture: baseline 32
+blank rows; **30 in the zero state** (the panel's most valuable output is one
+line, so it can only spend two); **1 when paths have moved**. The panel fills
+the screen precisely when it has something to say. The zero-state remainder is
 data-limited, not layout-limited: a 39-node mesh does not hold 77 rows of route
 facts, and rearranging blocks into columns was tried, measured and reverted in
 v0.29 — a sparse screen wants DATA, not furniture.
 
-655 tests; 160 mutants killed / 0 survived (3 new). Render contract verified at
+658 tests; 165 mutants, 0 survived (6 new this release). Render contract verified at
 200x80, 160x40, 120x30, 100x24, 80x24 and 64x20.
 
 ## 0.33.0 — 2026-08-11
