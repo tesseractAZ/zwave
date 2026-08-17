@@ -298,6 +298,24 @@ const MUTANTS = [
     find: "      if (after.routeKnown < MIN_LIVE) return 'unverifiable';",
     repl: '',
     what: 'a route that went INVISIBLE is unknown, never a settled route' },
+  /* ── v0.34: route stability — measured, leftover-funded ──────────────── */
+  { id: 'stability-zero-is-finding', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Renders "every path held" over an EMPTY measurement — the exact
+    // confident-zero-over-no-data failure the panel exists to avoid.
+    find: '    if (s && s.hours > 0) rows.push({ node: n, changes: s.changes, hours: s.hours });',
+    repl: '    if (s) rows.push({ node: n, changes: s.changes, hours: s.hours });',
+    what: 'a zero claim requires a non-empty measured window' },
+  { id: 'stability-leftover-funded', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Funds the panel unconditionally instead of from leftover pad — on a short
+    // frame it then steals rows from a tree that is already scrolling.
+    find: '  const stability = padRows >= 3 ? routeStabilityPanel(view, ctx, endNodes, nameBudget, padRows) : [];',
+    repl: '  const stability = routeStabilityPanel(view, ctx, endNodes, nameBudget, Math.max(3, padRows));',
+    what: 'the stability panel is funded ONLY by rows the tree left blank' },
+  { id: 'stability-rank-worst-first', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Ranks fewest-first, burying the unstable node under the quiet ones.
+    find: '  const ranked = rows.filter((r) => r.changes > 0).sort((a, b) => b.changes - a.changes || a.node.nodeId - b.node.nodeId);',
+    repl: '  const ranked = rows.filter((r) => r.changes > 0).sort((a, b) => a.changes - b.changes || a.node.nodeId - b.node.nodeId);',
+    what: 'the node that re-routed most ranks first' },
   /* ── v0.33: the error-ack latch release ──────────────────────────────── */
   { id: 'ack-writes-latch', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     // The pre-v0.33 state: the acked field exists, renders two-tone, and

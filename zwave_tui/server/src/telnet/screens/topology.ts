@@ -182,12 +182,26 @@ export function renderTopology(ctx: ScreenCtx): string[] {
     surplus > 0
       ? repeaterLoadPanel(view, ctx, endNodes, nameBudget, noise, surplus).slice(0, panelCap)
       : basePanel;
-  const treeCap = Math.max(1, bodyCap - histLines.length - panel.length);
+  // ROUTE STABILITY is funded ONLY by rows the tree would otherwise leave blank
+  // (v0.34). On a tall terminal this screen padded ~40 % of its height with
+  // empty rows (32 of 80 at 200x80, measured) while the one quantity a topology
+  // screen most wants — does this path HOLD? — sat unread in the evidence
+  // store. Shelving the existing blocks into columns was tried, measured and
+  // reverted in v0.29: a sparse screen wants DATA, not rearrangement.
+  //
+  // Strictly leftover-funded: when the tree needs to scroll there is no pad to
+  // spend, `padRows` is 0, and this panel does not exist — the tree never loses
+  // a row to it. Same rule as the repeater panel above.
+  const treeCapBase = Math.max(1, bodyCap - histLines.length - panel.length);
+  const padRows = Math.max(0, treeCapBase - tree.length);
+  const stability = padRows >= 3 ? routeStabilityPanel(view, ctx, endNodes, nameBudget, padRows) : [];
+  const treeCap = Math.max(1, treeCapBase - stability.length);
 
   const body: string[] = [...histLines];
   if (tree.length <= treeCap) {
     body.push(...tree);
     while (body.length < histLines.length + treeCap) body.push('');
+    body.push(...stability);
     view.topologyScroll = 0;
   } else {
     // The tree SCROLLS. It is ordered shallowest-first, so a fixed window from
@@ -532,6 +546,82 @@ function signalCell(
 }
 
 /* ── repeater-load panel (single-point-of-failure indicator) ─────────────── */
+
+/**
+ * What the mesh's routing has actually DONE, over days — the quantity no screen
+ * held (v0.34).
+ *
+ * Reads the same `dRouteChanges` accumulator the `route-churn` detector sums,
+ * via the persisted coarse tier. Its purpose is as much epistemic as visual:
+ * route-churn has carried a detector and a planner card since v0.30 and has
+ * never once fired here, and until this panel there was no way to tell whether
+ * the mesh is genuinely stable or the detector simply cannot see. A measured
+ * "zero re-routes across N nodes over Xh" answers that; an empty screen did not.
+ *
+ * ZERO IS A FINDING, NOT AN EMPTY STATE. When nothing has moved, that is one
+ * confident line — not 38 rows each reading "0", which would spend the whole
+ * budget restating the same fact. Only when paths HAVE moved does the panel
+ * rank them, worst-first, because then the identity of the unstable node is the
+ * information.
+ */
+function routeStabilityPanel(
+  view: ViewState,
+  ctx: ScreenCtx,
+  endNodes: NodeSnapshot[],
+  nameBudget: number,
+  budget: number,
+): string[] {
+  if (typeof ctx.data.routeStability !== 'function' || budget < 3) return [];
+  const rows: { node: NodeSnapshot; changes: number; hours: number }[] = [];
+  for (const n of endNodes) {
+    const s = ctx.data.routeStability(n.nodeId);
+    if (s && s.hours > 0) rows.push({ node: n, changes: s.changes, hours: s.hours });
+  }
+  // No coarse history yet (fresh install, or the store is off) — say so rather
+  // than render a confident zero over an empty measurement.
+  if (rows.length === 0) return [];
+
+  const hours = Math.max(...rows.map((r) => r.hours));
+  const span = hours >= 48 ? `${Math.round(hours / 24)}d` : `${Math.round(hours)}h`;
+  const total = rows.reduce((a, r) => a + r.changes, 0);
+  const lines = [groupHeader(view, 'Route stability', rows.length)];
+
+  if (total === 0) {
+    lines.push(
+      '  ' +
+        c.green('every path held') +
+        c.grey(` — ${rows.length} node(s), ${span} measured, zero re-routes`),
+    );
+    return lines.slice(0, budget);
+  }
+
+  const ranked = rows.filter((r) => r.changes > 0).sort((a, b) => b.changes - a.changes || a.node.nodeId - b.node.nodeId);
+  const capacity = Math.max(1, budget - 2); // header + the disclosure line
+  const canDisclose = ranked.length > capacity;
+  const shown = canDisclose ? ranked.slice(0, capacity - 1) : ranked.slice(0, capacity);
+  const max = ranked[0].changes;
+
+  for (const r of shown) {
+    // Per-DAY rate, not the raw count: a 6-hour-old store and a 6-day-old one
+    // are not comparable by total, and the detector's own threshold is a RATE.
+    const perDay = r.changes / Math.max(1 / 24, r.hours / 24);
+    const tone = perDay >= 12 ? c.red : perDay >= 4 ? c.yellow : c.green;
+    const left = '  ' + c.white(`n${r.node.nodeId}`) + ' ' + c.white(truncate(r.node.name, nameBudget));
+    const right =
+      meter(r.changes / max, 8, { color: tone }) +
+      ' ' +
+      tone(`${r.changes} re-route${r.changes === 1 ? '' : 's'}`) +
+      c.grey(` · ${perDay < 1 ? '<1' : Math.round(perDay)}/day`);
+    lines.push(lr(left, right, view.cols));
+  }
+  if (canDisclose) {
+    const rest = ranked.length - shown.length;
+    lines.push(c.grey(`  +${rest} more node(s) with re-routes — by count, most first`));
+  } else if (lines.length < budget) {
+    lines.push(c.grey(`  ${rows.length - ranked.length} node(s) held every path · ${span} measured`));
+  }
+  return lines.slice(0, budget);
+}
 
 function repeaterLoadPanel(
   view: ViewState,

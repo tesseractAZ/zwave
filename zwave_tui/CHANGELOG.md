@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.34.0 — 2026-08-17
+
+**Route stability, measured.** `route-churn` has carried a detector and a full
+planner card since v0.30 and has never once fired on the reference mesh — and
+until now nothing could tell whether that meant *the mesh is stable* or *the
+detector cannot see*. The evidence was being collected and persisted the whole
+time; nothing read it back to a human.
+
+- New `DataProvider.routeStability(nodeId)` sums the SAME `dRouteChanges`
+  accumulator the detector reads, over the persisted coarse tier, and reports
+  the measured span alongside it so the claim can never outrun its window.
+- TOPOLOGY gains a **Route stability** panel:
+  `every path held — 38 node(s), 3d measured, zero re-routes`.
+  **Zero is a finding, not an empty state** — one confident line rather than 38
+  rows each restating "0". When paths HAVE moved it ranks the culprits
+  worst-first with a per-DAY rate, because a 6-hour store and a 6-day store are
+  not comparable by raw count and the detector's own threshold is a rate.
+- An EMPTY measurement renders nothing at all. A confident "every path held"
+  over no data would be exactly the fabrication the engine's collapse-method
+  discipline exists to prevent; a mutant restores it and dies.
+- The panel is **leftover-funded**: it spends only rows the route tree would
+  have left blank. When the tree scrolls there is no pad, the panel does not
+  exist, and the frame is byte-identical to before — the same rule the repeater
+  panel follows since v0.29.
+
+Vertical pad at 200x80 drops from 32 blank rows to 28. The remainder is
+data-limited, not layout-limited: a 39-node mesh does not hold 77 rows of route
+facts, and rearranging blocks into columns was tried, measured and reverted in
+v0.29 — a sparse screen wants DATA, not furniture.
+
+655 tests; 160 mutants killed / 0 survived (3 new). Render contract verified at
+200x80, 160x40, 120x30, 100x24, 80x24 and 64x20.
+
 ## 0.33.0 — 2026-08-11
 
 **The error-ack latch is real now.** Since v0.8 the Log screen declared

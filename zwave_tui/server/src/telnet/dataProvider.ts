@@ -48,6 +48,8 @@ export interface ZwaveDataSource {
   events(): LogEvent[];
   /** Release an error's RED latch by seq (shared across sessions). */
   ackEvent?(seq: number): boolean;
+  /** Measured route stability from the coarse tier (v0.34). */
+  routeStability?(nodeId: number): { changes: number; hours: number } | null;
   /** Has the first roster load completed? Falls back to "roster non-empty". */
   ready?(): boolean;
   /** Last fatal error string, if any. */
@@ -209,6 +211,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     controller: () => cachedController,
     events: () => cachedEvents,
     ackEvent: (seq) => zwaveData.ackEvent?.(seq) ?? false,
+    routeStability: (nodeId) => zwaveData.routeStability?.(nodeId) ?? null,
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,
     hasRealNoise: () => cachedHasNoise,
