@@ -53,6 +53,7 @@ import {
   createEvidenceStore,
   type EvidenceStore,
   type EvidenceSample,
+  COARSE_BUCKET_MS,
   type CoarseBucket,
   type ControllerSample,
   type RouteFailureEvent,
@@ -304,6 +305,8 @@ export interface ZwaveData {
   events(): LogEvent[];
   /** Release an error event's RED latch by seq (v0.33) — see the impl. */
   ackEvent(seq: number): boolean;
+  /** Measured route stability from the coarse tier (v0.34). */
+  routeStability(nodeId: number): { changes: number; hours: number } | null;
   /** The resolved config-entry id (null until discovered). */
   getEntryId(): string | null;
   /** Engine-detected symptoms (M3), ranked. */
@@ -2087,6 +2090,27 @@ class ZwaveDataImpl implements ZwaveData {
 
   evidenceCoarse(nodeId: number): CoarseBucket[] {
     return this.evidenceStore ? [...this.evidenceStore.coarseForNode(nodeId)] : [];
+  }
+
+  /**
+   * Measured route stability from the persisted coarse tier (v0.34).
+   *
+   * Sums the SAME `dRouteChanges` accumulator the route-churn detector reads,
+   * over the whole coarse window, so "this detector has never fired" becomes a
+   * measurement instead of an assumption. `hours` is derived from the bucket
+   * SPAN actually held (not from a nominal retention constant), so the label
+   * can never over-claim the history behind it.
+   */
+  routeStability(nodeId: number): { changes: number; hours: number } | null {
+    if (!this.evidenceStore) return null;
+    const buckets = this.evidenceStore.coarseForNode(nodeId);
+    if (buckets.length === 0) return { changes: 0, hours: 0 };
+    let changes = 0;
+    for (const b of buckets) changes += b.routeChanges ?? 0;
+    // Span = first bucket start → end of the last bucket, so a single bucket
+    // reports its own width rather than zero.
+    const spanMs = buckets[buckets.length - 1].t0 - buckets[0].t0 + COARSE_BUCKET_MS;
+    return { changes, hours: spanMs / 3_600_000 };
   }
 
   evidenceController(): ControllerSample[] {

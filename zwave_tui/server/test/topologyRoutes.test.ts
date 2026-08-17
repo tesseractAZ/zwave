@@ -318,3 +318,121 @@ test('a 0 reading never enters the repeater aggregate', () => {
   assert.ok(/worst\s+-74\s+n1\/2/.test(out), `only the real reading counts, got:\n${out}`);
   assert.ok(!/worst\s+0\b/.test(out), 'a 0 became the reported worst reading');
 });
+
+/* ── v0.34: route stability — the measurement that answers "never fired" ──── */
+
+/** 38 end nodes at mixed hop depths — enough to overflow a short frame and to
+ *  leave pad on a tall one, which is exactly the surplus rule under test. */
+function bigMesh(): NodeSnapshot[] {
+  return Array.from({ length: 38 }, (_v, i) => {
+    const id = i + 2;
+    const hops = i % 3;
+    return mkNode({
+      nodeId: id, name: 'Node ' + id, isController: false,
+      stats: { rtt: 30, rssi: -60, nlwr: null, commandsTX: 100, commandsRX: 90,
+        commandsDroppedTX: 0, commandsDroppedRX: 0, timeoutResponse: 0, lastSeen: Date.now(),
+        lwr: route(Array.from({ length: hops }, (_x, k) => 2 + k), -62, [-60]) } as never,
+    });
+  });
+}
+const visLen = (s: string): number => strip(s).length;
+
+function withStability(
+  nodes: NodeSnapshot[],
+  rs: (id: number) => { changes: number; hours: number } | null,
+  opts: { cols?: number; rows?: number } = {},
+): ScreenCtx {
+  const ctx = ctxFor(nodes, opts);
+  (ctx.data as { routeStability?: (id: number) => { changes: number; hours: number } | null }).routeStability = rs;
+  return ctx;
+}
+
+test('ZERO re-routes is ONE confident finding, never 38 rows of "0"', () => {
+  // The whole point: route-churn has never fired, and until this panel there
+  // was no way to tell "the mesh is stable" from "the detector cannot see".
+  const out = lines(withStability(bigMesh(), () => ({ changes: 0, hours: 72 }), { cols: 200, rows: 80 }));
+  const body = out.join('\n');
+  assert.match(body, /Route stability/, 'the panel must appear when there is pad to fund it');
+  assert.match(body, /every path held/, 'zero must read as a finding');
+  assert.match(body, /zero re-routes/);
+  assert.match(body, /3d measured/, 'the measured span qualifies the claim');
+  const zeroRows = out.filter((l) => /re-route/.test(l) && /\b0\b/.test(l));
+  assert.equal(zeroRows.length, 0, 'must not spend the budget restating 0 per node');
+});
+
+test('nodes that DID re-route are named and ranked, worst first', () => {
+  const out = lines(withStability(bigMesh(), (id) =>
+    ({ changes: id === 7 ? 9 : id === 12 ? 3 : 0, hours: 72 }), { cols: 200, rows: 80 }));
+  const body = out.join('\n');
+  assert.match(body, /Route stability/);
+  const n7 = out.findIndex((l) => /\bn7\b/.test(l) && /re-route/.test(l));
+  const n12 = out.findIndex((l) => /\bn12\b/.test(l) && /re-route/.test(l));
+  assert.ok(n7 >= 0 && n12 >= 0, 'both churning nodes must be named');
+  assert.ok(n7 < n12, 'the worst node ranks first');
+  assert.match(body, /held every path/, 'the stable remainder is still accounted for');
+});
+
+test('NO coarse history renders NOTHING — never a confident zero over no data', () => {
+  const out = lines(withStability(bigMesh(), () => ({ changes: 0, hours: 0 }), { cols: 200, rows: 80 }));
+  assert.ok(!out.join('\n').includes('Route stability'),
+    'an empty measurement must not render as "every path held"');
+});
+
+test('a provider without routeStability renders exactly as before', () => {
+  const plain = lines(ctxFor(bigMesh(), { cols: 200, rows: 80 }));
+  assert.ok(!plain.join('\n').includes('Route stability'));
+});
+
+test('the panel is LEFTOVER-funded — a scrolling tree never loses a row to it', () => {
+  // 80x24: the tree already overflows, so there is no pad to spend. The panel
+  // must not exist, and the frame must be unchanged from the no-provider case.
+  const withRs = lines(withStability(bigMesh(), () => ({ changes: 4, hours: 72 }), { cols: 80, rows: 24 }));
+  const without = lines(ctxFor(bigMesh(), { cols: 80, rows: 24 }));
+  assert.deepEqual(withRs, without, 'no surplus ⇒ byte-identical frame');
+});
+
+test('render contract holds with the panel across sizes', () => {
+  for (const [cols, rows] of [[200, 80], [160, 40], [120, 30], [100, 24], [80, 24], [64, 20]] as const) {
+    const out = renderTopology(withStability(bigMesh(), (id) =>
+      ({ changes: id % 4, hours: 50 }), { cols, rows }));
+    assert.equal(out.length, rows, `row count at ${cols}x${rows}`);
+    for (const l of out) assert.ok(visLen(l) <= cols, `width at ${cols}x${rows}: ${strip(l)}`);
+  }
+});
+
+/* ── v0.34 audit fixes: the three defects the fixtures hid ───────────────── */
+
+test('the span is the SHORTEST window — a claim cannot outrun its weakest node', () => {
+  // Every earlier fixture passed a CONSTANT `hours`, where max === min, so a
+  // max-vs-min swap was invisible to the whole suite. Per-node coarse rings
+  // start at each node's own first fold, so this case is ordinary, not exotic:
+  // one long-lived node and two recently-included ones.
+  const nodes = bigMesh().slice(0, 3);
+  const hoursById: Record<number, number> = { 2: 240, 3: 0.5, 4: 0.5 };
+  const out = lines(withStability(nodes, (id) => ({ changes: 0, hours: hoursById[id] ?? 0.5 }),
+    { cols: 200, rows: 80 }));
+  const body = out.join('\n');
+  assert.match(body, /every path held/);
+  assert.ok(!/10d measured/.test(body),
+    `must not credit 3 nodes with the oldest node's 10-day window: ${body.match(/every path held[^\n]*/)?.[0]}`);
+  assert.match(body, /1h measured/, 'the shortest window is the honest one');
+});
+
+test('ranking is by the per-DAY RATE the row displays, not the raw count', () => {
+  // 10 re-routes over 10 days = 1/day; 4 over 2 hours = 48/day. Sorting by raw
+  // count puts the genuinely unstable node SECOND — contradicting the panel's
+  // own reason for showing a rate at all.
+  const nodes = bigMesh().slice(0, 4);
+  const spec: Record<number, { changes: number; hours: number }> = {
+    2: { changes: 10, hours: 240 }, // 1/day
+    3: { changes: 4, hours: 2 },    // 48/day — the real problem
+    4: { changes: 0, hours: 240 },
+    5: { changes: 0, hours: 240 },
+  };
+  const out = lines(withStability(nodes, (id) => spec[id] ?? { changes: 0, hours: 240 },
+    { cols: 200, rows: 80 }));
+  const n3 = out.findIndex((l) => /\bn3\b/.test(l) && /re-route/.test(l));
+  const n2 = out.findIndex((l) => /\bn2\b/.test(l) && /re-route/.test(l));
+  assert.ok(n3 >= 0 && n2 >= 0, 'both churning nodes must be listed');
+  assert.ok(n3 < n2, `48/day must rank above 1/day — got n3 at ${n3}, n2 at ${n2}`);
+});

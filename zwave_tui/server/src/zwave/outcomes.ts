@@ -246,9 +246,17 @@ function metricOf(kind: SymptomKind): RecoveryMetric {
     case 'route-churn':
       return 'route'; // LWR re-routes subsiding
     default:
-      // chatty-device, ghost-suspect, controller-degraded, edge-cluster,
-      // mesh-interference: not scorable by a single per-node recovery window
-      // (multi-node or mesh-scoped) → always unverifiable.
+      // TWO different reasons live here, and conflating them is exactly how
+      // route-churn stayed mis-justified for two minor versions:
+      //   • genuinely multi-node / mesh-scoped — controller-degraded,
+      //     edge-cluster, mesh-interference — no single per-node recovery
+      //     window can score them;
+      //   • per-node, but with NO metric whose movement means recovery —
+      //     chatty-device (a flooder that stops looks identical to one that went
+      //     silent) and ghost-suspect (the remedy REMOVES the node, so there is
+      //     nothing left to measure afterwards). Both carry a concrete nodeId,
+      //     so calling them "mesh-scoped" was factually false.
+      // Either way the honest verdict is unverifiable.
       //
       // route-churn USED to sit in this list under that same justification, and
       // the justification was simply wrong for it: it is emitted per node, with

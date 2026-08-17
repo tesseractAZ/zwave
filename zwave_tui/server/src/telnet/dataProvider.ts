@@ -46,8 +46,19 @@ export interface ZwaveDataSource {
   controller(): ControllerSnapshot | null;
   /** Driver-event + operator-command log ring. */
   events(): LogEvent[];
-  /** Release an error's RED latch by seq (shared across sessions). */
-  ackEvent?(seq: number): boolean;
+  /**
+   * Release an error's RED latch by seq (shared across sessions).
+   *
+   * REQUIRED, not optional. v0.33 declared this optional here so mocks need not
+   * supply it — and the production bridge in index.ts then silently omitted it,
+   * so `zwaveData.ackEvent?.(seq) ?? false` resolved to `false` on every real
+   * keypress and the shipped `M` key did nothing for two releases. Optionality
+   * on the SOURCE (which has exactly one production implementation) buys
+   * nothing and costs the compiler's ability to enforce the bridge.
+   */
+  ackEvent(seq: number): boolean;
+  /** Measured route stability from the coarse tier (v0.34). REQUIRED — see ackEvent. */
+  routeStability(nodeId: number): { changes: number; hours: number } | null;
   /** Has the first roster load completed? Falls back to "roster non-empty". */
   ready?(): boolean;
   /** Last fatal error string, if any. */
@@ -118,6 +129,41 @@ function computeNoiseFloor(controller: ControllerSnapshot | null): number {
  * provider's accessors return the latest cached values; `stop()` clears the
  * timers this module owns (not the underlying data layer).
  */
+/**
+ * Build the ZwaveDataSource bridge the add-on runs on.
+ *
+ * EXTRACTED SO IT CAN BE TESTED (v0.34). It used to be an object literal inside
+ * index.ts's `main()`, which is unreachable from a test because importing
+ * index.ts starts the server. That made the one bridge production actually uses
+ * the only un-covered link in the chain — and it is exactly where v0.33's ack
+ * key and v0.34's route stability were dropped: wired everywhere else, omitted
+ * here, silently returning false/null on every real keypress.
+ *
+ * Every member forwards straight through; the value of this function is that a
+ * test can now assert that it does.
+ */
+export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
+  return {
+    snapshot: () => zd.snapshot(),
+    controller: () => zd.controller(),
+    events: () => zd.events(),
+    ready: () => zd.ready?.() ?? true,
+    lastError: () => zd.lastError?.() ?? null,
+    lastUpdated: () => zd.lastUpdated?.() ?? Date.now(),
+    history: (n) => zd.history?.(n) ?? { rssi: [], rtt: [] },
+    historyLong: (n) => zd.historyLong?.(n) ?? { rssi: [], rtt: [] },
+    symptoms: () => zd.symptoms?.() ?? [],
+    engineStatus: () => zd.engineStatus?.() ?? { enabled: false, ready: 0, total: 0 },
+    efficacyFor: (k, a) => zd.efficacyFor?.(k, a) ?? null,
+    interference: () => zd.interference?.() ?? null,
+    entityStates: (n) => zd.entityStates?.(n) ?? [],
+    configParams: (n) => zd.configParams?.(n) ?? [],
+    requestConfigParams: (n) => zd.requestConfigParams?.(n),
+    ackEvent: (seq) => zd.ackEvent(seq),
+    routeStability: (n) => zd.routeStability(n),
+  };
+}
+
 export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
   provider: DataProvider;
   stop: () => void;
@@ -208,7 +254,8 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     nodeById: (nodeId) => cachedById.get(nodeId),
     controller: () => cachedController,
     events: () => cachedEvents,
-    ackEvent: (seq) => zwaveData.ackEvent?.(seq) ?? false,
+    ackEvent: (seq) => zwaveData.ackEvent(seq),
+    routeStability: (nodeId) => zwaveData.routeStability(nodeId),
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,
     hasRealNoise: () => cachedHasNoise,

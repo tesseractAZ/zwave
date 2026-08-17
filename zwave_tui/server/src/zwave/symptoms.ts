@@ -26,6 +26,11 @@ export type SymptomKind =
   | 'return-path-degraded'
   | 'chronic-return-path'
   | 'dead-flap'
+  // DECLARED, NOT EMITTED. Nothing constructs this kind (grep `kind: '` — 13
+  // kinds have emitters, this one has none). It is kept because the planner and
+  // outcomes both carry cases for it, and DESIGN §3.3 specifies it; the gap is
+  // the DETECTOR. Flagged rather than silently deleted, because a declared kind
+  // that nothing emits is precisely how route-churn hid for two minor versions.
   | 'quiet-node'
   | 'rate-fallback'
   | 'route-churn'

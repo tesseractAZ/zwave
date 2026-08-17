@@ -243,6 +243,21 @@ export interface DataProvider {
   hasRealNoise(): boolean; // true when noiseFloor() is a real reading, not the fallback
   history(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] }; // rolling fine trend (READONLY view — do not mutate)
   historyLong(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] }; // coarse long-horizon (~2h) trend
+  /**
+   * Measured route stability for a node, from the persisted coarse tier (v0.34).
+   *
+   * `route-churn` has had a detector and a planner card since v0.30 and has
+   * never fired on the reference mesh — and until now there was no way to tell
+   * whether that meant "the mesh is stable" or "the detector cannot see". This
+   * exposes the SAME `dRouteChanges` accumulator the detector sums, over the
+   * multi-day coarse window, so the absence is a measurement rather than an
+   * assumption.
+   *
+   * `null` when no evidence store is configured. `hours: 0` means the store is
+   * present but has no coarse history for this node yet — which must render as
+   * "no history", never as "0 changes".
+   */
+  routeStability?(nodeId: number): { changes: number; hours: number } | null;
   lastUpdated(): number | null; // epoch ms of the last successful roster refresh
   ready(): boolean; // has the first roster load completed?
   lastError(): string | null;
