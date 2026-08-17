@@ -165,6 +165,15 @@ const DATA: DataProvider = {
   hasRealNoise: () => true,
   history: () => ({ rssi: spark(-62, 40, 4), rtt: spark(34, 40, 8) }),
   historyLong: () => ({ rssi: spark(-63, 90, 5), rtt: [] }),
+  // v0.34 — demo route history so the Route-stability panel has something to
+  // draw. Two nodes with real churn plus a stable remainder exercises BOTH
+  // halves: the ranked culprits and the held-path count. The panel is
+  // leftover-funded, so it only renders on a frame tall enough to leave pad
+  // — which is why the topology shot below is taller than the others.
+  routeStability: (nodeId: number) => ({
+    changes: nodeId === 12 ? 11 : nodeId === 7 ? 4 : 0,
+    hours: 74,
+  }),
   lastUpdated: () => NOW - 1_200,
   ready: () => true,
   lastError: () => null,
@@ -281,7 +290,11 @@ const shots: Array<[string, string[], string]> = [
   // Scrolled so the frame lands on the v0.22 sections that make Detail distinctive.
   ['detail', renderScreen(ctx(view('detail', { selected: 1, detailScroll: 15 }))), 'Detail — per-node dossier with live entity state and config parameters'],
   ['controller', renderScreen(ctx(view('controller'))), 'Controller — radio health, noise floor, counters'],
-  ['topology', renderScreen(ctx(view('topology'))), 'Topology — hop-grouped route tree'],
+  // TALLER than the 22-row default on purpose: the route tree alone fills a
+  // 22-row frame, and the Route-stability panel spends only leftover rows —
+  // so at the default size the published screenshot would show a topology
+  // screen that omits a documented panel.
+  ['topology', renderScreen(ctx(view('topology', { rows: 34 }))), 'Topology — hop-grouped route tree + measured route stability'],
   ['heatmap', renderScreen(ctx(view('heatmap'))), 'Heatmap — nodes by area, graded by SNR margin'],
   ['log', renderScreen(ctx(view('log'))), 'Log — driver events, value changes and command outcomes'],
   ['remedy', renderScreen(ctx(view('remedy'))), 'Remedy — engine diagnoses and ranked recommendations'],
