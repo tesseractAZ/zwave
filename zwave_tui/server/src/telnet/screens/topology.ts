@@ -618,9 +618,16 @@ function routeFailurePanel(
   if (byPair.size === 0) return [];
 
   const ranked = [...byPair.values()].sort((x, y) => y.n - x.n || y.last - x.last);
-  const capacity = Math.max(1, budget - 2);
-  const canDisclose = ranked.length > capacity;
-  const shown = canDisclose ? ranked.slice(0, capacity - 1) : ranked.slice(0, capacity);
+  // Header takes 1 row; the disclosure line exists ONLY when something is cut,
+  // and it replaces exactly one link row. The first version subtracted the
+  // disclosure twice (capacity = budget - 2, then slice(capacity - 1)), and
+  // because failCap pins budget to 3 for every padRows in 3..7 — the DEFAULT
+  // 80x24 frame — the panel rendered a header and "+7 more" while naming ZERO
+  // links (v0.35 review, confirmed by three independent reproductions). A
+  // disclosure line above nothing is "+7 more" than the zero it showed.
+  const fitCap = Math.max(1, budget - 1);
+  const canDisclose = ranked.length > fitCap;
+  const shown = canDisclose ? ranked.slice(0, Math.max(1, budget - 2)) : ranked;
   const lines = [groupHeader(view, 'Route failures', byPair.size)];
   const nameOf = (id: number): string => {
     const n = ctx.data.nodeById(id);
@@ -688,9 +695,13 @@ function routeStabilityPanel(
   const ranked = rows
     .filter((r) => r.changes > 0)
     .sort((a, b) => perDayOf(b) - perDayOf(a) || b.changes - a.changes || a.node.nodeId - b.node.nodeId);
-  const capacity = Math.max(1, budget - 2); // header + the disclosure line
-  const canDisclose = ranked.length > capacity;
-  const shown = canDisclose ? ranked.slice(0, capacity - 1) : ranked.slice(0, capacity);
+  // Same disclosure arithmetic as routeFailurePanel, for the same reason: the
+  // pre-v0.35 version double-subtracted the disclosure row, so a small budget
+  // rendered "+N more" over an empty list. Pre-existing here since v0.34 — the
+  // v0.35 failCap split just widened the small-budget band it hid in.
+  const fitCap = Math.max(1, budget - 1);
+  const canDisclose = ranked.length > fitCap;
+  const shown = canDisclose ? ranked.slice(0, Math.max(1, budget - 2)) : ranked;
   const max = perDayOf(ranked[0]);
 
   for (const r of shown) {

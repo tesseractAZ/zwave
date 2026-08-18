@@ -28,9 +28,15 @@ import { planFor, type PlanCandidate } from '../../zwave/planner';
  * contradicts a prior is exactly backwards: overturning priors is what the
  * learning loop is FOR.
  *
- * So a blocked candidate still reports what was measured, framed as what it is —
- * a disagreement with the advice above it, or a confirmation of it — and never
- * as an endorsement of an action the screen just told you not to run.
+ * So a blocked candidate still reports what was measured — but WITHOUT
+ * characterizing the block. `blocked` is one string carrying three different
+ * kinds of gate: a planner-authored advisory ("physical-link symptom"), the
+ * write-actions master gate, and a hard safety gate (battery/FLiRS probe
+ * skip). The first draft said "the block above is lore", which is true only
+ * of the first kind — telling an operator a SAFETY gate is unfounded folklore
+ * is precisely the reading this note must never produce (v0.35 review). The
+ * note now states the measurement and that the block still applies, which is
+ * true for all three, and endorses nothing.
  */
 function efficacyNote(e: Efficacy | null | undefined, blocked = false): string | null {
   if (!e || !e.ready) return null; // still learning → say nothing (honest)
@@ -40,11 +46,11 @@ function efficacyNote(e: Efficacy | null | undefined, blocked = false): string |
     // `n` first (after the headline %) so the trust signal survives truncation.
     const pct = Math.round(e.expectedEfficacy * 100);
     return blocked
-      ? c.yellow(`⚠ ledger disagrees — measured ${pct}% here (n=${n})${base}; the block above is lore`)
+      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n})${base} — the block above still applies`)
       : c.green(`✓ helped ${pct}% (n=${n})${base}`);
   }
   return blocked
-    ? c.grey(`≈ n=${n}: measured, and not distinguishable from self-healing — the block holds`)
+    ? c.grey(`≈ n=${n}: measured — not distinguishable from self-healing`)
     : c.grey(`≈ n=${n}: not distinguishable from self-healing`);
 }
 

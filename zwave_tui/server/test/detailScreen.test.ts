@@ -257,8 +257,11 @@ test('EVIDENCE names the feeds and the window behind every other number on the s
   assert.match(body, /status/);
   assert.match(body, /stats/);
   assert.match(body, /500/, 'the cumulative sample count');
-  assert.match(body, /450 \(90%\)/, 'fresh is shown as a share, not a bare count');
+  assert.match(body, /450 \(90% lifetime\)/,
+    'fresh is a share AND says it is cumulative — it cannot show current staleness and must not imply it');
   assert.match(body, /3d/, 'how long this node has been watched');
+  assert.match(body, /span ·/,
+    'the History figure is a SPAN (first bucket to now), not continuous coverage — a gap lives inside it');
 });
 
 test('BOTH feeds down reads as a MONITORING HOLE, never as a quiet node', () => {
@@ -325,6 +328,8 @@ test('a GRADUATED baseline is quoted — the yardstick behind every "below its o
   assert.match(line!, /-62 dBm/);
   assert.match(line!, /±3 dB/);
   assert.match(line!, /9d/, 'the days behind it qualify the claim');
+  assert.match(line!, /this time-of-day band/,
+    'the store keeps a normal per 4h band — unlabelled, the yardstick reads as contradicting itself across the day');
 });
 
 test('an UNGRADUATED baseline says "still learning", never quotes a median', () => {
@@ -372,4 +377,17 @@ test('the fresh-sample share is TONED by how stale it is — not green regardles
   assert.ok(!stale.includes(GREEN), 'and must not ALSO carry green — a mostly-stale feed is not healthy');
   const middling = raw(55);
   assert.ok(middling.includes(YELLOW), '55% fresh is the middle band');
+});
+
+test('ZERO samples renders a DASH for the fresh share — never a confident 0%', () => {
+  // The pct==null branch is the code that keeps "no measurement" visually
+  // distinct from "0% fresh" — the review found it had no assertion and no
+  // mutant, which is exactly how such branches rot.
+  const out = evidenceLines(withEvidence(
+    { firstSeenAt: Date.now() - 60_000, samples: 0, freshSamples: 0, statusFeedLive: true, statsFeedLive: true },
+  ));
+  const row = out.find((l) => /Samples/.test(l));
+  assert.ok(row, 'the Samples row renders');
+  assert.match(row!, /—/, 'no measurement is a dash');
+  assert.ok(!/\(0% lifetime\)/.test(row!), 'a 0% over zero samples would be a fabricated reading');
 });

@@ -126,3 +126,30 @@ test('an event with NO captured name still shows the id — never a blank row', 
     .map(strip).find((l) => /^\s*Entity/.test(l));
   assert.ok(line && /switch\.unnamed/.test(line), `id must survive: ${line}`);
 });
+
+test('at 80 columns the ID survives whole — the name yields, never the id (v0.35 review)', () => {
+  // field() truncates blindly from the right, so leading with a long name
+  // pushed the id past the cut — clipping `sensor.node_27_illumina…` into a
+  // DIFFERENT plausible id. The id is what you type into HA; it must never be
+  // mangled. When both cannot fit, the name is dropped, not the id's tail.
+  const ev = mkEvent({
+    kind: 'value', entityId: 'sensor.node_27_illuminance_lux_reading',
+    entityName: 'Back Porch Motion · Illuminance (calibrated)', domain: 'sensor',
+  });
+  const line = renderLog(ctx({ view: mkView({ cols: 80, rows: 30 }), events: [ev], nodes: sampleNodes }))
+    .map(strip).find((l) => /^\s*Entity/.test(l));
+  assert.ok(line, 'the Entity row renders');
+  assert.ok(line!.includes('sensor.node_27_illuminance_lux_reading'),
+    `the FULL id must survive at 80 cols: ${JSON.stringify(line)}`);
+});
+
+test('on a WIDE frame both still fit and the name still leads', () => {
+  const ev = mkEvent({
+    kind: 'value', entityId: 'sensor.node_27_illuminance',
+    entityName: 'Back Porch Motion', domain: 'sensor',
+  });
+  const line = renderLog(ctx({ view: mkView({ cols: 140, rows: 30 }), events: [ev], nodes: sampleNodes }))
+    .map(strip).find((l) => /^\s*Entity/.test(l))!;
+  assert.ok(line.indexOf('Back Porch Motion') < line.indexOf('sensor.node_27_illuminance'),
+    'name first when it fits — the v0.35 behaviour is width-gated, not reverted');
+});

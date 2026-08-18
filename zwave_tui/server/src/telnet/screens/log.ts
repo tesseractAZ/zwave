@@ -163,12 +163,21 @@ function detailLines(ev: LogEvent | undefined, data: DataProvider, W: number, ro
       // Lead with the FRIENDLY name when the capture carried one (v0.35). It was
       // recorded on every value event and thrown away here, so a pane whose whole
       // job is "which thing did this?" answered `sensor.node_27_illuminance`
-      // while the answer "Back Porch Motion" sat unread on the same object. The
-      // id stays as the secondary — it is what you type into HA.
-      const label = ev.entityName
-        ? `${c.white(ev.entityName)} ${c.grey(ev.entityId)}`
+      // while the answer "Back Porch Motion" sat unread on the same object.
+      //
+      // …but only when the id still fits BESIDE it. field() truncates blindly
+      // from the right, so at 80 columns a leading name pushed the id past the
+      // cut — clipping `sensor.node_27_illumina…` into a different, plausible
+      // id (v0.35 review). The id is the one part that must never be mangled
+      // (it is what you type into HA), so when both cannot fit the id wins and
+      // the name is dropped — exactly the pre-v0.35 row.
+      const domainTag = ' (' + (ev.domain ?? '?') + ')';
+      const nameFits = !!ev.entityName &&
+        ev.entityName.length + 1 + ev.entityId.length + domainTag.length <= W - 10;
+      const label = nameFits
+        ? `${c.white(ev.entityName!)} ${c.grey(ev.entityId)}`
         : c.white(ev.entityId);
-      lines.push(field('Entity', `${label} ${c.grey('(' + (ev.domain ?? '?') + ')')}`, W));
+      lines.push(field('Entity', `${label}${c.grey(domainTag)}`, W));
     }
     if (ev.oldState != null || ev.newState != null) {
       lines.push(field('Change', `${c.grey(ev.oldState ?? '—')} ${c.cyan('→')} ${c.white(ev.newState ?? '—')}`, W));

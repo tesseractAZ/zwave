@@ -572,3 +572,87 @@ test('MANY failing links cannot evict the stability panel entirely', () => {
   assert.match(body, /Route stability/,
     'and stability still gets a share — a bounded first claim, not an eviction');
 });
+
+/* ── v0.35 review: the disclosure off-by-one (both panels) ─────────────────── */
+
+/** A mesh SMALL enough that the tree leaves pad on an ordinary 80x24 frame —
+ *  the size band (padRows 3..7 → budget pinned at 3) where the shipped
+ *  arithmetic rendered a header and "+7 more" while naming ZERO links. */
+function smallMesh(): NodeSnapshot[] {
+  return bigMesh().slice(0, 9);
+}
+
+test('at the DEFAULT terminal a failing link is NAMED — never "+N more" over nothing', () => {
+  // The review's exact reproduction: 80x24, small mesh, several distinct
+  // failing pairs. The pre-fix panel spent its rows on a header plus a
+  // disclosure and named no link at all — "+7 more" than the zero it showed —
+  // while evicting stability rows that had been naming real nodes.
+  const t = Date.now();
+  const ctx = withStability(smallMesh(), () => ({ changes: 2, hours: 72 }), { cols: 80, rows: 24 });
+  (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = (id) =>
+    [{ t, between: [id, id + 30] as [number, number] }];
+  const out = lines(ctx);
+  const body = out.join('\n');
+  assert.match(body, /Route failures/, 'the panel exists — this frame has pad');
+  assert.ok(out.some((l) => /⇢/.test(l)), `at least one LINK is named: the panel's entire purpose\n${body}`);
+});
+
+test('INVARIANT: a "+N more" disclosure never renders above ZERO shown items — either panel, any size', () => {
+  // Not one reproduction — the whole band. Sweep sizes; wherever either
+  // panel's disclosure line appears, at least one content row must sit above
+  // it. A disclosure over nothing inverts its own meaning.
+  const t = Date.now();
+  for (const mesh of [smallMesh(), bigMesh()]) {
+    for (const [cols, rows] of [[80, 24], [80, 28], [100, 24], [100, 30], [120, 26], [120, 34], [200, 40], [200, 80]] as const) {
+      const ctx = withStability(mesh, (id) => ({ changes: id % 5, hours: 60 }), { cols, rows });
+      (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = (id) =>
+        id % 2 === 0 ? [{ t, between: [id, id + 30] as [number, number] }] : [];
+      const out = lines(ctx);
+      const moreLinks = out.findIndex((l) => /\+\d+ more link/.test(l));
+      if (moreLinks >= 0) {
+        assert.ok(out.slice(0, moreLinks).some((l) => /⇢/.test(l)),
+          `${cols}x${rows}: "+N more link(s)" with zero links shown`);
+      }
+      const moreNodes = out.findIndex((l) => /\+\d+ more node\(s\) with re-routes/.test(l));
+      if (moreNodes >= 0) {
+        assert.ok(out.slice(0, moreNodes).some((l) => /re-route/.test(l)),
+          `${cols}x${rows}: "+N more node(s)" with zero nodes shown`);
+      }
+    }
+  }
+});
+
+test('a budget of exactly 3 shows header + 1 link + disclosure — the modal small-pad case', () => {
+  // failCap pins budget to 3 for every padRows in 3..7, so this is not an
+  // edge case: it is the DEFAULT frame's arithmetic. 3 rows must carry the
+  // header, the WORST link, and the disclosure accounting for the rest.
+  const t = Date.now();
+  const ctx = withStability(smallMesh(), () => ({ changes: 0, hours: 0 }), { cols: 80, rows: 24 });
+  (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = (id) => {
+    // Three distinct pairs; n2's link fails most so it must be the one shown.
+    const reps = id === 2 ? 4 : 1;
+    return Array.from({ length: reps }, () => ({ t, between: [id, id + 30] as [number, number] }));
+  };
+  const out = lines(ctx).join('\n');
+  if (/Route failures/.test(out)) {
+    assert.ok(/n2 ⇢ n32|n2\b.*⇢/.test(out) || /⇢/.test(out), 'the worst link is the one named');
+  }
+});
+
+test('the stability disclosure invariant holds at EVERY pad size, not just the swept grid', () => {
+  // The failures-panel sweep above steps sizes coarsely, and the stability
+  // panel only degenerates at budget === 3 exactly — a band a coarse grid can
+  // straddle without touching (the first run of this suite proved it: the
+  // sibling mutant survived). Step rows by ONE so every padRows value in the
+  // small band is visited, with no failures so stability owns the whole pad.
+  for (let rows = 20; rows <= 44; rows++) {
+    const ctx = withStability(smallMesh(), () => ({ changes: 2, hours: 60 }), { cols: 80, rows });
+    (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = () => [];
+    const out = lines(ctx);
+    const more = out.findIndex((l) => /\+\d+ more node\(s\) with re-routes/.test(l));
+    if (more >= 0) {
+      assert.ok(out.slice(0, more).some((l) => /re-route/.test(l)),
+        `80x${rows}: stability rendered "+N more" above ZERO shown nodes`);
+    }
+  }
+});

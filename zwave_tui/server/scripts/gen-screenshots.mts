@@ -105,10 +105,17 @@ const controllerNode: NodeSnapshot = {
   isController: true, stats: stats({ rssi: null, rtt: null, lwr: null }),
 };
 const NODES: NodeSnapshot[] = [controllerNode, ...DEMO.map(node)];
-const SCORES = new Map<number, HealthResult>(DEMO.map((d) => [d.id, {
-  score: d.score, rating: Math.round(d.score / 10), grade: d.grade,
-  state: d.score === 0 ? 'dead' : d.score < 70 ? 'flaky' : 'ok', flags: d.flags,
-} as HealthResult]));
+// No `as HealthResult` here — the assertion is precisely what let a deleted
+// field (`rating`) survive in this file after v0.35 removed it from the type,
+// invisible to the very tsconfig gate added to catch that (v0.35 review). A
+// plain satisfies-shaped literal lets the compiler do its job.
+const SCORES = new Map<number, HealthResult>(DEMO.map((d) => {
+  const r: HealthResult = {
+    score: d.score, grade: d.grade,
+    state: d.score === 0 ? 'dead' : d.score < 70 ? 'flaky' : 'ok', flags: d.flags,
+  };
+  return [d.id, r];
+}));
 SCORES.set(1, { score: 100, grade: 'A', state: 'ok', flags: [] });
 
 const CONTROLLER: ControllerSnapshot = {

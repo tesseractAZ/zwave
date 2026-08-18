@@ -222,27 +222,27 @@ test('an ACTIVE event reports how many distinct nodes are symptomatic', () => {
   const iv = cleanView({ correlated: { active: true, degradedNodes: 7, narrative: 'Correlated mesh degradation (4 of 11 active).' } });
   const joined = renderInterference(ctx(120, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.match(joined, /4 of 11 active/, "the detector's own ratio still leads");
-  assert.match(joined, /scope · 7 distinct nodes symptomatic \(quiet ones included\)/,
-    'and the scope count is labelled APART, so 7 and 4-of-11 cannot read as one number disagreeing with itself');
+  assert.match(joined, /meanwhile · 7 nodes symptomatic across ALL detectors — not necessarily this event/,
+    'labelled as the mesh-wide symptom count, NEVER as the event reach — unrelated faults are in this number');
 });
 
-test('an active event with no distinct count adds no scope line', () => {
+test('an active event with no distinct count adds no companion line', () => {
   const iv = cleanView({ correlated: { active: true, degradedNodes: 0, narrative: 'Correlated mesh degradation.' } });
   const joined = renderInterference(ctx(120, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
-  assert.ok(!/scope ·/.test(joined));
+  assert.ok(!/meanwhile ·/.test(joined));
 });
 
 test('the INACTIVE case is untouched — the narrative still owns the count', () => {
   const iv = cleanView({ correlated: { active: false, degradedNodes: 2, narrative: '2 nodes degraded, but not correlated into a mesh event.' } });
   const joined = renderInterference(ctx(120, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.match(joined, /2 nodes degraded, but not correlated/);
-  assert.ok(!/scope ·/.test(joined), 'no duplicate count when the narrative already states it');
+  assert.ok(!/meanwhile ·/.test(joined), 'no duplicate count when the narrative already states it');
 });
 
-test('the scope line singularises, and the exact-rows contract still holds', () => {
+test('the companion line singularises, and the exact-rows contract still holds', () => {
   const iv = cleanView({ correlated: { active: true, degradedNodes: 1, narrative: 'Correlated mesh degradation (1 of 9 active).' } });
   const joined = renderInterference(ctx(120, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
-  assert.match(joined, /1 distinct node symptomatic/);
+  assert.match(joined, /1 node symptomatic across ALL detectors/);
   for (const [cols, rows] of [[60, 16], [96, 24], [120, 40], [200, 50]] as const) {
     const lines = renderInterference(ctx(cols, rows, iv));
     assert.equal(lines.length, rows, `${cols}x${rows}`);

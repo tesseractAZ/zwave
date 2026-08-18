@@ -163,31 +163,36 @@ test('M4: a subsumed symptom shows NO recommendation (its plan defers to the mes
 
 const plain = (s: string[]): string => s.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
 
-test('a BLOCKED candidate now reports what was measured — framed as a disagreement', () => {
-  // route-churn's ONLY executable candidate is hardcoded blocked ("physical-link
-  // symptom — won't settle it"), which is `lore`. Until v0.35 that made the
-  // ledger's measurement of the very same action unreachable: the learning loop
-  // could learn healNode works and had no way to say so. Suppressing measurement
-  // because it contradicts a prior is backwards — overturning priors is the point.
+test('a BLOCKED candidate now reports what was measured — without judging the block', () => {
+  // route-churn's ONLY executable candidate is hardcoded blocked, so until
+  // v0.35 the ledger's measurement of the very same action was unreachable.
+  // The note reports the measurement and that the block still applies — it
+  // must NOT characterize the block (an earlier draft said "the block above is
+  // lore", which read as calling a SAFETY gate unfounded folklore whenever the
+  // block came from gateExecutable rather than the planner's advisory text).
   const eff: Eff = { expectedEfficacy: 0.8, n: 10, baseRate: 0.2, ready: true };
   const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
   assert.match(joined, /⊘ physical-link symptom/, 'the block is still stated');
-  assert.match(joined, /ledger disagrees — measured 80% here \(n=10\) vs 20% self-heal/,
-    'and the measurement now reaches the screen');
+  assert.match(joined, /ledger measured 80% here \(n=10\) vs 20% self-heal — the block above still applies/,
+    'the measurement reaches the screen AND the block is never undermined');
   assert.ok(!/✓ helped/.test(joined),
-    'but NEVER as a green endorsement of advice the screen just told you not to take');
+    'never as a green endorsement of advice the screen just told you not to take');
+  // NOT a bare !/lore/ — the basis TAG legitimately prints "lore" ([physical · lore]).
+  // The defect was the NOTE claiming the block's epistemics, so pin that phrase.
+  assert.ok(!/block above is lore/.test(joined),
+    'and never characterizes the block — blocked carries safety and config gates too');
 });
 
-test('a blocked candidate the ledger AGREES with says the block holds', () => {
+test('a blocked candidate with a NULL result reports it plainly, endorsing nothing', () => {
   const eff: Eff = { expectedEfficacy: null, n: 12, baseRate: 0.5, ready: true };
   const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
-  assert.match(joined, /not distinguishable from self-healing — the block holds/);
+  assert.match(joined, /measured — not distinguishable from self-healing/);
 });
 
 test('a blocked candidate with no opinion yet still says NOTHING', () => {
   const eff: Eff = { expectedEfficacy: null, n: 2, baseRate: null, ready: false };
   const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
-  assert.ok(!/ledger disagrees|block holds|helped|distinguishable/.test(joined),
+  assert.ok(!/ledger measured|block above|helped|distinguishable/.test(joined),
     'not-ready is silence, blocked or not');
 });
 
@@ -200,9 +205,9 @@ test('one plan can carry BOTH voices — green on the runnable, disagreement on 
   const rows = plain(renderRemedy(ctx(140, 40, [sym()], () => eff))).split('\n');
   assert.ok(rows.some((l) => /✓ helped 83% \(n=6\) vs 20% self-heal/.test(l)),
     'the runnable candidate keeps the plain green note');
-  assert.ok(rows.some((l) => /ledger disagrees — measured 83% here/.test(l)),
-    'the blocked candidate gets the disagreement framing');
-  assert.ok(!rows.some((l) => /✓ helped/.test(l) && /ledger disagrees/.test(l)),
+  assert.ok(rows.some((l) => /ledger measured 83% here/.test(l) && /block above still applies/.test(l)),
+    'the blocked candidate gets the measurement-plus-block framing');
+  assert.ok(!rows.some((l) => /✓ helped/.test(l) && /ledger measured/.test(l)),
     'and never both on one row');
 });
 

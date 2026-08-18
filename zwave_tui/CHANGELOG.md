@@ -46,11 +46,14 @@ block reason is `lore`; the ledger is `measured`. Suppressing measurement
 because it contradicts a prior is backwards — overturning priors is what the
 loop is *for*.
 
-Blocked candidates now report what was measured in their own voice:
-`⚠ ledger disagrees — measured 80% here (n=10) vs 20% self-heal; the block above
-is lore`, or, when the ledger agrees, `… not distinguishable from self-healing —
-the block holds`. Never as an endorsement of an action the screen just told you
-not to run.
+Blocked candidates now report what was measured in a voice that endorses
+nothing and judges nothing: `⚠ ledger measured 80% here (n=10) vs 20% self-heal
+— the block above still applies`, or, on a null result, `≈ n=12: measured — not
+distinguishable from self-healing`. The note deliberately does NOT characterize
+the block: `blocked` carries planner advisories, the write-actions master gate,
+and hard safety gates alike, and a first draft that appended "the block above
+is lore" told the operator a battery/FLiRS safety gate was unfounded folklore —
+the pre-merge review caught it, and a mutant now pins the neutral voice.
 
 ### Fixed — a removed node's baselines outlived it
 
@@ -64,16 +67,20 @@ live node's learned baselines is the larger harm.
 
 ### Also surfaced
 
-- INTERFERENCE states the **scope** of a live correlated event — the count of
-  distinct symptomatic nodes, quiet ones included. It was computed for every
-  view since M6 and only ever reached the screen through the *inactive*
-  narrative, i.e. it went dark at exactly the moment it mattered. Labelled apart
-  from the detector's own "degraded X of Y active" ratio so the two numbers
-  cannot read as one measurement disagreeing with itself.
+- INTERFERENCE adds a companion count to a live correlated event: `meanwhile ·
+  N nodes symptomatic across ALL detectors — not necessarily this event`. It
+  was computed for every view since M6 and only ever reached the screen through
+  the *inactive* narrative, i.e. it went dark at exactly the moment it
+  mattered. Deliberately NOT labelled as the event's scope — the count includes
+  faults unrelated to the event — and labelled apart from the detector's own
+  "degraded X of Y active" ratio so the two numbers cannot read as one
+  measurement disagreeing with itself.
 - The LOG detail pane leads with the entity's **friendly name**, with the id as
-  the secondary. The name was captured on every value event and discarded at the
-  render, so a pane whose whole job is "which thing did this?" answered with a
-  slug.
+  the secondary — width-gated so the id always survives whole: at 80 columns a
+  leading name would push the id past the pane's right-truncate, clipping it
+  into a different, plausible id, so when both cannot fit the name yields. The
+  name was captured on every value event and discarded at the render, so a pane
+  whose whole job is "which thing did this?" answered with a slug.
 - NODE DETAIL shows the **HA device id** — the exact string a `device_id:`
   automation target needs, and one HA's own UI makes awkward to copy.
 - `/api/health` reports `haError`: the HA socket's *own* last failure. An auth
@@ -97,16 +104,50 @@ And three were simply dead: `HaWsClient.registerEventHandler` /
 `HaWsClient.isConfigured()`, and `ViewState.followTail` (written once at session
 construction, read never).
 
+### Pre-merge review round (this release, before it shipped)
+
+A 6-lens adversarial review of the unmerged diff (115 agents; every finding
+attacked by three independent refutation lenses) confirmed 9 findings and 6
+gaps — all fixed in this same release:
+
+- **The Route-failures panel named zero links at the default terminal.** The
+  disclosure arithmetic subtracted the "+N more" row twice, and the pad split
+  pins the panel's budget to 3 rows for every leftover-pad size from 3 to 7 —
+  i.e. 80×24 — so with two or more failing links it rendered a header and
+  "+7 more" above nothing, while evicting stability rows that had been naming
+  real nodes. The same off-by-one existed in the stability panel since v0.34.
+  Both fixed; a step-1 size sweep now pins the invariant that a disclosure
+  line never renders above zero shown items.
+- **EVIDENCE feed badges glowed green through an HA-socket outage.** The
+  subscription idempotency sets survive a disconnect, so on their own the
+  badges meant "a subscribe once succeeded". Now ANDed with the live socket:
+  both go dark in an outage — exactly when MONITORING HOLE must be able to
+  fire.
+- **The departed-node eviction sweep now forgets baselines too** — the
+  onNodeRemoved hook only covered removals issued from this TUI; a node
+  excluded from HA's own UI kept its dead device's learned normals keyed to a
+  reusable node id.
+- **Honesty labels**: the fresh share is marked `lifetime` (cumulative — it
+  cannot show current staleness); the learned normal is marked `this
+  time-of-day band` (the store keeps one per 4-hour band); the History figure
+  is marked a `span`, not coverage; zero samples renders a dash, never `0%`.
+- The screenshot generator's `as HealthResult` assertion was hiding the
+  deleted `rating` field from the very tsconfig gate added to catch it —
+  assertion removed, field gone.
+
 ### Guards
 
 - The v0.34 **bridge-completeness** test now round-trips every v0.35 member
   through `buildZwaveDataSource` — the object `index.ts` actually builds — so
   the class of defect that shipped a dead `M` key cannot recur on the new ones.
 - Mutants added for pair-tallying, failure ranking, both panels' leftover
-  funding and their bounded competition for it, the monitoring-hole call, the
-  fresh-share tone, un-graduated baselines, the entity-name lead, the blocked
-  ledger voice in both directions, the zero-suppressed false-positive line, the
-  scope line, and success-only baseline forgetting.
+  funding and their bounded competition for it, both panels' single-subtraction
+  disclosure, the monitoring-hole call, the fresh-share tone, the no-samples
+  dash, un-graduated baselines and their band label, the socket-gated feed
+  badges, the entity-name lead and the id's survival, the blocked ledger voice
+  in both directions (endorses nothing, judges nothing), the zero-suppressed
+  false-positive line, the companion count, and success-only baseline
+  forgetting.
 
 ## 0.34.0 — 2026-08-17
 

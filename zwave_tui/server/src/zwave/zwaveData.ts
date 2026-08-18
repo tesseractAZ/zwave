@@ -1363,6 +1363,15 @@ class ZwaveDataImpl implements ZwaveData {
         } else if (now - since > 5 * 60_000) {
           this.log(`node ${id} left the network — evicting its evidence + caches`);
           this.evidenceStore?.evictNode(id);
+          // Baselines too (v0.35 review): the onNodeRemoved hook only covers a
+          // removal issued from THIS TUI. A node excluded from HA's own UI, or
+          // replaced via replace_failed_node, arrives here with its learned
+          // normals still keyed to the id — and a re-include on that id is
+          // different hardware measured against a dead device's yardstick.
+          // Idempotent with the hook; the 5-minute dwell above is what makes
+          // this safe against a transient roster glitch wiping weeks of
+          // learning.
+          this.forgetNodeBaselines(id);
           this.statsByNode.delete(id);
           this.histByNode.delete(id);
           this.histLongByNode.delete(id);
@@ -2149,7 +2158,16 @@ class ZwaveDataImpl implements ZwaveData {
     if (!cov) return null;
     // Subscription state is part of coverage (DESIGN §3.1): "no evidence" from
     // a node whose feeds are DOWN is a monitoring hole, not node silence.
-    return { ...cov, statusFeedLive: this.statusSubbed.has(nodeId), statsFeedLive: this.statsSubbedNodes.has(nodeId) };
+    //
+    // ANDed with the socket, because the idempotency sets mean "a subscribe
+    // call once succeeded" and are cleared only by the NEXT epoch's resubscribe
+    // run — through a disconnect they stay populated, so on their own the
+    // badges would glow green for the entire duration of the largest
+    // monitoring hole there is (v0.35 review). Both feeds ride this one HA
+    // socket, so both go dark together when it drops — which is exactly when
+    // the MONITORING HOLE line must be able to fire.
+    const up = this.client.ready();
+    return { ...cov, statusFeedLive: up && this.statusSubbed.has(nodeId), statsFeedLive: up && this.statsSubbedNodes.has(nodeId) };
   }
 
   /** Map a raw node-statistics event → cached NodeStats. */

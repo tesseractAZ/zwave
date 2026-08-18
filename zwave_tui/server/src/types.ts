@@ -319,6 +319,11 @@ export interface DataProvider {
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.
    *
+   * BAND-DEPENDENT: the store keeps a separate normal per 4-hour time-of-day
+   * band, and this answers for the band containing NOW — the same call at 3am
+   * and 3pm legitimately returns different yardsticks. Any rendering must say
+   * so, or the baseline reads as contradicting itself across the day.
+   *
    * This is the yardstick every per-node signal verdict is measured against.
    * It was computed and persisted since M3 and readable from nothing, which
    * made "n27's signal is below its own normal" an unfalsifiable claim on
@@ -374,8 +379,12 @@ export interface InterferenceView {
   coverageDays: number;
   /** Current correlated-degradation state. When a mesh event is active the
    *  `narrative` carries the DETECTOR's own coherent "degraded X of Y active"
-   *  ratio; `degradedNodes` is a plain count of distinct symptomatic nodes for
-   *  the inactive case (no invented denominator — the detector owns the ratio). */
+   *  ratio. `degradedNodes` is a plain count of distinct nodes carrying ANY
+   *  per-node symptom (controller-degraded and edge-cluster excluded) — read
+   *  by the inactive narrative, and from v0.35 also rendered during an ACTIVE
+   *  event as the mesh-wide symptom count. It is NOT the event's reach: nodes
+   *  with unrelated faults are in it, which is why the screen labels it
+   *  "across ALL detectors" rather than as scope. */
   correlated: {
     active: boolean;
     degradedNodes: number;

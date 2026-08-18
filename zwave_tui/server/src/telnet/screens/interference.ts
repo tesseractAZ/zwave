@@ -217,16 +217,18 @@ export function renderInterference(ctx: ScreenCtx): string[] {
   if (iv.correlated.active) {
     push('  ' + c.yellowB('⚠ correlated mesh degradation'));
     for (const line of wrap(iv.correlated.narrative, W - 4).slice(0, 2)) push('    ' + c.grey(line));
-    // SCOPE, which the detector's ratio does not give you (v0.35). The narrative
-    // says "degraded X of Y active" — a share of the nodes that were TALKING in
-    // the window. This is the count of distinct nodes carrying a symptom at all,
-    // quiet ones included, so it answers the different question of how far the
-    // event reaches. Computed since M6 and never rendered while an event was
-    // live, which is the one time it matters. Labelled apart so the two numbers
-    // can never be read as the same measure disagreeing with itself.
+    // A companion count, NOT the event's reach (v0.35, reworded on review).
+    // `degradedNodes` counts distinct nodes carrying ANY per-node symptom right
+    // now — including faults with no relationship to this event (a dead-flap,
+    // an S2 storm). Calling that the event's "scope" over-claimed what the
+    // detector correlated, so it is labelled as what it is: the mesh-wide
+    // symptom count while the event runs. Still worth a row — it is the
+    // difference between "an RF event, and otherwise healthy" and "an RF event
+    // on top of three unrelated fires".
     if (iv.correlated.degradedNodes > 0) {
-      push('    ' + c.grey('scope · ') + c.white(String(iv.correlated.degradedNodes)) +
-        c.grey(` distinct node${iv.correlated.degradedNodes === 1 ? '' : 's'} symptomatic (quiet ones included)`));
+      const k = iv.correlated.degradedNodes;
+      push('    ' + c.grey('meanwhile · ') + c.white(String(k)) +
+        c.grey(` node${k === 1 ? '' : 's'} symptomatic across ALL detectors — not necessarily this event`));
     }
   } else {
     push('  ' + c.green('✓ ') + c.grey(iv.correlated.narrative));

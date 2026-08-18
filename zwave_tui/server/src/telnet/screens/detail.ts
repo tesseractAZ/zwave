@@ -326,17 +326,21 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         feedTag('status', cov.statusFeedLive) + c.grey(' · ') + feedTag('stats', cov.statsFeedLive);
       const watched = fmtAge(Date.now() - cov.firstSeenAt);
       body.push(twoCol('Feeds', feeds, 'Watched', c.white(watched), inner));
-      // Fresh vs total is the honesty line: a node with samples but none fresh
-      // is being polled and answering with stale data, which reads nothing like
-      // a node with no samples at all.
+      // Fresh vs total is CUMULATIVE since first sight — a chronic share, not
+      // a now-reading (the counters are lifetime, so it cannot move fast). It
+      // is labelled "lifetime" for exactly that reason: a node that went stale
+      // yesterday still shows last month's green here, and pretending
+      // otherwise was the review's finding, not a feature (v0.35).
       const pct = cov.samples > 0 ? Math.round((cov.freshSamples / cov.samples) * 100) : null;
       const freshTone = pct == null ? c.grey : pct >= 80 ? c.green : pct >= 40 ? c.yellow : c.red;
       const samples =
         c.white(String(cov.samples)) +
-        c.grey(' · fresh ') + freshTone(pct == null ? '—' : `${cov.freshSamples} (${pct}%)`);
+        c.grey(' · fresh ') + freshTone(pct == null ? '—' : `${cov.freshSamples} (${pct}% lifetime)`);
       const span =
         coarse.length > 0
-          ? c.white(fmtAge(Date.now() - coarse[0].t0)) + c.grey(` · ${coarse.length} bucket(s)`)
+          // "span", deliberately: first-bucket-to-now, NOT continuous coverage —
+          // a gap in observation lives inside this number (v0.35 review).
+          ? c.white(fmtAge(Date.now() - coarse[0].t0) + ' span') + c.grey(` · ${coarse.length} bucket(s)`)
           : c.grey('none yet');
       body.push(twoCol('Samples', samples, 'History', span, inner));
       // The engine's LEARNED yardstick for this node. Every per-node signal
@@ -349,7 +353,11 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       if (rn) {
         const band = rn.ready
           ? c.white(`${Math.round(rn.median)} dBm`) + c.grey(` ±${Math.round(rn.scale)} dB`) +
-            c.grey(` · ${rn.days}d`)
+            // The store keeps a separate normal per 4-hour time-of-day band and
+            // this row answers for the band you are IN — ask at 3am and at 3pm
+            // and the yardstick legitimately differs. Unlabelled, that reads as
+            // the baseline contradicting itself (v0.35 review).
+            c.grey(` · ${rn.days}d · this time-of-day band`)
           : c.yellow('still learning') + c.grey(` · ${rn.days}d so far — not yet a yardstick`);
         body.push(kv('Normal', band, inner));
       }
