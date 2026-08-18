@@ -59,6 +59,19 @@ export interface ZwaveDataSource {
   ackEvent(seq: number): boolean;
   /** Measured route stability from the coarse tier (v0.34). REQUIRED — see ackEvent. */
   routeStability(nodeId: number): { changes: number; hours: number } | null;
+  /** Persisted route-failure events: which LINK broke, not just that one did (v0.35). */
+  routeFailures(nodeId: number): { t: number; between: [number, number] }[];
+  /** What the engine can SEE for a node (v0.35). REQUIRED — see ackEvent. */
+  evidenceCoverage(nodeId: number): {
+    firstSeenAt: number; samples: number; freshSamples: number;
+    statusFeedLive: boolean; statsFeedLive: boolean;
+  } | null;
+  /** Long-horizon buckets for a node (v0.35). REQUIRED — see ackEvent. */
+  evidenceCoarse(nodeId: number): { t0: number; samples: number; routeChanges?: number }[];
+  /** Ledger tally of `refused-misdiagnosis` closes for a kind (v0.35). REQUIRED — see ackEvent. */
+  falsePositives(kind: SymptomKind): number;
+  /** Learned RSSI normal for a node (v0.35). REQUIRED — see ackEvent. */
+  rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** Has the first roster load completed? Falls back to "roster non-empty". */
   ready?(): boolean;
   /** Last fatal error string, if any. */
@@ -106,7 +119,6 @@ export interface CreateTuiDataProviderOptions {
 /** A neutral score returned for a node we have not scored yet. */
 const UNKNOWN_SCORE: HealthResult = {
   score: 0,
-  rating: 0,
   grade: 'F',
   state: 'unknown',
   flags: [],
@@ -161,6 +173,11 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     requestConfigParams: (n) => zd.requestConfigParams?.(n),
     ackEvent: (seq) => zd.ackEvent(seq),
     routeStability: (n) => zd.routeStability(n),
+    routeFailures: (n) => zd.routeFailures(n),
+    evidenceCoverage: (n) => zd.evidenceCoverage(n),
+    evidenceCoarse: (n) => zd.evidenceCoarse(n),
+    falsePositives: (k) => zd.falsePositives(k),
+    rssiNormal: (n) => zd.rssiNormal(n),
   };
 }
 
@@ -256,6 +273,11 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     events: () => cachedEvents,
     ackEvent: (seq) => zwaveData.ackEvent(seq),
     routeStability: (nodeId) => zwaveData.routeStability(nodeId),
+    routeFailures: (nodeId) => zwaveData.routeFailures(nodeId),
+    evidenceCoverage: (nodeId) => zwaveData.evidenceCoverage(nodeId),
+    evidenceCoarse: (nodeId) => zwaveData.evidenceCoarse(nodeId),
+    falsePositives: (kind) => zwaveData.falsePositives(kind),
+    rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,
     hasRealNoise: () => cachedHasNoise,

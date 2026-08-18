@@ -34,6 +34,11 @@ export interface ActionRunnerOptions {
   /** v0.23: invalidate a node's cached config parameters after a successful write,
    *  so the DETAIL screen re-fetches and shows the new value. */
   onConfigWritten?: (nodeId: number) => void;
+  /** v0.35: the node has LEFT the mesh (removeFailed succeeded). Its learned
+   *  baselines describe a device that is gone — a later re-include on the same
+   *  node id is different hardware, and measuring it against the dead device's
+   *  normals is how the engine manufactures symptoms out of a swap. */
+  onNodeRemoved?: (nodeId: number) => void;
   enabled: boolean;
 }
 
@@ -94,7 +99,11 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     healNode: (n) => run('healNode', n, `rebuild routes node ${n}`, () => deviceCmd('zwave_js/rebuild_node_routes', n)),
     rebuildAll: () => run('rebuildAll', null, 'rebuild ALL routes', () => entryCmd('zwave_js/begin_rebuilding_routes')),
     stopRebuild: () => run('stopRebuild', null, 'stop rebuilding routes', () => entryCmd('zwave_js/stop_rebuilding_routes')),
-    removeFailed: (n) => run('removeFailed', n, `remove failed node ${n}`, () => deviceCmd('zwave_js/remove_failed_node', n)),
+    removeFailed: async (n) => {
+      const res = await run('removeFailed', n, `remove failed node ${n}`, () => deviceCmd('zwave_js/remove_failed_node', n));
+      if (res.ok) o.onNodeRemoved?.(n); // only on success — a failed removal leaves the node, and its history, in place
+      return res;
+    },
     controlEntity: (n, entityId, verb: EntityVerb) =>
       run(
         'controlEntity',

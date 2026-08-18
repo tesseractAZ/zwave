@@ -136,6 +136,13 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       c.grey(' · ') +
       c.grey(`${n.entities.length} entit${n.entities.length === 1 ? 'y' : 'ies'}`);
     body.push(kv('Area', loc, inner));
+    // The HA device_registry id (v0.35). Carried on every snapshot since v0.3
+    // and displayed nowhere — while being the exact string you need for a
+    // `device_id:` target in an automation or a template, and one that HA's own
+    // UI makes awkward to copy. Shown last: identity you occasionally need,
+    // not a number you read at a glance. Omitted when the registry join failed
+    // rather than printing an empty field.
+    if (n.deviceId) body.push(kv('HA id', c.grey(n.deviceId), inner));
   }
   sep();
 
@@ -306,6 +313,64 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     body.push(truncate('  ' + line, inner));
   }
 
+  // EVIDENCE — what the ENGINE can see for this node (v0.35). Everything above
+  // is what the node reports; this is whether anyone was listening. The store
+  // has tracked it since M2 and no screen has ever read it back.
+  {
+    const cov = data.evidenceCoverage?.(n.nodeId) ?? null;
+    const coarse = data.evidenceCoarse?.(n.nodeId) ?? [];
+    if (cov) {
+      sep();
+      body.push(section('EVIDENCE'));
+      const feeds =
+        feedTag('status', cov.statusFeedLive) + c.grey(' · ') + feedTag('stats', cov.statsFeedLive);
+      const watched = fmtAge(Date.now() - cov.firstSeenAt);
+      body.push(twoCol('Feeds', feeds, 'Watched', c.white(watched), inner));
+      // Fresh vs total is CUMULATIVE since first sight — a chronic share, not
+      // a now-reading (the counters are lifetime, so it cannot move fast). It
+      // is labelled "lifetime" for exactly that reason: a node that went stale
+      // yesterday still shows last month's green here, and pretending
+      // otherwise was the review's finding, not a feature (v0.35).
+      const pct = cov.samples > 0 ? Math.round((cov.freshSamples / cov.samples) * 100) : null;
+      const freshTone = pct == null ? c.grey : pct >= 80 ? c.green : pct >= 40 ? c.yellow : c.red;
+      const samples =
+        c.white(String(cov.samples)) +
+        c.grey(' · fresh ') + freshTone(pct == null ? '—' : `${cov.freshSamples} (${pct}% lifetime)`);
+      const span =
+        coarse.length > 0
+          // "span", deliberately: first-bucket-to-now, NOT continuous coverage —
+          // a gap in observation lives inside this number (v0.35 review).
+          ? c.white(fmtAge(Date.now() - coarse[0].t0) + ' span') + c.grey(` · ${coarse.length} bucket(s)`)
+          : c.grey('none yet');
+      body.push(twoCol('Samples', samples, 'History', span, inner));
+      // The engine's LEARNED yardstick for this node. Every per-node signal
+      // verdict ("below its own normal") is measured against this and it was
+      // readable from nowhere, which made those verdicts unfalsifiable on
+      // screen: you could see the accusation but never the baseline. An
+      // un-graduated band says so rather than quoting a median nobody should
+      // act on yet.
+      const rn = data.rssiNormal?.(n.nodeId) ?? null;
+      if (rn) {
+        const band = rn.ready
+          ? c.white(`${Math.round(rn.median)} dBm`) + c.grey(` ±${Math.round(rn.scale)} dB`) +
+            // The store keeps a separate normal per 4-hour time-of-day band and
+            // this row answers for the band you are IN — ask at 3am and at 3pm
+            // and the yardstick legitimately differs. Unlabelled, that reads as
+            // the baseline contradicting itself (v0.35 review).
+            c.grey(` · ${rn.days}d · this time-of-day band`)
+          : c.yellow('still learning') + c.grey(` · ${rn.days}d so far — not yet a yardstick`);
+        body.push(kv('Normal', band, inner));
+      }
+      // A node the engine cannot see must SAY so here, because every quiet
+      // verdict elsewhere on this screen silently depends on it.
+      if (!cov.statusFeedLive && !cov.statsFeedLive) {
+        body.push(note('Both feeds are down — silence from this node is a MONITORING HOLE, not health', inner, c.red));
+      } else if (cov.samples === 0) {
+        body.push(note('No samples yet — the engine has nothing to judge this node on', inner, c.yellow));
+      }
+    }
+  }
+
   /* ── window the body into the scrollable content area ────────────────────── */
   // frame() reserves masthead + rule + command bar (3 rows). We reserve one more
   // for the flag legend pinned at the bottom, and scroll everything else.
@@ -345,6 +410,11 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     body: windowRows,
     keys,
   });
+}
+
+/** A live/down badge for one evidence feed (v0.35). */
+function feedTag(name: string, live: boolean): string {
+  return live ? c.green('\u25cf ' + name) : c.red('\u25cb ' + name);
 }
 
 /** Per-node flag legend, pinned at the bottom of the Detail body. */

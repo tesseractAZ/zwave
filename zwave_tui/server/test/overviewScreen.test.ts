@@ -17,16 +17,16 @@ function node(id: number, over: Partial<NodeSnapshot> = {}): NodeSnapshot {
 const nodes = Array.from({ length: 39 }, (_, i) => node(i + 1, i === 5 ? { stats: stats({ rtt: 234.5, commandsTX: 100, commandsDroppedTX: 2, timeoutResponse: 8 }) } : {}));
 const scores: Record<number, HealthResult> = {};
 // Node 6 carries ALL NINE flags — the widest FLAGS cell + the selected row.
-scores[6] = { score: 34, rating: 3, grade: 'F', state: 'flaky', flags: ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B', 'U'] };
+scores[6] = { score: 34, grade: 'F', state: 'flaky', flags: ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B', 'U'] };
 const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
 const data: DataProvider = {
   nodes: () => nodes, nodeById: (id) => nodes.find((n) => n.nodeId === id), controller: () => ctrl, events: () => [],
-  scoreFor: (id) => scores[id] ?? { score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] },
+  scoreFor: (id) => scores[id] ?? { score: 90, grade: 'A', state: 'ok', flags: [] },
   noiseFloor: () => -92, hasRealNoise: () => true, history: () => ({ rssi: [-60, -59, -58], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
   lastUpdated: () => now - 1200, ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }), efficacyFor: () => null, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
   entityStates: () => [], configParams: () => ({ status: 'ready', params: [] }), requestConfigParams: () => {},
 };
-const mkView = (cols: number, rows: number, selected = 5): ViewState => ({ screen: 'overview', cols, rows, selected, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', followTail: true, errorsOnly: false, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null } as ViewState);
+const mkView = (cols: number, rows: number, selected = 5): ViewState => ({ screen: 'overview', cols, rows, selected, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', errorsOnly: false, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null } as ViewState);
 const ctx = (cols: number, rows: number, selected = 5): ScreenCtx => ({ view: mkView(cols, rows, selected), data, visibleNodes: nodes, filtering: false, actionsEnabled: true });
 
 const strip = (l: string): string => l.replace(/\x1b\[[0-9;]*m/g, '');
@@ -36,7 +36,7 @@ test('signal cell guarded: DEAD → dash (no live margin); ROUTED → neutral gr
   const routedN = node(3, { name: 'RoutedNode', stats: stats({ rssi: -60, lwr: { repeaters: [10], protocolDataRate: 3, rssi: -60, repeaterRSSI: [], routeFailedBetween: null } }) });
   const directN = node(4, { name: 'DirectNode', stats: stats({ rssi: -60 }) }); // margin = -60 - (-92) = +32
   const three = [directN, routedN, deadN];
-  const d: DataProvider = { ...data, nodes: () => three, nodeById: (id) => three.find((n) => n.nodeId === id), scoreFor: () => ({ score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] }) };
+  const d: DataProvider = { ...data, nodes: () => three, nodeById: (id) => three.find((n) => n.nodeId === id), scoreFor: () => ({ score: 90, grade: 'A', state: 'ok', flags: [] }) };
   // Select the dead node (index 2) so Direct/Routed render in COLOURED form (the
   // selected row uses inverse-video plain cells with no per-cell colour code).
   const raw = renderOverview({ view: mkView(120, 20, 2), data: d, visibleNodes: three, filtering: false, actionsEnabled: true });

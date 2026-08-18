@@ -15,10 +15,10 @@
  *
  *   2. A persistent message router (`handleMessage`) attached ONCE per
  *      connection that demultiplexes every inbound frame: `result` frames go to
- *      the pending-request map, `event` frames go to `registerEventHandler(id,
- *      cb)` — this is what makes `subscribe_*` pushes reachable. `subscribe()`
- *      wires the two together (allocate id → register handler → send the
- *      subscribe command under that id).
+ *      the pending-request map, `event` frames go to the handler registered in
+ *      `eventHandlers` under that id — this is what makes `subscribe_*` pushes
+ *      reachable. `subscribe()` wires the two together (allocate id → register
+ *      handler → send the subscribe command under that id).
  *
  * Auth handshake: on connect HA sends `{type:'auth_required'}`; we reply with
  * `{type:'auth', access_token: SUPERVISOR_TOKEN}` and wait for `{type:'auth_ok'}`.
@@ -92,16 +92,10 @@ export interface HaWsClient {
   send<T = unknown>(cmd: Record<string, unknown>, timeoutMs?: number): Promise<T>;
   /** Subscribe helper: registers an event handler then sends the subscribe command. */
   subscribe(cmd: Record<string, unknown>, onEvent: HaEventHandler, timeoutMs?: number): Promise<HaSubscription>;
-  /** Register a raw event handler for a known subscription id (low-level primitive). */
-  registerEventHandler(id: number, cb: HaEventHandler): void;
-  /** Remove a previously-registered event handler. */
-  unregisterEventHandler(id: number): void;
   /** Called after every successful (re)authentication — the re-subscribe hook. */
   onReady(cb: () => void): void;
   /** True once authenticated with HA Core. */
   ready(): boolean;
-  /** True when a token is present (false = dev no-op mode). */
-  isConfigured(): boolean;
   /** Last connection/auth error, or null. */
   lastError(): string | null;
   /** Force a fresh connection (drops the current socket → clears its handlers +
@@ -257,14 +251,6 @@ class HaWebSocketClient implements HaWsClient {
     };
   }
 
-  registerEventHandler(id: number, cb: HaEventHandler): void {
-    this.eventHandlers.set(id, cb);
-  }
-
-  unregisterEventHandler(id: number): void {
-    this.eventHandlers.delete(id);
-  }
-
   onReady(cb: () => void): void {
     this.readyCallbacks.add(cb);
     if (this.authenticated) {
@@ -278,10 +264,6 @@ class HaWebSocketClient implements HaWsClient {
 
   ready(): boolean {
     return this.authenticated;
-  }
-
-  isConfigured(): boolean {
-    return this.token != null;
   }
 
   lastError(): string | null {

@@ -11,7 +11,7 @@ const node: NodeSnapshot = {
   stats: { rtt: null, rssi: null, lwr: null, nlwr: null, commandsTX: 0, commandsRX: 0, commandsDroppedTX: 0, commandsDroppedRX: 0, timeoutResponse: 0, lastSeen: null },
   entities: [],
 };
-const score: HealthResult = { score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] };
+const score: HealthResult = { score: 90, grade: 'A', state: 'ok', flags: [] };
 
 function mkData(controller: ControllerSnapshot | null = null): DataProvider {
   return {

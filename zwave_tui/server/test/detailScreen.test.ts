@@ -30,7 +30,7 @@ function ent(over: Partial<EntityLiveState> = {}): EntityLiveState {
 }
 
 const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
-const okScore: HealthResult = { score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] };
+const okScore: HealthResult = { score: 90, grade: 'A', state: 'ok', flags: [] };
 
 interface DataOver {
   node?: NodeSnapshot;
@@ -66,7 +66,7 @@ function mkData(o: DataOver = {}): { data: DataProvider; nodes: NodeSnapshot[] }
 }
 
 const mkView = (cols: number, rows: number, over: Partial<ViewState> = {}): ViewState =>
-  ({ screen: 'detail', cols, rows, selected: 0, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', followTail: true, errorsOnly: false, detailScroll: 0, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null, ...over } as ViewState);
+  ({ screen: 'detail', cols, rows, selected: 0, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', errorsOnly: false, detailScroll: 0, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null, ...over } as ViewState);
 const ctx = (view: ViewState, data: DataProvider, nodes: NodeSnapshot[]): ScreenCtx =>
   ({ view, data, visibleNodes: nodes, filtering: false, actionsEnabled: true });
 
@@ -232,4 +232,162 @@ test('columnize keeps the 80-column terminal single-column (no name collapse)', 
       .includes('Kitchen Power Meter Channel 0');
   assert.ok(intact(80), 'an 80-col terminal truncated entity names into stubs');
   assert.ok(intact(100), 'a 100-col terminal truncated entity names into stubs');
+});
+
+/* ── v0.35: the EVIDENCE section — what the ENGINE can see ─────────────────── */
+
+type Cov = { firstSeenAt: number; samples: number; freshSamples: number; statusFeedLive: boolean; statsFeedLive: boolean };
+
+function withEvidence(cov: Cov | null, coarse: { t0: number; samples: number }[] = []): { data: DataProvider; nodes: NodeSnapshot[] } {
+  const d = mkData();
+  (d.data as { evidenceCoverage?: (n: number) => Cov | null }).evidenceCoverage = () => cov;
+  (d.data as { evidenceCoarse?: (n: number) => { t0: number; samples: number }[] }).evidenceCoarse = () => coarse;
+  return d;
+}
+const evidenceLines = (d: { data: DataProvider; nodes: NodeSnapshot[] }, rows = 60): string[] =>
+  renderDetail(ctx(mkView(120, rows), d.data, d.nodes)).map(strip);
+
+test('EVIDENCE names the feeds and the window behind every other number on the screen', () => {
+  const out = evidenceLines(withEvidence(
+    { firstSeenAt: Date.now() - 3 * 86_400_000, samples: 500, freshSamples: 450, statusFeedLive: true, statsFeedLive: true },
+    [{ t0: Date.now() - 2 * 86_400_000, samples: 10 }],
+  ));
+  const body = out.join('\n');
+  assert.match(body, /EVIDENCE/);
+  assert.match(body, /status/);
+  assert.match(body, /stats/);
+  assert.match(body, /500/, 'the cumulative sample count');
+  assert.match(body, /450 \(90% lifetime\)/,
+    'fresh is a share AND says it is cumulative — it cannot show current staleness and must not imply it');
+  assert.match(body, /3d/, 'how long this node has been watched');
+  assert.match(body, /span ·/,
+    'the History figure is a SPAN (first bucket to now), not continuous coverage — a gap lives inside it');
+});
+
+test('BOTH feeds down reads as a MONITORING HOLE, never as a quiet node', () => {
+  // The distinction the whole section exists for: every quiet verdict elsewhere
+  // on this dossier depends on someone having been listening.
+  const out = evidenceLines(withEvidence(
+    { firstSeenAt: Date.now() - 86_400_000, samples: 12, freshSamples: 0, statusFeedLive: false, statsFeedLive: false },
+  ));
+  assert.match(out.join('\n'), /MONITORING HOLE/);
+});
+
+test('feeds up but ZERO samples says so, instead of implying a clean bill', () => {
+  const out = evidenceLines(withEvidence(
+    { firstSeenAt: Date.now() - 60_000, samples: 0, freshSamples: 0, statusFeedLive: true, statsFeedLive: true },
+  ));
+  const body = out.join('\n');
+  assert.match(body, /No samples yet/);
+  assert.ok(!/MONITORING HOLE/.test(body), 'a live feed with no data yet is not a hole');
+});
+
+test('no coarse history renders "none yet", never a fabricated span', () => {
+  const out = evidenceLines(withEvidence(
+    { firstSeenAt: Date.now() - 60_000, samples: 4, freshSamples: 4, statusFeedLive: true, statsFeedLive: true }, [],
+  ));
+  assert.match(out.join('\n'), /none yet/);
+});
+
+test('a provider WITHOUT evidence coverage renders exactly as before', () => {
+  // The v0.33 bridge lesson, both directions: absent ⇒ no section, present ⇒ it
+  // must actually reach the screen.
+  const plain = evidenceLines({ ...mkData() });
+  assert.ok(!plain.join('\n').includes('EVIDENCE'));
+  const wired = evidenceLines(withEvidence(
+    { firstSeenAt: Date.now() - 3600_000, samples: 9, freshSamples: 9, statusFeedLive: true, statsFeedLive: true },
+  ));
+  assert.ok(wired.join('\n').includes('EVIDENCE'));
+});
+
+test('the render contract holds with the EVIDENCE section at every size', () => {
+  const d = withEvidence(
+    { firstSeenAt: Date.now() - 86_400_000, samples: 500, freshSamples: 100, statusFeedLive: true, statsFeedLive: false },
+    [{ t0: Date.now() - 86_400_000, samples: 10 }],
+  );
+  for (const [cols, rows] of [[200, 60], [120, 40], [100, 24], [80, 24], [64, 20], [40, 12]] as const) {
+    const out = renderDetail(ctx(mkView(cols, rows), d.data, d.nodes));
+    assert.equal(out.length, rows, `rows at ${cols}x${rows}`);
+    for (const l of out) assert.ok(visLen(l) <= cols, `width at ${cols}x${rows}: ${strip(l)}`);
+  }
+});
+
+/* ── v0.35: the engine's LEARNED yardstick, and the HA device id ───────────── */
+
+type Norm = { median: number; scale: number; ready: boolean; days: number };
+function withNormal(rn: Norm | null): { data: DataProvider; nodes: NodeSnapshot[] } {
+  const d = withEvidence({ firstSeenAt: Date.now() - 86_400_000, samples: 100, freshSamples: 95, statusFeedLive: true, statsFeedLive: true });
+  (d.data as { rssiNormal?: (n: number) => Norm | null }).rssiNormal = () => rn;
+  return d;
+}
+
+test('a GRADUATED baseline is quoted — the yardstick behind every "below its own normal"', () => {
+  const out = evidenceLines(withNormal({ median: -62.4, scale: 3.2, ready: true, days: 9 }));
+  const line = out.find((l) => /^\s*Normal/.test(l));
+  assert.ok(line, 'the Normal row must render');
+  assert.match(line!, /-62 dBm/);
+  assert.match(line!, /±3 dB/);
+  assert.match(line!, /9d/, 'the days behind it qualify the claim');
+  assert.match(line!, /this time-of-day band/,
+    'the store keeps a normal per 4h band — unlabelled, the yardstick reads as contradicting itself across the day');
+});
+
+test('an UNGRADUATED baseline says "still learning", never quotes a median', () => {
+  // Quoting a median nobody should act on is worse than admitting it is early:
+  // it looks exactly like a graduated band on screen.
+  const out = evidenceLines(withNormal({ median: -71.9, scale: 12, ready: false, days: 1 }));
+  const line = out.find((l) => /^\s*Normal/.test(l));
+  assert.ok(line, 'the row still renders');
+  assert.match(line!, /still learning/);
+  assert.ok(!/-72 dBm|-71 dBm/.test(line!), 'no median from an un-graduated band');
+});
+
+test('no baseline at all renders no Normal row', () => {
+  const out = evidenceLines(withNormal(null));
+  assert.ok(!out.some((l) => /^\s*Normal/.test(l)));
+});
+
+test('the HA device id is shown — the string an automation needs and HA hides', () => {
+  const d = mkData({ node: node({ deviceId: 'abc123def456' }) });
+  const out = renderDetail(ctx(mkView(120, 60), d.data, d.nodes)).map(strip);
+  assert.ok(out.some((l) => /HA id/.test(l) && /abc123def456/.test(l)), 'device id row present');
+});
+
+test('a node whose registry join FAILED shows no empty HA id row', () => {
+  const d = mkData({ node: node({ deviceId: '' }) });
+  const out = renderDetail(ctx(mkView(120, 60), d.data, d.nodes)).map(strip);
+  assert.ok(!out.some((l) => /HA id/.test(l)), 'omit the row rather than print a blank field');
+});
+
+test('the fresh-sample share is TONED by how stale it is — not green regardless', () => {
+  // Asserted on the raw escape codes, deliberately. Every other test in this
+  // file strips ANSI, which made the tone invisible to the suite: a mutant that
+  // painted a 5%-fresh feed green survived a fully-passing run.
+  const raw = (freshSamples: number): string =>
+    renderDetail(ctx(mkView(120, 60), ...(() => {
+      const d = withEvidence({ firstSeenAt: Date.now() - 86_400_000, samples: 100, freshSamples, statusFeedLive: true, statsFeedLive: true });
+      return [d.data, d.nodes] as const;
+    })())).find((l) => /fresh/.test(strip(l))) ?? '';
+
+  const GREEN = '\x1b[92m', YELLOW = '\x1b[93m', RED = '\x1b[91m';
+  const healthy = raw(95);
+  assert.ok(healthy.includes(GREEN), '95% fresh is green');
+  const stale = raw(5);
+  assert.ok(stale.includes(RED), `5% fresh must be RED, got: ${JSON.stringify(strip(stale))}`);
+  assert.ok(!stale.includes(GREEN), 'and must not ALSO carry green — a mostly-stale feed is not healthy');
+  const middling = raw(55);
+  assert.ok(middling.includes(YELLOW), '55% fresh is the middle band');
+});
+
+test('ZERO samples renders a DASH for the fresh share — never a confident 0%', () => {
+  // The pct==null branch is the code that keeps "no measurement" visually
+  // distinct from "0% fresh" — the review found it had no assertion and no
+  // mutant, which is exactly how such branches rot.
+  const out = evidenceLines(withEvidence(
+    { firstSeenAt: Date.now() - 60_000, samples: 0, freshSamples: 0, statusFeedLive: true, statsFeedLive: true },
+  ));
+  const row = out.find((l) => /Samples/.test(l));
+  assert.ok(row, 'the Samples row renders');
+  assert.match(row!, /—/, 'no measurement is a dash');
+  assert.ok(!/\(0% lifetime\)/.test(row!), 'a 0% over zero samples would be a fabricated reading');
 });

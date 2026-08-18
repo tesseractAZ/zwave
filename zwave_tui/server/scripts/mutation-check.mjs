@@ -329,8 +329,8 @@ const MUTANTS = [
   { id: 'stability-leftover-funded', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
     // Funds the panel unconditionally instead of from leftover pad — on a short
     // frame it then steals rows from a tree that is already scrolling.
-    find: '  const stability = padRows >= 3 ? routeStabilityPanel(view, ctx, endNodes, nameBudget, padRows) : [];',
-    repl: '  const stability = routeStabilityPanel(view, ctx, endNodes, nameBudget, Math.max(3, padRows));',
+    find: '  const stability = stabPad >= 3 ? routeStabilityPanel(view, ctx, endNodes, nameBudget, stabPad) : [];',
+    repl: '  const stability = routeStabilityPanel(view, ctx, endNodes, nameBudget, Math.max(3, stabPad));',
     what: 'the stability panel is funded ONLY by rows the tree left blank' },
   { id: 'stability-rank-worst-first', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
     // DIRECTION (its sibling stability-rank-by-rate pins the METRIC): ranks
@@ -874,6 +874,156 @@ const MUTANTS = [
     what: 'cancelling a confirm returns to the menu you were in',
     equivalent: true,
     why: 'the modals swallow every key, so the screen cannot change behind them and re-deriving agrees. The swallow is pinned in sessionActions.test.ts.' },
+  /* ── v0.35: route FAILURES — which link broke ────────────────────────── */
+  { id: 'failures-tally-by-pair', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // One row per REPORT instead of per pair: a single marginal link that six
+    // nodes all witnessed reads as six unrelated one-off failures, which is
+    // exactly the aggregation the panel exists to do.
+    find: '      if (cur) { cur.n += 1; cur.last = Math.max(cur.last, f.t); }',
+    repl: '      if (cur) { cur.last = Math.max(cur.last, f.t); }',
+    what: 'failures on one link are summed into ONE row, not scattered per reporter' },
+  { id: 'failures-rank-worst-first', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Ranks the least-broken link first, burying the one to go fix.
+    find: '  const ranked = [...byPair.values()].sort((x, y) => y.n - x.n || y.last - x.last);',
+    repl: '  const ranked = [...byPair.values()].sort((x, y) => x.n - y.n || x.last - y.last);',
+    what: 'the link that failed MOST ranks first' },
+  { id: 'failures-leftover-funded', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Funds the panel unconditionally: on a frame whose tree is already
+    // scrolling it steals rows the tree needed.
+    find: '  const failures = failCap >= 3 ? routeFailurePanel(view, ctx, endNodes, nameBudget, failCap) : [];',
+    repl: '  const failures = routeFailurePanel(view, ctx, endNodes, nameBudget, Math.max(3, failCap));',
+    what: 'the failure panel is funded ONLY by rows the tree left blank' },
+  { id: 'failures-bounded-vs-stability', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Lets failures take the WHOLE pad, starving the stability panel entirely
+    // whenever more than a handful of links have ever failed.
+    find: '  const failCap = Math.min(padRows, Math.max(3, Math.floor(padRows / 2)));',
+    repl: '  const failCap = padRows;',
+    what: 'failures claim first but BOUNDED — stability is never evicted' },
+  { id: 'bridge-forwards-route-failures', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    // The v0.33 hole re-opened on the v0.35 member: the panel renders in every
+    // unit test against its own mock and shows nothing in production.
+    find: '    routeFailures: (n) => zd.routeFailures(n),',
+    repl: '    routeFailures: () => [],',
+    what: 'the production bridge forwards routeFailures to the data layer' },
+  { id: 'bridge-forwards-coverage', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    evidenceCoverage: (n) => zd.evidenceCoverage(n),',
+    repl: '    evidenceCoverage: () => null,',
+    what: 'the production bridge forwards evidenceCoverage to the data layer' },
+  { id: 'bridge-forwards-false-positives', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    falsePositives: (k) => zd.falsePositives(k),',
+    repl: '    falsePositives: () => 0,',
+    what: 'the production bridge forwards falsePositives to the data layer' },
+  { id: 'bridge-forwards-rssi-normal', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    rssiNormal: (n) => zd.rssiNormal(n),',
+    repl: '    rssiNormal: () => null,',
+    what: 'the production bridge forwards rssiNormal to the data layer' },
+  /* ── v0.35: EVIDENCE — what the engine can SEE ───────────────────────── */
+  { id: 'evidence-names-monitoring-hole', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Both feeds down renders identically to a genuinely quiet node — the one
+    // distinction the whole section exists to draw.
+    find: '      if (!cov.statusFeedLive && !cov.statsFeedLive) {',
+    repl: '      if (false) {',
+    what: 'a node with BOTH feeds down is named a monitoring hole, not health' },
+  { id: 'evidence-fresh-share-honest', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Colours a mostly-stale feed green: 5% fresh reads as healthy.
+    find: '      const freshTone = pct == null ? c.grey : pct >= 80 ? c.green : pct >= 40 ? c.yellow : c.red;',
+    repl: '      const freshTone = c.green;',
+    what: 'the fresh-sample share is toned by how stale it actually is' },
+  { id: 'baseline-ungraduated-says-so', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Quotes a median from a band that has not graduated — indistinguishable
+    // on screen from a learned yardstick, and actionable when it must not be.
+    find: '        const band = rn.ready',
+    repl: '        const band = rn.days >= 0',
+    what: 'an un-graduated baseline says "still learning" instead of quoting a median' },
+  { id: 'log-entity-name-leads', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
+    // Back to printing the slug while the captured friendly name goes unused.
+    // NOT `false && …`: TS drops flow narrowing inside an unreachable operand,
+    // so that form fails to compile (`ev` reverts to `LogEvent | undefined`) —
+    // an INVALID mutant that would count as killed while proving nothing.
+    // Flipping the threshold keeps every operand reachable and live.
+    find: '        ev.entityName.length + 1 + ev.entityId.length + domainTag.length <= W - 10;',
+    repl: '        ev.entityName.length + 1 + ev.entityId.length + domainTag.length <= -1;',
+    what: 'the log detail pane leads with the entity NAME it captured' },
+  { id: 'log-entity-id-survives', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
+    // Drops the width gate: at 80 cols a long name pushes the id past field()'s
+    // blind right-truncate, clipping it into a DIFFERENT plausible id — the
+    // v0.35 review finding this gate exists to prevent.
+    find: "      const nameFits = !!ev.entityName &&\n        ev.entityName.length + 1 + ev.entityId.length + domainTag.length <= W - 10;",
+    repl: '      const nameFits = !!ev.entityName;',
+    what: 'the entity ID always survives whole — the name yields, never the id' },
+  /* ── v0.35 (Z2): the ledger reaches BLOCKED candidates ───────────────── */
+  { id: 'ledger-reaches-blocked', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Restores the pre-v0.35 gate: route-churn's only executable candidate is
+    // permanently blocked, so its MEASURED efficacy can never reach the screen
+    // and the learning loop can never overturn the hardcoded lore.
+    find: '        const note = efficacyNote(cand.efficacy, cand.blocked != null);',
+    repl: '        const note = cand.blocked == null ? efficacyNote(cand.efficacy, false) : null;',
+    what: 'a blocked candidate still reports what the ledger measured' },
+  { id: 'ledger-blocked-never-endorses', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Drops the blocked framing: a green "✓ helped 80%" now sits directly under
+    // advice that says NOT recommended.
+    find: "    return blocked\n      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n})${base} — the block above still applies`)\n      : c.green(`✓ helped ${pct}% (n=${n})${base}`);",
+    repl: '    return c.green(`✓ helped ${pct}% (n=${n})${base}`);',
+    what: 'a blocked candidate is never endorsed in the voice of a recommendation' },
+  { id: 'ledger-never-judges-block', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Restores the review defect verbatim: `blocked` carries safety and config
+    // gates too, and "the block above is lore" told an operator a BATTERY/FLiRS
+    // safety gate was unfounded folklore contradicted by measurement.
+    find: '      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n})${base} — the block above still applies`)',
+    repl: '      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n})${base}; the block above is lore`)',
+    what: 'the note reports measurement without ever characterizing the block' },
+  { id: 'false-positives-only-above-zero', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // A clean detector boasts a zero — noise on every card, and it trains the
+    // operator to stop reading the line that matters.
+    find: '    if (fp > 0) {',
+    repl: '    if (fp >= 0) {',
+    what: 'the false-positive warning appears only when there ARE false positives' },
+  { id: 'correlated-scope-only-when-active', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
+    // Prints "scope · 0 distinct nodes symptomatic" during a live mesh event.
+    find: '    if (iv.correlated.degradedNodes > 0) {',
+    repl: '    if (iv.correlated.degradedNodes >= 0) {',
+    what: 'the scope line states a real count or says nothing' },
+  { id: 'forget-baselines-on-success-only', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // Discards a LIVE node's learned baselines when the removal failed — the
+    // node is still on the mesh and the engine has just been blinded to it.
+    find: '      if (res.ok) o.onNodeRemoved?.(n);',
+    repl: '      o.onNodeRemoved?.(n);',
+    what: 'baselines are forgotten only when the node actually LEFT the mesh' },
+  /* ── v0.35 review fixes ──────────────────────────────────────────────── */
+  { id: 'failures-disclosure-not-double', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // The shipped-then-caught off-by-one: capacity = budget-2 reserves the
+    // disclosure row, slice(capacity-1) reserves it AGAIN — at the pinned
+    // budget of 3 (every padRows in 3..7, i.e. the default 80x24) the panel
+    // rendered "+7 more" while naming ZERO links.
+    find: '  const fitCap = Math.max(1, budget - 1);\n  const canDisclose = ranked.length > fitCap;\n  const shown = canDisclose ? ranked.slice(0, Math.max(1, budget - 2)) : ranked;\n  const lines = [groupHeader(view, \'Route failures\', byPair.size)];',
+    repl: '  const fitCap = Math.max(1, budget - 2);\n  const canDisclose = ranked.length > fitCap;\n  const shown = canDisclose ? ranked.slice(0, fitCap - 1) : ranked.slice(0, fitCap);\n  const lines = [groupHeader(view, \'Route failures\', byPair.size)];',
+    what: 'the disclosure row is subtracted ONCE — a "+N more" never renders above zero links' },
+  { id: 'stability-disclosure-not-double', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // The same off-by-one in the sibling panel (pre-existing since v0.34; the
+    // v0.35 failCap split widened the band it hid in).
+    find: '  const fitCap = Math.max(1, budget - 1);\n  const canDisclose = ranked.length > fitCap;\n  const shown = canDisclose ? ranked.slice(0, Math.max(1, budget - 2)) : ranked;\n  const max = perDayOf(ranked[0]);',
+    repl: '  const fitCap = Math.max(1, budget - 2);\n  const canDisclose = ranked.length > fitCap;\n  const shown = canDisclose ? ranked.slice(0, fitCap - 1) : ranked.slice(0, fitCap);\n  const max = perDayOf(ranked[0]);',
+    what: 'the stability disclosure is subtracted once too — never "+N more" over nothing' },
+  { id: 'evidence-no-samples-dash', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Coerces "no measurement" into a confident 0%: zero samples renders
+    // "(0% lifetime)" — a fabricated reading over absent data.
+    find: '      const pct = cov.samples > 0 ? Math.round((cov.freshSamples / cov.samples) * 100) : null;',
+    repl: '      const pct = Math.round((cov.freshSamples / Math.max(1, cov.samples)) * 100);',
+    what: 'zero samples is a dash, never a confident 0%' },
+  { id: 'coverage-live-requires-socket', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // The review defect: the idempotency sets survive a disconnect, so without
+    // the socket AND the badges glow green for the whole outage and the
+    // MONITORING HOLE line can never fire during one.
+    find: '    const up = this.client.ready();',
+    repl: '    const up = true;',
+    what: 'a feed badge means subscription AND socket — it goes dark in an outage' },
+  { id: 'baseline-band-labelled', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Drops the time-of-day qualifier: the store keeps a normal per 4-hour
+    // band, and an unlabelled band-dependent yardstick reads as the baseline
+    // contradicting itself across the day.
+    find: "            c.grey(` · ${rn.days}d · this time-of-day band`)",
+    repl: "            c.grey(` · ${rn.days}d`)",
+    what: 'the learned normal SAYS it answers for the current time-of-day band' },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

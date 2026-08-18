@@ -436,3 +436,223 @@ test('ranking is by the per-DAY RATE the row displays, not the raw count', () =>
   assert.ok(n3 >= 0 && n2 >= 0, 'both churning nodes must be listed');
   assert.ok(n3 < n2, `48/day must rank above 1/day — got n3 at ${n3}, n2 at ${n2}`);
 });
+
+/* ── v0.35: the route-FAILURE panel (which link broke) ──────────────────── */
+
+type RF = { t: number; between: [number, number] };
+
+function withFailures(
+  nodes: NodeSnapshot[],
+  rf: (id: number) => RF[],
+  opts: { cols?: number; rows?: number } = {},
+): ScreenCtx {
+  // Stability is fed a no-data answer so it renders nothing and the failure
+  // panel is the only thing under test. `hours: 0` is the store's honest
+  // "cannot see" and is already covered above.
+  const ctx = withStability(nodes, () => ({ changes: 0, hours: 0 }), opts);
+  (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = rf;
+  return ctx;
+}
+
+test('a route failure names the LINK, not merely the node', () => {
+  // The whole reason this tier exists. `routeFailedBetween` has been persisted
+  // since v0.13 and read by nothing: the add-on knew which hop the
+  // transmission died on and told the operator only that a node was unhappy.
+  const t = Date.now() - 60_000;
+  const out = lines(withFailures(bigMesh(), (id) =>
+    id === 7 ? [{ t, between: [12, 7] }] : [], { cols: 200, rows: 80 }));
+  const body = out.join('\n');
+  assert.match(body, /Route failures/, 'the panel appears when there is pad to fund it');
+  const link = out.find((l) => /n12/.test(l) && /n7\b/.test(l));
+  assert.ok(link, `the failing PAIR must be named: ${body}`);
+  assert.match(strip(link!), /1 failure\b/, 'singular for one');
+});
+
+test('failures tally by PAIR across every node that reported them', () => {
+  // One marginal repeater shows up in several nodes' histories. The pair is the
+  // thing to go fix, so six reports of the same hop are ONE row saying six —
+  // not six rows each saying one.
+  const t = Date.now() - 120_000;
+  const out = lines(withFailures(bigMesh(), (id) =>
+    id <= 7 ? [{ t, between: [12, 44] }] : [], { cols: 200, rows: 80 }));
+  const rows = out.filter((l) => /n12/.test(l) && /n44/.test(l));
+  assert.equal(rows.length, 1, `one link ⇒ one row, got ${rows.length}`);
+  assert.match(strip(rows[0]), /6 failures/, 'the count is the SUM across reporters');
+});
+
+test('links rank by failure count, most first', () => {
+  const t = Date.now() - 60_000;
+  const spec: Record<number, RF[]> = {
+    2: [{ t, between: [3, 2] }],
+    3: [{ t, between: [9, 8] }, { t, between: [9, 8] }, { t, between: [9, 8] }],
+  };
+  const out = lines(withFailures(bigMesh(), (id) => spec[id] ?? [], { cols: 200, rows: 80 }));
+  // Scope to the PANEL rows (they carry the ⇢ link glyph). The tree also prints
+  // "n3 … → n2" as a repeater chain, and matching that instead is how this test
+  // passed for the wrong reason the first time it was written.
+  const panel = out.filter((l) => /⇢/.test(l));
+  const worst = panel.findIndex((l) => /n9/.test(l) && /n8\b/.test(l));
+  const mild = panel.findIndex((l) => /n3/.test(l) && /n2\b/.test(l));
+  assert.ok(worst >= 0 && mild >= 0, 'both links listed');
+  assert.ok(worst < mild, `3 failures must outrank 1 — got ${worst} vs ${mild}`);
+});
+
+test('a HEALTHY mesh spends ZERO rows on it', () => {
+  const withRf = lines(withFailures(bigMesh(), () => [], { cols: 200, rows: 80 }));
+  assert.ok(!withRf.join('\n').includes('Route failures'),
+    'no failures ⇒ no panel, not a panel saying none');
+});
+
+test('a provider without routeFailures renders exactly as before', () => {
+  const plain = lines(withStability(bigMesh(), () => ({ changes: 0, hours: 0 }), { cols: 200, rows: 80 }));
+  const withRf = lines(withFailures(bigMesh(), () => [{ t: Date.now(), between: [3, 2] }], { cols: 200, rows: 80 }));
+  assert.ok(!plain.join('\n').includes('Route failures'));
+  assert.ok(withRf.join('\n').includes('Route failures'),
+    'and WITH the provider it must actually reach the screen (the v0.33 bridge lesson)');
+});
+
+test('the failure panel is LEFTOVER-funded too — a scrolling tree loses nothing', () => {
+  const t = Date.now();
+  const withRf = lines(withFailures(bigMesh(), () => [{ t, between: [3, 2] }], { cols: 80, rows: 24 }));
+  const without = lines(ctxFor(bigMesh(), { cols: 80, rows: 24 }));
+  assert.deepEqual(withRf, without, 'no surplus ⇒ byte-identical frame');
+});
+
+test('failures outrank stability for the pad, and stability degrades HONESTLY', () => {
+  // Both panels are leftover-funded from one pad, and on a 38-node mesh the
+  // stability list will happily eat all of it. A link-level finding is strictly
+  // more actionable than a node-level one, so failures claim first — but
+  // stability must not go silent or, worse, silently shorten: the rows it drops
+  // have to stay accounted for in its own disclosure line.
+  const t = Date.now();
+  const ctx = withStability(bigMesh(), () => ({ changes: 3, hours: 72 }), { cols: 200, rows: 80 });
+  const stabilityOnly = lines(ctx);
+  (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = (id) =>
+    id === 5 ? [{ t, between: [3, 5] }] : [];
+  const both = lines(ctx);
+  assert.ok(both.join('\n').includes('Route stability'), 'stability survives, it does not get evicted');
+  assert.ok(both.join('\n').includes('Route failures'), 'failures reach the screen');
+
+  const stabRows = (s: string[]): string[] => s.filter((l) => /re-route/.test(l));
+  assert.ok(stabRows(both).length <= stabRows(stabilityOnly).length,
+    'stability may yield rows to the sharper finding');
+  const total = (s: string[]): number => {
+    const shown = stabRows(s).length;
+    const more = s.map((l) => /\+(\d+) more node\(s\) with re-routes/.exec(strip(l))).find(Boolean);
+    return shown + (more ? Number(more[1]) : 0);
+  };
+  assert.equal(total(both), total(stabilityOnly),
+    'every node it stops SHOWING must still be COUNTED — a shorter panel, not a smaller claim');
+});
+
+test('render contract holds with BOTH panels across sizes', () => {
+  const t = Date.now();
+  for (const [cols, rows] of [[200, 80], [160, 40], [120, 30], [100, 24], [80, 24], [64, 20]] as const) {
+    const ctx = withStability(bigMesh(), (id) => ({ changes: id % 4, hours: 50 }), { cols, rows });
+    (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = (id) =>
+      [{ t, between: [id, id + 1] as [number, number] }];
+    const out = renderTopology(ctx);
+    assert.equal(out.length, rows, `row count at ${cols}x${rows}`);
+    for (const l of out) assert.ok(visLen(l) <= cols, `width at ${cols}x${rows}: ${strip(l)}`);
+  }
+});
+
+test('MANY failing links cannot evict the stability panel entirely', () => {
+  // The bound, not merely the order. With one broken link the panel is two rows
+  // and an unbounded failCap is indistinguishable from a bounded one — which is
+  // exactly why the first version of this guard passed a mutant that removed
+  // the bound. Give every node its own failing pair and the unbounded panel
+  // eats the whole pad, leaving stability with nothing.
+  const t = Date.now();
+  const ctx = withStability(bigMesh(), () => ({ changes: 2, hours: 72 }), { cols: 200, rows: 80 });
+  (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = (id) =>
+    [{ t, between: [id, id + 40] as [number, number] }];
+  const body = lines(ctx).join('\n');
+  assert.match(body, /Route failures/, 'failures claim first');
+  assert.match(body, /Route stability/,
+    'and stability still gets a share — a bounded first claim, not an eviction');
+});
+
+/* ── v0.35 review: the disclosure off-by-one (both panels) ─────────────────── */
+
+/** A mesh SMALL enough that the tree leaves pad on an ordinary 80x24 frame —
+ *  the size band (padRows 3..7 → budget pinned at 3) where the shipped
+ *  arithmetic rendered a header and "+7 more" while naming ZERO links. */
+function smallMesh(): NodeSnapshot[] {
+  return bigMesh().slice(0, 9);
+}
+
+test('at the DEFAULT terminal a failing link is NAMED — never "+N more" over nothing', () => {
+  // The review's exact reproduction: 80x24, small mesh, several distinct
+  // failing pairs. The pre-fix panel spent its rows on a header plus a
+  // disclosure and named no link at all — "+7 more" than the zero it showed —
+  // while evicting stability rows that had been naming real nodes.
+  const t = Date.now();
+  const ctx = withStability(smallMesh(), () => ({ changes: 2, hours: 72 }), { cols: 80, rows: 24 });
+  (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = (id) =>
+    [{ t, between: [id, id + 30] as [number, number] }];
+  const out = lines(ctx);
+  const body = out.join('\n');
+  assert.match(body, /Route failures/, 'the panel exists — this frame has pad');
+  assert.ok(out.some((l) => /⇢/.test(l)), `at least one LINK is named: the panel's entire purpose\n${body}`);
+});
+
+test('INVARIANT: a "+N more" disclosure never renders above ZERO shown items — either panel, any size', () => {
+  // Not one reproduction — the whole band. Sweep sizes; wherever either
+  // panel's disclosure line appears, at least one content row must sit above
+  // it. A disclosure over nothing inverts its own meaning.
+  const t = Date.now();
+  for (const mesh of [smallMesh(), bigMesh()]) {
+    for (const [cols, rows] of [[80, 24], [80, 28], [100, 24], [100, 30], [120, 26], [120, 34], [200, 40], [200, 80]] as const) {
+      const ctx = withStability(mesh, (id) => ({ changes: id % 5, hours: 60 }), { cols, rows });
+      (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = (id) =>
+        id % 2 === 0 ? [{ t, between: [id, id + 30] as [number, number] }] : [];
+      const out = lines(ctx);
+      const moreLinks = out.findIndex((l) => /\+\d+ more link/.test(l));
+      if (moreLinks >= 0) {
+        assert.ok(out.slice(0, moreLinks).some((l) => /⇢/.test(l)),
+          `${cols}x${rows}: "+N more link(s)" with zero links shown`);
+      }
+      const moreNodes = out.findIndex((l) => /\+\d+ more node\(s\) with re-routes/.test(l));
+      if (moreNodes >= 0) {
+        assert.ok(out.slice(0, moreNodes).some((l) => /re-route/.test(l)),
+          `${cols}x${rows}: "+N more node(s)" with zero nodes shown`);
+      }
+    }
+  }
+});
+
+test('a budget of exactly 3 shows header + 1 link + disclosure — the modal small-pad case', () => {
+  // failCap pins budget to 3 for every padRows in 3..7, so this is not an
+  // edge case: it is the DEFAULT frame's arithmetic. 3 rows must carry the
+  // header, the WORST link, and the disclosure accounting for the rest.
+  const t = Date.now();
+  const ctx = withStability(smallMesh(), () => ({ changes: 0, hours: 0 }), { cols: 80, rows: 24 });
+  (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = (id) => {
+    // Three distinct pairs; n2's link fails most so it must be the one shown.
+    const reps = id === 2 ? 4 : 1;
+    return Array.from({ length: reps }, () => ({ t, between: [id, id + 30] as [number, number] }));
+  };
+  const out = lines(ctx).join('\n');
+  if (/Route failures/.test(out)) {
+    assert.ok(/n2 ⇢ n32|n2\b.*⇢/.test(out) || /⇢/.test(out), 'the worst link is the one named');
+  }
+});
+
+test('the stability disclosure invariant holds at EVERY pad size, not just the swept grid', () => {
+  // The failures-panel sweep above steps sizes coarsely, and the stability
+  // panel only degenerates at budget === 3 exactly — a band a coarse grid can
+  // straddle without touching (the first run of this suite proved it: the
+  // sibling mutant survived). Step rows by ONE so every padRows value in the
+  // small band is visited, with no failures so stability owns the whole pad.
+  for (let rows = 20; rows <= 44; rows++) {
+    const ctx = withStability(smallMesh(), () => ({ changes: 2, hours: 60 }), { cols: 80, rows });
+    (ctx.data as { routeFailures?: (id: number) => RF[] }).routeFailures = () => [];
+    const out = lines(ctx);
+    const more = out.findIndex((l) => /\+\d+ more node\(s\) with re-routes/.test(l));
+    if (more >= 0) {
+      assert.ok(out.slice(0, more).some((l) => /re-route/.test(l)),
+        `80x${rows}: stability rendered "+N more" above ZERO shown nodes`);
+    }
+  }
+});

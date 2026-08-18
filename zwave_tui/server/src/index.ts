@@ -92,6 +92,7 @@ async function main(): Promise<void> {
     onOutcome: (kind, nodeId, ok) => zwaveData.recordActionOutcome(kind, nodeId, ok),
     // v0.23: after a config write, drop the stale cache so DETAIL re-fetches.
     onConfigWritten: (nodeId) => zwaveData.invalidateConfigParams(nodeId),
+    onNodeRemoved: (nodeId) => zwaveData.forgetNodeBaselines(nodeId),
     enabled: config.writeActions,
   });
   log(
@@ -206,6 +207,11 @@ async function main(): Promise<void> {
       lastUpdated: provider.lastUpdated(),
       lastStatsUpdated: zwaveData.lastStatsUpdated(),
       error: provider.lastError(),
+      // The HA socket's OWN last failure (v0.35). Distinct from the roster
+      // error above: an auth rejection or a refused connect leaves the data
+      // layer with nothing to report but "not ready", so the only line that
+      // names the actual cause was the one the endpoint did not print.
+      haError: client.lastError(),
     });
   });
 

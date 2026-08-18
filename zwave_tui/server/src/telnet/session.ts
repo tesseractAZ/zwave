@@ -198,7 +198,6 @@ export class TuiSession {
       filter: '',
       sortKey: 'health',
       signalDisplay: opts.signalDisplay ?? 'margin',
-      followTail: true,
       errorsOnly: false,
       detailScroll: 0,
       remedyCursor: 0,

@@ -38,7 +38,7 @@ test('alive node scores above a dead one and yields a valid grade', () => {
   const dead = scoreNode(makeNode({ status: NodeStatus.Dead, statusLabel: 'dead' }), NOISE);
   assert.ok(alive.score > dead.score);
   assert.match(alive.grade, /^[A-F]$/);
-  assert.ok(alive.rating >= 0 && alive.rating <= 10);
+  assert.ok(alive.score >= 0 && alive.score <= 100, 'the score is the only published health scalar');
 });
 
 test('battery is a separate lane: low battery flags B but does not change the RF score', () => {
@@ -108,7 +108,7 @@ test('Long-Range node scores without error', () => {
 test('null / partial stats never produce NaN', () => {
   const r = scoreNode(makeNode({ stats: emptyStats({ rssi: null, rtt: null }) }), NOISE);
   assert.ok(Number.isFinite(r.score));
-  assert.ok(!Number.isNaN(r.rating));
+  assert.ok(r.score >= 0 && r.score <= 100, 'and stays in band');
 });
 
 test('a NEVER-MEASURED Alive node reads unknown — not a fabricated 84/B "ok" (v0.26)', () => {

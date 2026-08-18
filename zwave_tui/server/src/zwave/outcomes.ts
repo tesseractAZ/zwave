@@ -119,7 +119,6 @@ export interface OutcomeStore {
   /** Drop an open episode without a verdict (e.g. node left the roster). */
   abandon(nodeId: number | null, kind: SymptomKind): void;
   /** Keys of currently-open episodes (`${nodeId}:${kind}`). */
-  openKeys(): string[];
   /** Currently-open episodes as (key, nodeId, kind) — for the caller's
    *  confirmation-window resolution loop (no key-parsing needed). */
   openEpisodes(): { key: string; nodeId: number | null; kind: SymptomKind }[];
@@ -468,10 +467,6 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       open.delete(key(nodeId, kind));
     },
 
-    openKeys(): string[] {
-      return [...open.keys()];
-    },
-
     openEpisodes(): { key: string; nodeId: number | null; kind: SymptomKind }[] {
       return [...open.entries()].map(([k, ep]) => ({ key: k, nodeId: ep.nodeId, kind: ep.kind }));
     },
@@ -486,7 +481,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const base = this.baseRate(kind);
       const t = action.get(aKey(kind, act));
       const n = t?.n ?? 0, ok = t?.ok ?? 0;
-      if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, beatsSelfHealing: false, ready: false };
+      if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, ready: false };
       const rate = ok / n;
       // "Beats self-healing" REQUIRES a measured control arm to beat — you cannot
       // out-perform a base rate you have not measured. With no base rate yet the
@@ -499,7 +494,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // green "✓ helped 100%". The DISPLAYED efficacy stays the point estimate
       // (honest best guess) but is shown only once the lower bound earns it.
       const beats = base != null && wilsonLower(ok, n) >= base + cfg.minEffect;
-      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, beatsSelfHealing: beats, ready: true };
+      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, ready: true };
     },
 
     falsePositives(kind): number {

@@ -55,7 +55,6 @@ import {
   type EvidenceSample,
   COARSE_BUCKET_MS,
   type CoarseBucket,
-  type ControllerSample,
   type RouteFailureEvent,
   type NodeCoverage,
   isRouteChange,
@@ -289,9 +288,8 @@ export interface ZwaveData {
   /** Coarse 30-min evidence buckets (baseline substrate; up to 14 days). */
   evidenceCoarse(nodeId: number): CoarseBucket[];
   /** Controller serial-link evidence samples. */
-  evidenceController(): ControllerSample[];
   /** Event-latched route failures for a node (newest last). */
-  evidenceRouteFailures(nodeId: number): RouteFailureEvent[];
+  routeFailures(nodeId: number): RouteFailureEvent[];
   /** Coverage metadata — how long/how much the store has observed this node,
    *  plus live subscription state (a coverage hole ≠ node silence). */
   evidenceCoverage(nodeId: number): (NodeCoverage & { statusFeedLive: boolean; statsFeedLive: boolean }) | null;
@@ -307,6 +305,7 @@ export interface ZwaveData {
   ackEvent(seq: number): boolean;
   /** Measured route stability from the coarse tier (v0.34). */
   routeStability(nodeId: number): { changes: number; hours: number } | null;
+  /** Persisted route-failure events (v0.35) — the link each failure died on. */
   /** The resolved config-entry id (null until discovered). */
   getEntryId(): string | null;
   /** Engine-detected symptoms (M3), ranked. */
@@ -317,6 +316,9 @@ export interface ZwaveData {
   recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean): void;
   /** M5: learned efficacy of an action against a symptom kind (null if off). */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
+  falsePositives(kind: SymptomKind): number;
+  rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  forgetNodeBaselines(nodeId: number): void;
   /** M6: interference view (noise floor, serial health, diurnal heatmap). */
   interference(): InterferenceView;
   /** v0.22: a node's entities joined with their current live state (DETAIL). */
@@ -1047,6 +1049,31 @@ class ZwaveDataImpl implements ZwaveData {
     return this.outcomes ? this.outcomes.efficacyFor(kind, action) : null;
   }
 
+  /** How many episodes of this kind the ledger closed as `refused-misdiagnosis`
+   *  — the engine's own record of when this detector cried wolf (v0.35). */
+  falsePositives(kind: SymptomKind): number {
+    return this.outcomes ? this.outcomes.falsePositives(kind) : 0;
+  }
+
+  /** The engine's LEARNED RSSI normal for a node (v0.35) — the yardstick every
+   *  per-node signal verdict is measured against, and until now unreadable. */
+  rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null {
+    return this.baselines ? this.baselines.rssiNormal(nodeId, Date.now()) : null;
+  }
+
+  /**
+   * Forget one node's learned baselines (v0.35).
+   *
+   * Called after a SUCCESSFUL removeFailed: the node is gone from the mesh, and
+   * a later re-include on the same node id is a different physical device. The
+   * engine would otherwise measure the new device against the dead one's
+   * normals and raise symptoms about a discrepancy that is just a device swap.
+   */
+  forgetNodeBaselines(nodeId: number): void {
+    this.baselines?.resetNode(nodeId);
+    this.baselines?.save();
+  }
+
   /** Engine-detected symptoms (M3), ranked; [] when the engine is off. */
   symptoms(): Symptom[] {
     return this.lastSymptoms;
@@ -1336,6 +1363,15 @@ class ZwaveDataImpl implements ZwaveData {
         } else if (now - since > 5 * 60_000) {
           this.log(`node ${id} left the network — evicting its evidence + caches`);
           this.evidenceStore?.evictNode(id);
+          // Baselines too (v0.35 review): the onNodeRemoved hook only covers a
+          // removal issued from THIS TUI. A node excluded from HA's own UI, or
+          // replaced via replace_failed_node, arrives here with its learned
+          // normals still keyed to the id — and a re-include on that id is
+          // different hardware measured against a dead device's yardstick.
+          // Idempotent with the hook; the 5-minute dwell above is what makes
+          // this safe against a transient roster glitch wiping weeks of
+          // learning.
+          this.forgetNodeBaselines(id);
           this.statsByNode.delete(id);
           this.histByNode.delete(id);
           this.histLongByNode.delete(id);
@@ -2113,11 +2149,7 @@ class ZwaveDataImpl implements ZwaveData {
     return { changes, hours: spanMs / 3_600_000 };
   }
 
-  evidenceController(): ControllerSample[] {
-    return this.evidenceStore ? [...this.evidenceStore.controllerSamples()] : [];
-  }
-
-  evidenceRouteFailures(nodeId: number): RouteFailureEvent[] {
+  routeFailures(nodeId: number): RouteFailureEvent[] {
     return this.evidenceStore ? [...this.evidenceStore.routeFailures(nodeId)] : [];
   }
 
@@ -2126,7 +2158,16 @@ class ZwaveDataImpl implements ZwaveData {
     if (!cov) return null;
     // Subscription state is part of coverage (DESIGN §3.1): "no evidence" from
     // a node whose feeds are DOWN is a monitoring hole, not node silence.
-    return { ...cov, statusFeedLive: this.statusSubbed.has(nodeId), statsFeedLive: this.statsSubbedNodes.has(nodeId) };
+    //
+    // ANDed with the socket, because the idempotency sets mean "a subscribe
+    // call once succeeded" and are cleared only by the NEXT epoch's resubscribe
+    // run — through a disconnect they stay populated, so on their own the
+    // badges would glow green for the entire duration of the largest
+    // monitoring hole there is (v0.35 review). Both feeds ride this one HA
+    // socket, so both go dark together when it drops — which is exactly when
+    // the MONITORING HOLE line must be able to fire.
+    const up = this.client.ready();
+    return { ...cov, statusFeedLive: up && this.statusSubbed.has(nodeId), statsFeedLive: up && this.statsSubbedNodes.has(nodeId) };
   }
 
   /** Map a raw node-statistics event → cached NodeStats. */

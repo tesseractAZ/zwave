@@ -13,7 +13,7 @@ const node: NodeSnapshot = {
     commandsDroppedTX: 0, commandsDroppedRX: 0, timeoutResponse: 0, lastSeen: null,
   }, entities: [],
 };
-const score: HealthResult = { score: 79, rating: 8, grade: 'C', state: 'ok', flags: [] };
+const score: HealthResult = { score: 79, grade: 'C', state: 'ok', flags: [] };
 const data: DataProvider = {
   nodes: () => [node], nodeById: () => node, controller: () => null, events: () => [],
   scoreFor: () => score, noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }),
@@ -22,7 +22,7 @@ const data: DataProvider = {
 };
 const mkView = (screen: ViewState['screen'] = 'overview'): ViewState => ({
   screen, cols: 100, rows: 30, selected: 0, scroll: 0, filter: '',
-  sortKey: 'health', signalDisplay: 'margin', followTail: true, errorsOnly: false,
+  sortKey: 'health', signalDisplay: 'margin', errorsOnly: false,
   detailScroll: 0, remedyCursor: 0, remedyAnchorId: null, topologyScroll: 0,
   logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null,
 });

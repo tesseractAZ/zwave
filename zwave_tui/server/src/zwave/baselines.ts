@@ -147,8 +147,11 @@ export interface BaselineStore {
   /** The learned rtt normal for a node's current-time band. */
   rttNormal(nodeId: number, at: number): ContNormal | null;
   /** Force-reset a node's baselines (re-interview / replace / home-id change). */
-  resetNode(nodeId: number): void;
   /** Drop everything (home-id change) and rewrite disk immediately. */
+  /** Drop ONE node's learned normals. Correct after the node leaves the mesh:
+   *  a later re-include on the same id is a DIFFERENT device, and comparing it
+   *  against a stranger's baseline is how the engine invents symptoms. */
+  resetNode(nodeId: number): void;
   reset(): void;
   load(): void;
   save(): void;

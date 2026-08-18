@@ -100,7 +100,7 @@ test('action arm: expectedEfficacy stays NULL until the action beats self-healin
   }
   const eff = o.efficacyFor('return-path-degraded', 'refreshValues');
   assert.equal(eff.expectedEfficacy, null, 'cannot beat 100% self-healing → efficacy null');
-  assert.equal(eff.beatsSelfHealing, false);
+  assert.equal(eff.expectedEfficacy, null, 'does not beat self-healing');
   assert.ok(eff.n >= 4, 'but the episode count is surfaced');
 });
 
@@ -117,7 +117,7 @@ test('action arm: efficacy is offered once the action clears the base rate + eff
     o.resolve(i, 'return-path-degraded', 2000, W(100, 1));
   }
   const eff = o.efficacyFor('return-path-degraded', 'ping');
-  assert.ok(eff.beatsSelfHealing, 'action beats self-healing');
+  assert.ok(eff.expectedEfficacy != null, 'action beats self-healing');
   assert.ok(eff.expectedEfficacy != null && eff.expectedEfficacy > 0.9, `efficacy ~1.0, got ${eff.expectedEfficacy}`);
   assert.ok(eff.baseRate != null && eff.baseRate < 0.3, 'base rate surfaced for context');
 });
@@ -133,7 +133,7 @@ test('efficacy CANNOT claim to beat self-healing with no measured control arm (b
   const eff = o.efficacyFor('return-path-degraded', 'refreshValues');
   assert.equal(o.baseRate('return-path-degraded'), null, 'no control arm measured');
   assert.equal(eff.ready, true, 'enough attempts to have an opinion');
-  assert.equal(eff.beatsSelfHealing, false, 'but cannot BEAT an unmeasured base rate');
+  assert.equal(eff.expectedEfficacy, null, 'but cannot BEAT an unmeasured base rate');
   assert.equal(eff.expectedEfficacy, null, 'so no efficacy claim — "not distinguishable"');
 });
 
@@ -276,13 +276,13 @@ test('dead-flap: a node that went HARD-DEAD after (0 flaps but 0 fresh liveness)
   assert.equal(o.resolve(7, 'dead-flap', 2000, silent)?.verdict, 'unverifiable', 'no after-liveness → cannot claim recovery');
 });
 
-test('open is idempotent per key; abandon drops without a verdict; openKeys tracks lifecycle', () => {
+test('open is idempotent per key; abandon drops without a verdict; the open set tracks lifecycle', () => {
   const o = store();
   o.open(7, 'dead-flap', 1000, W(100, 40));
   o.open(7, 'dead-flap', 1500, W(50, 20)); // second open ignored
-  assert.deepEqual(o.openKeys(), ['7:dead-flap']);
+  assert.deepEqual(o.openEpisodes().map((e) => e.key), ['7:dead-flap']);
   o.abandon(7, 'dead-flap');
-  assert.deepEqual(o.openKeys(), []);
+  assert.deepEqual(o.openEpisodes().map((e) => e.key), []);
   assert.equal(o.resolve(7, 'dead-flap', 2000, W(100, 1)), null, 'resolving an abandoned episode is a no-op');
 });
 
@@ -470,7 +470,7 @@ test('efficacy: a 4/4 fluke does NOT clear a strong base rate — but 8/8 does (
   }
   const four = o.efficacyFor('return-path-degraded', 'refreshValues');
   assert.equal(four.ready, true, 'enough episodes to have an opinion');
-  assert.equal(four.beatsSelfHealing, false, '4/4 must not beat a 50% base — the lower bound does not clear it');
+  assert.equal(four.expectedEfficacy, null, '4/4 must not beat a 50% base — the lower bound does not clear it');
   assert.equal(four.expectedEfficacy, null);
 
   // 4 more successes (8/8, Wilson lower ≈ 0.68) — now the claim is earned.
@@ -480,7 +480,7 @@ test('efficacy: a 4/4 fluke does NOT clear a strong base rate — but 8/8 does (
     o.resolve(i, 'return-path-degraded', 2000, W(100, 1));
   }
   const eight = o.efficacyFor('return-path-degraded', 'refreshValues');
-  assert.equal(eight.beatsSelfHealing, true, '8/8 clears a 50% base at the lower bound');
+  assert.ok(eight.expectedEfficacy != null, '8/8 clears a 50% base at the lower bound');
   assert.equal(eight.expectedEfficacy, 1);
 });
 

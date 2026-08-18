@@ -58,6 +58,9 @@ function cannedResult(cmd: Record<string, unknown>): unknown {
 interface FakeHa extends HaWsClient {
   /** Captured live event handlers, keyed by a best-guess feed name. */
   handlers: Map<string, HaEventHandler[]>;
+  /** Toggleable connection state, so a test can simulate an OUTAGE without a
+   *  reconnect (the idempotency sets survive one; ready() must not). */
+  isReady: boolean;
   /** Count of subscriptions ever made, by feed name. */
   subCount: Map<string, number>;
   /** Subscriptions currently LIVE (created and not unsubscribed), by feed. */
@@ -84,11 +87,12 @@ function fakeHa(): FakeHa {
   const gate: FakeHa['gate'] = { feed: null, releases: [], parked: null };
   const client: FakeHa = {
     handlers, subCount, live, gate,
+    isReady: true,
     fireReady: () => { for (const cb of [...readyCbs]) cb(); },
     start: () => { /* the test fires ready explicitly */ },
     stop: () => {},
     reconnect: () => { /* a real client would drop + redial; tests fireReady() */ },
-    ready: () => true,
+    ready: () => client.isReady,
     whenReady: () => Promise.resolve(),
     onReady: (cb: () => void) => { readyCbs.push(cb); },
     lastError: () => null,
@@ -293,5 +297,37 @@ test('ackEvent releases exactly one error latch, refuses non-errors, repeats, an
     assert.equal(zd.ackEvent(999_999_999), false, 'a seq not on the ring is refused');
   } finally {
     zd.stop();
+  }
+});
+
+test('feed badges go DARK when the socket drops — a subscription is not liveness (v0.35 review)', async () => {
+  // statusSubbed/statsSubbedNodes mean "a subscribe call once succeeded" and
+  // are cleared only by the NEXT epoch's resubscribe run — through an outage
+  // they stay populated. Unguarded, the EVIDENCE badges would glow green for
+  // the entire duration of the largest monitoring hole there is, and the
+  // MONITORING HOLE line (which needs both feeds down) could never fire.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-cov-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), driverWsUrl: null,
+  });
+  try {
+    pushStats(ha, statsEvent());
+    await waitFor(() => zd.evidenceCoverage(7) != null, 5000);
+    const up = zd.evidenceCoverage(7)!;
+    assert.equal(up.statsFeedLive, true, 'subscribed + socket up = live');
+
+    ha.isReady = false; // the outage: socket down, idempotency sets untouched
+    const down = zd.evidenceCoverage(7)!;
+    assert.equal(down.statusFeedLive, false, 'status badge must go dark with the socket');
+    assert.equal(down.statsFeedLive, false, 'stats badge must go dark with the socket');
+
+    ha.isReady = true; // service restored — same sets, badges return
+    const back = zd.evidenceCoverage(7)!;
+    assert.equal(back.statsFeedLive, true, 'recovery needs no resubscribe to read live again');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
