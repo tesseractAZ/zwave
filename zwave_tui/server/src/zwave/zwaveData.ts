@@ -55,7 +55,6 @@ import {
   type EvidenceSample,
   COARSE_BUCKET_MS,
   type CoarseBucket,
-  type ControllerSample,
   type RouteFailureEvent,
   type NodeCoverage,
   isRouteChange,
@@ -289,9 +288,8 @@ export interface ZwaveData {
   /** Coarse 30-min evidence buckets (baseline substrate; up to 14 days). */
   evidenceCoarse(nodeId: number): CoarseBucket[];
   /** Controller serial-link evidence samples. */
-  evidenceController(): ControllerSample[];
   /** Event-latched route failures for a node (newest last). */
-  evidenceRouteFailures(nodeId: number): RouteFailureEvent[];
+  routeFailures(nodeId: number): RouteFailureEvent[];
   /** Coverage metadata — how long/how much the store has observed this node,
    *  plus live subscription state (a coverage hole ≠ node silence). */
   evidenceCoverage(nodeId: number): (NodeCoverage & { statusFeedLive: boolean; statsFeedLive: boolean }) | null;
@@ -307,6 +305,7 @@ export interface ZwaveData {
   ackEvent(seq: number): boolean;
   /** Measured route stability from the coarse tier (v0.34). */
   routeStability(nodeId: number): { changes: number; hours: number } | null;
+  /** Persisted route-failure events (v0.35) — the link each failure died on. */
   /** The resolved config-entry id (null until discovered). */
   getEntryId(): string | null;
   /** Engine-detected symptoms (M3), ranked. */
@@ -317,6 +316,9 @@ export interface ZwaveData {
   recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean): void;
   /** M5: learned efficacy of an action against a symptom kind (null if off). */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
+  falsePositives(kind: SymptomKind): number;
+  rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  forgetNodeBaselines(nodeId: number): void;
   /** M6: interference view (noise floor, serial health, diurnal heatmap). */
   interference(): InterferenceView;
   /** v0.22: a node's entities joined with their current live state (DETAIL). */
@@ -1045,6 +1047,31 @@ class ZwaveDataImpl implements ZwaveData {
   /** Learned efficacy of an action against a symptom kind (M5) — for the planner. */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null {
     return this.outcomes ? this.outcomes.efficacyFor(kind, action) : null;
+  }
+
+  /** How many episodes of this kind the ledger closed as `refused-misdiagnosis`
+   *  — the engine's own record of when this detector cried wolf (v0.35). */
+  falsePositives(kind: SymptomKind): number {
+    return this.outcomes ? this.outcomes.falsePositives(kind) : 0;
+  }
+
+  /** The engine's LEARNED RSSI normal for a node (v0.35) — the yardstick every
+   *  per-node signal verdict is measured against, and until now unreadable. */
+  rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null {
+    return this.baselines ? this.baselines.rssiNormal(nodeId, Date.now()) : null;
+  }
+
+  /**
+   * Forget one node's learned baselines (v0.35).
+   *
+   * Called after a SUCCESSFUL removeFailed: the node is gone from the mesh, and
+   * a later re-include on the same node id is a different physical device. The
+   * engine would otherwise measure the new device against the dead one's
+   * normals and raise symptoms about a discrepancy that is just a device swap.
+   */
+  forgetNodeBaselines(nodeId: number): void {
+    this.baselines?.resetNode(nodeId);
+    this.baselines?.save();
   }
 
   /** Engine-detected symptoms (M3), ranked; [] when the engine is off. */
@@ -2113,11 +2140,7 @@ class ZwaveDataImpl implements ZwaveData {
     return { changes, hours: spanMs / 3_600_000 };
   }
 
-  evidenceController(): ControllerSample[] {
-    return this.evidenceStore ? [...this.evidenceStore.controllerSamples()] : [];
-  }
-
-  evidenceRouteFailures(nodeId: number): RouteFailureEvent[] {
+  routeFailures(nodeId: number): RouteFailureEvent[] {
     return this.evidenceStore ? [...this.evidenceStore.routeFailures(nodeId)] : [];
   }
 

@@ -109,7 +109,7 @@ const SCORES = new Map<number, HealthResult>(DEMO.map((d) => [d.id, {
   score: d.score, rating: Math.round(d.score / 10), grade: d.grade,
   state: d.score === 0 ? 'dead' : d.score < 70 ? 'flaky' : 'ok', flags: d.flags,
 } as HealthResult]));
-SCORES.set(1, { score: 100, rating: 10, grade: 'A', state: 'ok', flags: [] });
+SCORES.set(1, { score: 100, grade: 'A', state: 'ok', flags: [] });
 
 const CONTROLLER: ControllerSnapshot = {
   homeId: 0xC0FFEE01, nodeId: 1, sdkVersion: '7.21.0', firmwareVersion: '1.8', rfRegion: 'USA',
@@ -160,7 +160,7 @@ const DATA: DataProvider = {
   nodeById: (id) => NODES.find((n) => n.nodeId === id),
   controller: () => CONTROLLER,
   events: () => EVENTS,
-  scoreFor: (id) => SCORES.get(id) ?? { score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] },
+  scoreFor: (id) => SCORES.get(id) ?? { score: 90, grade: 'A', state: 'ok', flags: [] },
   noiseFloor: () => -101,
   hasRealNoise: () => true,
   history: () => ({ rssi: spark(-62, 40, 4), rtt: spark(34, 40, 8) }),
@@ -174,12 +174,39 @@ const DATA: DataProvider = {
     changes: nodeId === 12 ? 11 : nodeId === 7 ? 4 : 0,
     hours: 74,
   }),
+  // v0.35 — demo data for the surfaces this release made reachable. Each is
+  // shaped to show the INTERESTING case, because a screenshot of an empty
+  // panel documents nothing: one link that has failed repeatedly, a node the
+  // engine can see well, a graduated baseline, and a detector with a history
+  // of being wrong.
+  routeFailures: (nodeId: number) =>
+    nodeId === 12 ? [{ t: NOW - 240_000, between: [3, 12] as [number, number] },
+                     { t: NOW - 900_000, between: [3, 12] as [number, number] },
+                     { t: NOW - 3_600_000, between: [3, 12] as [number, number] }]
+    : nodeId === 7 ? [{ t: NOW - 1_800_000, between: [8, 7] as [number, number] }]
+    : [],
+  evidenceCoverage: () => ({
+    firstSeenAt: NOW - 12 * 86_400_000, samples: 4_180, freshSamples: 3_930,
+    statusFeedLive: true, statsFeedLive: true,
+  }),
+  evidenceCoarse: () => [{ t0: NOW - 12 * 86_400_000, samples: 96 }],
+  rssiNormal: () => ({ median: -62, scale: 3, ready: true, days: 12 }),
+  // Keyed to a kind that is actually IN the demo roster — a tally for a symptom
+  // no card shows is a tally no screenshot shows.
+  falsePositives: (kind) => (kind === 'weak-signal' ? 2 : 0),
   lastUpdated: () => NOW - 1_200,
   ready: () => true,
   lastError: () => null,
   symptoms: () => SYMPTOMS,
   engineStatus: () => ({ enabled: true, ready: 10, total: 11 }),
-  efficacyFor: (_k, a) => (a === 'ping' ? { expectedEfficacy: 0.71, n: 7, baseRate: 0.22, beatsSelfHealing: true, ready: true } : null),
+  efficacyFor: (_k, a) =>
+    a === 'ping' ? { expectedEfficacy: 0.71, n: 7, baseRate: 0.22, ready: true }
+    // healNode is emitted BLOCKED on every arm that mentions it, so this is the
+    // ledger contradicting the hardcoded lore — the v0.35 case that could not
+    // reach a screen at all before this release, and therefore the one the
+    // published screenshot has to show.
+    : a === 'healNode' ? { expectedEfficacy: 0.64, n: 11, baseRate: 0.19, ready: true }
+    : null,
   interference: () => ({
     noise: { channels: [-101, -103, -99, -102], floor: -101, real: true, trend: spark(-101, 40, 2), trendCoarse: spark(-100, 60, 3), trendCoarseDays: 12, band: 'clean' },
     serial: { nakPerH: 0, canPerH: 0.4, tmoAckPerH: 0.1, tmoRespPerH: 2.1, band: 'healthy', spanH: 168 },
@@ -194,7 +221,7 @@ const DATA: DataProvider = {
 
 const view = (screen: ScreenView, over: Partial<ViewState> = {}): ViewState => ({
   screen, cols: COLS, rows: ROWS, selected: 1, scroll: 0, filter: '', sortKey: 'health',
-  signalDisplay: 'margin', followTail: true, errorsOnly: false, detailScroll: 0,
+  signalDisplay: 'margin', errorsOnly: false, detailScroll: 0,
   logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null, ...over,
 } as ViewState);
 
@@ -288,16 +315,26 @@ ${body.join('\n')}
 const shots: Array<[string, string[], string]> = [
   ['overview', renderScreen(ctx(view('overview'))), 'Overview — live node table, worst health first'],
   // Scrolled so the frame lands on the v0.22 sections that make Detail distinctive.
-  ['detail', renderScreen(ctx(view('detail', { selected: 1, detailScroll: 15 }))), 'Detail — per-node dossier with live entity state and config parameters'],
+  // Tall AND scrolled to the end: EVIDENCE is the last section, and
+  // `detailScroll` self-clamps to maxScroll, so an over-large value pins the
+  // frame to the bottom of the dossier no matter how long it grows. A fixed row
+  // count would silently start clipping the new section the next time a section
+  // is added above it — which is exactly how the v0.34 shot came to advertise
+  // a panel it did not contain.
+  ['detail', renderScreen(ctx(view('detail', { selected: 1, rows: 44, detailScroll: 9_999 }))), 'Detail — per-node dossier: live entity state, config parameters, and what the engine can see'],
   ['controller', renderScreen(ctx(view('controller'))), 'Controller — radio health, noise floor, counters'],
   // TALLER than the 22-row default on purpose: the route tree alone fills a
   // 22-row frame, and the Route-stability panel spends only leftover rows —
   // so at the default size the published screenshot would show a topology
   // screen that omits a documented panel.
-  ['topology', renderScreen(ctx(view('topology', { rows: 34 }))), 'Topology — hop-grouped route tree + measured route stability'],
+  ['topology', renderScreen(ctx(view('topology', { rows: 40 }))), 'Topology — hop-grouped route tree, route failures by link, measured stability'],
   ['heatmap', renderScreen(ctx(view('heatmap'))), 'Heatmap — nodes by area, graded by SNR margin'],
   ['log', renderScreen(ctx(view('log'))), 'Log — driver events, value changes and command outcomes'],
-  ['remedy', renderScreen(ctx(view('remedy'))), 'Remedy — engine diagnoses and ranked recommendations'],
+  // TALLER for the same reason Topology is: at 22 rows the frame holds ONE
+  // symptom card, so the ledger notes and the detector's false-positive tally —
+  // both of which live on cards further down — would be documented in prose and
+  // absent from the picture.
+  ['remedy', renderScreen(ctx(view('remedy', { rows: 38 }))), 'Remedy — engine diagnoses, ranked recommendations, and the ledger\u2019s verdict'],
   ['interference', renderScreen(ctx(view('interference'))), 'Interference — noise floor, serial health, diurnal heatmap'],
 ];
 

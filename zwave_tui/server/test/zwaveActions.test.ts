@@ -9,6 +9,7 @@ function mk(enabled: boolean, opts: MkOpts = {}) {
   const logs: Array<{ sev: string; nodeId: number | null; text: string }> = [];
   const outcomes: Array<{ kind: string; nodeId: number | null; ok: boolean }> = [];
   const configWritten: number[] = [];
+  const removed: number[] = [];
   const client = {
     send: async (cmd: any) => { sent.push(cmd); if (opts.reject) throw new Error('boom'); return null; },
   } as unknown as HaWsClient;
@@ -20,9 +21,10 @@ function mk(enabled: boolean, opts: MkOpts = {}) {
     log: (sev, nodeId, text) => logs.push({ sev, nodeId, text }),
     onOutcome: (kind, nodeId, ok) => outcomes.push({ kind, nodeId, ok }),
     onConfigWritten: (n) => configWritten.push(n),
+    onNodeRemoved: (n) => removed.push(n),
     enabled,
   });
-  return { runner, sent, logs, outcomes, configWritten };
+  return { runner, sent, logs, outcomes, configWritten, removed };
 }
 
 const param = (over: Partial<import('../src/types').ConfigParam> = {}): import('../src/types').ConfigParam => ({
@@ -151,4 +153,30 @@ test('a DISABLED runner blocks controlEntity + setConfigParam too', async () => 
   assert.equal((await runner.controlEntity(8, 'light.x', 'on')).ok, false);
   assert.equal((await runner.setConfigParam(5, param(), 0)).ok, false);
   assert.equal(sent.length, 0);
+});
+
+/* ── v0.35: a removed node's learned baselines must not outlive it ─────────── */
+
+test('a SUCCESSFUL removeFailed fires onNodeRemoved', async () => {
+  // The node is gone. A later re-include on the same id is different hardware,
+  // and measuring it against the dead device's normals is how the engine
+  // manufactures symptoms out of a swap.
+  const { runner, removed } = mk(true);
+  const r = await runner.removeFailed(9);
+  assert.equal(r.ok, true);
+  assert.deepEqual(removed, [9]);
+});
+
+test('a FAILED removeFailed does NOT — the node and its history are still there', async () => {
+  const { runner, removed } = mk(true, { reject: true });
+  const r = await runner.removeFailed(9);
+  assert.equal(r.ok, false);
+  assert.deepEqual(removed, [], 'discarding a live node’s learned baselines would be the real damage');
+});
+
+test('a disabled runner removes nothing and forgets nothing', async () => {
+  const { runner, removed, sent } = mk(false);
+  await runner.removeFailed(9);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(removed, []);
 });

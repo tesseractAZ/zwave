@@ -2,7 +2,7 @@
  * Composite RF health model for a single Z-Wave node.
  *
  * `scoreNode(node, noiseFloor)` maps one {@link NodeSnapshot} to a
- * {@link HealthResult}: a 0..100 score, a 0..10 rating, an A..F grade, a
+ * {@link HealthResult}: a 0..100 score, an A..F grade, a
  * discrete `state`, and a set of single-char `flags`. It is a pure function —
  * the render loop calls it every frame via `DataProvider.scoreFor()`, so it
  * must never throw and must be robust to null/partial statistics.
@@ -220,7 +220,7 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
     const flags = new Set<string>(['D']);
     if (batteryLow) flags.add('B');
     if (updateAvail) flags.add('U');
-    return { score: 0, rating: 0, grade: 'F', state: 'dead', flags: orderFlags(flags) };
+    return { score: 0, grade: 'F', state: 'dead', flags: orderFlags(flags) };
   }
 
   // ── Gate 2a: NO MEASUREMENTS YET → we simply don't know (state 'unknown').
@@ -245,7 +245,7 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
     const flags = new Set<string>();
     if (batteryLow) flags.add('B'); // controllers are mains-powered, but stay honest
     if (updateAvail) flags.add('U');
-    return { score: 100, rating: 10, grade: 'A', state: 'ok', flags: orderFlags(flags) };
+    return { score: 100, grade: 'A', state: 'ok', flags: orderFlags(flags) };
   }
 
   // "Never measured" must mean NO evidence of contact of any kind: zero
@@ -264,7 +264,6 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
     const score = 10; // ≤ UNKNOWN_SCORE_CAP by construction
     return {
       score,
-      rating: Math.round(score / 10),
       grade: gradeFor(score),
       state: 'unknown',
       flags: orderFlags(flags),
@@ -402,7 +401,6 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
 
   return {
     score,
-    rating: clamp(Math.round(score / 10), 0, 10),
     grade: gradeFor(score),
     state,
     flags: orderFlags(flags),

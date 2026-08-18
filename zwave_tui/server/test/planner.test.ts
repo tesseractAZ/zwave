@@ -165,7 +165,7 @@ test('mesh-interference: inferred vs measured split — inferred is unconfirmed 
 });
 
 test('M5: efficacyFor is attached to EXECUTABLE candidates only (physical guidance is unscored)', () => {
-  const eff = { expectedEfficacy: 0.9, n: 6, baseRate: 0.2, beatsSelfHealing: true, ready: true };
+  const eff = { expectedEfficacy: 0.9, n: 6, baseRate: 0.2, ready: true };
   const calls: string[] = [];
   const ctx = { writeActions: true, efficacyFor: (k: SymptomKind, a: string) => { calls.push(`${k}:${a}`); return eff; } };
   const p = planFor(sym('return-path-degraded', { nodeId: 7 }), node(7), ctx);

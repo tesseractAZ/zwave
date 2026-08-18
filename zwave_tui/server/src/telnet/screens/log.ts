@@ -160,7 +160,15 @@ function detailLines(ev: LogEvent | undefined, data: DataProvider, W: number, ro
     );
     lines.push(field('Device', deviceLine(ev.nodeId, data), W));
     if (ev.entityId) {
-      lines.push(field('Entity', `${c.white(ev.entityId)} ${c.grey('(' + (ev.domain ?? '?') + ')')}`, W));
+      // Lead with the FRIENDLY name when the capture carried one (v0.35). It was
+      // recorded on every value event and thrown away here, so a pane whose whole
+      // job is "which thing did this?" answered `sensor.node_27_illuminance`
+      // while the answer "Back Porch Motion" sat unread on the same object. The
+      // id stays as the secondary — it is what you type into HA.
+      const label = ev.entityName
+        ? `${c.white(ev.entityName)} ${c.grey(ev.entityId)}`
+        : c.white(ev.entityId);
+      lines.push(field('Entity', `${label} ${c.grey('(' + (ev.domain ?? '?') + ')')}`, W));
     }
     if (ev.oldState != null || ev.newState != null) {
       lines.push(field('Change', `${c.grey(ev.oldState ?? '—')} ${c.cyan('→')} ${c.white(ev.newState ?? '—')}`, W));

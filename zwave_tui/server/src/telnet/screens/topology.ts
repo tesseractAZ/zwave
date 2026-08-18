@@ -194,13 +194,29 @@ export function renderTopology(ctx: ScreenCtx): string[] {
   // a row to it. Same rule as the repeater panel above.
   const treeCapBase = Math.max(1, bodyCap - histLines.length - panel.length);
   const padRows = Math.max(0, treeCapBase - tree.length);
-  const stability = padRows >= 3 ? routeStabilityPanel(view, ctx, endNodes, nameBudget, padRows) : [];
-  const treeCap = Math.max(1, treeCapBase - stability.length);
+  // Route FAILURES get FIRST claim on the pad (v0.35). This is the
+  // persisted `routeFailedBetween` history the evidence store has recorded
+  // since v0.13 and NO screen has ever drawn — the one quantity that names a
+  // suspect LINK rather than a suspect node. On a healthy mesh it is empty
+  // and costs nothing; when a link is failing it is the most specific thing
+  // this screen can say.
+  //
+  // First claim, but a BOUNDED one: on a 38-node mesh the stability panel will
+  // happily list every churning node and consume the entire surplus, so a
+  // strictly-more-actionable finding must not be the one that gets squeezed
+  // out. Half the pad (floor 3) is enough for the ranked links plus the
+  // "+N more" disclosure, and stability keeps the rest — neither starves.
+  const failCap = Math.min(padRows, Math.max(3, Math.floor(padRows / 2)));
+  const failures = failCap >= 3 ? routeFailurePanel(view, ctx, endNodes, nameBudget, failCap) : [];
+  const stabPad = Math.max(0, padRows - failures.length);
+  const stability = stabPad >= 3 ? routeStabilityPanel(view, ctx, endNodes, nameBudget, stabPad) : [];
+  const treeCap = Math.max(1, treeCapBase - stability.length - failures.length);
 
   const body: string[] = [...histLines];
   if (tree.length <= treeCap) {
     body.push(...tree);
     while (body.length < histLines.length + treeCap) body.push('');
+    body.push(...failures);
     body.push(...stability);
     view.topologyScroll = 0;
   } else {
@@ -564,6 +580,66 @@ function signalCell(
  * rank them, worst-first, because then the identity of the unstable node is the
  * information.
  */
+/**
+ * Which LINK broke — the persisted route-failure history (v0.35).
+ *
+ * `routeFailedBetween` is transient on the live stats object (the next OK
+ * transmission overwrites it), which is why the evidence store latches every
+ * occurrence to disk. It has done so since v0.13 and nothing has ever read it
+ * back: the add-on has been recording exactly which pair a transmission died
+ * between, and showing the operator nothing.
+ *
+ * A node-level symptom says "n44 is unreliable". This says "n44's traffic died
+ * between n12 and n44, six times" — which is a different and far more
+ * actionable claim, because it names the hop to go look at.
+ *
+ * Empty on a healthy mesh, and it costs zero rows there.
+ */
+function routeFailurePanel(
+  view: ViewState,
+  ctx: ScreenCtx,
+  endNodes: NodeSnapshot[],
+  nameBudget: number,
+  budget: number,
+): string[] {
+  if (typeof ctx.data.routeFailures !== 'function' || budget < 3) return [];
+  // Tally by the PAIR, not by the reporting node: one marginal link shows up in
+  // several nodes' histories, and the pair is the thing to go fix.
+  const byPair = new Map<string, { a: number; b: number; n: number; last: number }>();
+  for (const n of endNodes) {
+    for (const f of ctx.data.routeFailures(n.nodeId) ?? []) {
+      const [a, b] = f.between;
+      const k = `${a}>${b}`;
+      const cur = byPair.get(k);
+      if (cur) { cur.n += 1; cur.last = Math.max(cur.last, f.t); }
+      else byPair.set(k, { a, b, n: 1, last: f.t });
+    }
+  }
+  if (byPair.size === 0) return [];
+
+  const ranked = [...byPair.values()].sort((x, y) => y.n - x.n || y.last - x.last);
+  const capacity = Math.max(1, budget - 2);
+  const canDisclose = ranked.length > capacity;
+  const shown = canDisclose ? ranked.slice(0, capacity - 1) : ranked.slice(0, capacity);
+  const lines = [groupHeader(view, 'Route failures', byPair.size)];
+  const nameOf = (id: number): string => {
+    const n = ctx.data.nodeById(id);
+    return n ? truncate(n.name, Math.max(6, Math.floor(nameBudget / 2))) : `n${id}`;
+  };
+  for (const f of shown) {
+    const tone = f.n >= 5 ? c.red : f.n >= 2 ? c.yellow : c.grey;
+    const left = '  ' + c.white(`n${f.a}`) + c.grey(' ⇢ ') + c.white(`n${f.b}`) +
+      c.grey('  ' + nameOf(f.a) + ' → ' + nameOf(f.b));
+    const right = tone(`${f.n} failure${f.n === 1 ? '' : 's'}`) +
+      c.grey(` · last ${fmtElapsed(Math.max(0, Date.now() - f.last))} ago`);
+    lines.push(lr(left, right, view.cols));
+  }
+  if (canDisclose) {
+    lines.push(c.grey(`  +${ranked.length - shown.length} more link(s) — by failure count, most first`));
+  }
+  return lines.slice(0, budget);
+}
+
 function routeStabilityPanel(
   view: ViewState,
   ctx: ScreenCtx,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { renderRemedy } from '../src/telnet/screens/remedy';
 import { visLen } from '../src/telnet/ansi';
 import { NodeStatus } from '../src/types';
-import type { DataProvider, NodeSnapshot, ControllerSnapshot, ScreenCtx, ViewState, Symptom } from '../src/types';
+import type { DataProvider, NodeSnapshot, ControllerSnapshot, ScreenCtx, ViewState, Symptom, SymptomKind } from '../src/types';
 
 const now = Date.now();
 function node(id: number): NodeSnapshot {
@@ -21,7 +21,7 @@ type Eff = ReturnType<DataProvider['efficacyFor']>;
 function data(symptoms: Symptom[], efficacyFor: DataProvider['efficacyFor'] = () => null): DataProvider {
   return {
     nodes: () => nodes, nodeById: (id) => nodes.find((n) => n.nodeId === id), controller: () => ctrl, events: () => [],
-    scoreFor: () => ({ score: 90, rating: 9, grade: 'A', state: 'ok', flags: [] }),
+    scoreFor: () => ({ score: 90, grade: 'A', state: 'ok', flags: [] }),
     noiseFloor: () => -100, hasRealNoise: () => true, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
     lastUpdated: () => now - 1000, ready: () => true, lastError: () => null, symptoms: () => symptoms,
     engineStatus: () => ({ enabled: true, ready: 3, total: 3 }), efficacyFor, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
@@ -29,7 +29,7 @@ function data(symptoms: Symptom[], efficacyFor: DataProvider['efficacyFor'] = ()
   };
 }
 const mkView = (cols: number, rows: number): ViewState =>
-  ({ screen: 'remedy', cols, rows, selected: 0, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', followTail: true, errorsOnly: false, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null } as ViewState);
+  ({ screen: 'remedy', cols, rows, selected: 0, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', errorsOnly: false, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null } as ViewState);
 const ctx = (cols: number, rows: number, symptoms: Symptom[], eff?: DataProvider['efficacyFor']): ScreenCtx =>
   ({ view: mkView(cols, rows), data: data(symptoms, eff), visibleNodes: nodes, filtering: false, actionsEnabled: true });
 
@@ -132,19 +132,19 @@ test('M4: the overflow footer survives even when one oversized block fills a tin
 });
 
 test('M5: a learned "beat self-healing" efficacy renders a green note on the executable candidate', () => {
-  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, beatsSelfHealing: true, ready: true };
+  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, ready: true };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(/✓ helped 83% \(n=6\) vs 20% self-heal/.test(joined), 'efficacy note shows the win, the base rate, and n');
 });
 
 test('M5: a learned-but-not-distinguishable efficacy renders the honest "not distinguishable" note', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 8, baseRate: 0.9, beatsSelfHealing: false, ready: true };
+  const eff: Eff = { expectedEfficacy: null, n: 8, baseRate: 0.9, ready: true };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(/≈ n=8: not distinguishable from self-healing/.test(joined), 'honest null-result note');
 });
 
 test('M5: while still learning (not ready) NO efficacy note is shown', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 1, baseRate: null, beatsSelfHealing: false, ready: false };
+  const eff: Eff = { expectedEfficacy: null, n: 1, baseRate: null, ready: false };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(!/helped|not distinguishable/.test(joined), 'says nothing until it has an opinion');
 });
@@ -157,4 +157,88 @@ test('M4: a subsumed symptom shows NO recommendation (its plan defers to the mes
   // (The narrative may mention "repeater", so we anchor on plan-only markers.)
   assert.ok(!/▎/.test(joined), 'no plan headline bar for a subsumed symptom');
   assert.ok(!/\[(physical|safe|caution|disruptive|destructive) · /.test(joined), 'no candidate cost tags either');
+});
+
+/* ── v0.35 (Z2): the ledger's verdict reaches BLOCKED candidates too ───────── */
+
+const plain = (s: string[]): string => s.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+
+test('a BLOCKED candidate now reports what was measured — framed as a disagreement', () => {
+  // route-churn's ONLY executable candidate is hardcoded blocked ("physical-link
+  // symptom — won't settle it"), which is `lore`. Until v0.35 that made the
+  // ledger's measurement of the very same action unreachable: the learning loop
+  // could learn healNode works and had no way to say so. Suppressing measurement
+  // because it contradicts a prior is backwards — overturning priors is the point.
+  const eff: Eff = { expectedEfficacy: 0.8, n: 10, baseRate: 0.2, ready: true };
+  const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
+  assert.match(joined, /⊘ physical-link symptom/, 'the block is still stated');
+  assert.match(joined, /ledger disagrees — measured 80% here \(n=10\) vs 20% self-heal/,
+    'and the measurement now reaches the screen');
+  assert.ok(!/✓ helped/.test(joined),
+    'but NEVER as a green endorsement of advice the screen just told you not to take');
+});
+
+test('a blocked candidate the ledger AGREES with says the block holds', () => {
+  const eff: Eff = { expectedEfficacy: null, n: 12, baseRate: 0.5, ready: true };
+  const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
+  assert.match(joined, /not distinguishable from self-healing — the block holds/);
+});
+
+test('a blocked candidate with no opinion yet still says NOTHING', () => {
+  const eff: Eff = { expectedEfficacy: null, n: 2, baseRate: null, ready: false };
+  const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
+  assert.ok(!/ledger disagrees|block holds|helped|distinguishable/.test(joined),
+    'not-ready is silence, blocked or not');
+});
+
+test('one plan can carry BOTH voices — green on the runnable, disagreement on the blocked', () => {
+  // return-path-degraded plans a runnable candidate AND a blocked one, and the
+  // ledger has the same opinion of each. The note must therefore switch VOICE
+  // per candidate, not per plan: the reader has to be able to tell which row
+  // the measurement is talking about.
+  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, ready: true };
+  const rows = plain(renderRemedy(ctx(140, 40, [sym()], () => eff))).split('\n');
+  assert.ok(rows.some((l) => /✓ helped 83% \(n=6\) vs 20% self-heal/.test(l)),
+    'the runnable candidate keeps the plain green note');
+  assert.ok(rows.some((l) => /ledger disagrees — measured 83% here/.test(l)),
+    'the blocked candidate gets the disagreement framing');
+  assert.ok(!rows.some((l) => /✓ helped/.test(l) && /ledger disagrees/.test(l)),
+    'and never both on one row');
+});
+
+/* ── v0.35 (Z3-e): the detector's own track record ─────────────────────────── */
+
+function withFp(fp: number, symptoms: Symptom[] = [sym()]): ScreenCtx {
+  const cx = ctx(140, 40, symptoms);
+  (cx.data as { falsePositives?: (k: SymptomKind) => number }).falsePositives = () => fp;
+  return cx;
+}
+
+test('a detector that has been refused as a misdiagnosis says so ON the card', () => {
+  // The ledger has counted these since M5 and no screen showed them — the one
+  // number that argues against the card it sits on was the one kept off it.
+  const joined = plain(renderRemedy(withFp(3)));
+  assert.match(joined, /refused as a misdiagnosis 3×/);
+  assert.match(joined, /weigh the evidence above before acting/);
+});
+
+test('a CLEAN detector says nothing — no boast, no zero row', () => {
+  const joined = plain(renderRemedy(withFp(0)));
+  assert.ok(!/misdiagnosis/.test(joined), 'zero refusals is silence');
+});
+
+test('a provider with NO ledger renders exactly as a clean one', () => {
+  const joined = plain(renderRemedy(ctx(140, 40, [sym()])));
+  assert.ok(!/misdiagnosis/.test(joined),
+    'absent ledger means no data, which must never render as a warning');
+});
+
+test('the exact-rows contract survives the extra warning row at every size', () => {
+  for (const [cols, rows] of [[140, 40], [120, 24], [100, 18], [80, 12], [40, 9]] as const) {
+    const cx = withFp(5, [sym({ severity: 'crit', kind: 'dead-flap' }), sym(), sym({ nodeId: 7 })]);
+    cx.view.cols = cols; cx.view.rows = rows;
+    const out = renderRemedy(cx);
+    assert.equal(out.length, rows, `rows at ${cols}x${rows}`);
+    for (const l of out) assert.ok(l.replace(/\x1b\[[0-9;]*m/g, '').length <= cols, `width at ${cols}x${rows}`);
+  }
 });

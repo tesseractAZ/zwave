@@ -16,16 +16,36 @@ import { planFor, type PlanCandidate } from '../../zwave/planner';
 /** One-line learned-efficacy note for an executable candidate (M5): a green
  *  "beat self-healing" when it clears the control arm, a grey "not
  *  distinguishable" once enough episodes exist, nothing while still learning. */
-function efficacyNote(e: Efficacy | null | undefined): string | null {
+/**
+ * The outcome ledger's verdict on one candidate.
+ *
+ * `blocked` changes the VOICE, not whether we speak (v0.35). Until now the note
+ * was rendered for runnable candidates only, on the sound-looking grounds that a
+ * green "✓ helped" must never sit under advice that says "NOT recommended". But
+ * route-churn's only executable candidate is hardcoded blocked, so the ledger's
+ * measurement of it could never reach the screen at all — and the block reason
+ * is `lore`, while the ledger is `measured`. Suppressing measurement because it
+ * contradicts a prior is exactly backwards: overturning priors is what the
+ * learning loop is FOR.
+ *
+ * So a blocked candidate still reports what was measured, framed as what it is —
+ * a disagreement with the advice above it, or a confirmation of it — and never
+ * as an endorsement of an action the screen just told you not to run.
+ */
+function efficacyNote(e: Efficacy | null | undefined, blocked = false): string | null {
   if (!e || !e.ready) return null; // still learning → say nothing (honest)
   const n = Math.round(e.n);
+  const base = e.baseRate != null ? ` vs ${Math.round(e.baseRate * 100)}% self-heal` : '';
   if (e.expectedEfficacy != null) {
     // `n` first (after the headline %) so the trust signal survives truncation.
     const pct = Math.round(e.expectedEfficacy * 100);
-    const base = e.baseRate != null ? ` vs ${Math.round(e.baseRate * 100)}% self-heal` : '';
-    return c.green(`✓ helped ${pct}% (n=${n})${base}`);
+    return blocked
+      ? c.yellow(`⚠ ledger disagrees — measured ${pct}% here (n=${n})${base}; the block above is lore`)
+      : c.green(`✓ helped ${pct}% (n=${n})${base}`);
   }
-  return c.grey(`≈ n=${n}: not distinguishable from self-healing`);
+  return blocked
+    ? c.grey(`≈ n=${n}: measured, and not distinguishable from self-healing — the block holds`)
+    : c.grey(`≈ n=${n}: not distinguishable from self-healing`);
 }
 
 const SEV_TAG: Record<Symptom['severity'], string> = {
@@ -55,7 +75,15 @@ function costTag(cost: PlanCandidate['cost']): string {
   }
 }
 
-function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, efficacyFor: (kind: SymptomKind, action: ActionKind) => Efficacy | null, selected = false): string[] {
+/** The two things the outcome ledger knows about a card: whether its actions
+ *  work, and whether the detector that raised it has been wrong before. */
+interface Ledger {
+  efficacyFor: (kind: SymptomKind, action: ActionKind) => Efficacy | null;
+  falsePositives: (kind: SymptomKind) => number;
+}
+
+function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, ledger: Ledger, selected = false): string[] {
+  const { efficacyFor } = ledger;
   const rows: string[] = [];
   const who = sym.nodeId != null ? c.cyan(`#${sym.nodeId} ${nameOf(sym.nodeId)}`) : c.blue('MESH');
   // Compact basis GLYPH placed right after severity so it survives truncation at
@@ -82,6 +110,19 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     const parts = [basisWord, ...sym.evidence.map((e) => `${c.label(e.label)} ${c.white(e.value)}`)];
     rows.push(truncate('    ' + parts.join(c.grey('  ·  ')), W));
   }
+  // The detector's own track record (v0.35). The ledger has counted every
+  // episode of this kind an operator closed as `refused-misdiagnosis` since M5,
+  // and no screen showed it — a strange omission for an ADVISORY engine, since
+  // this is the one number that argues against the card it sits on. Shown only
+  // when non-zero: a clean detector says nothing rather than boasting.
+  {
+    const fp = ledger.falsePositives(sym.kind);
+    if (fp > 0) {
+      rows.push(truncate(
+        '    ' + c.yellow(`⚠ this detector has been refused as a misdiagnosis ${fp}\u00d7`) +
+        c.grey(' — weigh the evidence above before acting'), W));
+    }
+  }
   // Narrative — one line of diagnostic context (the plan headline carries the
   // recommendation, so a single line here keeps the block scannable).
   for (const line of wrap(sym.narrative, W - 4).slice(0, 1)) rows.push(truncate('    ' + c.grey(line), W));
@@ -105,11 +146,12 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
         const rl = wrap(cand.rationale, W - 8);
         if (rl.length) rows.push(truncate('        ' + c.grey(rl[0] + (rl.length > 1 ? ' …' : '')), W));
       }
-      // M5: learned efficacy note — ONLY on a runnable recommendation. A blocked
-      // or anti-pattern candidate (e.g. the "rebuild — NOT recommended" row) must
-      // never carry a green "✓ helped …" note that contradicts the advice.
-      if (runnable) {
-        const note = efficacyNote(cand.efficacy);
+      // M5: the learned efficacy note. Every candidate the ledger can have an
+      // opinion about gets one — i.e. every candidate with an action, blocked or
+      // not. efficacyNote() carries the blocked framing so a "NOT recommended"
+      // row can report a measurement without ever reading as an endorsement.
+      if (cand.action != null) {
+        const note = efficacyNote(cand.efficacy, cand.blocked != null);
         if (note) rows.push(truncate('        ' + note, W));
       }
     });
@@ -185,7 +227,13 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
   const symptoms = data.symptoms();
   const nameOf = (id: number): string => data.nodeById(id)?.name ?? `Node ${id}`;
   const nodeOf = (id: number): NodeSnapshot | undefined => data.nodeById(id);
-  const efficacyFor = (kind: SymptomKind, action: ActionKind): Efficacy | null => data.efficacyFor(kind, action);
+  const ledger: Ledger = {
+    efficacyFor: (kind, action) => data.efficacyFor(kind, action),
+    // Optional on the provider (older/mock providers predate it) — absent means
+    // "no ledger", which is 0 refusals, NOT "this detector is trustworthy".
+    // Same thing either way on screen: the line only renders above zero.
+    falsePositives: (kind) => data.falsePositives?.(kind) ?? 0,
+  };
 
   const body: string[] = [];
   if (symptoms.length === 0) {
@@ -244,7 +292,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       let used = headerRows;
       let last = start - 1;
       for (let i = start; i < sorted.length; i++) {
-        const len = symptomBlock(sorted[i], now, W, nameOf, ctx.actionsEnabled === true, nodeOf, efficacyFor, i === cursor).length;
+        const len = symptomBlock(sorted[i], now, W, nameOf, ctx.actionsEnabled === true, nodeOf, ledger, i === cursor).length;
         const reserve = i < sorted.length - 1 ? 1 : 0;
         if (used + len > bodyCap - reserve && i > start) break;
         used += len;
@@ -257,7 +305,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     let used = headerRows;
     let shown = 0;
     for (let i = start; i < sorted.length; i++) {
-      const blk = symptomBlock(sorted[i], now, W, nameOf, ctx.actionsEnabled === true, nodeOf, efficacyFor, i === cursor);
+      const blk = symptomBlock(sorted[i], now, W, nameOf, ctx.actionsEnabled === true, nodeOf, ledger, i === cursor);
       const remaining = sorted.length - start - shown;
       // Reserve one line for the "N more" footer whenever blocks remain unshown.
       const reserve = remaining > 1 ? 1 : 0;

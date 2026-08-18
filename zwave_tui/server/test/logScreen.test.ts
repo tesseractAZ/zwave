@@ -101,3 +101,28 @@ test('a very narrow terminal still holds the geometry contract', () => {
   const lines = renderLog(ctx({ view: mkView({ cols: 40, rows: 24 }), events: sampleEvents, nodes: sampleNodes }));
   assertGeometry(lines, 40, 24, 'narrow');
 });
+
+/* ── v0.35: the detail pane stops discarding the friendly name ─────────────── */
+
+test('the Entity row leads with the FRIENDLY name, id as the secondary', () => {
+  // The name was captured on every value event and thrown away at the render.
+  // A pane whose whole job is "which thing did this?" answered with a slug.
+  const ev = mkEvent({
+    kind: 'value', entityId: 'sensor.node_27_illuminance',
+    entityName: 'Back Porch Motion · Illuminance', domain: 'sensor',
+  });
+  const line = renderLog(ctx({ view: mkView({ cols: 140, rows: 30 }), events: [ev], nodes: sampleNodes }))
+    .map(strip).find((l) => /^\s*Entity/.test(l));
+  assert.ok(line, 'the Entity row must render');
+  assert.match(line!, /Back Porch Motion/, 'the name is what the operator recognises');
+  assert.match(line!, /sensor\.node_27_illuminance/, 'the id stays — it is what you type into HA');
+  assert.ok(line!.indexOf('Back Porch Motion') < line!.indexOf('sensor.node_27'),
+    'name first: the id is the footnote, not the headline');
+});
+
+test('an event with NO captured name still shows the id — never a blank row', () => {
+  const ev = mkEvent({ kind: 'value', entityId: 'switch.unnamed', domain: 'switch' });
+  const line = renderLog(ctx({ view: mkView({ cols: 140, rows: 30 }), events: [ev], nodes: sampleNodes }))
+    .map(strip).find((l) => /^\s*Entity/.test(l));
+  assert.ok(line && /switch\.unnamed/.test(line), `id must survive: ${line}`);
+});

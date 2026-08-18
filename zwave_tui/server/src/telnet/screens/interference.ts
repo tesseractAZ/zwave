@@ -217,6 +217,17 @@ export function renderInterference(ctx: ScreenCtx): string[] {
   if (iv.correlated.active) {
     push('  ' + c.yellowB('⚠ correlated mesh degradation'));
     for (const line of wrap(iv.correlated.narrative, W - 4).slice(0, 2)) push('    ' + c.grey(line));
+    // SCOPE, which the detector's ratio does not give you (v0.35). The narrative
+    // says "degraded X of Y active" — a share of the nodes that were TALKING in
+    // the window. This is the count of distinct nodes carrying a symptom at all,
+    // quiet ones included, so it answers the different question of how far the
+    // event reaches. Computed since M6 and never rendered while an event was
+    // live, which is the one time it matters. Labelled apart so the two numbers
+    // can never be read as the same measure disagreeing with itself.
+    if (iv.correlated.degradedNodes > 0) {
+      push('    ' + c.grey('scope · ') + c.white(String(iv.correlated.degradedNodes)) +
+        c.grey(` distinct node${iv.correlated.degradedNodes === 1 ? '' : 's'} symptomatic (quiet ones included)`));
+    }
   } else {
     push('  ' + c.green('✓ ') + c.grey(iv.correlated.narrative));
   }

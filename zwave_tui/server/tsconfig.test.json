@@ -1,5 +1,9 @@
-// Type-checks the tests alongside src so mock drift against the shared type
-// contract (DataProvider / NodeSnapshot / LogEvent …) can't ship green.
+// Type-checks the tests AND scripts/ alongside src so mock drift against the
+// shared type contract (DataProvider / NodeSnapshot / LogEvent …) can't ship
+// green. scripts/ was added in v0.35: gen-screenshots.mts declares a full
+// `DATA: DataProvider` and was outside every tsconfig, so it kept a field the
+// type had dropped and nothing said a word — the exact drift this release
+// spent its time removing everywhere else.
 // The runtime uses tsx and never emits, so this config is noEmit-only.
 {
   "extends": "./tsconfig.json",
@@ -7,5 +11,5 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.mts"]
 }

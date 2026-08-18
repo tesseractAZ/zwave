@@ -23,7 +23,7 @@ function data(iv: InterferenceView): DataProvider {
   } as unknown as DataProvider;
 }
 const mkView = (cols: number, rows: number): ViewState =>
-  ({ screen: 'interference', cols, rows, selected: 0, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', followTail: true, errorsOnly: false, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null } as ViewState);
+  ({ screen: 'interference', cols, rows, selected: 0, scroll: 0, filter: '', sortKey: 'id', signalDisplay: 'margin', errorsOnly: false, logCursor: 0, logScroll: 0, logRange: 'all', logAnchorSeq: null } as ViewState);
 const ctx = (cols: number, rows: number, iv: InterferenceView): ScreenCtx =>
   ({ view: mkView(cols, rows), data: data(iv), visibleNodes: [], filtering: false, actionsEnabled: true } as ScreenCtx);
 
@@ -211,4 +211,41 @@ test('the diurnal chart marks an UNRATED hour as no-data, never as a measured 0%
   const cols = baseline!.replace(/^\s+0%\s/, '');
   assert.equal(cols.slice(0, 10), '·'.repeat(10),
     `unrated hours drew bars instead of no-data dots: ${JSON.stringify(cols.slice(0, 14))}`);
+});
+
+/* ── v0.35 (Z3-i): the correlated event states its SCOPE ───────────────────── */
+
+test('an ACTIVE event reports how many distinct nodes are symptomatic', () => {
+  // degradedNodes was computed for every view since M6 and only ever reached
+  // the screen through the INACTIVE narrative — i.e. it went dark at exactly
+  // the moment the operator needed to know how far the event reached.
+  const iv = cleanView({ correlated: { active: true, degradedNodes: 7, narrative: 'Correlated mesh degradation (4 of 11 active).' } });
+  const joined = renderInterference(ctx(120, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(joined, /4 of 11 active/, "the detector's own ratio still leads");
+  assert.match(joined, /scope · 7 distinct nodes symptomatic \(quiet ones included\)/,
+    'and the scope count is labelled APART, so 7 and 4-of-11 cannot read as one number disagreeing with itself');
+});
+
+test('an active event with no distinct count adds no scope line', () => {
+  const iv = cleanView({ correlated: { active: true, degradedNodes: 0, narrative: 'Correlated mesh degradation.' } });
+  const joined = renderInterference(ctx(120, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.ok(!/scope ·/.test(joined));
+});
+
+test('the INACTIVE case is untouched — the narrative still owns the count', () => {
+  const iv = cleanView({ correlated: { active: false, degradedNodes: 2, narrative: '2 nodes degraded, but not correlated into a mesh event.' } });
+  const joined = renderInterference(ctx(120, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(joined, /2 nodes degraded, but not correlated/);
+  assert.ok(!/scope ·/.test(joined), 'no duplicate count when the narrative already states it');
+});
+
+test('the scope line singularises, and the exact-rows contract still holds', () => {
+  const iv = cleanView({ correlated: { active: true, degradedNodes: 1, narrative: 'Correlated mesh degradation (1 of 9 active).' } });
+  const joined = renderInterference(ctx(120, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(joined, /1 distinct node symptomatic/);
+  for (const [cols, rows] of [[60, 16], [96, 24], [120, 40], [200, 50]] as const) {
+    const lines = renderInterference(ctx(cols, rows, iv));
+    assert.equal(lines.length, rows, `${cols}x${rows}`);
+    for (const l of lines) assert.ok(visLen(l) <= cols, `${cols}x${rows}`);
+  }
 });

@@ -1122,7 +1122,7 @@ test('a never-contacted node is not reported as “RF health nominal”', () => 
   });
   const data = {
     ...mockData({ nodes: [unknown] }),
-    scoreFor: () => ({ score: 12, rating: 1, grade: 'F', state: 'unknown', flags: [] }),
+    scoreFor: () => ({ score: 12, grade: 'F', state: 'unknown', flags: [] }),
   };
   const out = renderDetail({
     view: mkView({ screen: 'detail', cols: 110, rows: 30, selected: 0 }),
@@ -1279,7 +1279,7 @@ test('the Overview roll-up grades through the roster\'s own scoreColor', () => {
   const nodes = Array.from({ length: 6 }, (_, i) =>
     mkNode({ nodeId: i + 1, name: `Device ${i + 1}`, isController: i === 0 }));
   const data = mockData({ nodes }) as never as Record<string, unknown>;
-  data.scoreFor = () => ({ score: 55, rating: 6, grade: 'D', state: 'ok', flags: [] });
+  data.scoreFor = () => ({ score: 55, grade: 'D', state: 'ok', flags: [] });
   const out = renderOverview({
     view: mkView({ screen: 'overview', cols: 200, rows: 60 }),
     data: data as never, visibleNodes: nodes, filtering: false,

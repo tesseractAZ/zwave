@@ -33,7 +33,10 @@ export interface NodeEntity {
   entityId: string;
   domain: string; // light | switch | sensor | binary_sensor | button | number | select | update | event | fan
   name?: string;
-  state?: string;
+  // No `state` here (dropped v0.35): the registry roster is identity only and
+  // never carried one. Live state is EntityLiveState below, which the Detail
+  // screen actually reads — two places to look for a state, one of them always
+  // undefined, is worse than one.
 }
 
 /** A node entity joined with its CURRENT live state (Detail entity list, v0.22).
@@ -164,7 +167,6 @@ export interface ControllerSnapshot {
 /** Health scoring output for one node. */
 export interface HealthResult {
   score: number; // 0..100
-  rating: number; // 0..10
   grade: string; // A..F
   state: 'ok' | 'weak' | 'flaky' | 'asleep' | 'dead' | 'unknown';
   flags: string[]; // e.g. ['W','F'] — single-char flags rendered in the table
@@ -194,8 +196,10 @@ export interface Efficacy {
   n: number;
   /** The kind's spontaneous-recovery base rate (control arm), for context. */
   baseRate: number | null;
-  /** True once the action's success rate clears baseRate by the min effect size. */
-  beatsSelfHealing: boolean;
+  // NOTE: there is deliberately no `beatsSelfHealing` flag (dropped v0.35). It
+  // was `expectedEfficacy != null` by construction — two fields encoding one
+  // fact, read by nothing but its own tests, and one refactor away from
+  // disagreeing with each other about whether an action works.
   /** Enough episodes to have an opinion at all (n ≥ min). Distinguishes
    *  "still learning" from "learned: not distinguishable from self-healing". */
   ready: boolean;
@@ -258,6 +262,36 @@ export interface DataProvider {
    * "no history", never as "0 changes".
    */
   routeStability?(nodeId: number): { changes: number; hours: number } | null;
+  /**
+   * Persisted route-failure events for a node (v0.35): each carries the PAIR
+   * the transmission died between, which is the one thing a topology screen
+   * most wants and never had — "the route failed" is a symptom, "it failed
+   * between n3 and n7" names the suspect link. Recorded since v0.13 and read
+   * by nothing until now.
+   */
+  routeFailures?(nodeId: number): { t: number; between: [number, number] }[];
+  /**
+   * What the engine can actually SEE for this node (v0.35).
+   *
+   * The evidence store has tracked cumulative sample counts and feed liveness
+   * per node since M2 and no screen has read them back. That matters more than
+   * it sounds: "no evidence for n27" from a node whose status/stats feeds are
+   * DOWN is a monitoring hole, and rendering it the same as genuine node
+   * silence is how a blind spot passes for a clean bill of health.
+   *
+   * `firstSeenAt`/`samples`/`freshSamples` are cumulative since roster
+   * registration and survive both ring eviction and restarts.
+   */
+  evidenceCoverage?(nodeId: number): {
+    firstSeenAt: number;
+    samples: number;
+    freshSamples: number;
+    statusFeedLive: boolean;
+    statsFeedLive: boolean;
+  } | null;
+  /** Persisted long-horizon buckets for a node (v0.35) — the tier that outlives
+   *  the fine ring, so the dossier can state the window behind its numbers. */
+  evidenceCoarse?(nodeId: number): { t0: number; samples: number; routeChanges?: number }[];
   lastUpdated(): number | null; // epoch ms of the last successful roster refresh
   ready(): boolean; // has the first roster load completed?
   lastError(): string | null;
@@ -271,6 +305,26 @@ export interface DataProvider {
    *  outcome ledger is off / has no estimate yet. Read by the REMEDY screen so
    *  the planner's candidates can carry an evidence-backed efficacy note. */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
+  /**
+   * How many episodes of this symptom kind the outcome ledger closed as
+   * `refused-misdiagnosis` (v0.35) — the engine's own tally of when this
+   * detector cried wolf.
+   *
+   * Recorded since M5 and read by nothing, which is a strange gap for an
+   * ADVISORY engine: the one number that says "be sceptical of this card" was
+   * the one the card would not show you.
+   */
+  falsePositives?(kind: SymptomKind): number;
+  /**
+   * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
+   * scale, whether it has graduated, and the days behind it.
+   *
+   * This is the yardstick every per-node signal verdict is measured against.
+   * It was computed and persisted since M3 and readable from nothing, which
+   * made "n27's signal is below its own normal" an unfalsifiable claim on
+   * screen — the operator could see the verdict but never the baseline.
+   */
+  rssiNormal?(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** M6 interference view (cached) — the noise floor, its trend, controller
    *  serial-link health, the diurnal timeout-rate heatmap, and the current
    *  correlated-degradation state. Read by the INTERFERENCE screen. */
@@ -377,7 +431,6 @@ export interface ViewState {
   filter: string; // substring filter on the overview
   sortKey: 'health' | 'id' | 'name' | 'rssi' | 'seen';
   signalDisplay: 'margin' | 'dbm';
-  followTail: boolean; // log screen
   errorsOnly: boolean; // log screen
   // ── Detail screen: dossier scroll offset (v0.22) ──
   detailScroll: number; // index of the first visible dossier row (renderer clamps + writes back)

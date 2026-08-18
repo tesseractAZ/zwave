@@ -482,6 +482,13 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       requestConfigParams: () => {},
       ackEvent: (seq: number) => seq === 42,
       routeStability: (n: number) => ({ changes: n, hours: 48 }),
+      // v0.35 additions — each one an exemplar from the SAME family the hole
+      // came from: a capability the data layer implements and a screen reads.
+      routeFailures: (n: number) => [{ t: 1000 + n, between: [n, n + 1] as [number, number] }],
+      evidenceCoverage: (n: number) => ({ firstSeenAt: n, samples: n * 2, freshSamples: n, statusFeedLive: true, statsFeedLive: false }),
+      evidenceCoarse: (n: number) => [{ t0: n, samples: n }],
+      falsePositives: (k: string) => (k === 'route-churn' ? 4 : 0),
+      rssiNormal: (n: number) => ({ median: -n, scale: 3, ready: true, days: 7 }),
   } as never);
   const provider = src.createTuiDataProvider({
     zwaveData: bridged, refreshMs: 60_000, routePollMs: 60_000, log: () => {},
@@ -490,6 +497,13 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
     assert.equal(provider.provider.ackEvent?.(42), true, 'ack must reach the data layer');
     assert.equal(provider.provider.ackEvent?.(1), false, 'and carry its real answer back');
     assert.deepEqual(provider.provider.routeStability?.(7), { changes: 7, hours: 48 });
+    assert.deepEqual(provider.provider.routeFailures?.(7), [{ t: 1007, between: [7, 8] }]);
+    assert.deepEqual(provider.provider.evidenceCoverage?.(7),
+      { firstSeenAt: 7, samples: 14, freshSamples: 7, statusFeedLive: true, statsFeedLive: false });
+    assert.deepEqual(provider.provider.evidenceCoarse?.(7), [{ t0: 7, samples: 7 }]);
+    assert.equal(provider.provider.falsePositives?.('route-churn'), 4);
+    assert.equal(provider.provider.falsePositives?.('dead-flap'), 0, 'and carries a real 0, not a default one');
+    assert.deepEqual(provider.provider.rssiNormal?.(62), { median: -62, scale: 3, ready: true, days: 7 });
   } finally {
     provider.stop();
   }
