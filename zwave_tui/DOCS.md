@@ -2852,11 +2852,32 @@ The full read path each frame: Remedy `symptomBlock` → `planFor(sym, node, { w
 
 **Option hygiene.** `clean()` strips `undefined` keys (and `log`) from the options before the `{ ...DEFAULTS, ...clean(opts) }` spread, so an explicitly-passed `undefined` can never clobber a default with `undefined`.
 
-### 9.7 Known scoping limitations (as-built)
+### 9.7 Evidence starvation, and the verification probes (v0.36)
+
+The ledger's floors are sound and the detector's are sound, and between them lay a gap that made the whole loop inert on a real mesh. A 39-hour post-deploy audit of v0.35 found **16 of 16 closed episodes scored `unverifiable`**, feeding neither arm, with the persisted ledger holding one control kind and zero action arms after months of operation.
+
+The cause is an asymmetry, not a bad constant:
+
+| | evidence required |
+|---|---|
+| **Detector** (`symptoms.ts`, `latestFresh`) | **one** fresh reading |
+| **Verifier** (`outcomes.ts`, `MIN_OBS`) | **three** fresh readings in *each* of two 5-minute windows |
+
+A detector is allowed to fire on evidence the verifier is forbidden to accept. On a quiet node the only traffic is the add-on's own liveness probe at `staleMs` (120 min by default), so the arithmetic is roughly 72× short and the verdict is settled before the episode opens — the system's own probe cadence guarantees the evidence poverty its verifier then fails closed on.
+
+**Three changes close it, none of which lowers a floor.**
+
+1. **The before-window spans the breach** (`degradedSpan`). A symptom surfaces at dwell maturity and the dwell equals the lookback, so a trailing window opened at emission began exactly where the firing observation ended — the reading that proved the node degraded was excluded from the evidence for its own episode. The window now runs from one lookback *before* the breach through to emission. Every sample in that span belongs to the same live symptom, so this adds no other state.
+2. **Verification probes** at the two moments a verdict depends on: when an episode opens (while the symptom is live, filling the degraded window) and when its symptom goes absent (filling the confirmation window). `VERIFY_BURST` is 3 — exactly the verifier's floor, no more traffic than that requires — spaced `VERIFY_SPACING_MS` (70 s) so each is a separate observation rather than three packets carrying one reading's worth of information. Requests **top up**, never stack: a symptom that flaps ten times still owes one burst. They are drained through `drainVerifyRequests` and cleared by `decideAutoPings`, so they pass the **same** gate ladder as every other autonomous write — master switch, boot window, rebuild, storm — and a Dead node is never verification-probed, because the remediation path owns it with its own dwell, backoff and attempt budget.
+3. **`refineBefore`** folds the newly-probed evidence into the open episode's before-window each tick *while the symptom is still live*. Strictly-better only (never fewer readings) and never on a scored episode. The live-ness gate is load-bearing: an episode inside its confirmation window has already recovered, and folding those readings into `before` would quietly compare the node against itself healthy.
+
+**And the silence is now legible.** `OutcomeStore.unverifiable(kind)` counts every episode the ledger could not score, and REMEDY renders it per card (`○ N past episodes of this kind could not be scored — too few readings to judge recovery`). An empty efficacy table reads exactly like a patient one; this is the number that tells an inert ledger from a patient one, and it is suppressed at zero.
+
+### 9.8 Known scoping limitations (as-built)
 
 Two deliberate departures a maintainer must know:
 
-- **Timeout-rate-only scoring.** Success is scored solely by the per-command timeout rate — the primary reliability signal, apt for the return-path / timeout family. A symptom kind whose recovery does *not* show up as a timeout-rate change (a purely RSSI-based weak-signal, or a rate-fallback where the node still responds) yields no measurable improvement and simply reads `unverifiable` / `no-change`, accruing no efficacy. That is honest but incomplete; per-kind recovery metrics are a future refinement.
+- **Per-kind recovery metrics** (`metricOf` → rssi / rtt / rate / flaps / timeout) replaced the original timeout-rate-only scoring; each gates on observations of *its own* signal, because a fresh sample routinely carries a null rssi/rtt and a shared "fresh sample" count would let a median-of-one pass as robust. What remains as-built is that a kind whose recovery shows up in no collected signal still reads `unverifiable` — honest, and now **counted** (§9.7) rather than silent.
 
 - **Marginal (un-banded) arms — a documented diurnal confound.** Each `Episode` records a `band` (from `bandOf(onsetMs)`, the same 6×4h time-of-day bands as `baselines.ts`), but the arm keys are **marginal**: control by `kind`, action by `${kind}|${act}` — band is *not* in either key. DESIGN §3.6's bullet describing the action arm as keyed by `(kind, action, time-of-day band)` is superseded by this as-built decision: per-band keying would need n ≥ `minEpisodes` across 6 bands to learn anything, and comparing a band-summed action rate against an un-banded base rate is a Simpson's-paradox confound. Both arms are kept marginal on purpose, with the diurnal limitation documented rather than papered over.
 
@@ -3496,7 +3517,12 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 | Per-source-IP telnet cap (4) + idle reclaim + TCP keepalive | `telnet/server.ts` | One host taking every telnet slot; silent sockets holding slots forever |
 | Login buffers length-bounded, input ignored while verifying | `session.ts:237, 262, 264` | Buffer abuse; keys racing an in-flight scrypt |
 
-### 11.12 Auto-ping — the one autonomous write (v0.30)
+### 11.12 Auto-ping — the autonomous writes (v0.30, extended v0.36)
+
+> **A probe's answer is judged from evidence, not from the call (v0.36).** The ping verb is `call_service button.press`, and HA's zwave_js ping button awaits `node.async_ping()`, which returns a boolean and raises nothing when the node stays silent. The service call therefore fulfils whether or not the node answered, so the `.catch` around it can only ever fire on "this node has no ping button" or a WebSocket transport fault — never on the outcome auto-ping exists to detect. Through v0.35 the two `did not answer` log lines were unreachable for their stated purpose. `judgeProbeAnswers` now asks the only question that can be answered: `ANSWER_GRACE_MS` (90 s) after a probe, did the node's `lastSeen` advance past the moment we sent it? A node absent from the roster is judged **neither** way — a roster gap is not evidence of a failed probe.
+
+> **Verification probes ride this same runner (v0.36).** The outcome ledger requests them (§9.7); they are cleared by `decideAutoPings` alongside the remediation and liveness lanes precisely so they inherit every gate rather than opening a second, less-guarded path to the mesh, and they are logged to the event ring at info but to the server log only at debug — three probes per episode boundary would otherwise triple the add-on log's auto-ping chatter for a mechanism whose whole purpose is bookkeeping.
+
 
 Everything else in this reference is advisory: the engine detects, explains, and recommends, and a human presses the key. **Auto-ping breaks that rule on purpose and narrowly, so the rule stays meaningful everywhere else.** It is the only code path in the shipped build from a detector to a WS command with no human in the loop.
 

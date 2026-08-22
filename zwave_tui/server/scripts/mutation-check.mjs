@@ -1024,6 +1024,95 @@ const MUTANTS = [
     find: "            c.grey(` · ${rn.days}d · this time-of-day band`)",
     repl: "            c.grey(` · ${rn.days}d`)",
     what: 'the learned normal SAYS it answers for the current time-of-day band' },
+  /* ── v0.36: the learning loop can finally learn ──────────────────────── */
+  { id: 'unverifiable-is-counted', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Restores the pre-v0.36 silence: an unscoreable episode vanishes without
+    // trace, so an inert ledger and a patient one render identically. On the
+    // live mesh that hid 16 discarded episodes out of 16.
+    find: '        unver.set(kind, (unver.get(kind) ?? 0) + 1);',
+    repl: '        void kind;',
+    what: 'an unscoreable episode is COUNTED, so an inert ledger cannot pass for a patient one' },
+  { id: 'unverifiable-feeds-no-arm', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // The counter must not become a back door into the control arm: counting an
+    // episode is not the same as scoring it, and an unscoreable one is still
+    // evidence of nothing.
+    find: "      } else if (ep.verdict === 'unverifiable') {",
+    repl: "      } else if (ep.verdict === 'unverifiable' && false) {",
+    what: 'counting an unscoreable episode never promotes it into an arm' },
+  { id: 'refine-before-strictly-better', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Lets a POORER window overwrite a richer one — the probes would then be
+    // able to make the evidence worse, which is the opposite of the point.
+    find: '      const had = ep.before?.freshN ?? -1;\n      if (window.freshN <= had) return false;',
+    repl: '      const had = ep.before?.freshN ?? -1;\n      void had;',
+    what: 'a refined before-window only ever ADDS readings, never removes them' },
+  { id: 'refine-before-not-after-verdict', file: 'src/zwave/outcomes.ts',
+    find: '      if (!ep || ep.resolvedMs != null || ep.verdict != null) return false;',
+    repl: '      if (!ep) return false;',
+    what: 'a scored episode is history — its evidence is never rewritten',
+    equivalent: true,
+    why: 'resolve() deletes the episode from `open` before setting its verdict, so a resolved episode is never reachable through open.get() and the `!ep` guard alone already refuses it. The clause is defence-in-depth against a future refactor that keeps resolved episodes in the map; the observable invariant is pinned in outcomes.test.ts.' },
+  { id: 'before-window-spans-the-breach',
+    // Back to anchoring the degraded window at emission: the dwell equals the
+    // lookback, so the observation that FIRED the episode falls outside its own
+    // before-window and a quiet node scores unverifiable by arithmetic.
+    file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    find: '  const from = Math.min(sinceMs, now) - windowMs;',
+    repl: '  const from = now - windowMs;',
+    what: 'the degraded window spans the breach that armed the symptom, not just the last 5 minutes' },
+  { id: 'verify-obeys-gates', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Routes verification probes around the suppression ladder — they would
+    // then fire during a storm, a rebuild, the boot window, or with write
+    // actions off, which is a second and less-guarded path to the mesh.
+    find: "  const verify = (input.verifyDue ?? []).filter((id) => candidates.has(id));",
+    repl: "  const verify = input.verifyDue ?? [];",
+    what: 'a verification probe passes every gate auto-ping itself passes' },
+  { id: 'verify-skips-dead-nodes', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Lets the verification lane race the remediation lane on a Dead node,
+    // bypassing its dwell, backoff and 3-attempt budget.
+    find: '  const candidates = new Set(listeningNodes.filter((n) => n.status !== NodeStatus.Dead).map((n) => n.nodeId));',
+    repl: '  const candidates = new Set(listeningNodes.map((n) => n.nodeId));',
+    what: 'a DEAD node is probed by the remediation path only, never by verification' },
+  { id: 'probe-answer-from-evidence', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Calls every probe answered regardless of whether lastSeen moved —
+    // restoring the v0.35 state where an unanswered probe was unobservable.
+    find: '    out.push({ nodeId, answered: seen != null && seen >= at });',
+    repl: '    out.push({ nodeId, answered: true });',
+    what: 'a probe is judged answered only when the node lastSeen actually advanced' },
+  { id: 'probe-answer-waits-grace', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Judges a probe before the round trip could possibly have completed, so
+    // every probe reads as unanswered.
+    find: '    if (now - at < graceMs) continue;',
+    repl: '    if (false) continue;',
+    what: 'a probe is judged only after its round trip has had time to complete' },
+  { id: 'probe-answer-roster-gap', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Calls a node missing from the roster a failed probe — manufacturing the
+    // false alarm this signal exists to avoid.
+    find: '    if (!seenOf.has(nodeId)) continue;',
+    repl: '    if (false) continue;',
+    what: 'a roster gap is judged NEITHER way, never as a failed probe' },
+  { id: 'verify-burst-does-not-stack', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Accumulates instead of topping up: a symptom that flaps ten times would
+    // owe thirty probes.
+    find: '      left: Math.max(cur?.left ?? 0, VERIFY_BURST),',
+    repl: '      left: (cur?.left ?? 0) + VERIFY_BURST,',
+    what: 'repeated verification requests top the budget up, never stack it' },
+  { id: 'verify-burst-is-spaced', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Fires the whole burst in one second — three packets carrying one
+    // observation's worth of information, at three times the airtime.
+    find: '    else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });',
+    repl: '    else this.verifyOwed.set(id, { left, nextAt: now });',
+    what: 'a verification burst is spaced so each probe is a separate reading' },
+  { id: 'unscoreable-row-above-zero', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // A clean ledger boasts a zero on every card, training the operator to stop
+    // reading the line that matters.
+    find: '    if (unver > 0) {',
+    repl: '    if (unver >= 0) {',
+    what: 'the unscoreable-episode line appears only when there ARE unscoreable episodes' },
+  { id: 'bridge-forwards-unverifiable', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    // The v0.33 hole re-opened on the v0.36 member.
+    find: '    unverifiableCount: (k) => zd.unverifiableCount(k),',
+    repl: '    unverifiableCount: () => 0,',
+    what: 'the production bridge forwards unverifiableCount to the data layer' },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

@@ -201,6 +201,10 @@ const DATA: DataProvider = {
   // Keyed to a kind that is actually IN the demo roster — a tally for a symptom
   // no card shows is a tally no screenshot shows.
   falsePositives: (kind) => (kind === 'weak-signal' ? 2 : 0),
+  // v0.36 — a kind whose episodes the ledger could not score. Keyed to a kind
+  // that IS in the demo roster, because a counter for a symptom no card shows
+  // is a counter no screenshot shows.
+  unverifiableCount: (kind) => (kind === 'dead-flap' ? 3 : 0),
   lastUpdated: () => NOW - 1_200,
   ready: () => true,
   lastError: () => null,
