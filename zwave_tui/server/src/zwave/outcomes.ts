@@ -188,6 +188,34 @@ function median(vals: number[]): number | null {
  * Every sample in this span belongs to the same live symptom, so widening to
  * cover the breach adds no other state — only the readings that were the point.
  */
+/**
+ * Is an episode in its confirmation window ready for its AFTER-window probes?
+ *
+ * The after-window is a trailing `windowMs` slice taken at RESOLVE, which
+ * happens `confirmMs` after the symptom went absent. v0.36.0 requested the
+ * confirmation burst the moment the symptom cleared — so its readings were
+ * `confirmMs - burstLength` old by the time the window was cut, and every one
+ * of them had aged out of the very window they existed to fill. The episode
+ * then scored `unverifiable` with three perfectly good answered probes sitting
+ * just outside the frame.
+ *
+ * Probing only once the pending age has reached `confirmMs - windowMs` puts the
+ * whole burst inside the slice that will actually be measured.
+ *
+ * Deliberately NOT solved by widening the after-window instead: the confirm
+ * dwell exists so the after-window settles past the recovery transition, and
+ * stretching it back over the whole confirmation period would re-admit exactly
+ * the unsettled readings that dwell is there to exclude.
+ */
+export function confirmBurstDue(
+  pendingSinceMs: number,
+  now: number,
+  confirmMs: number,
+  windowMs: number,
+): boolean {
+  return now - pendingSinceMs >= Math.max(0, confirmMs - windowMs);
+}
+
 export function degradedSpan(
   samples: EvidenceSample[],
   sinceMs: number,

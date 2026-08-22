@@ -879,6 +879,21 @@ const MUTANTS = [
     what: 'the ledger queue is drained only on a tick that will actually probe',
     equivalent: true,
     why: 'the DRAIN-ORDER invariant cannot be expressed as a single-line substitution here — moving the resolve above the gates requires editing two places at once. It is pinned directly by the runner test "a SUPPRESSED tick does not spend the ledger budget it will not use", which was verified to FAIL against a hand-applied eager-resolve regression.' },
+  { id: 'confirm-burst-lands-in-window', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Restores v0.36.0's mistiming: probe the instant the symptom clears, so
+    // every reading has aged out of the trailing after-window by the time
+    // resolve() cuts it. Observed live on node 55 — four answered probes and
+    // still `unverifiable`.
+    find: '  return now - pendingSinceMs >= Math.max(0, confirmMs - windowMs);',
+    repl: '  return now >= pendingSinceMs;',
+    what: 'the after-window burst waits until the window it fills has opened' },
+  { id: 'confirm-burst-no-negative-wait', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Drops the clamp: a confirm window shorter than the after-window yields a
+    // negative threshold, which is harmless here but would invert if the
+    // comparison were ever reordered — the clamp states the intent.
+    find: '  return now - pendingSinceMs >= Math.max(0, confirmMs - windowMs);',
+    repl: '  return now - pendingSinceMs >= confirmMs - windowMs && confirmMs > windowMs;',
+    what: 'a confirm window shorter than the after-window is due immediately, not never' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
