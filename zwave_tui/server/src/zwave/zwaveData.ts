@@ -62,7 +62,7 @@ import {
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, type BaselineStore } from './baselines';
 import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
-import { createOutcomeStore, windowMetrics, degradedSpan, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
+import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { computeInterference } from './interference';
 
 /**
@@ -601,6 +601,10 @@ class ZwaveDataImpl implements ZwaveData {
    * mesh auto-ping itself would have left alone.
    */
   private readonly verifyOwed = new Map<number, { left: number; nextAt: number }>();
+  /** Episode keys whose after-window burst has already been requested (v0.36.3),
+   *  so the timed request fires once per confirmation window rather than every
+   *  tick from the moment it comes due. */
+  private readonly confirmBurstSent = new Set<string>();
   private outcomesFlushTimer: ReturnType<typeof setInterval> | null = null;
   private baselineFlushTimer: ReturnType<typeof setInterval> | null = null;
   /** M6 interference view, memoized on the sample cadence (heavy coarse fold). */
@@ -1019,7 +1023,6 @@ class ZwaveDataImpl implements ZwaveData {
     const oc = this.outcomes;
     if (!oc) return;
     const CONFIRM_MS = 10 * 60_000;
-    const wasPending = new Set(this.pendingResolve.keys());
     const { toOpen, toResolve } = planEpisodeLifecycle(symptoms, oc.openEpisodes(), this.pendingResolve, now, CONFIRM_MS);
     // Capture the degraded before-window at onset and the settled after-window
     // at resolution (well past the transition, thanks to the confirm window).
@@ -1055,14 +1058,28 @@ class ZwaveDataImpl implements ZwaveData {
       oc.refineBefore(ep.nodeId, ep.kind, this.degradedWindow(ep.nodeId, since, now));
     }
     for (const r of toResolve) oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now));
-    // A symptom that JUST went absent starts the confirmation window. Probe now
-    // so the after-window has something in it when the verdict is computed —
-    // otherwise a quiet node's recovery is unscoreable by arithmetic, and the
-    // episode closes `unverifiable` no matter how genuinely it recovered.
-    for (const key of this.pendingResolve.keys()) {
-      if (wasPending.has(key)) continue;
+    // The AFTER-window burst, timed to land inside the window it fills (v0.36.3).
+    //
+    // v0.36.0 probed the moment the symptom went absent. Those readings were
+    // then ~8 minutes old when `resolve` cut a trailing 5-minute after-window,
+    // so all three had aged out and the episode scored `unverifiable` with
+    // three answered probes sitting just outside the frame — observed live on
+    // node 55. `confirmBurstDue` waits until the pending age reaches
+    // CONFIRM_MS - WINDOW_MS, which is the moment the after-window starts.
+    const WINDOW_MS = 5 * 60_000;
+    for (const [key, since] of this.pendingResolve) {
+      if (this.confirmBurstSent.has(key)) continue;
+      if (!confirmBurstDue(since, now, CONFIRM_MS, WINDOW_MS)) continue;
       const id = Number(key.split(':')[0]);
-      if (Number.isFinite(id)) this.requestVerification(id);
+      if (Number.isFinite(id)) {
+        this.requestVerification(id);
+        this.confirmBurstSent.add(key);
+      }
+    }
+    // Forget keys that left the confirmation window, so a symptom that returns
+    // and clears again gets a fresh burst rather than being remembered forever.
+    for (const key of [...this.confirmBurstSent]) {
+      if (!this.pendingResolve.has(key)) this.confirmBurstSent.delete(key);
     }
   }
 

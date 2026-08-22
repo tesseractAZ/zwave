@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, statSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { wilsonLower, createOutcomeStore, windowMetrics, degradedSpan, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
+import { wilsonLower, createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
 import type { EvidenceSample } from '../src/zwave/evidenceStore';
 import type { SymptomKind } from '../src/zwave/symptoms';
 
@@ -727,4 +727,40 @@ test('the degraded span never reaches into the future, and tolerates since > now
     'a sample stamped in the future is not evidence about the past');
   // A clock nudge could hand us sinceMs > now; the span must stay well-formed.
   assert.deepEqual(degradedSpan(samples, now + 60_000, now, WIN).map((s) => s.t), [now - 1, now]);
+});
+
+/* ── v0.36.3: the after-window burst must land INSIDE the after-window ─────── */
+
+test('the confirm burst waits until the after-window has opened', () => {
+  // Observed live on node 55: four answered verification probes, and the
+  // episode still scored `unverifiable`. The burst fired the moment the symptom
+  // cleared, so by the time resolve() cut a trailing 5-minute window 10 minutes
+  // later, every reading had aged out of the window it existed to fill.
+  const CONFIRM = 10 * 60_000, WIN = 5 * 60_000;
+  const T = 1_000_000;
+  assert.equal(confirmBurstDue(T, T, CONFIRM, WIN), false, 'not the instant it clears');
+  assert.equal(confirmBurstDue(T, T + 4 * 60_000, CONFIRM, WIN), false, 'not while still too early');
+  assert.equal(confirmBurstDue(T, T + WIN, CONFIRM, WIN), true, 'due exactly as the after-window opens');
+  assert.equal(confirmBurstDue(T, T + 9 * 60_000, CONFIRM, WIN), true, 'and stays due');
+});
+
+test('a burst fired when due lands ENTIRELY inside the measured after-window', () => {
+  // The property that matters, stated as arithmetic rather than as a constant:
+  // every probe of the burst must fall in [resolve - windowMs, resolve].
+  const CONFIRM = 10 * 60_000, WIN = 5 * 60_000, SPACING = 70_000, BURST = 3;
+  const T = 1_000_000;
+  const resolveAt = T + CONFIRM;
+  // Earliest moment the burst is allowed to start:
+  let start = T;
+  while (!confirmBurstDue(T, start, CONFIRM, WIN)) start += 1_000;
+  const probes = Array.from({ length: BURST }, (_v, i) => start + i * SPACING);
+  for (const p of probes) {
+    assert.ok(p >= resolveAt - WIN, `probe at +${(p - T) / 1000}s is before the after-window opens`);
+    assert.ok(p <= resolveAt, `probe at +${(p - T) / 1000}s lands after resolve`);
+  }
+});
+
+test('a confirm window shorter than the after-window is due immediately, never negative', () => {
+  assert.equal(confirmBurstDue(1000, 1000, 60_000, 300_000), true,
+    'a degenerate config must not compute a negative wait and stall forever');
 });

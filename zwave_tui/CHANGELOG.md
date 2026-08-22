@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.36.3 — 2026-08-20
+
+**The after-window probes were landing outside the after-window.** v0.36.0
+requested the confirmation burst the instant a symptom went absent. `resolve()`
+runs `CONFIRM_MS` (10 min) later and cuts a trailing `WINDOW_MS` (5 min)
+after-window — so all three readings were roughly eight minutes old by then, and
+every one had aged out of the very window it existed to fill.
+
+Caught in production, not by the suite: node 55, a quiet-but-alive node of
+exactly the class this release targets, took **four answered verification
+probes** and still closed `unverifiable`. The probes worked; they were simply
+measured after they had expired.
+
+`confirmBurstDue` now holds the burst until the pending age reaches
+`CONFIRM_MS - WINDOW_MS` — the moment the after-window opens — so the whole
+burst lands inside the slice that will actually be measured.
+
+**Widening the after-window would have been the wrong repair.** The confirm
+dwell exists precisely so that window settles past the recovery transition;
+stretching it back across the confirmation period would re-admit the unsettled
+readings the dwell is there to exclude. The burst moves, not the window.
+
+Tests state the fix as arithmetic rather than as a constant — every probe of a
+due burst must fall within `[resolve - windowMs, resolve]` — so the property
+survives any later change to the dwell or the window. Two mutants pin it.
+
 ## 0.36.2 — 2026-08-20
 
 **A gated tick was spending the budget it never used.** The runner drained the
