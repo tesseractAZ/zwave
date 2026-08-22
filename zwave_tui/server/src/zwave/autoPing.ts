@@ -117,11 +117,21 @@ export interface AutoPingInput {
   config: AutoPingConfig;
   /** True inside the post-start window, where statuses are not yet trustworthy. */
   booting: boolean;
-  /** Nodes the outcome ledger has asked to probe for episode verification
-   *  (v0.36). Subject to EVERY gate below — a verification probe is a write
-   *  like any other, and must never reach a mesh auto-ping would have left
-   *  alone. */
-  verifyDue?: number[];
+  /**
+   * Nodes the outcome ledger has asked to probe for episode verification
+   * (v0.36). Subject to EVERY gate below — a verification probe is a write like
+   * any other, and must never reach a mesh auto-ping would have left alone.
+   *
+   * A THUNK, not an array, and that is load-bearing (v0.36.2). Draining the
+   * ledger's queue CONSUMES a probe from the node's burst, so evaluating it
+   * while building this input spent the budget on ticks that then returned
+   * early at a suppressor — a 5-minute boot window at one tick a minute could
+   * exhaust an entire 3-probe burst without a single packet reaching the mesh,
+   * and the episode closed `unverifiable` exactly as it had before the fix.
+   * Worse, that is precisely when episodes cluster: a restart re-detects many
+   * symptoms at once. Resolved below, after every gate has passed.
+   */
+  verifyDue?: () => number[];
 }
 
 export interface AutoPingDecision {
@@ -276,7 +286,9 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
    * belong to the remediation path above, with its own dwell and backoff.
    */
   const candidates = new Set(listeningNodes.filter((n) => n.status !== NodeStatus.Dead).map((n) => n.nodeId));
-  const verify = (input.verifyDue ?? []).filter((id) => candidates.has(id));
+  // Resolved HERE, past every suppressor, so a gated tick never spends the
+  // ledger's budget on a probe it is not going to send.
+  const verify = (input.verifyDue?.() ?? []).filter((id) => candidates.has(id));
 
   return { ...base, ping, stale, verify, suppressed: 'none' };
 }
@@ -414,7 +426,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // Not ready == no trustworthy roster yet, which is the same hazard as the
       // post-start window, so it counts as booting rather than as "no nodes".
       booting: !o.ready() || t - startedAt < BOOT_WINDOW_MS,
-      verifyDue: o.verifyRequests?.(t) ?? [],
+      verifyDue: () => o.verifyRequests?.(t) ?? [],
     });
 
     // DECISION TRACE.

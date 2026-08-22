@@ -57,7 +57,7 @@ function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
     controller: over.controller ?? null,
     config: over.config ?? cfg(),
     booting: over.booting ?? false,
-    verifyDue: over.verifyDue,
+    verifyDue: over.verifyDue ? () => over.verifyDue! : undefined,
   });
 }
 
@@ -680,4 +680,50 @@ test('an UNANSWERED probe is warned on both destinations; the answered case stay
   assert.ok(!debugged.some((l) => /answered its probe/.test(l)),
     'and a node that never answered must not also be logged as answering');
   h.stop();
+});
+
+test('a SUPPRESSED tick does not spend the ledger budget it will not use', () => {
+  // The seam defect v0.36.0/.1 shipped: the runner drained the ledger's queue
+  // while building the decision input, and decideAutoPings then returned early
+  // at a suppressor — so a gated tick consumed a probe from the node's burst
+  // without sending one. A 5-minute boot window at one tick a minute could
+  // exhaust a whole 3-probe burst silently, and that is exactly when episodes
+  // cluster, because a restart re-detects many symptoms at once.
+  //
+  // Both halves were individually correct and tested; only their JOIN was wrong.
+  const nodes = mesh(20);
+  for (const [label, over] of [
+    ['boot window', { booting: true }],
+    ['write actions off', { config: cfg({ writeActions: false }) }],
+    ['own switch off', { config: cfg({ enabled: false }) }],
+    ['rebuilding routes', { controller: { isRebuildingRoutes: true } as ControllerSnapshot }],
+  ] as const) {
+    const s = createAutoPingState();
+    let drained = 0;
+    trackEpisodes(s, nodes, T);
+    const d = decideAutoPings({
+      now: T, state: s, nodes,
+      controller: over.controller ?? null,
+      config: over.config ?? cfg(),
+      booting: over.booting ?? false,
+      verifyDue: () => { drained++; return [100]; },
+    });
+    assert.notEqual(d.suppressed, 'none', `${label} should suppress`);
+    assert.deepEqual(d.verify, [], `${label}: nothing may be probed`);
+    assert.equal(drained, 0, `${label}: the queue must not be drained on a tick that sends nothing`);
+  }
+});
+
+test('an UNsuppressed tick drains exactly once', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20);
+  let drained = 0;
+  trackEpisodes(s, nodes, T);
+  const d = decideAutoPings({
+    now: T, state: s, nodes, controller: null, config: cfg(), booting: false,
+    verifyDue: () => { drained++; return [100]; },
+  });
+  assert.equal(d.suppressed, 'none');
+  assert.deepEqual(d.verify, [100]);
+  assert.equal(drained, 1, 'drained once, and only once');
 });

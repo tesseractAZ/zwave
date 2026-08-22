@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.36.2 — 2026-08-20
+
+**A gated tick was spending the budget it never used.** The runner drained the
+outcome ledger's verification queue while *building* the decision input, and
+`decideAutoPings` then returned early at any suppressor — so a tick that sent
+nothing still consumed a probe from the node's burst. At one tick a minute, a
+five-minute boot window could exhaust an entire three-probe burst without a
+single packet reaching the mesh, and the episode closed `unverifiable` exactly
+as it had before v0.36.0 fixed anything.
+
+That window is the worst possible one to lose: a restart re-detects many
+symptoms at once, so episodes cluster precisely there. The same held for a route
+rebuild and for a storm.
+
+`verifyDue` is now a **thunk**, resolved past every gate, so the queue is
+touched only on a tick that will actually probe.
+
+Both halves of this were individually correct and individually tested — the pure
+decision function given a list, and the queue drained in isolation. Only their
+join was wrong, which is why nothing caught it until the deployed release was
+watched in production. A runner test now pins the invariant across all four
+suppressors, and was verified to fail against a hand-applied regression.
+
 ## 0.36.1 — 2026-08-20
 
 **A new autonomous write must be greppable.** v0.36.0's verification probes
