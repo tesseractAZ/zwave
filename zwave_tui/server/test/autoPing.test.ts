@@ -625,3 +625,59 @@ test('a node that vanished from the roster is judged NEITHER way', () => {
   assert.deepEqual(out, []);
   assert.equal(s.awaitingAnswer.size, 0, 'but it is dropped rather than pending forever');
 });
+
+test('a verification probe is visible in BOTH log destinations, not just the ring', async () => {
+  // This file's own rule, one screen up: "An autonomous action must be visible
+  // in BOTH." v0.36.0 shipped these to the server log at debug only, and the
+  // consequence was immediate — the first live deploy could not be verified
+  // from the container log at all, which is the same shape of failure that once
+  // had auto-ping itself diagnosed as a no-op.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const pinged: number[] = [];
+  const server: string[] = [];
+  const ring: string[] = [];
+  const nodes = mesh(20);
+  const log2 = Object.assign((m: string) => { server.push(m); }, { debug: () => {} });
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async (n) => { pinged.push(n); },
+    log: (_s, _n, text) => { ring.push(text); },
+    log2,
+    verifyRequests: () => [100],
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN;
+  h.tick();
+  assert.deepEqual(pinged, [100], 'the probe fired');
+  assert.ok(ring.some((l) => /verification probe/.test(l)), 'event ring records it');
+  assert.ok(server.some((l) => /verification probe/.test(l)),
+    `the container log an operator greps must record it too — got ${JSON.stringify(server)}`);
+  h.stop();
+});
+
+test('an UNANSWERED probe is warned on both destinations; the answered case stays quiet', async () => {
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const server: string[] = [];
+  const debugged: string[] = [];
+  // A node that never updates lastSeen: every probe to it goes unanswered.
+  const silent = node(100, { stats: { lastSeen: null } as never });
+  const nodes = [node(1, { isController: true }), silent];
+  const log2 = Object.assign((m: string) => { server.push(m); }, { debug: (m: string) => { debugged.push(m); } });
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: () => {}, log2,
+    verifyRequests: () => (clock === T + BOOT_WINDOW_MS + MIN ? [100] : []),
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN;
+  h.tick();                       // probe fires
+  clock += 5 * MIN;               // well past the answer grace
+  h.tick();                       // judged
+  assert.ok(server.some((l) => /did NOT answer/.test(l)),
+    `an unanswered probe is the signal — it must reach the container log: ${JSON.stringify(server)}`);
+  assert.ok(!debugged.some((l) => /answered its probe/.test(l)),
+    'and a node that never answered must not also be logged as answering');
+  h.stop();
+});
