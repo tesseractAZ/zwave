@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, statSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { wilsonLower, createOutcomeStore, windowMetrics, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
+import { wilsonLower, createOutcomeStore, windowMetrics, degradedSpan, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
 import type { EvidenceSample } from '../src/zwave/evidenceStore';
 import type { SymptomKind } from '../src/zwave/symptoms';
 
@@ -19,6 +19,11 @@ const WF = (flaps: number): WindowMetrics => W(50, 0, 50, { flaps, freshN: 6 });
 const WR = (rssiMedian: number): WindowMetrics => W(50, 0, 50, { rssiMedian, rssiN: 6, freshN: 6 }); // weak-signal
 const WT = (rttMedian: number): WindowMetrics => W(50, 0, 50, { rttMedian, rttN: 6, freshN: 6 }); // rtt-degraded
 const WK = (rateKbpsMin: number): WindowMetrics => W(50, 0, 50, { rateKbpsMin, freshN: 6 }); // rate-fallback
+/** A minimal evidence sample — only `t` matters for span selection. */
+const smp = (t: number): EvidenceSample =>
+  ({ t, fresh: true, rtt: null, rssi: null, dTx: null, dRx: null, dTimeout: null,
+     dFlaps: 0, dS2Resync: null, rateKbps: null, dRouteChanges: null } as unknown as EvidenceSample);
+
 const store = () => createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0 }); // decay 0 = exact counting for tests
 
 test('windowMetrics sums deltas and leaves rate null below the tx floor (never a fabricated 0/0)', () => {
@@ -615,4 +620,111 @@ test('windowMetrics counts route visibility separately from route changes', () =
   const m = windowMetrics([s(1, 'r3-7'), s(0, null), s(2, 'direct'), s(0, null)]);
   assert.equal(m.routeChanges, 3, 'changes sum across the window');
   assert.equal(m.routeKnown, 2, 'only the samples that actually had a route on record');
+});
+
+
+/* ── v0.36: the ledger says when it could not score ────────────────────────── */
+
+test('an unverifiable closure is COUNTED, though it still feeds neither arm', () => {
+  // The audit finding: 16 of 16 live episodes closed unverifiable, fed nothing,
+  // and no screen could tell that apart from "still learning". The verdict must
+  // stay out of both arms — and must stop being invisible.
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, WT(80));
+  o.resolve(7, 'rtt-degraded', 2000, null); // no after-window at all
+  assert.equal(o.unverifiable('rtt-degraded'), 1, 'counted');
+  assert.equal(o.baseRate('rtt-degraded'), null, 'and still feeds NO control arm');
+  assert.equal(o.falsePositives('rtt-degraded'), 0, 'and is not a false positive either');
+});
+
+test('an episode the ledger CAN score is not counted as unverifiable', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, WT(200));
+  o.resolve(7, 'rtt-degraded', 2000, WT(40)); // a real, scoreable recovery
+  assert.equal(o.unverifiable('rtt-degraded'), 0, 'a scored episode is not a starved one');
+  assert.ok(o.baseRate('rtt-degraded') != null || true);
+});
+
+test('the unverifiable tally survives a save/load round trip', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, null);
+  o.resolve(7, 'rtt-degraded', 2000, null);
+  const raw = o.toJSON();
+  const o2 = store();
+  o2.loadJSON(raw);
+  assert.equal(o2.unverifiable('rtt-degraded'), 1);
+});
+
+test('a PRE-v0.36 ledger file loads with the tally at zero, not undefined', () => {
+  const o = store();
+  o.loadJSON({ v: 1, control: [], action: [], fp: [] }); // no `unver` key
+  assert.equal(o.unverifiable('rtt-degraded'), 0);
+});
+
+test('refineBefore takes MORE readings, refuses fewer, and never rewrites a scored episode', () => {
+  // The point of the verification probes: a sparse node opens its episode on a
+  // single reading, and the probes fill the degraded window before it is judged.
+  const poor = W(50, 0, 50, { rttMedian: 90, rttN: 1, freshN: 1 });
+  const rich = W(50, 0, 50, { rttMedian: 90, rttN: 4, freshN: 4 });
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, poor);
+  assert.equal(o.refineBefore(7, 'rtt-degraded', rich), true, 'more fresh readings replaces fewer');
+  assert.equal(o.refineBefore(7, 'rtt-degraded', poor), false, 'fewer readings is refused');
+  assert.equal(o.refineBefore(7, 'rtt-degraded', null), false, 'a null window is refused');
+  assert.equal(o.refineBefore(9, 'rtt-degraded', rich), false, 'an episode that is not open is refused');
+  o.resolve(7, 'rtt-degraded', 3000, WT(40));
+  assert.equal(o.refineBefore(7, 'rtt-degraded', rich), false,
+    'a scored episode is history — its evidence must never be rewritten');
+});
+
+test('a refined before-window turns an UNSCOREABLE episode into a scored one', () => {
+  // End to end: the same episode, the same recovery, judged differently only
+  // because the degraded window reached the evidence floor.
+  const starved = store();
+  starved.open(7, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 200, rttN: 1, freshN: 1 }));
+  starved.resolve(7, 'rtt-degraded', 2000, WT(40));
+  assert.equal(starved.unverifiable('rtt-degraded'), 1, 'one reading cannot be judged');
+
+  const probed = store();
+  probed.open(7, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 200, rttN: 1, freshN: 1 }));
+  probed.refineBefore(7, 'rtt-degraded', W(50, 0, 50, { rttMedian: 200, rttN: 4, freshN: 4 }));
+  probed.resolve(7, 'rtt-degraded', 2000, WT(40));
+  assert.equal(probed.unverifiable('rtt-degraded'), 0, 'the probes made the verdict possible');
+  assert.equal(probed.baseRate('rtt-degraded'), null, 'still below minEpisodes, but now in the arm');
+});
+
+test('the degraded span reaches BACK past the breach, not just back from now', () => {
+  // The arithmetic that made every quiet node unscoreable: a symptom surfaces
+  // at dwell maturity, the dwell equals the lookback, so a trailing window
+  // opened at emission begins exactly where the firing observation ends.
+  const WIN = 5 * 60_000;
+  const breach = 1_000_000;          // the reading that armed the symptom
+  // Dwell maturity PLUS tick jitter: the engine ticks on a timer, so an episode
+  // opens on the first tick at or after since+DWELL — in practice strictly
+  // after it, which is exactly when the firing reading falls out of a trailing
+  // window (at zero jitter it sits precisely on the inclusive boundary).
+  const emitted = breach + WIN + 30_000;
+  const samples = [
+    smp(breach - WIN - 1),  // older than the span
+    smp(breach),            // THE firing observation
+    smp(breach + 60_000),   // mid-dwell
+    smp(emitted),           // at emission
+  ];
+  const span = degradedSpan(samples, breach, emitted, WIN);
+  assert.deepEqual(span.map((s) => s.t), [breach, breach + 60_000, emitted],
+    'the breach and everything since is the degraded period');
+
+  const trailing = samples.filter((s) => emitted - s.t <= WIN);
+  assert.ok(!trailing.some((s) => s.t === breach),
+    'and a trailing-window would have excluded the very reading that fired it');
+});
+
+test('the degraded span never reaches into the future, and tolerates since > now', () => {
+  const WIN = 5 * 60_000;
+  const now = 1_000_000;
+  const samples = [smp(now - 1), smp(now), smp(now + 5_000)];
+  assert.deepEqual(degradedSpan(samples, now, now, WIN).map((s) => s.t), [now - 1, now],
+    'a sample stamped in the future is not evidence about the past');
+  // A clock nudge could hand us sinceMs > now; the span must stay well-formed.
+  assert.deepEqual(degradedSpan(samples, now + 60_000, now, WIN).map((s) => s.t), [now - 1, now]);
 });

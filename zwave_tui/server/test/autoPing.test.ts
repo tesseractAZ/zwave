@@ -15,6 +15,7 @@ import {
   decideAutoPings,
   noteAttempt,
   trackEpisodes,
+  judgeProbeAnswers,
   type AutoPingConfig,
   type AutoPingState,
 } from '../src/zwave/autoPing';
@@ -48,7 +49,7 @@ function mesh(live: number, extra: NodeSnapshot[] = []): NodeSnapshot[] {
 
 /** Drive one tick: track episodes, then decide. */
 function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
-  config?: AutoPingConfig; controller?: ControllerSnapshot | null; booting?: boolean;
+  config?: AutoPingConfig; controller?: ControllerSnapshot | null; booting?: boolean; verifyDue?: number[];
 } = {}) {
   trackEpisodes(state, nodes, now);
   return decideAutoPings({
@@ -56,6 +57,7 @@ function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
     controller: over.controller ?? null,
     config: over.config ?? cfg(),
     booting: over.booting ?? false,
+    verifyDue: over.verifyDue,
   });
 }
 
@@ -526,4 +528,100 @@ test('the probe log line reports MEASURED silence, never just the threshold', as
     `measured silence (~${silence}m) must appear, got: ${probe}`);
   assert.ok(probe!.includes('threshold 240m'), 'the threshold is context, labelled as such');
   assert.ok(!/unheard for 240m/.test(probe!), 'the measured value must not equal-by-construction the threshold');
+});
+
+/* ── v0.36: verification probes ride the SAME gate ladder ──────────────────── */
+
+test('a ledger verification request is cleared when every gate passes', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20);
+  const d = tick(s, nodes, T, { verifyDue: [100, 101] });
+  assert.deepEqual(d.verify, [100, 101]);
+});
+
+test('verification probes obey EVERY suppressor auto-ping obeys', () => {
+  // The whole reason these route through here instead of going straight out: a
+  // verification probe is a write, and must never reach a mesh that auto-ping
+  // itself would have left alone.
+  const nodes = mesh(20);
+  for (const [label, over] of [
+    ['own switch off', { config: cfg({ enabled: false }) }],
+    ['write actions off', { config: cfg({ writeActions: false }) }],
+    ['boot window', { booting: true }],
+    ['rebuilding routes', { controller: { isRebuildingRoutes: true } as ControllerSnapshot }],
+  ] as const) {
+    const s = createAutoPingState();
+    const d = tick(s, nodes, T, { ...over, verifyDue: [100] });
+    assert.deepEqual(d.verify, [], `verification leaked past: ${label}`);
+    assert.notEqual(d.suppressed, 'none');
+  }
+});
+
+test('a DEAD node is never verification-probed — the remediation path owns it', () => {
+  // Otherwise the two lanes would race: remediation has a dwell, a backoff and
+  // a 3-attempt budget, and verification has none of that.
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  const d = tick(s, nodes, T, { verifyDue: [7, 100] });
+  assert.deepEqual(d.verify, [100], 'the dead node is dropped, the live one kept');
+});
+
+test('a verification request for an unknown node is dropped, not fabricated', () => {
+  const s = createAutoPingState();
+  const d = tick(s, createAutoPingState() && mesh(20), T, { verifyDue: [999] });
+  assert.deepEqual(d.verify, []);
+});
+
+test('a storm suppresses verification along with everything else', () => {
+  const s = createAutoPingState();
+  const many = Array.from({ length: 12 }, (_v, i) => dead(200 + i));
+  const nodes = mesh(6, many);
+  const d = tick(s, nodes, T, { verifyDue: [100] });
+  assert.equal(d.suppressed, 'storm');
+  assert.deepEqual(d.verify, []);
+});
+
+/* ── v0.36: a probe's ANSWER is judged from evidence, not from the call ────── */
+
+test('a probe whose node lastSeen advanced is judged ANSWERED', () => {
+  // The service call cannot tell us: HA's ping button awaits async_ping(), which
+  // returns a boolean and raises nothing on silence. lastSeen is the only
+  // observable that separates "the probe got through" from "we sent a packet
+  // into the dark".
+  const s = createAutoPingState();
+  s.awaitingAnswer.set(7, T);
+  const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 5_000 } as never })], T + 120_000);
+  assert.deepEqual(out, [{ nodeId: 7, answered: true }]);
+  assert.equal(s.awaitingAnswer.size, 0, 'and the pending entry is cleared');
+});
+
+test('a probe whose node stayed silent is judged UNANSWERED — the signal that never existed', () => {
+  const s = createAutoPingState();
+  s.awaitingAnswer.set(7, T);
+  const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T - 60_000 } as never })], T + 120_000);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false }]);
+});
+
+test('a node that has NEVER been heard from is unanswered, not silently skipped', () => {
+  const s = createAutoPingState();
+  s.awaitingAnswer.set(7, T);
+  const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: null } as never })], T + 120_000);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false }]);
+});
+
+test('a probe is NOT judged before its grace period — no verdict on an in-flight round trip', () => {
+  const s = createAutoPingState();
+  s.awaitingAnswer.set(7, T);
+  assert.deepEqual(judgeProbeAnswers(s, [node(7)], T + 10_000), []);
+  assert.equal(s.awaitingAnswer.size, 1, 'still pending, still judgeable later');
+});
+
+test('a node that vanished from the roster is judged NEITHER way', () => {
+  // A roster gap is not evidence of a failed probe, and calling it one would
+  // manufacture exactly the false alarm this signal exists to avoid.
+  const s = createAutoPingState();
+  s.awaitingAnswer.set(7, T);
+  const out = judgeProbeAnswers(s, [node(8)], T + 120_000);
+  assert.deepEqual(out, []);
+  assert.equal(s.awaitingAnswer.size, 0, 'but it is dropped rather than pending forever');
 });

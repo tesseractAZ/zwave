@@ -331,3 +331,67 @@ test('feed badges go DARK when the socket drops — a subscription is not livene
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/* ── v0.36: the verification-probe queue ───────────────────────────────────── */
+
+test('drainVerifyRequests hands out ONE node per tick, spaced, and stops after the burst', async () => {
+  // Three probes is exactly the verifier's evidence floor; they must land as
+  // three separate readings across the window, not three packets in a second.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-verify-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const q = zd as unknown as { requestVerification: (n: number) => void };
+    q.requestVerification(7);
+    const t0 = 1_800_000_000_000;
+    assert.deepEqual(zd.drainVerifyRequests(t0), [7], 'first probe is due immediately');
+    assert.deepEqual(zd.drainVerifyRequests(t0 + 1_000), [], 'the next is spaced, not back-to-back');
+    assert.deepEqual(zd.drainVerifyRequests(t0 + 80_000), [7], 'second lands after the spacing');
+    assert.deepEqual(zd.drainVerifyRequests(t0 + 160_000), [7], 'third');
+    assert.deepEqual(zd.drainVerifyRequests(t0 + 240_000), [], 'burst exhausted — it does not probe forever');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('repeated requests CAP the outstanding budget — a flapping symptom cannot stack bursts', async () => {
+  // Top-up is intended: a second boundary (the symptom going absent) genuinely
+  // wants a fresh burst for the after-window. What must never happen is
+  // ACCUMULATION — a symptom that flaps ten times must not owe thirty probes.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-verify2-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const q = zd as unknown as { requestVerification: (n: number) => void };
+    const t0 = 1_800_000_000_000;
+    for (let i = 0; i < 10; i++) q.requestVerification(7); // ten flaps, back to back
+    let fired = 0;
+    for (let i = 0; i < 40; i++) if (zd.drainVerifyRequests(t0 + i * 80_000).length) fired++;
+    assert.equal(fired, 3, `ten requests must still owe ONE burst, not thirty probes — fired ${fired}`);
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with no engine configured the queue is inert — no probes requested at all', async () => {
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha, { refreshMs: 80, routePollMs: 120, driverWsUrl: null });
+  try {
+    const q = zd as unknown as { requestVerification: (n: number) => void };
+    q.requestVerification(7);
+    assert.deepEqual(zd.drainVerifyRequests(Date.now()), [],
+      'no outcome ledger means nothing to verify — and nothing to write to the mesh for');
+  } finally {
+    zd.stop();
+  }
+});

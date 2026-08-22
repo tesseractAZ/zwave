@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.36.0 — 2026-08-20
+
+**The learning loop can finally learn.** A post-deploy audit of v0.35 running on
+the live 39-node mesh found the outcome ledger structurally inert: **16 of 16
+episodes closed in a 39-hour window scored `unverifiable`**, feeding neither
+arm, with the persisted ledger holding one control kind and zero action arms
+after months of operation. Nothing was broken in the sense of a bug — every
+floor was doing exactly what it was written to do. The gap was between them.
+
+### The asymmetry
+
+| | evidence required |
+|---|---|
+| Detector (`latestFresh`) | **one** fresh reading |
+| Verifier (`MIN_OBS`) | **three** fresh readings in *each* of two 5-minute windows |
+
+A detector allowed to fire on evidence the verifier is forbidden to accept —
+on nodes whose sample rate the add-on itself schedules. A quiet node's only
+traffic is the liveness probe at 120-minute intervals, roughly 72× short of
+three-per-five-minutes, so the verdict was settled before the episode opened.
+
+**No floor was lowered to fix this.** Lowering them would manufacture confident
+verdicts out of medians-of-one, which is the fabrication this codebase exists
+to refuse. Three changes close the gap by supplying evidence instead:
+
+- **The before-window now spans the breach.** A symptom surfaces at dwell
+  maturity, and the dwell equals the lookback — so a trailing window opened at
+  emission began exactly where the firing observation ended, and the reading
+  that proved the node degraded was excluded from the evidence for its own
+  episode. `degradedSpan` runs from one lookback before the breach through to
+  emission; every sample in it belongs to the same live symptom.
+- **Verification probes** at the two moments a verdict depends on — episode
+  open (filling the degraded window while the symptom is live) and symptom
+  absence (filling the confirmation window). Three probes, exactly the
+  verifier's floor and no more traffic than that requires, spaced 70 s so each
+  is a separate observation rather than three packets carrying one reading's
+  worth of information. Requests top up, never stack: a symptom that flaps ten
+  times still owes one burst. They are cleared by `decideAutoPings` alongside
+  the existing lanes, so they pass the **same** gate ladder as every other
+  autonomous write — master switch, boot window, rebuild, storm — and a Dead
+  node is never verification-probed, because the remediation path owns it with
+  its own dwell, backoff and attempt budget.
+- **`refineBefore`** folds probe evidence into an open episode's before-window
+  each tick *while the symptom is still live*. Strictly-better only, never on a
+  scored episode. The live-ness gate is load-bearing: an episode inside its
+  confirmation window has already recovered, and folding those readings into
+  `before` would quietly compare the node against itself healthy.
+
+### The silence is now legible
+
+`OutcomeStore.unverifiable(kind)` counts every episode the ledger could not
+score, and REMEDY renders it per card: `○ 16 past episodes of this kind could
+not be scored — too few readings to judge recovery`. An empty efficacy table
+reads exactly like a patient one; this is the number that tells an inert ledger
+from a patient one. Suppressed at zero, persisted, and absent from pre-v0.36
+files without complaint.
+
+### Auto-ping could not tell whether a probe was answered
+
+The ping verb is `call_service button.press`, and HA's zwave_js ping button
+awaits `node.async_ping()` — which returns a boolean and raises nothing when
+the node stays silent. The service call fulfils either way, so the `.catch`
+around it could only ever fire on "no ping button" or a WS transport fault,
+never on the outcome auto-ping exists to detect. Both `did not answer` log
+lines were unreachable for their stated purpose.
+
+`judgeProbeAnswers` now asks the only question that has an answer: 90 seconds
+after a probe, did the node's `lastSeen` advance past the moment we sent it? A
+node missing from the roster is judged **neither** way — a roster gap is not
+evidence of a failed probe, and calling it one would manufacture exactly the
+false alarm this signal exists to avoid.
+
+### Documentation
+
+DOCS §9.7 is new (evidence starvation and the probes); §11.12 documents the
+probe-answer truth and the verification lane. The as-built limitations section
+had claimed timeout-rate-only scoring with per-kind metrics as "a future
+refinement" long after they shipped — corrected in both DOCS and the source
+comment an auditor would read to understand the mechanism.
+
+### Guards
+
+729 tests. 203 mutants, 14 new this release covering: the unscoreable counter
+(and that counting never promotes an episode into an arm), refineBefore's
+strictly-better and never-after-scoring rules, the breach-spanning window, the
+verify lane's gate obedience and dead-node exclusion, probe-answer judging in
+all three states (answered / silent / roster gap), burst non-stacking and
+spacing, the zero-suppressed REMEDY row, and the production bridge forwarding.
+
 ## 0.35.0 — 2026-08-17
 
 **Everything the engine already knew, and never said.** An audit of declared-but-

@@ -316,6 +316,16 @@ export interface DataProvider {
    */
   falsePositives?(kind: SymptomKind): number;
   /**
+   * How many episodes of this kind the ledger closed `unverifiable` (v0.36).
+   *
+   * The counter that makes a structurally-inert learning loop legible. An
+   * empty efficacy table reads identically whether the ledger is patiently
+   * gathering data or has been discarding every episode it ever closed; this
+   * is the number that tells those two apart, and on the live mesh it was 16
+   * out of 16 before anything surfaced it.
+   */
+  unverifiableCount?(kind: SymptomKind): number;
+  /**
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.
    *

@@ -111,6 +111,10 @@ async function main(): Promise<void> {
       controller: () => provider.controller(),
       ready: () => provider.ready(),
       ping: (n) => actions.ping(n),
+      // v0.36: the outcome ledger's verification probes ride the same runner,
+      // so they inherit every gate auto-ping already applies rather than
+      // opening a second, less-guarded path to the mesh.
+      verifyRequests: (now) => zwaveData.drainVerifyRequests(now),
       log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
       log2: log,
       config: {

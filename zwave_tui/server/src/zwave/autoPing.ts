@@ -84,10 +84,28 @@ export interface AutoPingState {
   deadSince: Map<number, number>;
   /** nodeId → epoch ms of the last STALE (liveness) probe. */
   lastStaleAt: Map<number, number>;
+  /**
+   * nodeId → epoch ms of a probe whose ANSWER has not been checked yet (v0.36).
+   *
+   * The ping verb is an HA `button.press` service call, and HA's zwave_js ping
+   * button awaits `node.async_ping()`, which returns a boolean and raises
+   * nothing when the node stays silent. So the promise resolves either way and
+   * the `.catch` around it can only ever fire on "this node has no ping button"
+   * or a WebSocket transport fault — never on the outcome auto-ping exists to
+   * detect. Whether the node ANSWERED is therefore not knowable from the call;
+   * it is knowable from the evidence, by asking a moment later whether the
+   * node's `lastSeen` moved.
+   */
+  awaitingAnswer: Map<number, number>;
 }
 
+/** How long to wait before judging whether a probe was answered (v0.36).
+ *  A ping is a round trip plus a stats push; 90 s is generous for a routed
+ *  mesh hop and still well inside one tick of slack. */
+const ANSWER_GRACE_MS = 90_000;
+
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map() };
 }
 
 export interface AutoPingInput {
@@ -99,6 +117,11 @@ export interface AutoPingInput {
   config: AutoPingConfig;
   /** True inside the post-start window, where statuses are not yet trustworthy. */
   booting: boolean;
+  /** Nodes the outcome ledger has asked to probe for episode verification
+   *  (v0.36). Subject to EVERY gate below — a verification probe is a write
+   *  like any other, and must never reach a mesh auto-ping would have left
+   *  alone. */
+  verifyDue?: number[];
 }
 
 export interface AutoPingDecision {
@@ -113,6 +136,8 @@ export interface AutoPingDecision {
    * starved by the cap.
    */
   stale: number[];
+  /** Ledger-requested verification probes cleared for this tick (v0.36). */
+  verify: number[];
   /** Why nothing was pinged (or 'none' when the gates all passed). */
   suppressed: AutoPingSuppression;
   /** Listening nodes currently Dead — the storm-guard numerator. */
@@ -172,7 +197,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const { now, nodes, controller, config, booting } = input;
   const listeningNodes = nodes.filter(isPingCandidate);
   const dead = listeningNodes.filter((n) => n.status === NodeStatus.Dead);
-  const base = { ping: [] as number[], stale: [] as number[], deadListening: dead.length,
+  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], deadListening: dead.length,
     listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
   if (!config.enabled) return { ...base, suppressed: 'disabled' };
@@ -238,7 +263,52 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
     base.stalestMs = due.length ? (due[0].seen == null ? null : now - due[0].seen) : null;
   }
 
-  return { ...base, ping, stale, suppressed: 'none' };
+  /* ── verification probes (v0.36) ──────────────────────────────────────
+   *
+   * The outcome ledger asks for these when an episode opens and when its
+   * symptom goes absent, because on a quiet node neither window can otherwise
+   * reach the verifier's evidence floor and the verdict is `unverifiable`
+   * before it is computed. They arrive here rather than going straight out so
+   * they pass the SAME ladder as every other autonomous write: master gate,
+   * boot window, rebuild, storm — all already applied above.
+   *
+   * Only nodes that are ping candidates and NOT Dead: a dead node's probes
+   * belong to the remediation path above, with its own dwell and backoff.
+   */
+  const candidates = new Set(listeningNodes.filter((n) => n.status !== NodeStatus.Dead).map((n) => n.nodeId));
+  const verify = (input.verifyDue ?? []).filter((id) => candidates.has(id));
+
+  return { ...base, ping, stale, verify, suppressed: 'none' };
+}
+
+/**
+ * Judge whether earlier probes were ANSWERED, from evidence rather than from
+ * the service call (v0.36).
+ *
+ * Returns one entry per probe old enough to judge, and clears it from the
+ * pending map. `answered` is true when the node's `lastSeen` advanced past the
+ * moment we probed it — the only observable that distinguishes "the probe got
+ * through" from "we sent a packet into the dark". Pure: the caller logs.
+ */
+export function judgeProbeAnswers(
+  state: AutoPingState,
+  nodes: NodeSnapshot[],
+  now: number,
+  graceMs = ANSWER_GRACE_MS,
+): { nodeId: number; answered: boolean }[] {
+  const seenOf = new Map<number, number | null>();
+  for (const n of nodes) seenOf.set(n.nodeId, n.stats?.lastSeen ?? null);
+  const out: { nodeId: number; answered: boolean }[] = [];
+  for (const [nodeId, at] of [...state.awaitingAnswer]) {
+    if (now - at < graceMs) continue;
+    state.awaitingAnswer.delete(nodeId);
+    // A node absent from the roster cannot be judged either way — say nothing
+    // rather than call a roster gap a failed probe.
+    if (!seenOf.has(nodeId)) continue;
+    const seen = seenOf.get(nodeId) ?? null;
+    out.push({ nodeId, answered: seen != null && seen >= at });
+  }
+  return out;
 }
 
 /**
@@ -318,6 +388,9 @@ export interface AutoPingRunnerOptions {
   config: AutoPingConfig;
   tickMs?: number;
   now?: () => number;
+  /** Drain the outcome ledger's pending verification probes (v0.36). Optional:
+   *  without it the runner behaves exactly as it did before. */
+  verifyRequests?: (now: number) => number[];
 }
 
 export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tick: () => void } {
@@ -341,6 +414,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // Not ready == no trustworthy roster yet, which is the same hazard as the
       // post-start window, so it counts as booting rather than as "no nodes".
       booting: !o.ready() || t - startedAt < BOOT_WINDOW_MS,
+      verifyDue: o.verifyRequests?.(t) ?? [],
     });
 
     // DECISION TRACE.
@@ -396,10 +470,15 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
         `(threshold ${Math.round(o.config.staleMs / 60_000)}m) — liveness probe`;
       o.log('info', nodeId, msg);
       o.log2?.(msg);
+      // The service call resolving proves only that HA ACCEPTED the request —
+      // its ping button returns a boolean and raises nothing when the node
+      // stays silent, so the answer is judged from evidence a moment later
+      // (judgeProbeAnswers). The catch here is left for what it can actually
+      // catch: no ping button, or a WS transport fault.
+      state.awaitingAnswer.set(nodeId, t);
       void o.ping(nodeId).catch(() => {
-        // A failed liveness probe is the POINT: the driver marks the node Dead
-        // and the remediation path takes over with its own dwell and backoff.
-        const m = `auto-ping: node ${nodeId} did not answer its liveness probe`;
+        state.awaitingAnswer.delete(nodeId);
+        const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
         o.log('warn', nodeId, m); o.log2?.(m);
       });
     }
@@ -413,10 +492,42 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       o.log2?.(msg);
       // Fire and forget: the ping runner records its own outcome into the M5
       // ledger, and a failed probe is information, not an error to escalate.
+      state.awaitingAnswer.set(nodeId, t);
       void o.ping(nodeId).catch(() => {
-        const m = `auto-ping: node ${nodeId} did not answer the probe`;
+        state.awaitingAnswer.delete(nodeId);
+        const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
         o.log('warn', nodeId, m); o.log2?.(m);
       });
+    }
+
+    /* ── verification probes (v0.36) ─────────────────────────────────────
+     * Requested by the outcome ledger at an episode's two scoring moments.
+     * Logged at debug on the server: three probes per boundary would otherwise
+     * triple the auto-ping chatter in the add-on log for a mechanism whose
+     * whole purpose is bookkeeping, while the event ring still records each
+     * one so an autonomous write is never invisible to the operator.
+     */
+    for (const nodeId of decision.verify) {
+      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence)`;
+      o.log('info', nodeId, msg);
+      o.log2?.debug?.(msg);
+      state.awaitingAnswer.set(nodeId, t);
+      void o.ping(nodeId).catch(() => {
+          state.awaitingAnswer.delete(nodeId);
+          const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
+          o.log('warn', nodeId, m); o.log2?.(m);
+        });
+    }
+
+    /* ── did the earlier probes actually land? (v0.36) ────────────────────
+     * The one honest answer available: did the node's lastSeen move past the
+     * moment we probed it. An unanswered probe is the signal auto-ping exists
+     * to produce, and until now it could not be observed at all.
+     */
+    for (const { nodeId, answered } of judgeProbeAnswers(state, nodes, t)) {
+      if (answered) { o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`); continue; }
+      const m = `auto-ping: node ${nodeId} did NOT answer its probe (lastSeen did not advance)`;
+      o.log('warn', nodeId, m); o.log2?.(m);
     }
   };
 

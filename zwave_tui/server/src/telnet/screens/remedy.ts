@@ -86,6 +86,8 @@ function costTag(cost: PlanCandidate['cost']): string {
 interface Ledger {
   efficacyFor: (kind: SymptomKind, action: ActionKind) => Efficacy | null;
   falsePositives: (kind: SymptomKind) => number;
+  /** Episodes of this kind the ledger closed unscoreable (v0.36). */
+  unverifiable: (kind: SymptomKind) => number;
 }
 
 function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, ledger: Ledger, selected = false): string[] {
@@ -127,6 +129,17 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       rows.push(truncate(
         '    ' + c.yellow(`⚠ this detector has been refused as a misdiagnosis ${fp}\u00d7`) +
         c.grey(' — weigh the evidence above before acting'), W));
+    }
+    // What the ledger could not SCORE (v0.36). An empty efficacy table reads
+    // exactly like a patient one, so a kind whose episodes all close
+    // unscoreable would otherwise look like a detector still gathering data
+    // rather than one whose evidence never reaches the verifier's floor. On
+    // the live mesh that was every episode of every kind for 39 hours.
+    const unver = ledger.unverifiable(sym.kind);
+    if (unver > 0) {
+      rows.push(truncate(
+        '    ' + c.grey(`○ ${unver} past episode${unver === 1 ? '' : 's'} of this kind could not be scored — ` +
+          'too few readings to judge recovery'), W));
     }
   }
   // Narrative — one line of diagnostic context (the plan headline carries the
@@ -239,6 +252,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     // "no ledger", which is 0 refusals, NOT "this detector is trustworthy".
     // Same thing either way on screen: the line only renders above zero.
     falsePositives: (kind) => data.falsePositives?.(kind) ?? 0,
+    unverifiable: (kind) => data.unverifiableCount?.(kind) ?? 0,
   };
 
   const body: string[] = [];

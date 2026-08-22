@@ -70,6 +70,8 @@ export interface ZwaveDataSource {
   evidenceCoarse(nodeId: number): { t0: number; samples: number; routeChanges?: number }[];
   /** Ledger tally of `refused-misdiagnosis` closes for a kind (v0.35). REQUIRED — see ackEvent. */
   falsePositives(kind: SymptomKind): number;
+  /** Episodes of this kind closed `unverifiable` (v0.36). REQUIRED — see ackEvent. */
+  unverifiableCount(kind: SymptomKind): number;
   /** Learned RSSI normal for a node (v0.35). REQUIRED — see ackEvent. */
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** Has the first roster load completed? Falls back to "roster non-empty". */
@@ -177,6 +179,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     evidenceCoverage: (n) => zd.evidenceCoverage(n),
     evidenceCoarse: (n) => zd.evidenceCoarse(n),
     falsePositives: (k) => zd.falsePositives(k),
+    unverifiableCount: (k) => zd.unverifiableCount(k),
     rssiNormal: (n) => zd.rssiNormal(n),
   };
 }
@@ -277,6 +280,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     evidenceCoverage: (nodeId) => zwaveData.evidenceCoverage(nodeId),
     evidenceCoarse: (nodeId) => zwaveData.evidenceCoarse(nodeId),
     falsePositives: (kind) => zwaveData.falsePositives(kind),
+    unverifiableCount: (kind) => zwaveData.unverifiableCount(kind),
     rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,

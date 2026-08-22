@@ -62,7 +62,7 @@ import {
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, type BaselineStore } from './baselines';
 import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
-import { createOutcomeStore, windowMetrics, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
+import { createOutcomeStore, windowMetrics, degradedSpan, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { computeInterference } from './interference';
 
 /**
@@ -159,6 +159,13 @@ const ENTITY_REFRESH_MS = 10 * 60_000;
 const COARSE_INTERVAL_MS = 60_000;
 /** v0.22: min gap before a FAILED config-param fetch is retried, so a Detail
  *  screen that re-requests every frame can't hammer a flaky device. */
+/** Verification probes requested per episode boundary (v0.36). Three readings
+ *  is exactly the verifier's evidence floor (outcomes MIN_OBS) — enough to make
+ *  a verdict possible, and no more traffic than that requires. */
+const VERIFY_BURST = 3;
+/** Spacing between probes in one burst — far enough apart that each is a
+ *  separate observation, close enough that all three land inside one window. */
+const VERIFY_SPACING_MS = 70_000;
 const CONFIG_RETRY_MS = 15_000;
 
 /* ─── raw HA response shapes (only the fields we read) ──────────────────── */
@@ -317,6 +324,10 @@ export interface ZwaveData {
   /** M5: learned efficacy of an action against a symptom kind (null if off). */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
   falsePositives(kind: SymptomKind): number;
+  /** Episodes of this kind the ledger closed `unverifiable` (v0.36). */
+  unverifiableCount(kind: SymptomKind): number;
+  /** Drain the node ids owed a verification probe this tick (v0.36). */
+  drainVerifyRequests(now?: number): number[];
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   forgetNodeBaselines(nodeId: number): void;
   /** M6: interference view (noise floor, serial health, diurnal heatmap). */
@@ -577,6 +588,19 @@ class ZwaveDataImpl implements ZwaveData {
   /** Symptom key → first tick it went absent, for the confirmation-window before
    *  an episode is resolved (an improvement must HOLD, not just blink). */
   private readonly pendingResolve = new Map<string, number>();
+  /**
+   * Nodes owed verification probes, and how many are still owed (v0.36).
+   *
+   * The learning loop's evidence floor is >=3 fresh readings in each of the
+   * before/after windows, while a quiet node's only traffic is the add-on's own
+   * 2-hourly liveness probe — so on the live mesh every closed episode scored
+   * `unverifiable` and the ledger learned nothing in 39 hours. These requests
+   * manufacture the missing observations at exactly the two moments a verdict
+   * depends on them, and are drained through the SAME gate ladder as auto-ping
+   * (write actions, boot window, rebuild, storm) so nothing here can probe a
+   * mesh auto-ping itself would have left alone.
+   */
+  private readonly verifyOwed = new Map<number, { left: number; nextAt: number }>();
   private outcomesFlushTimer: ReturnType<typeof setInterval> | null = null;
   private baselineFlushTimer: ReturnType<typeof setInterval> | null = null;
   /** M6 interference view, memoized on the sample cadence (heavy coarse fold). */
@@ -995,28 +1019,87 @@ class ZwaveDataImpl implements ZwaveData {
     const oc = this.outcomes;
     if (!oc) return;
     const CONFIRM_MS = 10 * 60_000;
+    const wasPending = new Set(this.pendingResolve.keys());
     const { toOpen, toResolve } = planEpisodeLifecycle(symptoms, oc.openEpisodes(), this.pendingResolve, now, CONFIRM_MS);
     // Capture the degraded before-window at onset and the settled after-window
     // at resolution (well past the transition, thanks to the confirm window).
-    for (const s of toOpen) oc.open(s.nodeId, s.kind, now, this.nodeWindow(s.nodeId, now));
+    //
+    // The before-window is anchored at the symptom's DWELL START, not at this
+    // tick (v0.36). A symptom is emitted at dwell maturity — five minutes after
+    // the reading that breached — and the window only looks five minutes back,
+    // so anchoring at emission excluded the very observation that fired the
+    // episode and left `before` empty on any node too quiet to speak twice in
+    // five minutes. The whole span from just before the breach through to
+    // emission is the degraded period, so all of it is fair evidence.
+    const sinceOf = new Map<string, number>();
+    for (const s of symptoms) sinceOf.set(`${s.nodeId ?? 'mesh'}:${s.kind}`, s.sinceMs);
+    for (const s of toOpen) {
+      const since = sinceOf.get(`${s.nodeId ?? 'mesh'}:${s.kind}`) ?? now;
+      oc.open(s.nodeId, s.kind, now, this.degradedWindow(s.nodeId, since, now));
+      // Ask for verification probes while the symptom is LIVE, so the degraded
+      // window can reach the verifier's evidence floor before it is scored.
+      this.requestVerification(s.nodeId);
+    }
+    // Keep improving each LIVE episode's before-window as probe evidence lands
+    // (v0.36). Refining on the ping's own resolution would be too early — the
+    // service call returns when HA accepts it, while the node's statistics push
+    // arrives later — so the honest trigger is simply "every tick, while the
+    // symptom is still present". Gated on live-ness precisely: an episode in
+    // its confirmation window has ALREADY recovered, and folding those readings
+    // into `before` would quietly compare the node against itself healthy.
+    for (const ep of oc.openEpisodes()) {
+      const key = `${ep.nodeId ?? 'mesh'}:${ep.kind}`;
+      if (this.pendingResolve.has(key)) continue;
+      const since = sinceOf.get(key);
+      if (since == null) continue; // not currently live → not a degraded window
+      oc.refineBefore(ep.nodeId, ep.kind, this.degradedWindow(ep.nodeId, since, now));
+    }
     for (const r of toResolve) oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now));
+    // A symptom that JUST went absent starts the confirmation window. Probe now
+    // so the after-window has something in it when the verdict is computed —
+    // otherwise a quiet node's recovery is unscoreable by arithmetic, and the
+    // episode closes `unverifiable` no matter how genuinely it recovered.
+    for (const key of this.pendingResolve.keys()) {
+      if (wasPending.has(key)) continue;
+      const id = Number(key.split(':')[0]);
+      if (Number.isFinite(id)) this.requestVerification(id);
+    }
   }
 
   /** The per-command reliability window for a node (last 5 min of evidence), for
    *  episode before/after scoring. Mesh-scoped symptoms have no per-node
    *  evidence → null (rendered `unverifiable` rather than fabricated).
    *
-   *  SCOPING LIMITATION (M5): success is scored by the per-command TIMEOUT rate
-   *  — the primary reliability signal, apt for the return-path / timeout family.
-   *  A symptom kind whose recovery does NOT show up as a timeout-rate change
-   *  (e.g. a purely RSSI-based weak-signal, or rate-fallback where the node still
-   *  responds) simply yields no measurable improvement → its episodes read
-   *  `unverifiable`/`no-change` and accrue no efficacy. That is honest (no false
-   *  claim), just incomplete; per-kind recovery metrics are a future refinement. */
+   *  Scoring is PER-KIND (outcomes `metricOf` → rssi / rtt / rate / flaps /
+   *  timeout), each gating on observations of its own signal. The comment that
+   *  stood here claimed timeout-rate-only scoring with per-kind metrics as "a
+   *  future refinement" long after they shipped — stale documentation about the
+   *  very mechanism an audit was reading it to understand (v0.36). What remains
+   *  true: a kind whose recovery shows up in no collected signal still reads
+   *  `unverifiable`, which is honest, and is now COUNTED rather than silent. */
   private nodeWindow(nodeId: number | null, now: number): ReturnType<typeof windowMetrics> | null {
     if (nodeId == null || !this.evidenceStore) return null;
     const WINDOW_MS = 5 * 60_000;
     const ring = this.evidenceStore.forNode(nodeId).filter((s) => now - s.t <= WINDOW_MS);
+    return ring.length ? windowMetrics(ring) : null;
+  }
+
+  /**
+   * The DEGRADED window for an episode: from just before the breach that armed
+   * the symptom through to now (v0.36).
+   *
+   * Deliberately not the plain 5-minute lookback. A symptom surfaces at dwell
+   * maturity, and the dwell equals the lookback, so a `nodeWindow(now)` at open
+   * time starts exactly where the firing observation ends — the reading that
+   * proved the node degraded was excluded from the evidence for its own
+   * episode. Every sample in this span belongs to the same live symptom, so
+   * widening to cover it adds no other state, only the readings that were
+   * always the point.
+   */
+  private degradedWindow(nodeId: number | null, sinceMs: number, now: number): ReturnType<typeof windowMetrics> | null {
+    if (nodeId == null || !this.evidenceStore) return null;
+    const WINDOW_MS = 5 * 60_000;
+    const ring = degradedSpan(this.evidenceStore.forNode(nodeId), sinceMs, now, WINDOW_MS);
     return ring.length ? windowMetrics(ring) : null;
   }
 
@@ -1054,6 +1137,56 @@ class ZwaveDataImpl implements ZwaveData {
   falsePositives(kind: SymptomKind): number {
     return this.outcomes ? this.outcomes.falsePositives(kind) : 0;
   }
+
+  /** Episodes of this kind the ledger could not score at all (v0.36). */
+  unverifiableCount(kind: SymptomKind): number {
+    return this.outcomes ? this.outcomes.unverifiable(kind) : 0;
+  }
+
+  /**
+   * Ask for a burst of verification probes on a node (v0.36).
+   *
+   * Idempotent per node: re-requesting while a burst is outstanding tops the
+   * count back up rather than queueing a second burst, so a symptom that
+   * flaps cannot multiply the traffic it causes.
+   */
+  private requestVerification(nodeId: number | null): void {
+    if (nodeId == null || !this.outcomes) return;
+    const cur = this.verifyOwed.get(nodeId);
+    this.verifyOwed.set(nodeId, {
+      left: Math.max(cur?.left ?? 0, VERIFY_BURST),
+      nextAt: cur?.nextAt ?? 0,
+    });
+  }
+
+  /**
+   * Node ids to probe for verification on this tick.
+   *
+   * At most ONE per call, newest-deadline-first, with a per-node spacing so a
+   * burst lands as separate readings across the window rather than three
+   * packets in one second (which would be one observation's worth of
+   * information and three times the airtime).
+   */
+  drainVerifyRequests(now = Date.now()): number[] {
+    const due: number[] = [];
+    for (const [id, st] of this.verifyOwed) {
+      if (st.left <= 0) { this.verifyOwed.delete(id); continue; }
+      if (now < st.nextAt) continue;
+      due.push(id);
+    }
+    if (due.length === 0) return [];
+    const id = due[0];
+    const st = this.verifyOwed.get(id)!;
+    const left = st.left - 1;
+    if (left <= 0) this.verifyOwed.delete(id);
+    else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });
+    return [id];
+  }
+
+  /**
+   * Fold a freshly-probed node's improved evidence into its OPEN episodes'
+   * before-window (v0.36) — the point of the probes at episode open.
+   */
 
   /** The engine's LEARNED RSSI normal for a node (v0.35) — the yardstick every
    *  per-node signal verdict is measured against, and until now unreadable. */

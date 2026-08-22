@@ -247,3 +247,41 @@ test('the exact-rows contract survives the extra warning row at every size', () 
     for (const l of out) assert.ok(l.replace(/\x1b\[[0-9;]*m/g, '').length <= cols, `width at ${cols}x${rows}`);
   }
 });
+
+/* ── v0.36: the ledger admits what it could not score ──────────────────────── */
+
+function withUnver(n: number, symptoms: Symptom[] = [sym()]): ScreenCtx {
+  const cx = ctx(140, 40, symptoms);
+  (cx.data as { unverifiableCount?: (k: SymptomKind) => number }).unverifiableCount = () => n;
+  return cx;
+}
+
+test('a kind whose episodes all closed UNSCOREABLE says so on the card', () => {
+  // An empty efficacy table reads exactly like a patient one. On the live mesh
+  // 16 of 16 episodes closed unscoreable and every screen looked like an engine
+  // still gathering data.
+  const joined = plain(renderRemedy(withUnver(16)));
+  assert.match(joined, /16 past episodes of this kind could not be scored/);
+  assert.match(joined, /too few readings to judge recovery/);
+});
+
+test('it singularises, and a ledger with nothing unscoreable stays silent', () => {
+  assert.match(plain(renderRemedy(withUnver(1))), /1 past episode of this kind could not be scored/);
+  assert.ok(!/could not be scored/.test(plain(renderRemedy(withUnver(0)))),
+    'zero unscoreable is silence, not a boast');
+});
+
+test('a provider with NO ledger renders exactly as a clean one', () => {
+  assert.ok(!/could not be scored/.test(plain(renderRemedy(ctx(140, 40, [sym()])))),
+    'absent ledger means no data, which must never render as a warning');
+});
+
+test('the exact-rows contract survives the extra unscoreable row at every size', () => {
+  for (const [cols, rows] of [[140, 40], [120, 24], [100, 18], [80, 12], [40, 9]] as const) {
+    const cx = withUnver(7, [sym({ severity: 'crit', kind: 'dead-flap' }), sym(), sym({ nodeId: 7 })]);
+    cx.view.cols = cols; cx.view.rows = rows;
+    const out = renderRemedy(cx);
+    assert.equal(out.length, rows, `rows at ${cols}x${rows}`);
+    for (const l of out) assert.ok(l.replace(/\x1b\[[0-9;]*m/g, '').length <= cols, `width at ${cols}x${rows}`);
+  }
+});

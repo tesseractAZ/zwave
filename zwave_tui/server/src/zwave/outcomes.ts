@@ -128,6 +128,28 @@ export interface OutcomeStore {
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy;
   /** How many episodes of this kind ended `refused-misdiagnosis` (false positives). */
   falsePositives(kind: SymptomKind): number;
+  /**
+   * How many episodes of this kind closed `unverifiable` — the ledger's own
+   * record of evidence it could not score (v0.36).
+   *
+   * This is the counter that would have made a silent failure loud. Over a
+   * 39-hour live window every one of 16 closed episodes returned `unverifiable`
+   * and therefore fed NEITHER arm, while the screens showed only an empty
+   * efficacy table that reads identically to "still learning". A ledger that
+   * cannot verify anything must SAY so, not look patient.
+   */
+  unverifiable(kind: SymptomKind): number;
+  /**
+   * Replace an OPEN episode's before-window with a better-evidenced one (v0.36).
+   *
+   * A sparse node's before-window may hold a single reading at open time, which
+   * the verifier's evidence floor will later reject. When verification probes
+   * subsequently fill the degraded window, this swaps the poorer window for the
+   * richer one — same degraded period, more observations. Refuses to act on a
+   * resolved episode, and never accepts a window with FEWER usable readings, so
+   * it can only ever improve the evidence behind a verdict.
+   */
+  refineBefore(nodeId: number | null, kind: SymptomKind, window: WindowMetrics | null): boolean;
   /** Load the learned arms from `path` (no-op if unset/missing/corrupt). */
   load(): void;
   /** Atomically persist the learned arms to `path` (no-op if unset). */
@@ -152,6 +174,30 @@ function median(vals: number[]): number | null {
  *  a timeout rate is not meaningful → rate stays null (never a fabricated 0/0).
  *  RSSI/RTT are taken from FRESH samples only (a re-sampled EMA carries no new
  *  information); flaps are event-driven counts; rateKbps is the worst seen. */
+/**
+ * The samples belonging to an episode's DEGRADED span (v0.36).
+ *
+ * From one window BEFORE the breach that armed the symptom through to `now`.
+ * Not the plain trailing window: a symptom surfaces at dwell maturity, and the
+ * dwell equals the lookback, so a trailing window opened at emission starts
+ * exactly where the firing observation ends — the reading that proved the node
+ * degraded was excluded from the evidence for its own episode, and on a node
+ * too quiet to speak twice in five minutes that left the window empty and the
+ * verdict `unverifiable` before it was computed.
+ *
+ * Every sample in this span belongs to the same live symptom, so widening to
+ * cover the breach adds no other state — only the readings that were the point.
+ */
+export function degradedSpan(
+  samples: EvidenceSample[],
+  sinceMs: number,
+  now: number,
+  windowMs: number,
+): EvidenceSample[] {
+  const from = Math.min(sinceMs, now) - windowMs;
+  return samples.filter((s) => s.t >= from && s.t <= now);
+}
+
 export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetrics {
   let tx = 0, rx = 0, timeouts = 0, flaps = 0, s2 = 0, s2Known = 0, n = 0, freshN = 0;
   let routeChanges = 0, routeKnown = 0;
@@ -390,6 +436,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   // Per-kind control arm (no-action episodes) and per-detector false positives.
   const control = new Map<SymptomKind, Tally>();
   const fp = new Map<SymptomKind, number>();
+  // Episodes closed `unverifiable`, per kind — see the interface docstring.
+  const unver = new Map<SymptomKind, number>();
   // Per (kind ▸ action ▸ band) action arm.
   const action = new Map<string, Tally>();
 
@@ -443,7 +491,12 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         fp.set(kind, (fp.get(kind) ?? 0) + 1);
         dirty = true;
       } else if (ep.verdict === 'unverifiable') {
-        // Contributes to NEITHER arm — an honest "we couldn't tell".
+        // Contributes to NEITHER arm — an honest "we couldn't tell". COUNTED
+        // though (v0.36): an unscoreable episode is not nothing, it is the
+        // ledger telling you its evidence was too thin, and that fact has to
+        // reach a screen or a structurally-inert loop looks like a patient one.
+        unver.set(kind, (unver.get(kind) ?? 0) + 1);
+        dirty = true;
       } else if (ep.action == null) {
         // Control arm: a symptom that resolved with no action taken.
         control.set(kind, bump(control.get(kind), ep.verdict === 'improved'));
@@ -501,8 +554,27 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       return fp.get(kind) ?? 0;
     },
 
+    unverifiable(kind): number {
+      return unver.get(kind) ?? 0;
+    },
+
+    refineBefore(nodeId, kind, window): boolean {
+      if (!window) return false;
+      const ep = open.get(key(nodeId, kind));
+      // Only an OPEN, unresolved episode: once a verdict is computed the
+      // evidence behind it is history and must not be rewritten.
+      if (!ep || ep.resolvedMs != null || ep.verdict != null) return false;
+      // Strictly-better only. `freshN` is the count of samples that actually
+      // carried new information, which is what every evidence floor gates on.
+      const had = ep.before?.freshN ?? -1;
+      if (window.freshN <= had) return false;
+      ep.before = window;
+      dirty = true;
+      return true;
+    },
+
     reset(): void {
-      open.clear(); control.clear(); action.clear(); fp.clear();
+      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear();
     },
 
     load(): void {
@@ -537,6 +609,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         control: [...control.entries()],
         action: [...action.entries()],
         fp: [...fp.entries()],
+        unver: [...unver.entries()],
         // Open episodes are intentionally NOT persisted — an episode spanning a
         // restart lost its before-window's continuity and can't yield an honest
         // verdict; it re-opens fresh when the symptom is re-detected.
@@ -544,12 +617,14 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     loadJSON(raw): void {
-      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][] };
+      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][] };
       if (!o || o.v !== 1) return;
-      control.clear(); action.clear(); fp.clear();
+      control.clear(); action.clear(); fp.clear(); unver.clear();
       for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, t);
       for (const [k, t] of o.action ?? []) if (validTally(t)) action.set(k, t);
       for (const [k, v] of o.fp ?? []) if (Number.isFinite(v) && v >= 0) fp.set(k, v);
+      // Absent in pre-v0.36 files — an older ledger simply starts this counter at 0.
+      for (const [k, v] of o.unver ?? []) if (Number.isFinite(v) && v >= 0) unver.set(k, v);
     },
   };
 }
