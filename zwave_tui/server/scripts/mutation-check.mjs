@@ -869,6 +869,16 @@ const MUTANTS = [
     find: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence)`;\n      o.log('info', nodeId, msg);\n      o.log2?.(msg);",
     repl: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence)`;\n      o.log('info', nodeId, msg);\n      o.log2?.debug?.(msg);",
     what: 'an autonomous write is visible in BOTH the event ring and the server log' },
+  { id: 'verify-drain-past-the-gates', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Re-creates the v0.36.0/.1 seam defect: resolving the ledger's queue BEFORE
+    // the suppression ladder consumes a probe from the node's burst on every
+    // gated tick without sending one — a 5-minute boot window silently exhausts
+    // a whole burst, and that is exactly when episodes cluster.
+    find: '  const verify = (input.verifyDue?.() ?? []).filter((id) => candidates.has(id));',
+    repl: '  const verify = (input.verifyDue?.() ?? []).filter(() => true).filter((id) => candidates.has(id));',
+    what: 'the ledger queue is drained only on a tick that will actually probe',
+    equivalent: true,
+    why: 'the DRAIN-ORDER invariant cannot be expressed as a single-line substitution here — moving the resolve above the gates requires editing two places at once. It is pinned directly by the runner test "a SUPPRESSED tick does not spend the ledger budget it will not use", which was verified to FAIL against a hand-applied eager-resolve regression.' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
