@@ -861,6 +861,14 @@ const MUTANTS = [
     repl: '  const tokenEquals = 1;\n  void tokenEquals;\n  return { sameOrigins, corsOriginCallback };',
     what: 'the dead write-token gate stays removed (it authorised nothing while persisting a secret)' },
 
+  { id: 'verify-probe-visible-in-both', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores v0.36.0's mistake: the probe reaches the event ring but not the
+    // container log an operator greps — the exact shape of failure that once had
+    // auto-ping itself diagnosed as a no-op, and which made the v0.36.0 deploy
+    // unverifiable from outside.
+    find: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence)`;\n      o.log('info', nodeId, msg);\n      o.log2?.(msg);",
+    repl: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence)`;\n      o.log('info', nodeId, msg);\n      o.log2?.debug?.(msg);",
+    what: 'an autonomous write is visible in BOTH the event ring and the server log' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",

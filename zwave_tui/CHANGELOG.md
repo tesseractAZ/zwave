@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.36.1 — 2026-08-20
+
+**A new autonomous write must be greppable.** v0.36.0's verification probes
+reached the event ring at info but the server log only at debug, on the
+reasoning that three probes per episode boundary would swamp the add-on log.
+The arithmetic does not survive contact with the mesh: roughly 60 verification
+probes per 39 hours against ~635 existing liveness probes is about a tenth
+more, not a flood.
+
+The cost showed up within minutes of deploying v0.36.0 — the release could not
+be verified from the container log at all, which is the same shape of failure
+`autoPing.ts` already documents one screen above the offending line: auto-ping
+was once diagnosed as a no-op purely because its evidence sat somewhere the
+diagnosis never looked. That file's own rule is "An autonomous action must be
+visible in BOTH", and v0.36.0 broke it in brand-new autonomous-write code.
+
+Verification probes now log to both destinations. The per-probe **answered**
+confirmation stays at debug deliberately — several hundred lines a day saying
+"as designed" is the noise that trains an operator to stop reading — while the
+**unanswered** case, the actual signal, is warn on both. A mutant pins the rule.
+
 ## 0.36.0 — 2026-08-20
 
 **The learning loop can finally learn.** A post-deploy audit of v0.35 running on

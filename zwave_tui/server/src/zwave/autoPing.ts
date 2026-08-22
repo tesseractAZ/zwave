@@ -502,15 +502,21 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
 
     /* ── verification probes (v0.36) ─────────────────────────────────────
      * Requested by the outcome ledger at an episode's two scoring moments.
-     * Logged at debug on the server: three probes per boundary would otherwise
-     * triple the auto-ping chatter in the add-on log for a mechanism whose
-     * whole purpose is bookkeeping, while the event ring still records each
-     * one so an autonomous write is never invisible to the operator.
+     *
+     * Logged to BOTH destinations, like every other autonomous write in this
+     * file. v0.36.0 put these on the server log at DEBUG only, reasoning that
+     * three probes per boundary would swamp the add-on log — arithmetic that
+     * does not survive contact with the mesh: roughly 60 verification probes
+     * per 39 hours against ~635 liveness probes is about a tenth more, not a
+     * flood. The cost of being wrong that way is the exact failure this file
+     * already documents one screen up: auto-ping was once diagnosed as a no-op
+     * purely because its evidence sat somewhere the diagnosis never looked.
+     * A new autonomous write is precisely the thing that must be greppable.
      */
     for (const nodeId of decision.verify) {
       const msg = `auto-ping: node ${nodeId} verification probe (episode evidence)`;
       o.log('info', nodeId, msg);
-      o.log2?.debug?.(msg);
+      o.log2?.(msg);
       state.awaitingAnswer.set(nodeId, t);
       void o.ping(nodeId).catch(() => {
           state.awaitingAnswer.delete(nodeId);
@@ -525,6 +531,10 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
      * to produce, and until now it could not be observed at all.
      */
     for (const { nodeId, answered } of judgeProbeAnswers(state, nodes, t)) {
+      // The expected case stays at debug — one line per probe on every healthy
+      // node is several hundred a day saying "as designed", which is the noise
+      // that trains an operator to stop reading. The UNANSWERED case below is
+      // the signal, and it is warn on both destinations.
       if (answered) { o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`); continue; }
       const m = `auto-ping: node ${nodeId} did NOT answer its probe (lastSeen did not advance)`;
       o.log('warn', nodeId, m); o.log2?.(m);
