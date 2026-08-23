@@ -328,6 +328,8 @@ export interface ZwaveData {
   unverifiableCount(kind: SymptomKind): number;
   /** Drain the node ids owed a verification probe this tick (v0.36). */
   drainVerifyRequests(now?: number): number[];
+  /** How many nodes have an outstanding verification burst (v0.37.1). */
+  verifyOwedCount(): number;
   /** Record one liveness-probe outcome for the persisted reply rate (v0.37). */
   recordProbeResult(nodeId: number, answered: boolean, selfProven: boolean): void;
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
@@ -1163,6 +1165,13 @@ class ZwaveDataImpl implements ZwaveData {
    *  — the engine's own record of when this detector cried wolf (v0.35). */
   falsePositives(kind: SymptomKind): number {
     return this.outcomes ? this.outcomes.falsePositives(kind) : 0;
+  }
+
+  /** Nodes with an outstanding verification burst (v0.37.1) — the contention
+   *  the one-per-tick queue is dividing, reported in the probe line so the
+   *  burst's real spacing can be read off the log rather than inferred. */
+  verifyOwedCount(): number {
+    return this.verifyOwed.size;
   }
 
   /** Record one liveness-probe outcome (v0.37) — the per-node reply rate the

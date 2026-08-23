@@ -111,6 +111,9 @@ export interface AutoPingState {
    * separates them without hiding either.
    */
   missStreak: Map<number, number>;
+  /** nodeId → epoch ms of this node's previous VERIFICATION probe (v0.37.1),
+   *  so the burst's real spacing is visible in the log. */
+  lastVerifyAt: Map<number, number>;
   /** nodeId → whether, at the moment of its last probe, the node had already
    *  communicated on its own since the previous sweep (v0.37). Read when the
    *  probe is judged, so the outcome records WHY the node was reachable. */
@@ -135,7 +138,7 @@ function ordinal(n: number): string {
 const ANSWER_GRACE_MS = 90_000;
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), selfProvenAtProbe: new Map() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), selfProvenAtProbe: new Map(), lastVerifyAt: new Map() };
 }
 
 export interface AutoPingInput {
@@ -162,6 +165,10 @@ export interface AutoPingInput {
    * symptoms at once. Resolved below, after every gate has passed.
    */
   verifyDue?: () => number[];
+  /** How many nodes currently have an outstanding verification burst (v0.37.1).
+   *  Reported in the probe line so the contention dividing the one-per-tick
+   *  queue is visible rather than inferred. */
+  verifyOwedCount?: () => number;
 }
 
 export interface AutoPingDecision {
@@ -178,6 +185,9 @@ export interface AutoPingDecision {
   stale: number[];
   /** Ledger-requested verification probes cleared for this tick (v0.36). */
   verify: number[];
+  /** How many DISTINCT nodes were owed a verification probe when this tick was
+   *  decided (v0.37.1) — the contention the one-per-tick queue is dividing. */
+  verifyOwed: number;
   /**
    * Nodes whose remediation budget is spent and are STILL Dead (v0.36.4).
    *
@@ -254,7 +264,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const { now, nodes, controller, config, booting } = input;
   const listeningNodes = nodes.filter(isPingCandidate);
   const dead = listeningNodes.filter((n) => n.status === NodeStatus.Dead);
-  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], gaveUp: [] as number[],
+  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], verifyOwed: 0, gaveUp: [] as number[],
     deadListening: dead.length,
     listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
@@ -354,6 +364,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   // Resolved HERE, past every suppressor, so a gated tick never spends the
   // ledger's budget on a probe it is not going to send.
   const verify = (input.verifyDue?.() ?? []).filter((id) => candidates.has(id));
+  base.verifyOwed = input.verifyOwedCount?.() ?? verify.length;
 
   return { ...base, ping, stale, verify, gaveUp, suppressed: 'none' };
 }
@@ -477,6 +488,8 @@ export interface AutoPingRunnerOptions {
   /** Drain the outcome ledger's pending verification probes (v0.36). Optional:
    *  without it the runner behaves exactly as it did before. */
   verifyRequests?: (now: number) => number[];
+  /** Nodes with an outstanding verification burst, for the probe line (v0.37.1). */
+  verifyOwedCount?: () => number;
   /** One liveness-probe outcome, for the persisted per-node reply rate (v0.37).
    *  `selfProven` = the node had already communicated on its own since the
    *  previous sweep, so the probe was confirming rather than discovering. */
@@ -505,6 +518,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // post-start window, so it counts as booting rather than as "no nodes".
       booting: !o.ready() || t - startedAt < BOOT_WINDOW_MS,
       verifyDue: () => o.verifyRequests?.(t) ?? [],
+      verifyOwedCount: () => o.verifyOwedCount?.() ?? 0,
     });
 
     // DECISION TRACE.
@@ -631,7 +645,17 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
      * A new autonomous write is precisely the thing that must be greppable.
      */
     for (const nodeId of decision.verify) {
-      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence)`;
+      // Carry the gap since this node's PREVIOUS verification probe (v0.37.1).
+      // A burst wants its probes inside one 5-minute window, but the queue hands
+      // out one node per tick GLOBALLY, so with several nodes owed bursts each
+      // one's probes stretch further apart — and the log could not show it,
+      // because the add-on log has no timestamps and the decision trace only
+      // prints on change. Without this number the spacing is unmeasurable from
+      // outside and any fix would be aimed at a story rather than a cause.
+      const prevVerify = state.lastVerifyAt.get(nodeId);
+      state.lastVerifyAt.set(nodeId, t);
+      const gap = prevVerify == null ? 'first' : `+${Math.round((t - prevVerify) / 1000)}s`;
+      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)`;
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       state.awaitingAnswer.set(nodeId, t);

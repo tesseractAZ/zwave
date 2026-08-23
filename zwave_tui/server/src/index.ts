@@ -115,6 +115,7 @@ async function main(): Promise<void> {
       // so they inherit every gate auto-ping already applies rather than
       // opening a second, less-guarded path to the mesh.
       verifyRequests: (now) => zwaveData.drainVerifyRequests(now),
+      verifyOwedCount: () => zwaveData.verifyOwedCount(),
       onProbeResult: (nodeId, answered, selfProven) => zwaveData.recordProbeResult(nodeId, answered, selfProven),
       log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
       log2: log,

@@ -933,3 +933,36 @@ test('every probe outcome is REPORTED for the persisted reply rate', async () =>
   assert.equal(ten!.answered, true);
   assert.equal(ten!.self, true, 'a node talking within the cadence is self-proven');
 });
+
+test('the verification probe line carries its own spacing and the contention (v0.37.1)', async () => {
+  // The diagnostic that makes the burst measurable. Two episodes closed
+  // `unverifiable` on live nodes that had received 8 and 5 probes, and the
+  // leading hypothesis — that a one-per-tick GLOBAL queue stretches each node's
+  // burst past the 5-minute window it must land inside — could not be confirmed,
+  // because the add-on log carries no timestamps and the decision trace only
+  // prints on change. A fix aimed at an unconfirmed cause is a guess.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const nodes = mesh(20);
+  let owed = 2;
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+    verifyRequests: () => [100],
+    verifyOwedCount: () => owed,
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN;
+  h.tick();
+  const first = lines.find((l) => /verification probe/.test(l))!;
+  assert.match(first, /first/, 'the first probe of a burst has no prior gap to report');
+  assert.match(first, /2 owed/, 'and states how many nodes are dividing the queue');
+
+  lines.length = 0;
+  clock += 140_000; // two ticks later
+  h.tick();
+  const second = lines.find((l) => /verification probe/.test(l))!;
+  assert.match(second, /\+140s/, `the measured gap must appear, got: ${second}`);
+  h.stop();
+});
