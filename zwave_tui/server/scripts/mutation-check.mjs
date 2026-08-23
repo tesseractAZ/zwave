@@ -894,6 +894,27 @@ const MUTANTS = [
     find: '  return now - pendingSinceMs >= Math.max(0, confirmMs - windowMs);',
     repl: '  return now - pendingSinceMs >= confirmMs - windowMs && confirmMs > windowMs;',
     what: 'a confirm window shorter than the after-window is due immediately, not never' },
+  { id: 'giveup-is-announced', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores the pre-v0.36.4 silence: the attempt budget is spent and the
+    // node stays Dead, and auto-ping simply stops saying anything. Observed
+    // live on node 23 — 80 minutes of silence indistinguishable from recovery,
+    // during which the node was very likely revivable by a single manual ping.
+    find: '      if (!input.state.gaveUpAnnounced.has(n.nodeId)) gaveUp.push(n.nodeId);',
+    repl: '      void n;',
+    what: 'a node the engine has abandoned is announced, not silently dropped' },
+  { id: 'giveup-said-once', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Announces every tick instead of once per outage — a per-minute drumbeat
+    // on a node that is going to stay down for hours, which buries the Log
+    // screen during exactly the incident an operator is trying to read.
+    find: '      if (!input.state.gaveUpAnnounced.has(n.nodeId)) gaveUp.push(n.nodeId);',
+    repl: '      gaveUp.push(n.nodeId);',
+    what: 'the give-up notice fires once per outage, not every tick' },
+  { id: 'giveup-rearms-on-recovery', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // A node that recovers and dies again is never announced a second time,
+    // because it is remembered forever as already-reported.
+    find: '      state.gaveUpAnnounced.delete(n.nodeId);',
+    repl: '      void n;',
+    what: 'recovery re-arms the give-up notice for the next outage' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.36.4 — 2026-08-20
+
+**The engine gave up on a node and never mentioned it.** `maxAttempts` is
+documented as "attempts per dead episode, after which we stop and leave it to a
+human". It did the stopping. It never did the leaving-it-to-a-human.
+
+The gate was a bare `continue` — no log line, no event — and `attempts` resets
+only when a node *leaves* Dead. So a node that stays down is abandoned
+permanently and in silence. The last thing an operator sees is a failed probe,
+and then the log simply moves on, which reads exactly like recovery.
+
+Observed live: node 23 exhausted 3/3 attempts and auto-ping said nothing for the
+**next 80 minutes**. The node was very likely revivable that entire time — it
+was eventually recovered by a single manual ping. The operator had no way to
+know the engine had quit, and the maintainer (me) read the same silence and
+escalated to "this needs a physical power-cycle", which was wrong.
+
+`decideAutoPings` now returns a `gaveUp` lane. The runner announces it at
+**error** severity on both destinations — the one auto-ping message that asks
+for action rather than reporting activity — once per outage, re-arming on
+recovery so a device that dies again is reported again.
+
+This is the fifth defect of the same class found today, and the most consequential:
+the engine going quiet at exactly the moment a human is needed. The others hid
+data from a screen; this one hid a request for help.
+
 ## 0.36.3 — 2026-08-20
 
 **The after-window probes were landing outside the after-window.** v0.36.0
