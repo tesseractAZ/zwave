@@ -79,6 +79,9 @@ export interface Episode {
   resolvedMs: number | null;
   after: WindowMetrics | null; // settled window after resolution
   verdict: Verdict | null;
+  /** The node could not be probed at all (v0.38) — a sleeping battery/FLiRS
+   *  device — so an `unverifiable` verdict here is structural, not starvation. */
+  unprobeable?: boolean;
 }
 
 /** A decayed tally of episodes and their successes. */
@@ -115,7 +118,7 @@ export interface OutcomeStore {
    *  spontaneous recovery. */
   recordAction(nodeId: number | null, actionKind: ActionKind, refused: boolean, atMs: number, skip?: (key: string) => boolean): void;
   /** Close an episode: the symptom resolved. Computes + folds the verdict. */
-  resolve(nodeId: number | null, kind: SymptomKind, resolvedMs: number, after: WindowMetrics | null): Episode | null;
+  resolve(nodeId: number | null, kind: SymptomKind, resolvedMs: number, after: WindowMetrics | null, opts?: { unprobeable?: boolean }): Episode | null;
   /** Drop an open episode without a verdict (e.g. node left the roster). */
   abandon(nodeId: number | null, kind: SymptomKind): void;
   /** Keys of currently-open episodes (`${nodeId}:${kind}`). */
@@ -139,6 +142,18 @@ export interface OutcomeStore {
    * cannot verify anything must SAY so, not look patient.
    */
   unverifiable(kind: SymptomKind): number;
+  /**
+   * Episodes closed `unverifiable` on a node that CANNOT BE PROBED (v0.38).
+   *
+   * Counted apart from the fixable kind, because they are different facts and a
+   * single number conflated them. A battery or FLiRS device is never probed by
+   * any lane — waking it on a cadence would flatten it — so its windows can
+   * never be filled and its episodes are unscoreable BY CONSTRUCTION. That is
+   * neither a fault nor something more evidence would fix, and letting it
+   * accumulate in the same counter drained the meaning from a signal built to
+   * flag evidence starvation, which IS fixable.
+   */
+  unverifiableUnprobeable(kind: SymptomKind): number;
   /**
    * Replace an OPEN episode's before-window with a better-evidenced one (v0.36).
    *
@@ -483,6 +498,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   const fp = new Map<SymptomKind, number>();
   // Episodes closed `unverifiable`, per kind — see the interface docstring.
   const unver = new Map<SymptomKind, number>();
+  /** Unscoreable on a node we are not allowed to probe — see the interface. */
+  const unverUnprobe = new Map<SymptomKind, number>();
   /**
    * Which DISTINCT nodes fed each arm (v0.36.5).
    *
@@ -543,17 +560,25 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       }
     },
 
-    resolve(nodeId, kind, resolvedMs, after): Episode | null {
+    resolve(nodeId, kind, resolvedMs, after, resolveOpts): Episode | null {
       const k = key(nodeId, kind);
       const ep = open.get(k);
       if (!ep) return null;
       open.delete(k);
       ep.resolvedMs = resolvedMs;
       ep.after = after;
+      // Recorded at RESOLVE, not at open: probeability is a property of the
+      // device the caller knows and the ledger does not.
+      if (resolveOpts?.unprobeable) ep.unprobeable = true;
       ep.verdict = computeVerdict(ep);
 
       if (ep.verdict === 'refused-misdiagnosis') {
         fp.set(kind, (fp.get(kind) ?? 0) + 1);
+        dirty = true;
+      } else if (ep.verdict === 'unverifiable' && ep.unprobeable) {
+        // Structural: no amount of further evidence can arrive, because we are
+        // not permitted to ask this device for any.
+        unverUnprobe.set(kind, (unverUnprobe.get(kind) ?? 0) + 1);
         dirty = true;
       } else if (ep.verdict === 'unverifiable') {
         // Contributes to NEITHER arm — an honest "we couldn't tell". COUNTED
@@ -626,6 +651,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       return unver.get(kind) ?? 0;
     },
 
+    unverifiableUnprobeable(kind): number {
+      return unverUnprobe.get(kind) ?? 0;
+    },
+
     refineBefore(nodeId, kind, window): boolean {
       if (!window) return false;
       const ep = open.get(key(nodeId, kind));
@@ -642,7 +671,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     reset(): void {
-      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); armNodes.clear(); controlNodes.clear();
+      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); armNodes.clear(); controlNodes.clear();
     },
 
     load(): void {
@@ -678,6 +707,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         action: [...action.entries()],
         fp: [...fp.entries()],
         unver: [...unver.entries()],
+        unverUnprobe: [...unverUnprobe.entries()],
         armNodes: [...armNodes.entries()].map(([k, v]) => [k, [...v]] as [string, number[]]),
         controlNodes: [...controlNodes.entries()].map(([k, v]) => [k, [...v]] as [SymptomKind, number[]]),
         // Open episodes are intentionally NOT persisted — an episode spanning a
@@ -687,14 +717,15 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     loadJSON(raw): void {
-      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
+      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
       if (!o || o.v !== 1) return;
-      control.clear(); action.clear(); fp.clear(); unver.clear(); armNodes.clear(); controlNodes.clear();
+      control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); armNodes.clear(); controlNodes.clear();
       for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, t);
       for (const [k, t] of o.action ?? []) if (validTally(t)) action.set(k, t);
       for (const [k, v] of o.fp ?? []) if (Number.isFinite(v) && v >= 0) fp.set(k, v);
       // Absent in pre-v0.36 files — an older ledger simply starts this counter at 0.
       for (const [k, v] of o.unver ?? []) if (Number.isFinite(v) && v >= 0) unver.set(k, v);
+      for (const [k, v] of o.unverUnprobe ?? []) if (Number.isFinite(v) && v >= 0) unverUnprobe.set(k, v);
       // Absent in pre-v0.36.5 files: an older ledger simply reports 0 nodes,
       // which the renderer treats as "provenance unknown" rather than as one.
       for (const [k, v] of o.armNodes ?? []) if (Array.isArray(v)) armNodes.set(k, new Set(v.filter((x) => Number.isFinite(x))));

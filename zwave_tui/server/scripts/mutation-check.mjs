@@ -1039,6 +1039,38 @@ const MUTANTS = [
     find: '    for (const id of due.slice(0, VERIFY_MAX_PER_TICK)) {',
     repl: '    for (const id of due.slice(0, 1)) {',
     what: 'several nodes may be probed per tick, so contention cannot stretch a burst' },
+  /* ── v0.38: quiet-node, and unscoreable-by-design ───────────────────── */
+  { id: 'quiet-node-fires', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
+    // Returns the last declared-but-unemitted kind to being unemitted. A mains
+    // node whose probes stop landing is invisible until the driver happens to
+    // attempt a transmission and fail — which is the gap this kind covers.
+    find: '      const b = eligible && seen != null && now - seen >= QUIET_MS;',
+    repl: '      const b = false;',
+    what: 'a mains node silent past the sweep cadence surfaces as quiet-node' },
+  { id: 'quiet-node-spares-sleepers', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
+    // Fires for battery/FLiRS devices, which are silent between wakeups BY
+    // DESIGN — turning every sleeping sensor into a standing alert.
+    find: '      const eligible = node.isListening === true && node.status !== NS.Dead;',
+    repl: '      const eligible = node.status !== NS.Dead;',
+    what: 'a sleeping device is never quiet-node, however long it is silent' },
+  { id: 'quiet-node-no-lastseen-is-not-silence', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
+    // Treats "never heard from" as proof of silence, so a roster that has just
+    // been rebuilt accuses every node at once.
+    find: '      const b = eligible && seen != null && now - seen >= QUIET_MS;',
+    repl: '      const b = eligible && (seen == null || now - seen >= QUIET_MS);',
+    what: 'absence of a lastSeen reading is not evidence of silence' },
+  { id: 'unscoreable-split-by-cause', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Back to one counter for two different facts: a permanent, unfixable
+    // condition accumulating in the signal built to flag the fixable one.
+    find: "      } else if (ep.verdict === 'unverifiable' && ep.unprobeable) {",
+    repl: "      } else if (false) {",
+    what: 'unscoreable-by-design is counted apart from unscoreable-for-now' },
+  { id: 'unprobeable-flag-reaches-ledger', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // The ledger can never tell the two apart, because the one fact it cannot
+    // compute for itself never arrives.
+    find: '      const unprobeable = r.nodeId != null && !(n != null && isPingCandidate(n));',
+    repl: '      const unprobeable = false;',
+    what: 'the caller tells the ledger whether the node could be probed at all' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",

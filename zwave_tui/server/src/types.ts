@@ -344,6 +344,10 @@ export interface DataProvider {
    * out of 16 before anything surfaced it.
    */
   unverifiableCount?(kind: SymptomKind): number;
+  /** Of those, episodes on a node that cannot be probed at all (v0.38) — a
+   *  sleeping battery/FLiRS device, whose windows can never be filled. A
+   *  different fact from thin evidence, and previously indistinguishable. */
+  unverifiableUnprobeableCount?(kind: SymptomKind): number;
   /**
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.

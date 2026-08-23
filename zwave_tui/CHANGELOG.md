@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.38.0 — 2026-08-23
+
+**The last declared-but-unreachable kind, and a counter that conflated two facts.**
+
+### `quiet-node` is emitted at last
+
+Declared in the `SymptomKind` union since the DESIGN table and unemitted for
+eleven minor versions — the final instance of the class this cycle has spent
+twelve releases clearing. All fifteen kinds now have live detectors.
+
+It fires **earlier** than `node-down`, and from the opposite direction. The
+liveness sweep asks every listening node every `staleMs`, and an answered probe
+refreshes `lastSeen` — so a mains node whose `lastSeen` has aged past several
+sweep cadences means the probes are not landing, while the driver still reports
+it Alive because it marks a node Dead only when a transmission it actually
+attempted fails. That gap is the window in which a device is already unreachable
+and nothing has said so.
+
+Gated on `isListening === true`: a battery or FLiRS device is silent between
+wakeups by design, and calling that a symptom would make every sleeping sensor a
+standing alert. A node with no `lastSeen` at all is **not** accused — absence of
+a reading is not evidence of silence, and a freshly rebuilt roster would
+otherwise indict the whole mesh at once. A node already Dead gets `node-down`
+instead; two cards for one fault is worse than one.
+
+### Unscoreable-by-design, counted apart
+
+`unverifiable` was one number covering two different facts. Thin evidence is
+fixable — more probes, a wider window, which is exactly what v0.36–v0.37 spent
+five releases improving. A sleeping device cannot be probed **at all**, so its
+windows can never be filled and no effort changes the outcome. Reported
+together, the permanent kind silently drained the meaning from a signal built to
+flag the fixable one.
+
+`unverifiableUnprobeable(kind)` now tracks the structural kind separately, and
+REMEDY renders it as its own line. Probeability is passed in at `resolve()`,
+because it is a property of the device that only the data layer knows — the
+ledger cannot compute it.
+
+**That plumbing is where a mutant survived**: the ledger half was tested and the
+caller half was not, so hardcoding the flag to `false` passed a green suite.
+The store can separate the two kinds perfectly and it means nothing if the one
+fact it cannot derive never arrives. Same seam shape as five earlier defects
+this cycle.
+
+777 tests. 232 mutation entries.
+
 ## 0.37.3 — 2026-08-23
 
 **I made the same error twice: checking the count and never the span.**

@@ -43,11 +43,23 @@ export type SymptomKind =
    * node that still reads Alive. Deadness is a driver verdict; silence is not.
    */
   | 'node-down'
-  // DECLARED, NOT EMITTED. Nothing constructs this kind (grep `kind: '` — 13
-  // kinds have emitters, this one has none). It is kept because the planner and
-  // outcomes both carry cases for it, and DESIGN §3.3 specifies it; the gap is
-  // the DETECTOR. Flagged rather than silently deleted, because a declared kind
-  // that nothing emits is precisely how route-churn hid for two minor versions.
+  /**
+   * A mains node that has not been HEARD FROM in far longer than the liveness
+   * sweep's own cadence (v0.38) — reserved in DESIGN §3.3 and unemitted until
+   * now, the last of the declared-but-unreachable kinds this cycle cleared.
+   *
+   * Distinct from `node-down`, which is the driver's own verdict after a failed
+   * transmission. This fires EARLIER and from the opposite direction: the sweep
+   * asks every listening node every `staleMs`, and an answered probe refreshes
+   * `lastSeen`. So a mains node whose `lastSeen` has aged past several sweep
+   * cadences means the probes are not landing — while the driver, which only
+   * marks Dead REACTIVELY, still reports it Alive. That gap is the window in
+   * which a node is already unreachable and nothing has said so yet.
+   *
+   * Gated on `isListening === true`: a battery or FLiRS device is silent
+   * between wakeups by design, and calling that a symptom would make every
+   * sleeping sensor a standing alert.
+   */
   | 'quiet-node'
   | 'rate-fallback'
   | 'route-churn'
@@ -113,6 +125,15 @@ export interface DetectInput {
 
 // ── Tunables (documented; ship as constants — shareability rule) ─────────────
 const DWELL_MS = 5 * 60_000; // a breach must persist 5 min to surface
+/**
+ * Silence past which a MAINS node is a `quiet-node` (v0.38).
+ *
+ * Deliberately several times the liveness sweep's default cadence (120 min), so
+ * this only fires once at least two sweeps have asked and produced nothing —
+ * one unanswered probe is ordinary transient loss, measured at ~2 % on the
+ * reference mesh, and would make this a nightly false alarm.
+ */
+const QUIET_MS = 6 * 60 * 60_000;
 const WINDOW_MS = 10 * 60_000; // windowed-rate lookback
 const MIN_WINDOW_TX = 20; // minimum successful sends for a rate to be meaningful
 const TIMEOUT_RATE_ABS = 0.15; // chronic absolute threshold (health-check rubric)
@@ -342,6 +363,32 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
           kind: 'dead-flap', nodeId: id, severity: 'crit', sinceMs: since, basis: 'measured',
           evidence: [{ label: 'Alive↔Dead flaps', value: `${flaps} in 10m` }],
           narrative: `${node.name} is flapping between Alive and Dead — a hard link failure. Runbook: ping → power-cycle the device → exclude/re-include. A route rebuild cannot repair a node that can't be reached.`,
+        });
+      }
+    }
+
+    // quiet-node — heard from far past the sweep's cadence (v0.38). The sweep
+    // asks every listening node every staleMs and an answered probe refreshes
+    // lastSeen, so silence this long means probes are not landing — yet the
+    // driver still says Alive, because Dead is set only on a failed
+    // transmission it actually attempted.
+    {
+      const seen = node.stats?.lastSeen ?? null;
+      // Mains only, and never for a node already Dead — node-down owns that,
+      // and stacking both on one device would be two cards for one fault.
+      const eligible = node.isListening === true && node.status !== NS.Dead;
+      // A node with NO lastSeen at all is not evidence of silence: it may
+      // simply never have been heard from since a restart cleared the roster.
+      // Fail closed rather than accuse on absence.
+      const b = eligible && seen != null && now - seen >= QUIET_MS;
+      const since = dwell(state, key(id, 'quiet-node'), b, now);
+      if (since != null) {
+        breaching = true;
+        const silentH = Math.round(((now - (seen as number)) / 3_600_000) * 10) / 10;
+        out.push({
+          kind: 'quiet-node', nodeId: id, severity: 'warn', sinceMs: since, basis: 'measured',
+          evidence: [{ label: 'last heard', value: `${silentH}h ago` }],
+          narrative: `${node.name} is a mains node that has not been heard from in ${silentH}h, far past the liveness sweep's cadence — the sweep has asked and nothing has come back. The driver still reports it Alive because it marks a node Dead only when a transmission it attempted fails. Silence this long on a device that never sleeps is the earlier signal.`,
         });
       }
     }

@@ -535,3 +535,43 @@ test('CONTENTION does not stretch a burst past its window', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('the UNPROBEABLE flag actually reaches the ledger (v0.38)', async () => {
+  // The seam: the ledger half was tested and the caller half was not, so a
+  // mutant that hardcoded `unprobeable = false` survived a green suite. The
+  // ledger cannot compute this for itself — probeability is a property of the
+  // device that only the data layer knows — so if the flag never arrives, the
+  // two kinds of unscoreable stay conflated no matter how well the store
+  // separates them.
+  //
+  // The fixture's node 7 carries no `is_listening`, which parses to null under
+  // the strict-boolean rule, so it is NOT a ping candidate — exactly the
+  // sleeping-device case.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-unprobe-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+    assert.notEqual(zd.snapshot().find((n: NodeSnapshot) => n.nodeId === 7)!.isListening, true,
+      'fixture precondition: node 7 must be non-listening for this test to mean anything');
+
+    const priv = zd as unknown as { updateEpisodes: (s: unknown[], now: number) => void };
+    const t0 = 1_800_000_000_000;
+    const symptom = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+    priv.updateEpisodes([symptom], t0);                 // open
+    priv.updateEpisodes([], t0 + 60_000);               // symptom absent -> pending
+    priv.updateEpisodes([], t0 + 12 * 60_000);          // past CONFIRM_MS -> resolve
+
+    assert.equal(zd.unverifiableUnprobeableCount('rtt-degraded'), 1,
+      'a sleeping node\'s unscoreable episode must be counted as STRUCTURAL');
+    assert.equal(zd.unverifiableCount('rtt-degraded'), 0,
+      'and must not inflate the starvation counter it would otherwise drain');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
