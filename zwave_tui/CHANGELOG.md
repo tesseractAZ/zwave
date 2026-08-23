@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.37.1 — 2026-08-23
+
+**A diagnostic, shipped deliberately ahead of a fix.**
+
+Two episodes closed `unverifiable` on quiet-but-alive nodes that had received
+**8 and 5 verification probes** — the exact case v0.36.3's burst timing was
+meant to solve. RTT readings are not the problem: `rtt-degraded` is the symptom
+that fired, and its detector needs a fresh RTT reading to arm.
+
+The leading hypothesis is that burst spacing does not survive contention.
+`drainVerifyRequests` hands out **one node per tick globally**, while each
+node's burst wants 70-second spacing. With a single node owed a burst the three
+probes land ~2 ticks apart and fit inside the 5-minute after-window — which is
+what happened when node 6 scored `improved`. With several nodes competing, each
+one's probes stretch further apart until the burst can no longer fit the window
+it exists to fill. Two individually-correct mechanisms — per-node spacing and a
+global rate limit — composing badly, which is the same shape as four earlier
+defects this cycle.
+
+**It is not shipped as a fix, because the cause is not confirmed.** The add-on
+log carries no timestamps and the decision trace prints only on change, so the
+actual inter-probe spacing is unmeasurable from outside. A fix aimed at a
+plausible story rather than a demonstrated cause is a guess, and this cycle has
+already produced two of those (a retracted DNS root cause, and a power-cycle
+recommendation for a node a single ping revived).
+
+The probe line now reads:
+
+    auto-ping: node 11 verification probe (episode evidence, +140s, 2 owed)
+
+— the real gap since that node's previous verification probe, and how many nodes
+were dividing the one-per-tick queue. If the gaps stay under ~140s with several
+owed, the hypothesis is wrong and the cause is elsewhere; if they stretch with
+contention, the fix is FIFO-by-node instead of round-robin, which costs no extra
+traffic.
+
+765 tests. 223 mutation entries.
+
 ## 0.37.0 — 2026-08-23
 
 **A dead node was invisible, and the sweep was measuring the wrong thing.**

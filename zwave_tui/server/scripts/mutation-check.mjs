@@ -999,6 +999,14 @@ const MUTANTS = [
     find: 'fresh: m.freshSamples, pa: m.probesAsked, pk: m.probesAnswered, ps: m.probesSelfProven };',
     repl: 'fresh: m.freshSamples };',
     what: 'the probe reply rate survives a restart' },
+  { id: 'verify-probe-reports-spacing', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Drops the diagnostic that makes a burst measurable. Without the gap the
+    // add-on log cannot show whether a burst landed inside its window — it has
+    // no timestamps, and the decision trace only prints on change — so the next
+    // unverifiable episode is again diagnosed by guesswork.
+    find: "      const gap = prevVerify == null ? 'first' : `+${Math.round((t - prevVerify) / 1000)}s`;",
+    repl: "      const gap = 'first';",
+    what: 'a verification probe reports the real gap since the node last got one' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
