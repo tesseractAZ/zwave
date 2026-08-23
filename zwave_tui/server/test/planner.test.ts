@@ -22,7 +22,7 @@ function sym(kind: SymptomKind, over: Partial<Symptom> = {}): Symptom {
  *  SymptomKind is added to the union but not listed here — so a new kind can
  *  never silently escape the invariant loops in this file. */
 const ALL_KINDS = [
-  'return-path-degraded', 'chronic-return-path', 'dead-flap', 'quiet-node',
+  'return-path-degraded', 'chronic-return-path', 'dead-flap', 'node-down', 'quiet-node',
   'rate-fallback', 'route-churn', 'rtt-degraded', 'weak-signal', 'chatty-device',
   'ghost-suspect', 'controller-degraded', 'edge-cluster', 'mesh-interference',
   's2-desync',

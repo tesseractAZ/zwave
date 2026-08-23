@@ -415,12 +415,6 @@ const MUTANTS = [
     find: '      .filter((n) => n.status !== NodeStatus.Dead) // the dead path owns those',
     repl: '      .filter(() => true) // the dead path owns those',
     what: 'the liveness probe leaves Dead nodes to the remediation path' },
-  { id: 'stale-window', file: 'src/zwave/autoPing.ts',
-    // Dropping the age test probes every node on every tick regardless of when
-    // it was last heard from — the opposite of a per-node cadence.
-    find: '      .filter((x) => x.seen == null || now - x.seen >= config.staleMs)',
-    repl: '      .filter(() => true)',
-    what: 'only nodes silent past the window get a liveness probe' },
   { id: 'autoping-master-gate', file: 'src/zwave/autoPing.ts',
     // Firing with write actions off would make the add-on's own read-only claim
     // false — the worst kind of defect here.
@@ -943,6 +937,68 @@ const MUTANTS = [
     find: "  const prov = e.nodes > 0 ? ` · ${e.nodes} node${e.nodes === 1 ? '' : 's'}` : '';",
     repl: "  const prov = ` · ${e.nodes} node${e.nodes === 1 ? '' : 's'}`;",
     what: 'an unknown node count renders as nothing, never as zero nodes' },
+  /* ── v0.37: node-down, the ordinary outage ──────────────────────────── */
+  { id: 'node-down-fires-on-dead', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
+    // Back to the pre-v0.37 blind spot: `dead-flap` needs THREE transitions, so
+    // an ordinary outage (die, stay dead, get probed, come back) surfaced as no
+    // symptom at all — invisible on REMEDY and unable to open an M5 episode,
+    // which is why auto-ping's own efficacy could never accrue a data point.
+    find: '      const b = node.status === NS.Dead;',
+    repl: '      const b = false;',
+    what: 'a node the driver marked Dead surfaces as a symptom' },
+  { id: 'node-down-needs-dead', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
+    // Fires for every node regardless of status — turning every sleeping device
+    // into a critical alert and conflating silence with a driver verdict.
+    find: '      const b = node.status === NS.Dead;',
+    repl: '      const b = true;',
+    what: 'node-down fires ONLY for a Dead node, never for a quiet one' },
+  /* ── v0.37: the liveness sweep asks everyone ────────────────────────── */
+  { id: 'sweep-asks-every-node', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores the pre-v0.37 silence filter. Sampling a node only when it
+    // happens to be quiet measures how talkative it is, not how reachable —
+    // the reply rates stop being comparable between devices, which is the one
+    // property that makes them worth persisting.
+    find: '      .filter((x) => {\n        const last = input.state.lastStaleAt.get(x.id);\n        return last == null || now - last >= config.staleMs;\n      })',
+    repl: '      .filter((x) => x.seen == null || now - x.seen >= config.staleMs)\n      .filter((x) => {\n        const last = input.state.lastStaleAt.get(x.id);\n        return last == null || now - last >= config.staleMs;\n      })',
+    what: 'the liveness sweep asks EVERY listening node, not only the quiet ones' },
+  { id: 'sweep-cadence-gate-holds', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Drops the only remaining gate: an unreachable node never refreshes
+    // lastSeen, stays permanently due, and is re-probed on EVERY tick.
+    find: '        const last = input.state.lastStaleAt.get(x.id);\n        return last == null || now - last >= config.staleMs;',
+    repl: '        return true;',
+    what: 'a node is not re-probed within one cadence interval' },
+  { id: 'selfproven-measured-vs-cadence', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // The bug found while building this: comparing against the previous PROBE
+    // time after noteStale has overwritten it compares against NOW, and nothing
+    // is ever newer — so every node reads as unheard and the distinction the
+    // sweep exists to draw disappears.
+    find: '      const selfProven = seenAt != null && t - seenAt < o.config.staleMs;',
+    repl: '      const selfProven = seenAt != null && seenAt > (state.lastStaleAt.get(nodeId) ?? 0);',
+    what: 'self-proven is measured against the CADENCE, not against a just-overwritten probe time' },
+  { id: 'probe-outcome-is-recorded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // The rate never accrues: probes fire, outcomes are judged, and nothing is
+    // persisted — leaving the same ephemeral log lines v0.36 had.
+    find: "      o.onProbeResult?.(nodeId, false, state.selfProvenAtProbe.get(nodeId) ?? false);",
+    repl: '      void nodeId;',
+    what: 'a missed probe is recorded to the persisted reply rate' },
+  { id: 'probe-row-needs-a-sample', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Renders a rate over zero probes — 0 of 0 is an absence of evidence, not a
+    // reliability of zero, and printing it as a percentage fabricates a reading.
+    find: '      if (cov.probesAsked > 0) {',
+    repl: '      if (cov.probesAsked >= 0) {',
+    what: 'the probe row appears only when the node has actually been swept' },
+  { id: 'probe-rate-toned-by-misses', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Paints every reply rate green, so a node answering 3 of 20 reads as
+    // healthy — the same ANSI-blind gap that once let a 5%-fresh feed pass.
+    find: '        const tone = pct >= 95 ? c.green : pct >= 75 ? c.yellow : c.red;',
+    repl: '        const tone = c.green;',
+    what: 'the probe reply rate is toned by how often the node actually answers' },
+  { id: 'probe-counts-persist', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    // The counters live only in memory, so every restart wipes the reply rate
+    // and it can never describe more than the current uptime.
+    find: 'fresh: m.freshSamples, pa: m.probesAsked, pk: m.probesAnswered, ps: m.probesSelfProven };',
+    repl: 'fresh: m.freshSamples };',
+    what: 'the probe reply rate survives a restart' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",

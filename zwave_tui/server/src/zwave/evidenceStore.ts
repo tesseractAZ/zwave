@@ -175,6 +175,31 @@ export interface NodeCoverage {
   /** Cumulative counts since firstSeenAt (not ring-bounded). */
   samples: number;
   freshSamples: number;
+  /**
+   * Liveness-probe outcomes (v0.37). Cumulative, persisted, never ring-bounded.
+   *
+   * From v0.37 the liveness sweep asks EVERY listening node on a fixed cadence
+   * rather than only the ones that have gone quiet, which is what makes these
+   * counts comparable between nodes: the same question, at the same interval,
+   * of every device. "Answered 3 of 20" is then a fact about the node rather
+   * than about how talkative it happens to be.
+   *
+   * This measures something the driver's Dead flag cannot. Dead is set
+   * REACTIVELY — only when a transmission fails — so a node nobody addresses
+   * reads Alive indefinitely; the sweep converts that silence into evidence.
+   */
+  probesAsked: number;
+  probesAnswered: number;
+  /**
+   * Probes where the node had ALREADY proved itself since the previous sweep,
+   * by communicating on its own (v0.37).
+   *
+   * A high count means the probe is redundant for this device — its own traffic
+   * is the liveness evidence and the sweep is only confirming it. That is worth
+   * distinguishing from a node whose ONLY proof of life is the probe, because
+   * the two look identical in a bare answered/asked ratio.
+   */
+  probesSelfProven: number;
 }
 
 export type EvidenceMap = Map<number, EvidenceSample[]>;
@@ -237,6 +262,9 @@ export interface EvidenceStore {
   controllerCoarse(): CtrlCoarseBucket[];
   routeFailures(nodeId: number): RouteFailureEvent[];
   coverage(nodeId: number): NodeCoverage | null;
+  /** Record one liveness-probe outcome for a node (v0.37). `selfProven` means
+   *  the node had already communicated on its own since the previous sweep. */
+  recordProbe(nodeId: number, answered: boolean, selfProven: boolean, at?: number): void;
   /** Store-level: when evidence collection first began (survives restarts). */
   recordingSince(): number | null;
   all(): EvidenceMap;
@@ -334,7 +362,7 @@ interface Persisted {
    *  noise-floor tier. Absent in a pre-tier v2 file ⇒ the tier loads empty. */
   controllerCoarse?: CtrlCoarseCols | null;
   routeFails: Record<string, { t: number[]; a: number[]; b: number[] }>;
-  meta: Record<string, { firstSeenAt: number; samples: number; fresh: number }>;
+  meta: Record<string, { firstSeenAt: number; samples: number; fresh: number; pa?: number; pk?: number; ps?: number }>;
 }
 
 const SCHEMA_V = 2;
@@ -650,7 +678,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       if (!Number.isInteger(nodeId) || nodeId <= 0) return;
       if (meta.has(nodeId)) return;
       const t = at ?? now();
-      meta.set(nodeId, { firstSeenAt: t, samples: 0, freshSamples: 0 });
+      meta.set(nodeId, { firstSeenAt: t, samples: 0, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 });
       if (since == null) since = t;
       dirty = true;
     },
@@ -702,7 +730,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       if (ring.length > maxSamples) ring.splice(0, ring.length - maxSamples);
       fine.set(nodeId, ring);
       foldCoarse(nodeId, sample, d.invalid);
-      const m = meta.get(nodeId) ?? { firstSeenAt: t, samples: 0, freshSamples: 0 };
+      const m = meta.get(nodeId) ?? { firstSeenAt: t, samples: 0, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 };
       m.samples += 1;
       if (fresh) m.freshSamples += 1;
       meta.set(nodeId, m);
@@ -776,6 +804,15 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     controllerSamples: () => ctrlRing,
     controllerCoarse: () => ctrlCoarse,
     routeFailures: (nodeId) => routeFails.get(nodeId) ?? [],
+    recordProbe(nodeId, answered, selfProven, at): void {
+      const t = at ?? now();
+      const m = meta.get(nodeId) ?? { firstSeenAt: t, samples: 0, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 };
+      m.probesAsked += 1;
+      if (answered) m.probesAnswered += 1;
+      if (selfProven) m.probesSelfProven += 1;
+      meta.set(nodeId, m);
+      dirty = true;
+    },
     coverage: (nodeId) => meta.get(nodeId) ?? null,
     recordingSince: () => since,
     all: () => fine,
@@ -843,12 +880,15 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           for (const [k, v] of Object.entries(obj.meta)) {
             const id = Number(k);
             if (!Number.isInteger(id) || id <= 0 || !v || typeof v !== 'object') continue;
-            const fm = v as { firstSeenAt?: unknown; samples?: unknown; fresh?: unknown };
+            const fm = v as { firstSeenAt?: unknown; samples?: unknown; fresh?: unknown; pa?: unknown; pk?: unknown; ps?: unknown };
             if (typeof fm.firstSeenAt !== 'number') continue;
+            const num = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0);
             meta.set(id, {
               firstSeenAt: fm.firstSeenAt,
               samples: typeof fm.samples === 'number' ? fm.samples : 0,
               freshSamples: typeof fm.fresh === 'number' ? fm.fresh : 0,
+              // Absent in pre-v0.37 files — an older store simply starts these at 0.
+              probesAsked: num(fm.pa), probesAnswered: num(fm.pk), probesSelfProven: num(fm.ps),
             });
           }
         }
@@ -1089,7 +1129,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         }
         const metaOut: Persisted['meta'] = {};
         for (const [id, m] of meta) {
-          metaOut[String(id)] = { firstSeenAt: m.firstSeenAt, samples: m.samples, fresh: m.freshSamples };
+          metaOut[String(id)] = { firstSeenAt: m.firstSeenAt, samples: m.samples, fresh: m.freshSamples, pa: m.probesAsked, pk: m.probesAnswered, ps: m.probesSelfProven };
         }
         const payload: Persisted = {
           v: SCHEMA_V,

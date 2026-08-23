@@ -2083,13 +2083,14 @@ burst must not fire, an active one must.
 
 #### 7.2.3 The 14 `SymptomKind`s
 
-The `SymptomKind` union declares **14** kinds. Thirteen have live detector bodies in `detectSymptoms`; one (`quiet-node`) is declared in the union but has **no detector implemented yet** — a reserved name from the DESIGN table awaiting the driver-WS cadence data:
+The `SymptomKind` union declares **15** kinds. Fourteen have live detector bodies in `detectSymptoms`; one (`quiet-node`) is declared in the union but has **no detector implemented yet** — a reserved name from the DESIGN table awaiting the driver-WS cadence data:
 
 | # | kind | scope | severity | basis | implemented? |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `return-path-degraded` | node | watch/warn | measured | yes |
 | 2 | `chronic-return-path` | node | warn | measured | yes |
 | 3 | `dead-flap` | node | crit | measured | yes |
+| 3b | `node-down` | node | crit | measured | yes (v0.37) |
 | 4 | `quiet-node` | node | — | — | **declared, not built** |
 | 5 | `rate-fallback` | node | watch/warn | measured | yes |
 | 6 | `route-churn` | node | warn | measured | yes (v0.30.0) |
@@ -2867,6 +2868,36 @@ The full read path each frame: Remedy `symptomBlock` → `planFor(sym, node, { w
 
 **Option hygiene.** `clean()` strips `undefined` keys (and `log`) from the options before the `{ ...DEFAULTS, ...clean(opts) }` spread, so an explicitly-passed `undefined` can never clobber a default with `undefined`.
 
+### 9.7a Why auto-ping's own efficacy is NOT measured (v0.37)
+
+`node-down` (§7.2.3) surfaces the ordinary outage — a node the driver has marked
+Dead past a dwell — which until v0.37 produced **no symptom at all**: `dead-flap`
+needs three Alive↔Dead transitions, and a node that dies, gets probed and comes
+back produces one or two. Outages were invisible on REMEDY entirely.
+
+It deliberately **opens no M5 episode**, and the reason is worth recording
+because the obvious design fails in two independent ways.
+
+The first is arithmetic. An episode closes only when its symptom goes absent,
+and `node-down` is absent exactly when the node stops being Dead — so every
+closure is a recovery. Both arms saturate at `ok === n`, `baseRate` pins at
+**1.0**, and the Wilson gate requires `wilsonLower(ok, n) >= base + minEffect`
+= **1.05**, which `wilsonLower(n, n)` approaches from below and never reaches at
+any n (0.839 at n=20, 0.996 at n=1000). An arm that cannot credit the action at
+any sample size is not a measurement.
+
+The second survives fixing the first. Auto-ping is applied **non-randomly**: it
+probes only outages that already survived its dwell. A control arm would fill
+with fast self-heals and the action arm with the hard cases, so any difference
+between them would measure selection, not efficacy.
+
+So the honest position is that this ledger cannot measure auto-ping's
+remediation efficacy, and `metricOf('node-down')` returns `none` rather than
+manufacturing a statistic that reads like evidence. The **liveness sweep**
+(§11.12) measures the thing that *is* soundly measurable — of the nodes we
+asked, how many answered — because there the question is descriptive and the
+sample is uniform.
+
 ### 9.7 Evidence starvation, and the verification probes (v0.36)
 
 The ledger's floors are sound and the detector's are sound, and between them lay a gap that made the whole loop inert on a real mesh. A 39-hour post-deploy audit of v0.35 found **16 of 16 closed episodes scored `unverifiable`**, feeding neither arm, with the persisted ledger holding one control kind and zero action arms after months of operation.
@@ -3537,6 +3568,8 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 > **A probe's answer is judged from evidence, not from the call (v0.36).** The ping verb is `call_service button.press`, and HA's zwave_js ping button awaits `node.async_ping()`, which returns a boolean and raises nothing when the node stays silent. The service call therefore fulfils whether or not the node answered, so the `.catch` around it can only ever fire on "this node has no ping button" or a WebSocket transport fault — never on the outcome auto-ping exists to detect. Through v0.35 the two `did not answer` log lines were unreachable for their stated purpose. `judgeProbeAnswers` now asks the only question that can be answered: `ANSWER_GRACE_MS` (90 s) after a probe, did the node's `lastSeen` advance past the moment we sent it? A node absent from the roster is judged **neither** way — a roster gap is not evidence of a failed probe. **Consecutive misses are counted (v0.36.5)** and the line says which (`3rd consecutive miss`); any answer resets the streak, so the ordinal always means "in a row". Severity follows it: a **first** miss logs `info`, a **streak** logs `warn`. Measured on the live mesh, healthy nodes drop about 2 % of probes to ordinary transient loss — across 35 candidates probed two-hourly that is a steady drip, and warning on each would sit a stream of false alarm beside the genuine article and teach an operator to skim past both. Nothing is suppressed; a single lost packet is simply not called a warning.
 
 > **Giving up is now SAID, not just done (v0.36.4).** `maxAttempts` is documented as "attempts per dead episode, after which we stop and leave it to a human" — and through v0.36.3 it did the stopping only. The gate was a bare `continue`, and because `attempts` resets solely when a node LEAVES Dead, a node that stays down was abandoned permanently and in silence. Observed live: node 23 exhausted 3/3 and auto-ping said nothing for the next 80 minutes, while the operator had no way to distinguish "given up" from "resolved" — both look like an absence of lines. The node was very likely revivable throughout by a single manual ping, which is in fact how it was eventually recovered. `decideAutoPings` now returns a `gaveUp` lane and the runner announces it at **error** severity on both destinations, once per outage (`gaveUpAnnounced`), re-arming when the node recovers so a device that dies again is reported again. It is the one auto-ping message that asks for action rather than reporting activity.
+
+> **The liveness sweep asks EVERYONE (v0.37).** Through v0.36 the sweep probed only nodes that had gone quiet past `staleMs`, on the reasoning that a talkative device proves itself and costs nothing to skip. That is true for *operations* and fatal for *measurement*: a reply rate sampled only when a node happens to be silent describes how talkative the node is, not how reachable. From v0.37 every listening non-Dead node is asked on the same cadence, and the outcomes are persisted per node in `NodeCoverage` (`probesAsked` / `probesAnswered` / `probesSelfProven`), surfaced on NODE DETAIL. The measured cost was small enough to settle the trade: on the reference mesh all 35 listening candidates were already crossing the silence threshold, so "ask everyone" is barely more traffic than "ask the quiet ones". The cadence gate remains and is now the only one — without it an unreachable node never refreshes `lastSeen`, stays permanently due, and is re-probed every tick. `probesSelfProven` records the probes where the node had **already** communicated within the cadence: a bare answered/asked ratio cannot distinguish a device whose own traffic keeps proving it alive from one whose only evidence is the probe. This is what the driver's `Dead` flag cannot supply, being set REACTIVELY — only on a failed transmission — so a node nobody addresses reads Alive indefinitely.
 
 > **Verification probes ride this same runner (v0.36).** The outcome ledger requests them (§9.7); they are cleared by `decideAutoPings` alongside the remediation and liveness lanes precisely so they inherit every gate rather than opening a second, less-guarded path to the mesh, and they are logged to **both** destinations at info, like every other autonomous write here. (v0.36.0 put them on the server log at debug only, on an estimate that did not survive contact with the mesh — roughly 60 verification probes per 39 hours against ~635 liveness probes is about a tenth more, not a flood — and the cost showed up immediately: the v0.36.0 deploy could not be verified from the container log at all. Corrected in v0.36.1.) The per-probe **answered** confirmation stays at debug: several hundred lines a day saying "as designed" is the noise that trains an operator to stop reading. The **unanswered** case is the signal, and it is warn on both.
 

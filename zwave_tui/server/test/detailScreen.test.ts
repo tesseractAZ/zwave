@@ -391,3 +391,51 @@ test('ZERO samples renders a DASH for the fresh share — never a confident 0%',
   assert.match(row!, /—/, 'no measurement is a dash');
   assert.ok(!/\(0% lifetime\)/.test(row!), 'a 0% over zero samples would be a fabricated reading');
 });
+
+/* ── v0.37: the liveness sweep's own record ────────────────────────────────── */
+
+type Cov37 = Cov & { probesAsked: number; probesAnswered: number; probesSelfProven: number };
+function withProbes(p: Partial<Cov37>): { data: DataProvider; nodes: NodeSnapshot[] } {
+  const d = mkData();
+  const cov: Cov37 = {
+    firstSeenAt: Date.now() - 7 * 86_400_000, samples: 500, freshSamples: 480,
+    statusFeedLive: true, statsFeedLive: true,
+    probesAsked: 0, probesAnswered: 0, probesSelfProven: 0, ...p,
+  };
+  (d.data as { evidenceCoverage?: (n: number) => Cov37 }).evidenceCoverage = () => cov;
+  return d;
+}
+
+test('the probe reply rate reaches the screen — a rate collected and never shown is not a measurement', () => {
+  const out = evidenceLines(withProbes({ probesAsked: 84, probesAnswered: 81, probesSelfProven: 22 }));
+  const row = out.find((l) => /^\s*Probes/.test(l));
+  assert.ok(row, 'the Probes row must render');
+  assert.match(row!, /81\/84 answered \(96%\)/);
+  assert.match(row!, /22 self-proven/, 'and how many the node had already answered for itself');
+});
+
+test('a node that mostly MISSES its probes is toned as such', () => {
+  // Asserted on the escape codes: the tone is the finding, and stripping ANSI
+  // is how a mutant painting everything green survived a fully-passing run once.
+  const raw = (asked: number, answered: number): string => {
+    const d = withProbes({ probesAsked: asked, probesAnswered: answered });
+    return renderDetail(ctx(mkView(120, 60), d.data, d.nodes)).find((l) => /Probes/.test(strip(l))) ?? '';
+  };
+  assert.ok(raw(20, 20).includes('\x1b[92m'), '100% is green');
+  assert.ok(raw(20, 3).includes('\x1b[91m'), '15% is red');
+  assert.ok(!raw(20, 3).includes('\x1b[92m'), 'and not also green');
+});
+
+test('a node never swept shows NO probe row rather than 0/0', () => {
+  // 0 of 0 is not a reliability of zero; it is an absence of evidence, and
+  // rendering it as a rate would be a fabricated reading.
+  const out = evidenceLines(withProbes({ probesAsked: 0 }));
+  assert.ok(!out.some((l) => /^\s*Probes/.test(l)));
+});
+
+test('self-proven is omitted when there is none, not printed as zero', () => {
+  const out = evidenceLines(withProbes({ probesAsked: 10, probesAnswered: 10, probesSelfProven: 0 }));
+  const row = out.find((l) => /^\s*Probes/.test(l))!;
+  assert.match(row, /10\/10 answered/);
+  assert.ok(!/self-proven/.test(row));
+});

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createEvidenceStore, COARSE_BUCKET_MS, routeKeyOfLwr, isRouteChange, type EvidenceStoreOptions } from '../src/zwave/evidenceStore';
@@ -593,4 +593,71 @@ test('isRouteChange: the first statistics event has nothing to compare against',
   // a route change, or every node would score one at startup.
   assert.equal(isRouteChange(undefined, lwr(3)), false);
   assert.equal(isRouteChange(undefined, lwr()), false);
+});
+
+/* ── v0.37: persisted liveness-probe reply rate ────────────────────────────── */
+
+/** Local clock for the probe tests (the file's other suites use their own). */
+const T = 1_800_000_000_000;
+
+test('probe outcomes accumulate per node and survive a save/load', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zwev-probe-'));
+  const path = join(dir, 'ev.json');
+  try {
+    const s = createEvidenceStore({ path, now: () => T });
+    s.registerNode(7, T);
+    s.recordProbe(7, true, false, T);
+    s.recordProbe(7, true, true, T);   // answered, and it had proved itself already
+    s.recordProbe(7, false, false, T); // missed
+    const c = s.coverage(7)!;
+    assert.equal(c.probesAsked, 3);
+    assert.equal(c.probesAnswered, 2);
+    assert.equal(c.probesSelfProven, 1, 'self-proven is tracked apart from answered');
+
+    s.save();
+    const s2 = createEvidenceStore({ path, now: () => T });
+    s2.load();
+    const c2 = s2.coverage(7)!;
+    assert.equal(c2.probesAsked, 3, 'a reply rate is only useful if it outlives a restart');
+    assert.equal(c2.probesAnswered, 2);
+    assert.equal(c2.probesSelfProven, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a PRE-v0.37 evidence file loads with probe counts at zero, not NaN', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zwev-old-'));
+  const path = join(dir, 'ev.json');
+  try {
+    // A file whose meta entries predate the probe counters entirely.
+    writeFileSync(path, JSON.stringify({
+      v: 4, savedAt: T, homeId: null, recordingSince: T - 1000, nodes: {}, coarse: {},
+      controller: null, controllerCoarse: null, routeFails: {},
+      meta: { '7': { firstSeenAt: T - 5000, samples: 10, fresh: 8 } },
+    }), 'utf8');
+    const s = createEvidenceStore({ path, now: () => T });
+    s.load();
+    const c = s.coverage(7);
+    if (c) {
+      assert.equal(c.probesAsked, 0);
+      assert.equal(c.probesAnswered, 0);
+      assert.equal(c.probesSelfProven, 0);
+      assert.equal(c.samples, 10, 'and the fields that DID exist are preserved');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('recordProbe on an unregistered node does not lose the count', () => {
+  // The sweep can reach a node before registerNode has run for it; dropping the
+  // outcome would silently under-report exactly the nodes we know least about.
+  // No path: the store runs in-memory, which is the configuration a fresh
+  // install has before EVIDENCE_PATH is set.
+  const dir = mkdtempSync(join(tmpdir(), 'zwev-unreg-'));
+  const s = createEvidenceStore({ path: join(dir, 'ev.json'), now: () => T });
+  s.recordProbe(99, false, false, T);
+  assert.equal(s.coverage(99)?.probesAsked, 1);
+  rmSync(dir, { recursive: true, force: true });
 });

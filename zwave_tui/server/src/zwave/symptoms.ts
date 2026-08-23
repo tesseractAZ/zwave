@@ -26,6 +26,23 @@ export type SymptomKind =
   | 'return-path-degraded'
   | 'chronic-return-path'
   | 'dead-flap'
+  /**
+   * A mains/listening node the driver has marked Dead, past a dwell (v0.37).
+   *
+   * Distinct from `dead-flap`, which needs three Alive↔Dead transitions and so
+   * only ever fires on a node that is oscillating. The ordinary outage — node
+   * dies, stays dead, is probed, comes back — produces one or two transitions
+   * and was therefore invisible to this engine entirely: the symptom list never
+   * mentioned it, and the M5 ledger never opened an episode, which meant
+   * auto-ping's own efficacy against deadness could never accrue a single data
+   * point. That is a strange gap for the one action allowed to run without a
+   * human, whose autonomy this file justifies on the grounds that it
+   * instruments itself.
+   *
+   * Also distinct from `quiet-node`, which is about SILENCE past a cadence on a
+   * node that still reads Alive. Deadness is a driver verdict; silence is not.
+   */
+  | 'node-down'
   // DECLARED, NOT EMITTED. Nothing constructs this kind (grep `kind: '` — 13
   // kinds have emitters, this one has none). It is kept because the planner and
   // outcomes both carry cases for it, and DESIGN §3.3 specifies it; the gap is
@@ -325,6 +342,29 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
           kind: 'dead-flap', nodeId: id, severity: 'crit', sinceMs: since, basis: 'measured',
           evidence: [{ label: 'Alive↔Dead flaps', value: `${flaps} in 10m` }],
           narrative: `${node.name} is flapping between Alive and Dead — a hard link failure. Runbook: ping → power-cycle the device → exclude/re-include. A route rebuild cannot repair a node that can't be reached.`,
+        });
+      }
+    }
+
+    // node-down — the ordinary outage (v0.37). Dead is set REACTIVELY by the
+    // driver (only on a failed transmission), so this is a measured verdict
+    // about the node, not an inference from silence. Deliberately dwelled
+    // SHORTER than auto-ping's probe threshold so the episode is already open
+    // when the probe fires and the M5 ledger can attribute it — the whole point
+    // of the kind is that the one autonomous action becomes measurable.
+    {
+      const b = node.status === NS.Dead;
+      // NOT markDegrading: a dead node contributes no RF readings, and feeding
+      // it to the mesh-correlation gate would let a single dead device look
+      // like environmental degradation.
+      const since = dwell(state, key(id, 'node-down'), b, now);
+      if (since != null) {
+        breaching = true;
+        const downFor = Math.max(0, Math.round((now - since) / 60_000));
+        out.push({
+          kind: 'node-down', nodeId: id, severity: 'crit', sinceMs: since, basis: 'measured',
+          evidence: [{ label: 'driver status', value: `Dead for ${downFor}m` }],
+          narrative: `${node.name} is marked Dead by the driver — a transmission to it failed and has not since succeeded. Silence alone would not prove this; the status is a measured verdict. A ping often revives a node whose radio is still there, which is what auto-ping attempts before handing it to you.`,
         });
       }
     }

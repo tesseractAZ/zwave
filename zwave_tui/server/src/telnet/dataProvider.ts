@@ -65,6 +65,7 @@ export interface ZwaveDataSource {
   evidenceCoverage(nodeId: number): {
     firstSeenAt: number; samples: number; freshSamples: number;
     statusFeedLive: boolean; statsFeedLive: boolean;
+    probesAsked: number; probesAnswered: number; probesSelfProven: number;
   } | null;
   /** Long-horizon buckets for a node (v0.35). REQUIRED — see ackEvent. */
   evidenceCoarse(nodeId: number): { t0: number; samples: number; routeChanges?: number }[];

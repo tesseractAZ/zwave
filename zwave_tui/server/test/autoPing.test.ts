@@ -330,13 +330,39 @@ test('probes a mains node that has been silent past the window', () => {
   assert.deepEqual(d.stale, [50]);
 });
 
-test('a chatty node is never probed — the clock is per-node', () => {
-  // This is what makes the cadence self-balancing: a device that reports on its
-  // own keeps resetting its own last-contact time and costs nothing.
+test('EVERY listening node is swept, chatty ones included (v0.37)', () => {
+  // Changed deliberately. Skipping talkative nodes saved a little traffic and
+  // cost the one property that makes a reply rate worth keeping: comparability.
+  // Sampled only when a node happens to be silent, the rate measures how
+  // talkative the node is, not how reachable — so every node is now asked the
+  // same question on the same cadence. Measured cost on the reference mesh:
+  // all 35 listening candidates were already crossing the threshold anyway.
   const s = createAutoPingState();
   const nodes = [node(1, { isController: true }), seen(51, 30 * MIN)];
   const d = tick(s, nodes, T, { config: staleCfg() });
-  assert.deepEqual(d.stale, [], 'a node heard from 30m ago is not stale at 240m');
+  assert.deepEqual(d.stale, [51], 'a node heard from 30m ago is still asked');
+});
+
+test('the cadence gate still holds — a node is not re-probed within staleMs', () => {
+  // The one remaining gate, and the one that matters: without it an unreachable
+  // node never refreshes lastSeen, stays permanently due, and is re-probed on
+  // every single tick.
+  const s = createAutoPingState();
+  const nodes = [node(1, { isController: true }), seen(51, 30 * MIN)];
+  assert.deepEqual(tick(s, nodes, T, { config: staleCfg() }).stale, [51]);
+  noteStale(s, 51, T);
+  assert.deepEqual(tick(s, nodes, T + 60 * MIN, { config: staleCfg() }).stale, [],
+    'probed an hour ago, cadence is 240m — not due');
+  assert.deepEqual(tick(s, nodes, T + 241 * MIN, { config: staleCfg() }).stale, [51],
+    'and due again once the cadence has elapsed');
+});
+
+test('longest-unheard is still swept FIRST', () => {
+  // Ask everyone, but ask the node with no independent proof of life before one
+  // that has been chatting all along.
+  const s = createAutoPingState();
+  const nodes = [node(1, { isController: true }), seen(51, 30 * MIN), seen(52, 300 * MIN)];
+  assert.deepEqual(tick(s, nodes, T, { config: staleCfg() }).stale, [52]);
 });
 
 test('a node never heard from at all is treated as maximally stale', () => {
@@ -437,22 +463,25 @@ test('an unchanged decision is not repeated every tick', async () => {
   const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
   let clock = T;
   const info: string[] = [];
-  // Every node heard from a minute ago ⇒ nothing due, nothing changes. (A mesh
-  // of all-null lastSeen is NOT steady: each tick probes one and puts it on
-  // cooldown, so stale-due genuinely counts down and the trace SHOULD change.)
+  // From v0.37 the sweep asks EVERY node, so at startup every node is due and
+  // the queue genuinely counts down — that is not a steady state and the trace
+  // SHOULD change through it. The steady state begins once the first pass has
+  // drained and every node is on its cadence cooldown.
   const nodes = [node(1, { isController: true }), seen(10, MIN), seen(11, MIN), seen(12, MIN)];
   const h = startAutoPing({
     nodes: () => nodes, controller: () => null, ready: () => true,
-    ping: async () => {}, log: (sev, _n, text) => { if (sev === 'info') info.push(text); },
+    ping: async () => {}, log: (sev, _n, text) => { if (sev === 'info' && text.includes('candidates=')) info.push(text); },
     config: staleCfg(), tickMs: 1_000_000, now: () => clock,
   });
   // Start PAST the boot window — otherwise the gate opening mid-run is itself a
   // change, and the run is not the steady state this test is about.
   clock = T + BOOT_WINDOW_MS + MIN;
-  h.tick();
+  // Drain the first sweep: three nodes, one probe per tick, plus a tick for the
+  // queue to reach empty.
+  for (let i = 1; i <= 5; i++) { clock = T + BOOT_WINDOW_MS + i * MIN; h.tick(); }
   const first = info.length;
-  for (let i = 2; i <= 6; i++) { clock = T + BOOT_WINDOW_MS + i * MIN; h.tick(); }
-  assert.equal(info.length, first, 'a steady state must not re-log every tick');
+  for (let i = 6; i <= 12; i++) { clock = T + BOOT_WINDOW_MS + i * MIN; h.tick(); }
+  assert.equal(info.length, first, 'once the sweep has drained, a steady state must not re-log every tick');
   h.stop();
 });
 
@@ -464,7 +493,10 @@ test('a steady state is still re-stated on the heartbeat', async () => {
   const nodes = [node(1, { isController: true }), seen(10, MIN), seen(11, MIN)];
   const h = startAutoPing({
     nodes: () => nodes, controller: () => null, ready: () => true,
-    ping: async () => {}, log: (sev, _n, text) => { if (sev === 'info') info.push(text); },
+    // TRACE lines only: from v0.37 a probe fires on most ticks and each one
+    // legitimately logs, so counting every info line measures probe activity
+    // rather than the trace dedup this test is about.
+    ping: async () => {}, log: (sev, _n, text) => { if (sev === 'info' && text.includes('candidates=')) info.push(text); },
     config: staleCfg(), tickMs: 1_000_000, now: () => clock,
   });
   h.tick();
@@ -493,8 +525,8 @@ test('an autonomous action is visible in the SERVER log, not only the event ring
   });
   clock = T + BOOT_WINDOW_MS + MIN;
   h.tick();
-  assert.ok(ring.some((m) => /liveness probe/.test(m)), 'must reach the event ring');
-  assert.ok(server.some((m) => /liveness probe/.test(m)), 'must ALSO reach the server log');
+  assert.ok(ring.some((m) => /liveness sweep/.test(m)), 'must reach the event ring');
+  assert.ok(server.some((m) => /liveness sweep/.test(m)), 'must ALSO reach the server log');
   h.stop();
 });
 
@@ -521,13 +553,36 @@ test('the probe log line reports MEASURED silence, never just the threshold', as
   clock = T + BOOT_WINDOW_MS + MIN;
   h.tick();
   h.stop();
-  const probe = lines.find((l) => l.includes('liveness probe'));
+  const probe = lines.find((l) => l.includes('liveness sweep'));
   assert.ok(probe, 'a stale node past the threshold must be probed');
   const silence = 700 + BOOT_WINDOW_MS / MIN + 1;
   assert.ok(probe!.includes(`unheard for ${Math.round(silence)}m`),
     `measured silence (~${silence}m) must appear, got: ${probe}`);
   assert.ok(probe!.includes('threshold 240m'), 'the threshold is context, labelled as such');
   assert.ok(!/unheard for 240m/.test(probe!), 'the measured value must not equal-by-construction the threshold');
+});
+
+test('a node that proved itself since the last sweep is labelled CONFIRMING, not unheard', async () => {
+  // v0.37 asks everyone, so "you were asked" no longer implies "you were
+  // silent". The line has to say which, or a confirming probe of a chatty node
+  // reads exactly like the discovery of a silent one.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const chatty = node(9, { stats: { lastSeen: T + BOOT_WINDOW_MS } as never });
+  const nodes = [node(1, { isController: true }), chatty];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+    config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN;
+  h.tick();
+  h.stop();
+  const probe = lines.find((l) => l.includes('liveness sweep'));
+  assert.ok(probe, 'a chatty node is still swept (v0.37)');
+  assert.match(probe!, /already heard .* on its own — confirming/,
+    `a self-proven node must say so, got: ${probe}`);
 });
 
 /* ── v0.36: verification probes ride the SAME gate ladder ──────────────────── */
@@ -842,4 +897,39 @@ test('ordinals read correctly past the awkward teens', async () => {
   s.missStreak.set(7, 10);
   s.awaitingAnswer.set(7, T);
   assert.equal(judge(s, [node(7, { stats: { lastSeen: null } as never })], T + 200_000)[0].misses, 11);
+});
+
+test('every probe outcome is REPORTED for the persisted reply rate', async () => {
+  // Without this the whole v0.37 feature is inert: probes fire, answers are
+  // judged, and nothing reaches the store — leaving exactly the ephemeral log
+  // lines v0.36 already had. A mutant that deletes the callback survived a
+  // fully-passing suite until this test existed.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const reported: Array<{ id: number; answered: boolean; self: boolean }> = [];
+  // Node 9 never updates lastSeen ⇒ its probe goes unanswered and it is not
+  // self-proven. Node 10 is heard from continuously ⇒ answered AND self-proven.
+  const silent = node(9, { stats: { lastSeen: null } as never });
+  const chatty = () => node(10, { stats: { lastSeen: clock } as never });
+  let nodes = [node(1, { isController: true }), silent, chatty()];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: () => {},
+    onProbeResult: (id, answered, self) => { reported.push({ id, answered, self }); },
+    config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
+  });
+  // Sweep both (one per tick), then let the answers mature past the grace.
+  clock = T + BOOT_WINDOW_MS + MIN; nodes = [node(1, { isController: true }), silent, chatty()]; h.tick();
+  clock += MIN;                     nodes = [node(1, { isController: true }), silent, chatty()]; h.tick();
+  clock += 5 * MIN;                 nodes = [node(1, { isController: true }), silent, chatty()]; h.tick();
+  h.stop();
+
+  const nine = reported.find((r) => r.id === 9);
+  const ten = reported.find((r) => r.id === 10);
+  assert.ok(nine, `node 9's outcome must be reported: ${JSON.stringify(reported)}`);
+  assert.equal(nine!.answered, false, 'a node that never advanced lastSeen did not answer');
+  assert.equal(nine!.self, false, 'and it certainly did not prove itself');
+  assert.ok(ten, `node 10's outcome must be reported: ${JSON.stringify(reported)}`);
+  assert.equal(ten!.answered, true);
+  assert.equal(ten!.self, true, 'a node talking within the cadence is self-proven');
 });

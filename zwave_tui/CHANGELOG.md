@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.37.0 — 2026-08-23
+
+**A dead node was invisible, and the sweep was measuring the wrong thing.**
+
+### `node-down` — the ordinary outage now surfaces
+
+`dead-flap` requires three Alive↔Dead transitions, so it only ever fires on a
+node that is oscillating. The ordinary outage — node dies, stays dead, gets
+probed, comes back — produces one or two, and was therefore invisible to the
+symptom engine **entirely**: `grep NodeStatus.Dead src/zwave/symptoms.ts`
+returned nothing. A node that was dead for hours never appeared on REMEDY.
+
+`node-down` fires for a mains/listening node the driver has marked Dead past a
+dwell. Deadness is a driver *verdict* — `Dead` is set reactively, only when a
+transmission fails — which is why it is distinct from `quiet-node`, whose whole
+premise is that silence is *not* proof of failure.
+
+**It deliberately opens no outcome episode**, and an adversarial review is why.
+The first design gave it an `alive` recovery metric so auto-ping's efficacy
+could finally accrue. Two independent reviewers, one of them by executing the
+real store, showed that metric was structurally incapable of ever crediting the
+action: an episode closes only when the symptom goes absent, `node-down` is
+absent exactly when the node stops being Dead, so every closure is a recovery,
+both arms saturate at `ok === n`, `baseRate` pins at 1.0, and the Wilson gate
+needs 1.05 — which `wilsonLower(n, n)` approaches from below and never reaches
+at any n. Shipping it would have been the declared-but-unreachable defect class
+this project has spent six releases removing, committed inside the fix for it.
+
+A second problem survives fixing the first: auto-ping is applied non-randomly,
+only to outages that already survived its dwell, so a control arm would fill
+with fast self-heals and the action arm with hard cases. Any difference would
+be selection, not efficacy. DOCS §9.7a records both, and `metricOf` returns
+`none` rather than manufacturing a statistic that reads like evidence.
+
+### The liveness sweep now asks EVERY node
+
+Through v0.36 it probed only nodes silent past `staleMs`, on the reasoning that
+a talkative device proves itself and costs nothing to skip. True for operations,
+fatal for measurement: a reply rate sampled only when a node happens to be
+silent describes how talkative it is, not how reachable.
+
+Every listening non-Dead node is now asked on the same cadence, and outcomes are
+**persisted per node** — `probesAsked` / `probesAnswered` / `probesSelfProven`
+on `NodeCoverage`, surfaced on NODE DETAIL as `81/84 answered (96%) · 22
+self-proven`. The cost was measured before the trade was made: on the reference
+mesh all 35 candidates were already crossing the threshold, so asking everyone
+is barely more traffic than asking the quiet ones.
+
+`probesSelfProven` counts probes where the node had already communicated within
+the cadence — a bare ratio cannot tell a device whose own traffic keeps proving
+it alive from one whose only evidence is the probe. This measures what the
+driver cannot: `Dead` being reactive, a node nobody addresses reads Alive
+indefinitely.
+
+### Three bugs the implementation surfaced
+
+- Reading `lastStaleAt` **after** `noteStale` overwrote it compared each node's
+  last contact against *now* — nothing is ever newer, so every node reported as
+  unheard.
+- Treating a never-probed node as self-proven declared a device silent for
+  eleven hours to be "confirming itself". The honest test needs no probe history
+  at all: did it speak within one sweep interval.
+- The trace dedup keyed on the whole line including `stale-due`, which now
+  churns every tick as the queue advances — a change-plus-heartbeat trace would
+  have become a per-minute drumbeat. It now dedups on the decision's shape.
+
+756 tests. 223 mutation entries.
+
 ## 0.36.5 — 2026-08-20
 
 Two refinements to signals this release cycle created, both driven by what the
