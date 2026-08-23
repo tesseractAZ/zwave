@@ -178,9 +178,36 @@ const COARSE_INTERVAL_MS = 60_000;
  * steady +120 s, and a node scored `improved` at the highest contention seen.
  */
 const VERIFY_BURST = 5;
-/** Spacing between probes in one burst — far enough apart that each is a
- *  separate observation, close enough that all three land inside one window. */
-const VERIFY_SPACING_MS = 70_000;
+// Span check, because the count alone was twice not enough: at the 60 s
+// tick-limited spacing a 5-probe burst spans 4 x 60 = 240 s, inside the 300 s
+// window it must fill, with two readings spare over the verifier's floor of 3.
+// v0.36 raised the COUNT against MIN_OBS and never checked the SPAN against
+// WINDOW_MS; at the then-effective 120 s spacing the burst ran 480 s and the
+// window could never hold more than two or three of its readings, so adding
+// probes made the stream longer without ever making the window fuller.
+/**
+ * Spacing between probes in one burst.
+ *
+ * Deliberately BELOW the 60 s engine tick, so the tick is the limiter and the
+ * effective spacing is 60 s. v0.36 used 70 s, reasoning only about "far enough
+ * apart to be separate observations" — but 70 s rounds UP to the next tick,
+ * making the real spacing 120 s, and nothing checked that against the window
+ * the burst has to land in. Measured live: a steady `+120s` between probes.
+ */
+const VERIFY_SPACING_MS = 30_000;
+
+/**
+ * Verification probes released per tick, across all nodes owed a burst.
+ *
+ * One-per-tick globally was the v0.36 rule, inherited from the liveness sweep
+ * where it exists to stop 36 probes firing at once. For bursts it is the wrong
+ * limiter: with N nodes owed, each node's probes stretch to N x 60 s apart and
+ * the burst outgrows its window again — contention re-serialises exactly what
+ * the tighter spacing just fixed. Releasing up to four keeps each node at the
+ * 60 s tick cadence for the usual case. Bursts are episode-scoped and brief,
+ * so the peak is a few extra pings for a few minutes, not a standing load.
+ */
+const VERIFY_MAX_PER_TICK = 4;
 const CONFIG_RETRY_MS = 15_000;
 
 /* ─── raw HA response shapes (only the fields we read) ──────────────────── */
@@ -1233,12 +1260,19 @@ class ZwaveDataImpl implements ZwaveData {
       due.push(id);
     }
     if (due.length === 0) return [];
-    const id = due[0];
-    const st = this.verifyOwed.get(id)!;
-    const left = st.left - 1;
-    if (left <= 0) this.verifyOwed.delete(id);
-    else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });
-    return [id];
+    // Several nodes per tick, not one. A burst must land INSIDE the window it
+    // fills, and serialising nodes one-per-tick stretches each burst by the
+    // number of nodes competing — which is how a 5-probe burst came to span
+    // 480 s against a 300 s window on the live mesh.
+    const out: number[] = [];
+    for (const id of due.slice(0, VERIFY_MAX_PER_TICK)) {
+      const st = this.verifyOwed.get(id)!;
+      const left = st.left - 1;
+      if (left <= 0) this.verifyOwed.delete(id);
+      else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });
+      out.push(id);
+    }
+    return out;
   }
 
   /**

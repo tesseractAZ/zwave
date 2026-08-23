@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.37.3 — 2026-08-23
+
+**I made the same error twice: checking the count and never the span.**
+
+v0.37.2 raised `VERIFY_BURST` from 3 to 5 for margin over the verifier's floor.
+Production showed that made it worse. Node 26 took **seven probes at a steady
++120 s** and still closed `unverifiable`:
+
+| | |
+|---|---|
+| effective spacing | 120 s (70 s requested, rounding up to the next 60 s tick) |
+| a 5-probe burst spans | **480 s** |
+| the window it must fill | **300 s** |
+
+A burst longer than its own window can never fill it: probes 1–2 age out before
+4–5 arrive, so the window holds two or three readings no matter how many are
+fired. Raising the count stretched the stream. Both times I checked the count
+against `MIN_OBS` and never the span against `WINDOW_MS`.
+
+`VERIFY_SPACING_MS` drops to 30 s — below the tick, so the tick is the limiter
+and the real spacing is 60 s. A 5-probe burst then spans 240 s inside the 300 s
+window, with two readings spare.
+
+**And a second constraint the span check cannot see.** Releasing one node per
+tick is FIFO, so each burst stays contiguous — but node B's burst does not
+*begin* until node A's five probes finish, five minutes later. A confirmation
+burst is timed to land in one specific window; starting it late puts every probe
+past the edge. Tight but late is exactly as useless as spread out. Up to four
+nodes are now released per tick.
+
+That second one was found by a **surviving mutant**: the contention change
+initially had no test that could fail without it, because span alone doesn't
+distinguish FIFO from parallel. The mutant surviving is what showed the real
+invariant was burst *start* time, not burst span.
+
+Both facts are now stated as arithmetic in the tests, so they survive any later
+change to the tick, the window, or the floor.
+
+769 tests. 227 mutation entries.
+
 ## 0.37.2 — 2026-08-23
 
 **The diagnostic refuted my hypothesis, and the real cause was simpler.**
