@@ -727,3 +727,56 @@ test('an UNsuppressed tick drains exactly once', () => {
   assert.deepEqual(d.verify, [100]);
   assert.equal(drained, 1, 'drained once, and only once');
 });
+
+/* ── v0.36.4: giving up must be SAID, not just done ────────────────────────── */
+
+test('a node that outlives the attempt budget is reported, once', () => {
+  // maxAttempts is documented as "after which we stop and leave it to a human".
+  // Through v0.36.3 it did the stopping only: a bare `continue`, no log, and
+  // `attempts` resets solely when the node LEAVES Dead — so a node that stays
+  // down is abandoned permanently and in silence. Observed live on node 23:
+  // 3/3 exhausted, then 80 minutes of nothing, with the operator unable to tell
+  // "given up" from "resolved" because both look like an absence of lines.
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  let clock = T;
+  tick(s, nodes, clock);                       // observe it Dead
+  clock += 11 * MIN; tick(s, nodes, clock);    // attempt 1
+  noteAttempt(s, 7, clock);
+  clock += 11 * MIN; tick(s, nodes, clock);    // attempt 2
+  noteAttempt(s, 7, clock);
+  clock += 31 * MIN; tick(s, nodes, clock);    // attempt 3
+  noteAttempt(s, 7, clock);
+
+  clock += 61 * MIN;
+  const d = tick(s, nodes, clock);
+  assert.deepEqual(d.ping, [], 'budget spent — it must stop probing');
+  assert.deepEqual(d.gaveUp, [7], 'and it must SAY it has stopped');
+
+  // Announced once: the runner records it, and the notice does not repeat every
+  // tick for as long as the node stays down.
+  s.gaveUpAnnounced.add(7);
+  clock += 10 * MIN;
+  assert.deepEqual(tick(s, nodes, clock).gaveUp, [], 'said once, not every minute');
+});
+
+test('recovery re-arms the notice, so a device that dies again is reported again', () => {
+  const s = createAutoPingState();
+  const alive = mesh(20, [node(7)]);
+  s.gaveUpAnnounced.add(7);
+  s.attempts.set(7, 3);
+  trackEpisodes(s, alive, T);
+  assert.equal(s.gaveUpAnnounced.has(7), false, 'leaving Dead clears the announcement');
+  assert.equal(s.attempts.has(7), false, 'and the budget, as before');
+});
+
+test('a node still inside its budget is NOT reported as given up', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  let clock = T;
+  tick(s, nodes, clock);
+  clock += 11 * MIN;
+  const d = tick(s, nodes, clock);
+  assert.deepEqual(d.ping, [7], 'it is still being probed');
+  assert.deepEqual(d.gaveUp, [], 'so it has not been given up on');
+});

@@ -97,6 +97,9 @@ export interface AutoPingState {
    * node's `lastSeen` moved.
    */
   awaitingAnswer: Map<number, number>;
+  /** Nodes already announced as abandoned this outage (v0.36.4), so the notice
+   *  fires once rather than every tick for as long as the node stays down. */
+  gaveUpAnnounced: Set<number>;
 }
 
 /** How long to wait before judging whether a probe was answered (v0.36).
@@ -105,7 +108,7 @@ export interface AutoPingState {
 const ANSWER_GRACE_MS = 90_000;
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), gaveUpAnnounced: new Set() };
 }
 
 export interface AutoPingInput {
@@ -148,6 +151,23 @@ export interface AutoPingDecision {
   stale: number[];
   /** Ledger-requested verification probes cleared for this tick (v0.36). */
   verify: number[];
+  /**
+   * Nodes whose remediation budget is spent and are STILL Dead (v0.36.4).
+   *
+   * `maxAttempts` is documented as "after which we stop and leave it to a
+   * human" — and until now it did the first half only. The gate was a bare
+   * `continue`, and because `attempts` resets solely when a node LEAVES Dead, a
+   * node that stays down is abandoned permanently and in silence. Observed
+   * live: node 23 exhausted 3/3, then auto-ping said nothing for 80 minutes
+   * while the operator had no way to tell "given up" from "resolved" — the last
+   * line in the log was a failed probe, and then the log simply moved on.
+   *
+   * The engine going quiet at exactly the moment a human is needed is the worst
+   * possible time for it to go quiet. The runner announces this ONCE per
+   * outage; recovery clears the state, so a device that dies again is announced
+   * again.
+   */
+  gaveUp: number[];
   /** Why nothing was pinged (or 'none' when the gates all passed). */
   suppressed: AutoPingSuppression;
   /** Listening nodes currently Dead — the storm-guard numerator. */
@@ -207,7 +227,8 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const { now, nodes, controller, config, booting } = input;
   const listeningNodes = nodes.filter(isPingCandidate);
   const dead = listeningNodes.filter((n) => n.status === NodeStatus.Dead);
-  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], deadListening: dead.length,
+  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], gaveUp: [] as number[],
+    deadListening: dead.length,
     listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
   if (!config.enabled) return { ...base, suppressed: 'disabled' };
@@ -224,11 +245,18 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   if (dead.length >= stormLimit) return { ...base, suppressed: 'storm' };
 
   const ping: number[] = [];
+  const gaveUp: number[] = [];
   for (const n of dead) {
     const started = input.state.deadSince.get(n.nodeId);
     if (started == null || now - started < config.afterMs) continue;
     const tries = input.state.attempts.get(n.nodeId) ?? 0;
-    if (tries >= config.maxAttempts) continue;
+    if (tries >= config.maxAttempts) {
+      // Budget spent and the node is still down. Say so ONCE — the runner
+      // tracks which nodes have already been announced — rather than dropping
+      // into a silence indistinguishable from recovery.
+      if (!input.state.gaveUpAnnounced.has(n.nodeId)) gaveUp.push(n.nodeId);
+      continue;
+    }
     const last = input.state.lastPingAt.get(n.nodeId);
     // `tries` is the count of attempts ALREADY made, so the wait after the first
     // is BACKOFF_MS[0]. Indexing by `tries` made the first gap 30m and silently
@@ -290,7 +318,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   // ledger's budget on a probe it is not going to send.
   const verify = (input.verifyDue?.() ?? []).filter((id) => candidates.has(id));
 
-  return { ...base, ping, stale, verify, suppressed: 'none' };
+  return { ...base, ping, stale, verify, gaveUp, suppressed: 'none' };
 }
 
 /**
@@ -341,6 +369,9 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
       state.deadSince.delete(n.nodeId);
       state.attempts.delete(n.nodeId);
       state.lastPingAt.delete(n.nodeId);
+      // Recovery ends the outage, so a device that dies again is announced
+      // again rather than being silently remembered as already-reported.
+      state.gaveUpAnnounced.delete(n.nodeId);
     }
   }
   // A node that vanished from the roster (removed/excluded) must not leak its
@@ -535,6 +566,20 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
           const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
           o.log('warn', nodeId, m); o.log2?.(m);
         });
+    }
+
+    /* ── nodes the engine has given up on (v0.36.4) ──────────────────────
+     * maxAttempts means "stop and leave it to a human", and for four releases
+     * it did the stopping without the leaving-it-to-a-human. ERROR severity on
+     * both destinations: this is the one auto-ping message that asks for
+     * action rather than reporting activity.
+     */
+    for (const nodeId of decision.gaveUp) {
+      state.gaveUpAnnounced.add(nodeId);
+      const m = `auto-ping: node ${nodeId} is STILL DEAD after ${o.config.maxAttempts} attempts — ` +
+        `giving up, this one needs a human (try a manual ping first; it often works when the ladder has expired)`;
+      o.log('error', nodeId, m);
+      o.log2?.(m);
     }
 
     /* ── did the earlier probes actually land? (v0.36) ────────────────────
