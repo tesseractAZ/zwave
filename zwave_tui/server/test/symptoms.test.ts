@@ -152,8 +152,8 @@ test('weak-signal fires for a DIRECT node with thin margin, NOT for a routed one
 
 test('ghost-suspect requires PROVEN coverage (dead + zero comms + ≥3 days observed)', () => {
   const nodes = [node(1), node(6, { status: NodeStatus.Dead })];
-  const young = new Map([[6, { firstSeenAt: T - 60_000, samples: 5, freshSamples: 0 }]]);
-  const proven = new Map([[6, { firstSeenAt: T - 5 * 86_400_000, samples: 900, freshSamples: 0 }]]);
+  const young = new Map([[6, { firstSeenAt: T - 60_000, samples: 5, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 }]]);
+  const proven = new Map([[6, { firstSeenAt: T - 5 * 86_400_000, samples: 900, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 }]]);
   const inpYoung = (now: number) => input({ nodes, recent: new Map([[6, []]]), cov: young, now });
   const inpProven = (now: number) => input({ nodes, recent: new Map([[6, []]]), cov: proven, now });
   assert.equal(settle(inpYoung, new Map(), T, 8).filter((s) => s.kind === 'ghost-suspect').length, 0, 'young store ⇒ no ghost verdict');
@@ -579,4 +579,48 @@ test('route-churn de-asserts when the churn stops (recency conjunct)', () => {
   const fired = settle(inp, new Map(), T, 6);
   assert.equal(fired.filter((s) => s.kind === 'route-churn').length, 0,
     'a stale churn burst must not stay asserted');
+});
+
+/* ── v0.37: node-down — the ordinary outage the engine could not see ───────── */
+
+test('node-down fires for a node the driver marked Dead, past the dwell', () => {
+  // The gap this closes: `dead-flap` needs THREE Alive↔Dead transitions, so the
+  // ordinary outage — node dies, stays dead, gets probed, comes back — produced
+  // one or two and was invisible to the symptom engine entirely. It never
+  // appeared on REMEDY and never opened an M5 episode, which is why auto-ping's
+  // own efficacy against deadness could not accrue a single data point.
+  const nodes = [node(1), node(6, { status: NodeStatus.Dead })];
+  const inp = (now: number) => input({ nodes, recent: new Map([[6, []]]), now });
+  const fired = settle(inp, new Map(), T, 8);
+  const s = fired.find((x) => x.kind === 'node-down' && x.nodeId === 6);
+  assert.ok(s, 'a Dead node must surface as a symptom');
+  assert.equal(s!.severity, 'crit');
+  assert.equal(s!.basis, 'measured', 'Dead is a driver VERDICT, not an inference from silence');
+});
+
+test('node-down does NOT fire for an Alive node, however quiet', () => {
+  // Silence is `quiet-node`'s territory and is explicitly not proof of failure.
+  // Deadness is a driver verdict; conflating them would turn every sleeping
+  // device into a critical alert.
+  const nodes = [node(1), node(6)];
+  const fired = settle((now: number) => input({ nodes, recent: new Map([[6, []]]), now }), new Map(), T, 8);
+  assert.equal(fired.filter((x) => x.kind === 'node-down').length, 0);
+});
+
+test('node-down needs the dwell — a momentary Dead reading does not surface', () => {
+  const nodes = [node(1), node(6, { status: NodeStatus.Dead })];
+  const one = detectSymptoms(input({ nodes, recent: new Map([[6, []]]), now: T }), new Map());
+  assert.equal(one.filter((x) => x.kind === 'node-down').length, 0,
+    'first observation arms the dwell; it must not emit yet');
+});
+
+test('a dead node does NOT feed the mesh-correlation gate', () => {
+  // A dead node contributes no RF readings, so counting it as "degrading" would
+  // let one dead device look like an environmental event across the mesh.
+  const nodes = [node(1), ...Array.from({ length: 12 }, (_v, i) => node(10 + i, { status: NodeStatus.Dead }))];
+  const recent = new Map<number, EvidenceSample[]>(nodes.filter((n) => !n.isController).map((n) => [n.nodeId, [] as EvidenceSample[]]));
+  const fired = settle((now: number) => input({ nodes, recent: new Map(recent), now }), new Map(), T, 8);
+  assert.ok(fired.some((x) => x.kind === 'node-down'), 'the individual outages surface');
+  assert.equal(fired.filter((x) => x.kind === 'mesh-interference').length, 0,
+    'but twelve dead nodes are not an RF-environment event');
 });

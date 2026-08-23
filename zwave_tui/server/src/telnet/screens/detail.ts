@@ -343,6 +343,25 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           ? c.white(fmtAge(Date.now() - coarse[0].t0) + ' span') + c.grey(` · ${coarse.length} bucket(s)`)
           : c.grey('none yet');
       body.push(twoCol('Samples', samples, 'History', span, inner));
+      // The LIVENESS SWEEP's verdict on this node (v0.37). Every listening node
+      // is asked the same question on the same cadence, so this rate is a fact
+      // about the device rather than about how talkative it is — which is
+      // exactly what a sample taken only when a node happened to be silent
+      // could never be. It also measures something the driver cannot: Dead is
+      // set REACTIVELY, only on a failed transmission, so a node nobody
+      // addresses reads Alive indefinitely.
+      if (cov.probesAsked > 0) {
+        const pct = Math.round((cov.probesAnswered / cov.probesAsked) * 100);
+        const tone = pct >= 95 ? c.green : pct >= 75 ? c.yellow : c.red;
+        // Probes the node had already answered for itself are called out: a
+        // device whose own traffic keeps proving it alive is in a different
+        // condition from one whose only evidence is the probe, and a bare
+        // answered/asked ratio hides that difference entirely.
+        const self = cov.probesSelfProven > 0
+          ? c.grey(` · ${cov.probesSelfProven} self-proven`)
+          : '';
+        body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${pct}%)`) + self, inner));
+      }
       // The engine's LEARNED yardstick for this node. Every per-node signal
       // verdict ("below its own normal") is measured against this and it was
       // readable from nowhere, which made those verdicts unfalsifiable on

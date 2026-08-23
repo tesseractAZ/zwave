@@ -111,6 +111,10 @@ export interface AutoPingState {
    * separates them without hiding either.
    */
   missStreak: Map<number, number>;
+  /** nodeId → whether, at the moment of its last probe, the node had already
+   *  communicated on its own since the previous sweep (v0.37). Read when the
+   *  probe is judged, so the outcome records WHY the node was reachable. */
+  selfProvenAtProbe: Map<number, boolean>;
 }
 
 /** 1st, 2nd, 3rd, 4th … for the miss-streak label (v0.36.5). */
@@ -131,7 +135,7 @@ function ordinal(n: number): string {
 const ANSWER_GRACE_MS = 90_000;
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), selfProvenAtProbe: new Map() };
 }
 
 export interface AutoPingInput {
@@ -308,17 +312,27 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
     const due = listeningNodes
       .filter((n) => n.status !== NodeStatus.Dead) // the dead path owns those
       .map((n) => ({ id: n.nodeId, seen: n.stats?.lastSeen ?? null }))
-      // A node with no lastSeen yet has never been heard from at all, which is
-      // the strongest reason to ask — treat it as maximally stale.
-      .filter((x) => x.seen == null || now - x.seen >= config.staleMs)
-      // One probe per node per staleMs. Without this a genuinely unreachable
-      // node never refreshes lastSeen, stays permanently "due", and would be
-      // re-probed on EVERY tick.
+      // EVERY listening node, on a fixed cadence — not only the ones that have
+      // gone quiet (v0.37). Skipping talkative nodes saved a little traffic and
+      // cost the one thing that makes the answers worth keeping: comparability.
+      // A reply rate is a fact about a device only if every device was asked the
+      // same question at the same interval; sampled only when a node happened to
+      // be silent, it measures how talkative the node is, not how reachable.
+      //
+      // The cost is small and was measured: on the reference mesh all 35
+      // listening candidates were already crossing the silence threshold, so
+      // "ask everyone" is barely more traffic than "ask the quiet ones".
+      //
+      // The cadence gate stays, and is now the ONLY gate: one probe per node per
+      // staleMs. Without it an unreachable node never refreshes lastSeen, stays
+      // permanently due, and is re-probed on every tick.
       .filter((x) => {
         const last = input.state.lastStaleAt.get(x.id);
         return last == null || now - last >= config.staleMs;
       })
-      .sort((a, b) => (a.seen ?? 0) - (b.seen ?? 0)); // stalest first
+      // Longest-unheard first, so a node whose own traffic has not proved it
+      // alive is still asked before one that has been chatting all along.
+      .sort((a, b) => (a.seen ?? 0) - (b.seen ?? 0));
     if (due.length) stale.push(due[0].id);
     base.staleDue = due.length;
     base.stalestMs = due.length ? (due[0].seen == null ? null : now - due[0].seen) : null;
@@ -463,6 +477,10 @@ export interface AutoPingRunnerOptions {
   /** Drain the outcome ledger's pending verification probes (v0.36). Optional:
    *  without it the runner behaves exactly as it did before. */
   verifyRequests?: (now: number) => number[];
+  /** One liveness-probe outcome, for the persisted per-node reply rate (v0.37).
+   *  `selfProven` = the node had already communicated on its own since the
+   *  previous sweep, so the probe was confirming rather than discovering. */
+  onProbeResult?: (nodeId: number, answered: boolean, selfProven: boolean) => void;
 }
 
 export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tick: () => void } {
@@ -509,11 +527,21 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
         ? `probing ${decision.ping.length + decision.stale.length}`
         : 'suppressed: ' + decision.suppressed}`;
     o.log2?.debug?.(trace);
-    const changed = trace !== lastTrace;
+    // Dedup on the SHAPE of the decision, not its exact text (v0.37). The
+    // sweep now asks every node, so `stale-due` and `stalest` churn on every
+    // single tick as the queue advances — deduping on the whole line would
+    // turn a change-plus-heartbeat trace into a per-minute drumbeat, which is
+    // the noise this dedup exists to prevent. What an operator needs to see
+    // change is the suppression state, the dead count, the candidate count,
+    // and whether anything is being probed at all; the exact queue depth is
+    // detail, and rides the debug line every tick regardless.
+    const traceKey = `${decision.listening}|${decision.deadListening}|${decision.suppressed}|` +
+      `${decision.ping.length + decision.stale.length > 0}`;
+    const changed = traceKey !== lastTrace;
     if (changed || t - lastTraceAt >= TRACE_HEARTBEAT_MS) {
       o.log('info', null, trace);
       o.log2?.(trace);
-      lastTrace = trace;
+      lastTrace = traceKey;
       lastTraceAt = t;
     }
 
@@ -538,8 +566,25 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       const silence = decision.stalestMs == null
         ? 'never (no lastSeen on record)'
         : `${Math.round(decision.stalestMs / 60_000)}m`;
-      const msg = `auto-ping: node ${nodeId} unheard for ${silence} ` +
-        `(threshold ${Math.round(o.config.staleMs / 60_000)}m) — liveness probe`;
+      // Did this node already prove itself since the last sweep? From v0.37 the
+      // sweep asks everyone, so the answer is no longer implied by being asked
+      // — and it is the difference between "the probe is this node's only
+      // evidence of life" and "the probe is confirming what its own traffic
+      // already showed".
+      // Measured against the CADENCE, not against the previous probe time. Two
+      // earlier attempts were wrong: reading lastStaleAt after noteStale
+      // compares against NOW (nothing is ever newer, so every node reads as
+      // unheard), and treating a never-probed node as self-proven declares a
+      // device silent for eleven hours to be confirming itself. "Did it speak
+      // within one sweep interval" needs no probe history and is true on the
+      // first sweep as readily as the hundredth.
+      const seenAt = nodes.find((x) => x.nodeId === nodeId)?.stats?.lastSeen ?? null;
+      const selfProven = seenAt != null && t - seenAt < o.config.staleMs;
+      state.selfProvenAtProbe.set(nodeId, selfProven);
+      const msg = `auto-ping: node ${nodeId} liveness sweep ` +
+        (selfProven
+          ? `(already heard ${silence} ago on its own — confirming)`
+          : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`);
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       // The service call resolving proves only that HA ACCEPTED the request —
@@ -621,13 +666,18 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // node is several hundred a day saying "as designed", which is the noise
       // that trains an operator to stop reading. The UNANSWERED case below is
       // the signal, and it is warn on both destinations.
-      if (answered) { o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`); continue; }
+      if (answered) {
+        o.onProbeResult?.(nodeId, true, state.selfProvenAtProbe.get(nodeId) ?? false);
+        o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`);
+        continue;
+      }
       // A FIRST miss is information; a streak is a warning. Measured on the live
       // mesh, healthy nodes drop about 2% of probes to ordinary transient loss,
       // so warning on every one of those would put a steady drip of false alarm
       // beside the genuine article and teach an operator to skim past both. The
       // count is in the text either way — this suppresses nothing, it only
       // stops calling a single lost packet a warning.
+      o.onProbeResult?.(nodeId, false, state.selfProvenAtProbe.get(nodeId) ?? false);
       const ord = ordinal(misses);
       const m = `auto-ping: node ${nodeId} did NOT answer its probe ` +
         `(${ord} consecutive miss, lastSeen did not advance)`;

@@ -328,6 +328,8 @@ export interface ZwaveData {
   unverifiableCount(kind: SymptomKind): number;
   /** Drain the node ids owed a verification probe this tick (v0.36). */
   drainVerifyRequests(now?: number): number[];
+  /** Record one liveness-probe outcome for the persisted reply rate (v0.37). */
+  recordProbeResult(nodeId: number, answered: boolean, selfProven: boolean): void;
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   forgetNodeBaselines(nodeId: number): void;
   /** M6: interference view (noise floor, serial health, diurnal heatmap). */
@@ -1037,6 +1039,14 @@ class ZwaveDataImpl implements ZwaveData {
     const sinceOf = new Map<string, number>();
     for (const s of symptoms) sinceOf.set(`${s.nodeId ?? 'mesh'}:${s.kind}`, s.sinceMs);
     for (const s of toOpen) {
+      // node-down opens NO episode (v0.37). The ledger cannot score it — see
+      // outcomes.metricOf — and opening episodes that are unscoreable by
+      // construction would inflate both the episode count and the
+      // "could not be scored" counter with a permanent, expected condition,
+      // draining the meaning from a signal added precisely to flag evidence
+      // starvation. The symptom still surfaces on REMEDY; it simply does not
+      // pretend to be an experiment.
+      if (s.kind === 'node-down') continue;
       const since = sinceOf.get(`${s.nodeId ?? 'mesh'}:${s.kind}`) ?? now;
       oc.open(s.nodeId, s.kind, now, this.degradedWindow(s.nodeId, since, now));
       // Ask for verification probes while the symptom is LIVE, so the degraded
@@ -1153,6 +1163,13 @@ class ZwaveDataImpl implements ZwaveData {
    *  — the engine's own record of when this detector cried wolf (v0.35). */
   falsePositives(kind: SymptomKind): number {
     return this.outcomes ? this.outcomes.falsePositives(kind) : 0;
+  }
+
+  /** Record one liveness-probe outcome (v0.37) — the per-node reply rate the
+   *  driver's reactive Dead flag cannot supply. No-op without an evidence
+   *  store, like every other persisted counter here. */
+  recordProbeResult(nodeId: number, answered: boolean, selfProven: boolean): void {
+    this.evidenceStore?.recordProbe(nodeId, answered, selfProven);
   }
 
   /** Episodes of this kind the ledger could not score at all (v0.36). */

@@ -308,6 +308,23 @@ function metricOf(kind: SymptomKind): RecoveryMetric {
       return 'timeout'; // reply-timeout rate
     case 'dead-flap':
       return 'flap'; // Alive↔Dead transitions stopping
+    case 'node-down':
+      // NOT scoreable by this ledger, and the reason is structural rather than
+      // a missing signal — see DOCS §9.9. Two independent problems compound:
+      //
+      //  (1) An episode closes only when the symptom goes absent, and node-down
+      //      is absent exactly when the node stops being Dead. So every closure
+      //      is a recovery: `ok === n`, baseRate 1.0, and the Wilson gate needs
+      //      `>= base + minEffect` = 1.05, which wilsonLower(n,n) approaches
+      //      from below and never reaches at ANY n. An arm that cannot ever
+      //      credit the action is not a measurement.
+      //  (2) Even given a failure exit, auto-ping is applied NON-RANDOMLY: it
+      //      probes only outages that already survived its dwell. The control
+      //      arm would fill with fast self-heals and the action arm with the
+      //      hard cases, so any difference would be selection, not efficacy.
+      //
+      // `none` is the honest answer until there is a design that measures it.
+      return 'none';
     case 's2-desync':
       return 's2'; // SPAN resyncs subsiding
     case 'weak-signal':

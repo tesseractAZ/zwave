@@ -299,6 +299,14 @@ export interface DataProvider {
     freshSamples: number;
     statusFeedLive: boolean;
     statsFeedLive: boolean;
+    /** Liveness-sweep outcomes (v0.37): every listening node asked the same
+     *  question on the same cadence, which is what makes the rate a fact about
+     *  the node rather than about how talkative it is. */
+    probesAsked: number;
+    probesAnswered: number;
+    /** Of those, how many the node had already answered for itself by
+     *  communicating since the previous sweep. */
+    probesSelfProven: number;
   } | null;
   /** Persisted long-horizon buckets for a node (v0.35) — the tier that outlives
    *  the fine ring, so the dossier can state the window behind its numbers. */

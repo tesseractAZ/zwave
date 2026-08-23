@@ -195,6 +195,10 @@ const DATA: DataProvider = {
   evidenceCoverage: () => ({
     firstSeenAt: NOW - 12 * 86_400_000, samples: 4_180, freshSamples: 3_930,
     statusFeedLive: true, statsFeedLive: true,
+    // v0.37 — the liveness sweep's own record. A node that mostly answers, with
+    // some probes it had already proved itself for: the interesting case, since
+    // a bare ratio hides that distinction.
+    probesAsked: 84, probesAnswered: 81, probesSelfProven: 22,
   }),
   evidenceCoarse: () => [{ t0: NOW - 12 * 86_400_000, samples: 96 }],
   rssiNormal: () => ({ median: -62, scale: 3, ready: true, days: 12 }),

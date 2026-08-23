@@ -812,3 +812,38 @@ test('a MESH-scoped episode contributes no node to provenance', () => {
   assert.equal(o.efficacyFor('mesh-interference', 'ping').nodes, 0,
     'a mesh event is not a node and must not be counted as one');
 });
+
+/* ── v0.37: node-down is NOT scoreable, and says so ───────────────────────── */
+
+test('node-down opens no episode and feeds no arm — it is visibility, not an experiment', () => {
+  // The review finding this replaces: an `alive` metric with only
+  // `unverifiable` and `improved` exits saturates both arms at ok === n, pins
+  // baseRate at 1.0, and makes the Wilson gate (base + minEffect = 1.05)
+  // arithmetically unreachable — wilsonLower(n,n) approaches 1.0 from below at
+  // every n. An arm that can never credit the action is not a measurement, and
+  // shipping one would have been the exact declared-but-unreachable defect this
+  // project has spent six releases removing.
+  const o = store();
+  // Even if an episode were forced open, the kind carries no recovery metric.
+  o.open(7, 'node-down', 1000, WT(200));
+  o.recordAction(7, 'ping', false, 1005);
+  o.resolve(7, 'node-down', 2000, W(50, 0, 50, { freshN: 6 }));
+  assert.equal(o.efficacyFor('node-down', 'ping').n, 0, 'no action arm accrues');
+  assert.equal(o.baseRate('node-down'), null, 'and no tautological 1.0 base rate');
+});
+
+test('the ledger has no metric that can only ever return improved', () => {
+  // A guard on the CLASS of bug, not the instance: any recovery metric must be
+  // able to express failure, or the arm it feeds is a foregone conclusion.
+  const o = store();
+  const kinds = ['return-path-degraded', 'dead-flap', 'weak-signal', 'rtt-degraded', 'rate-fallback'] as const;
+  for (const k of kinds) {
+    o.open(7, k, 1000, WT(30));
+    o.resolve(7, k, 2000, WT(400)); // markedly WORSE after-window
+  }
+  // At least one kind must have recorded a non-improved outcome; if every metric
+  // saturated at improved, baseRate would be 1.0 across the board.
+  const rates = kinds.map((k) => o.baseRate(k)).filter((r) => r != null) as number[];
+  assert.ok(rates.length === 0 || rates.some((r) => r < 1),
+    `every metric saturated at 1.0 — that is the alive-metric defect returning: ${JSON.stringify(rates)}`);
+});
