@@ -624,3 +624,49 @@ test('a dead node does NOT feed the mesh-correlation gate', () => {
   assert.equal(fired.filter((x) => x.kind === 'mesh-interference').length, 0,
     'but twelve dead nodes are not an RF-environment event');
 });
+
+/* ── v0.38: quiet-node — silence past the sweep's own cadence ──────────────── */
+
+test('quiet-node fires for a MAINS node unheard far past the sweep cadence', () => {
+  // The last declared-but-unemitted kind. It fires EARLIER than node-down and
+  // from the opposite direction: the sweep asks every listening node and an
+  // answered probe refreshes lastSeen, so silence this long means the probes
+  // are not landing — while the driver still says Alive, because it marks Dead
+  // only when a transmission it attempted fails.
+  const nodes = [node(1), node(6, { stats: { lastSeen: T - 8 * 3600_000 } as never })];
+  const fired = settle((now: number) => input({ nodes, recent: new Map([[6, []]]), now }), new Map(), T, 8);
+  const s = fired.find((x) => x.kind === 'quiet-node' && x.nodeId === 6);
+  assert.ok(s, 'a mains node silent for 8h must surface');
+  assert.equal(s!.severity, 'warn');
+  assert.match(s!.evidence[0].value, /h ago/);
+});
+
+test('a SLEEPING device is never quiet-node, however long it is silent', () => {
+  // Battery and FLiRS devices are silent between wakeups by design, and calling
+  // that a symptom would make every sleeping sensor a standing alert.
+  const nodes = [node(1), node(6, { isListening: false, stats: { lastSeen: T - 48 * 3600_000 } as never })];
+  const fired = settle((now: number) => input({ nodes, recent: new Map([[6, []]]), now }), new Map(), T, 8);
+  assert.equal(fired.filter((x) => x.kind === 'quiet-node').length, 0);
+});
+
+test('a node with NO lastSeen at all is not accused of silence', () => {
+  // Absence of a reading is not evidence of silence — it may simply never have
+  // been heard from since a restart cleared the roster. Fail closed.
+  const nodes = [node(1), node(6, { stats: { lastSeen: null } as never })];
+  const fired = settle((now: number) => input({ nodes, recent: new Map([[6, []]]), now }), new Map(), T, 8);
+  assert.equal(fired.filter((x) => x.kind === 'quiet-node').length, 0);
+});
+
+test('a node already DEAD gets node-down, not both cards', () => {
+  const nodes = [node(1), node(6, { status: NodeStatus.Dead, stats: { lastSeen: T - 8 * 3600_000 } as never })];
+  const fired = settle((now: number) => input({ nodes, recent: new Map([[6, []]]), now }), new Map(), T, 8);
+  assert.ok(fired.some((x) => x.kind === 'node-down'), 'the driver verdict wins');
+  assert.equal(fired.filter((x) => x.kind === 'quiet-node').length, 0,
+    'two cards for one fault is worse than one');
+});
+
+test('recent contact keeps a mains node quiet-node-free', () => {
+  const nodes = [node(1), node(6, { stats: { lastSeen: T - 30 * 60_000 } as never })];
+  const fired = settle((now: number) => input({ nodes, recent: new Map([[6, []]]), now }), new Map(), T, 8);
+  assert.equal(fired.filter((x) => x.kind === 'quiet-node').length, 0);
+});

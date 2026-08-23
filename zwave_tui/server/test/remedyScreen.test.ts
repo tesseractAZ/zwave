@@ -309,3 +309,19 @@ test('a ledger that predates the tracking claims NO node count', () => {
   assert.ok(!/node/.test(joined.split('\n').find((l) => /helped 90%/.test(l)) ?? ''),
     'no node count rather than a made-up one');
 });
+
+test('the card distinguishes “too few readings” from “cannot be probed”', () => {
+  const cx = ctx(140, 40, [sym()]);
+  (cx.data as { unverifiableCount?: (k: SymptomKind) => number }).unverifiableCount = () => 3;
+  (cx.data as { unverifiableUnprobeableCount?: (k: SymptomKind) => number }).unverifiableUnprobeableCount = () => 9;
+  const joined = plain(renderRemedy(cx));
+  assert.match(joined, /3 past episodes of this kind could not be scored — too few readings/);
+  assert.match(joined, /9 more on sleeping devices that cannot be probed — unscoreable by design/);
+});
+
+test('the sleeping-device line is silent when there are none', () => {
+  const cx = ctx(140, 40, [sym()]);
+  (cx.data as { unverifiableCount?: (k: SymptomKind) => number }).unverifiableCount = () => 3;
+  (cx.data as { unverifiableUnprobeableCount?: (k: SymptomKind) => number }).unverifiableUnprobeableCount = () => 0;
+  assert.ok(!/cannot be probed/.test(plain(renderRemedy(cx))));
+});

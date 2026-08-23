@@ -847,3 +847,46 @@ test('the ledger has no metric that can only ever return improved', () => {
   assert.ok(rates.length === 0 || rates.some((r) => r < 1),
     `every metric saturated at 1.0 — that is the alive-metric defect returning: ${JSON.stringify(rates)}`);
 });
+
+/* ── v0.38: unscoreable-because-thin vs unscoreable-by-design ─────────────── */
+
+test('an unprobeable node’s unscoreable episode is counted APART from a starved one', () => {
+  // One counter conflated two different facts. Thin evidence is fixable — more
+  // probes, a wider window. A sleeping device cannot be probed at all, so its
+  // windows can never be filled and no amount of effort changes that. Reported
+  // together, the permanent kind silently drained the meaning from the fixable
+  // one, which was built precisely to flag starvation.
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, WT(200));
+  o.resolve(7, 'rtt-degraded', 2000, null, { unprobeable: true });
+  assert.equal(o.unverifiableUnprobeable('rtt-degraded'), 1, 'structural');
+  assert.equal(o.unverifiable('rtt-degraded'), 0, 'and NOT counted as starvation');
+
+  o.open(8, 'rtt-degraded', 3000, WT(200));
+  o.resolve(8, 'rtt-degraded', 4000, null); // probeable, just thin
+  assert.equal(o.unverifiable('rtt-degraded'), 1, 'the fixable kind keeps its own count');
+  assert.equal(o.unverifiableUnprobeable('rtt-degraded'), 1, 'unchanged');
+});
+
+test('neither unscoreable kind ever feeds an arm', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, WT(200));
+  o.resolve(7, 'rtt-degraded', 2000, null, { unprobeable: true });
+  assert.equal(o.baseRate('rtt-degraded'), null, 'structural feeds nothing');
+  assert.equal(o.efficacyFor('rtt-degraded', 'ping').n, 0);
+});
+
+test('both counters survive a save/load, and a pre-v0.38 file starts at zero', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, WT(200));
+  o.resolve(7, 'rtt-degraded', 2000, null, { unprobeable: true });
+  const o2 = store();
+  o2.loadJSON(o.toJSON());
+  assert.equal(o2.unverifiableUnprobeable('rtt-degraded'), 1);
+
+  const old = store();
+  old.loadJSON({ v: 1, control: [], action: [], fp: [], unver: [['rtt-degraded', 4]] });
+  assert.equal(old.unverifiable('rtt-degraded'), 4, 'the old total is preserved as-is');
+  assert.equal(old.unverifiableUnprobeable('rtt-degraded'), 0,
+    'and none of it is retroactively reclassified — we do not know which were which');
+});

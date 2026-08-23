@@ -94,6 +94,8 @@ interface Ledger {
   falsePositives: (kind: SymptomKind) => number;
   /** Episodes of this kind the ledger closed unscoreable (v0.36). */
   unverifiable: (kind: SymptomKind) => number;
+  /** Of those, on devices that cannot be probed at all (v0.38). */
+  unverifiableUnprobeable: (kind: SymptomKind) => number;
 }
 
 function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, ledger: Ledger, selected = false): string[] {
@@ -141,11 +143,23 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     // unscoreable would otherwise look like a detector still gathering data
     // rather than one whose evidence never reaches the verifier's floor. On
     // the live mesh that was every episode of every kind for 39 hours.
+    // Two DIFFERENT facts, and one counter used to conflate them (v0.38). Thin
+    // evidence is fixable — more probes, a longer window. A device that cannot
+    // be probed at all is not: waking a sleeping battery or FLiRS node on a
+    // cadence would flatten it, so its windows can never be filled and the
+    // verdict is structural. Reported as one number, the permanent kind
+    // silently drained the meaning from the fixable one.
     const unver = ledger.unverifiable(sym.kind);
     if (unver > 0) {
       rows.push(truncate(
         '    ' + c.grey(`○ ${unver} past episode${unver === 1 ? '' : 's'} of this kind could not be scored — ` +
           'too few readings to judge recovery'), W));
+    }
+    const unprobe = ledger.unverifiableUnprobeable(sym.kind);
+    if (unprobe > 0) {
+      rows.push(truncate(
+        '    ' + c.grey(`○ ${unprobe} more on sleeping device${unprobe === 1 ? '' : 's'} that cannot be probed — ` +
+          'unscoreable by design, not a gap'), W));
     }
   }
   // Narrative — one line of diagnostic context (the plan headline carries the
@@ -259,6 +273,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     // Same thing either way on screen: the line only renders above zero.
     falsePositives: (kind) => data.falsePositives?.(kind) ?? 0,
     unverifiable: (kind) => data.unverifiableCount?.(kind) ?? 0,
+    unverifiableUnprobeable: (kind) => data.unverifiableUnprobeableCount?.(kind) ?? 0,
   };
 
   const body: string[] = [];

@@ -63,6 +63,7 @@ import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from '
 import { createBaselineStore, type BaselineStore } from './baselines';
 import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
+import { isPingCandidate } from './autoPing';
 import { computeInterference } from './interference';
 
 /**
@@ -368,6 +369,8 @@ export interface ZwaveData {
   falsePositives(kind: SymptomKind): number;
   /** Episodes of this kind the ledger closed `unverifiable` (v0.36). */
   unverifiableCount(kind: SymptomKind): number;
+  /** Of those, on nodes that cannot be probed at all (v0.38). */
+  unverifiableUnprobeableCount(kind: SymptomKind): number;
   /** Drain the node ids owed a verification probe this tick (v0.36). */
   drainVerifyRequests(now?: number): number[];
   /** How many nodes have an outstanding verification burst (v0.37.1). */
@@ -1111,7 +1114,15 @@ class ZwaveDataImpl implements ZwaveData {
       if (since == null) continue; // not currently live → not a degraded window
       oc.refineBefore(ep.nodeId, ep.kind, this.degradedWindow(ep.nodeId, since, now));
     }
-    for (const r of toResolve) oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now));
+    for (const r of toResolve) {
+      // Probeability is ours to know, not the ledger's: a sleeping battery or
+      // FLiRS device is excluded from every probe lane, so its windows can
+      // never be filled and an `unverifiable` verdict is structural rather than
+      // starvation. Counted apart so the fixable signal keeps its meaning.
+      const n = r.nodeId == null ? undefined : this.snapshot().find((x) => x.nodeId === r.nodeId);
+      const unprobeable = r.nodeId != null && !(n != null && isPingCandidate(n));
+      oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now), { unprobeable });
+    }
     // The AFTER-window burst, timed to land inside the window it fills (v0.36.3).
     //
     // v0.36.0 probed the moment the symptom went absent. Those readings were
@@ -1226,6 +1237,12 @@ class ZwaveDataImpl implements ZwaveData {
   /** Episodes of this kind the ledger could not score at all (v0.36). */
   unverifiableCount(kind: SymptomKind): number {
     return this.outcomes ? this.outcomes.unverifiable(kind) : 0;
+  }
+
+  /** Of those, the ones on a device we are not permitted to probe (v0.38) —
+   *  structural rather than starvation, and counted apart for that reason. */
+  unverifiableUnprobeableCount(kind: SymptomKind): number {
+    return this.outcomes ? this.outcomes.unverifiableUnprobeable(kind) : 0;
   }
 
   /**
