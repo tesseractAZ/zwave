@@ -211,12 +211,12 @@ const DATA: DataProvider = {
   symptoms: () => SYMPTOMS,
   engineStatus: () => ({ enabled: true, ready: 10, total: 11 }),
   efficacyFor: (_k, a) =>
-    a === 'ping' ? { expectedEfficacy: 0.71, n: 7, baseRate: 0.22, ready: true }
+    a === 'ping' ? { expectedEfficacy: 0.71, n: 7, baseRate: 0.22, nodes: 3, ready: true }
     // healNode is emitted BLOCKED on every arm that mentions it, so this is the
     // ledger contradicting the hardcoded lore — the v0.35 case that could not
     // reach a screen at all before this release, and therefore the one the
     // published screenshot has to show.
-    : a === 'healNode' ? { expectedEfficacy: 0.64, n: 11, baseRate: 0.19, ready: true }
+    : a === 'healNode' ? { expectedEfficacy: 0.64, n: 11, baseRate: 0.19, nodes: 3, ready: true }
     : null,
   interference: () => ({
     noise: { channels: [-101, -103, -99, -102], floor: -101, real: true, trend: spark(-101, 40, 2), trendCoarse: spark(-100, 60, 3), trendCoarseDays: 12, band: 'clean' },

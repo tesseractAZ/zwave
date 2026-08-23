@@ -42,16 +42,22 @@ function efficacyNote(e: Efficacy | null | undefined, blocked = false): string |
   if (!e || !e.ready) return null; // still learning → say nothing (honest)
   const n = Math.round(e.n);
   const base = e.baseRate != null ? ` vs ${Math.round(e.baseRate * 100)}% self-heal` : '';
+  // PROVENANCE (v0.36.5). The arms are marginal by design, so `n=6` reads as
+  // six nodes agreeing when it may be one node repeating — which is exactly
+  // what happened live, a single flapping device teaching the fleet-wide arm
+  // past its readiness threshold. Silent when the ledger predates the tracking
+  // (0) rather than claiming a node count it does not have.
+  const prov = e.nodes > 0 ? ` · ${e.nodes} node${e.nodes === 1 ? '' : 's'}` : '';
   if (e.expectedEfficacy != null) {
     // `n` first (after the headline %) so the trust signal survives truncation.
     const pct = Math.round(e.expectedEfficacy * 100);
     return blocked
-      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n})${base} — the block above still applies`)
-      : c.green(`✓ helped ${pct}% (n=${n})${base}`);
+      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n}${prov})${base} — the block above still applies`)
+      : c.green(`✓ helped ${pct}% (n=${n}${prov})${base}`);
   }
   return blocked
-    ? c.grey(`≈ n=${n}: measured — not distinguishable from self-healing`)
-    : c.grey(`≈ n=${n}: not distinguishable from self-healing`);
+    ? c.grey(`≈ n=${n}${prov}: measured — not distinguishable from self-healing`)
+    : c.grey(`≈ n=${n}${prov}: not distinguishable from self-healing`);
 }
 
 const SEV_TAG: Record<Symptom['severity'], string> = {

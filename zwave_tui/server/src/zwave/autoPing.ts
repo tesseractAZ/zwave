@@ -100,6 +100,29 @@ export interface AutoPingState {
   /** Nodes already announced as abandoned this outage (v0.36.4), so the notice
    *  fires once rather than every tick for as long as the node stays down. */
   gaveUpAnnounced: Set<number>;
+  /**
+   * nodeId → CONSECUTIVE unanswered probes (v0.36.5).
+   *
+   * Measured on the live mesh: excluding one genuinely broken node, 2 probes of
+   * ~98 went unanswered — about 2%, one each on two different healthy nodes.
+   * Across 35 candidates probed every two hours that is a steady drip of
+   * transient misses, and each produced a line textually identical to the
+   * fifteenth consecutive failure of a device that was actually down. A count
+   * separates them without hiding either.
+   */
+  missStreak: Map<number, number>;
+}
+
+/** 1st, 2nd, 3rd, 4th … for the miss-streak label (v0.36.5). */
+function ordinal(n: number): string {
+  const rem100 = n % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1: return `${n}st`;
+    case 2: return `${n}nd`;
+    case 3: return `${n}rd`;
+    default: return `${n}th`;
+  }
 }
 
 /** How long to wait before judging whether a probe was answered (v0.36).
@@ -108,7 +131,7 @@ export interface AutoPingState {
 const ANSWER_GRACE_MS = 90_000;
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), gaveUpAnnounced: new Set() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map() };
 }
 
 export interface AutoPingInput {
@@ -335,10 +358,10 @@ export function judgeProbeAnswers(
   nodes: NodeSnapshot[],
   now: number,
   graceMs = ANSWER_GRACE_MS,
-): { nodeId: number; answered: boolean }[] {
+): { nodeId: number; answered: boolean; misses: number }[] {
   const seenOf = new Map<number, number | null>();
   for (const n of nodes) seenOf.set(n.nodeId, n.stats?.lastSeen ?? null);
-  const out: { nodeId: number; answered: boolean }[] = [];
+  const out: { nodeId: number; answered: boolean; misses: number }[] = [];
   for (const [nodeId, at] of [...state.awaitingAnswer]) {
     if (now - at < graceMs) continue;
     state.awaitingAnswer.delete(nodeId);
@@ -346,7 +369,13 @@ export function judgeProbeAnswers(
     // rather than call a roster gap a failed probe.
     if (!seenOf.has(nodeId)) continue;
     const seen = seenOf.get(nodeId) ?? null;
-    out.push({ nodeId, answered: seen != null && seen >= at });
+    const answered = seen != null && seen >= at;
+    // The streak is CONSECUTIVE: one answer resets it, so "3rd miss" always
+    // means three in a row rather than three since the beginning of time.
+    const misses = answered ? 0 : (state.missStreak.get(nodeId) ?? 0) + 1;
+    if (answered) state.missStreak.delete(nodeId);
+    else state.missStreak.set(nodeId, misses);
+    out.push({ nodeId, answered, misses });
   }
   return out;
 }
@@ -587,14 +616,23 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
      * moment we probed it. An unanswered probe is the signal auto-ping exists
      * to produce, and until now it could not be observed at all.
      */
-    for (const { nodeId, answered } of judgeProbeAnswers(state, nodes, t)) {
+    for (const { nodeId, answered, misses } of judgeProbeAnswers(state, nodes, t)) {
       // The expected case stays at debug — one line per probe on every healthy
       // node is several hundred a day saying "as designed", which is the noise
       // that trains an operator to stop reading. The UNANSWERED case below is
       // the signal, and it is warn on both destinations.
       if (answered) { o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`); continue; }
-      const m = `auto-ping: node ${nodeId} did NOT answer its probe (lastSeen did not advance)`;
-      o.log('warn', nodeId, m); o.log2?.(m);
+      // A FIRST miss is information; a streak is a warning. Measured on the live
+      // mesh, healthy nodes drop about 2% of probes to ordinary transient loss,
+      // so warning on every one of those would put a steady drip of false alarm
+      // beside the genuine article and teach an operator to skim past both. The
+      // count is in the text either way — this suppresses nothing, it only
+      // stops calling a single lost packet a warning.
+      const ord = ordinal(misses);
+      const m = `auto-ping: node ${nodeId} did NOT answer its probe ` +
+        `(${ord} consecutive miss, lastSeen did not advance)`;
+      o.log(misses >= 2 ? 'warn' : 'info', nodeId, m);
+      o.log2?.(m);
     }
   };
 

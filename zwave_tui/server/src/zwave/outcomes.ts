@@ -466,6 +466,26 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   const fp = new Map<SymptomKind, number>();
   // Episodes closed `unverifiable`, per kind — see the interface docstring.
   const unver = new Map<SymptomKind, number>();
+  /**
+   * Which DISTINCT nodes fed each arm (v0.36.5).
+   *
+   * The arms are marginal by design — keyed by kind, or by kind|action — so a
+   * single pathological device can saturate one. Observed live within hours of
+   * the ledger starting to work: node 23 flapped a dozen times and taught the
+   * fleet-wide (rtt-degraded, ping) arm six no-change episodes entirely on its
+   * own, past `minEpisodes`. The statistics were honest and the provenance was
+   * invisible: `n=6` reads as six nodes agreeing when it was one node repeating.
+   *
+   * Cumulative and deliberately NOT decayed: this answers "how broad is the
+   * evidence", which does not get narrower with age the way a rate does.
+   */
+  const armNodes = new Map<string, Set<number>>();
+  const controlNodes = new Map<SymptomKind, Set<number>>();
+  const noteNode = (m: Map<string, Set<number>>, k: string, nodeId: number | null): void => {
+    if (nodeId == null) return; // a mesh-scoped episode is not a node
+    const set = m.get(k) ?? new Set<number>();
+    set.add(nodeId); m.set(k, set);
+  };
   // Per (kind ▸ action ▸ band) action arm.
   const action = new Map<string, Tally>();
 
@@ -528,6 +548,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       } else if (ep.action == null) {
         // Control arm: a symptom that resolved with no action taken.
         control.set(kind, bump(control.get(kind), ep.verdict === 'improved'));
+        noteNode(controlNodes as unknown as Map<string, Set<number>>, kind, ep.nodeId);
         dirty = true;
       } else {
         // Action arm — keyed by (kind, action) to match the un-banded control
@@ -538,6 +559,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         // limitation — see baseRate/efficacyFor).
         const ak = aKey(kind, ep.action.kind);
         action.set(ak, bump(action.get(ak), ep.verdict === 'improved'));
+        noteNode(armNodes, ak, ep.nodeId);
         dirty = true;
       }
       log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'}`);
@@ -562,7 +584,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const base = this.baseRate(kind);
       const t = action.get(aKey(kind, act));
       const n = t?.n ?? 0, ok = t?.ok ?? 0;
-      if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, ready: false };
+      const nodes = armNodes.get(aKey(kind, act))?.size ?? 0;
+      if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, nodes, ready: false };
       const rate = ok / n;
       // "Beats self-healing" REQUIRES a measured control arm to beat — you cannot
       // out-perform a base rate you have not measured. With no base rate yet the
@@ -575,7 +598,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // green "✓ helped 100%". The DISPLAYED efficacy stays the point estimate
       // (honest best guess) but is shown only once the lower bound earns it.
       const beats = base != null && wilsonLower(ok, n) >= base + cfg.minEffect;
-      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, ready: true };
+      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, nodes, ready: true };
     },
 
     falsePositives(kind): number {
@@ -602,7 +625,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     reset(): void {
-      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear();
+      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); armNodes.clear(); controlNodes.clear();
     },
 
     load(): void {
@@ -638,6 +661,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         action: [...action.entries()],
         fp: [...fp.entries()],
         unver: [...unver.entries()],
+        armNodes: [...armNodes.entries()].map(([k, v]) => [k, [...v]] as [string, number[]]),
+        controlNodes: [...controlNodes.entries()].map(([k, v]) => [k, [...v]] as [SymptomKind, number[]]),
         // Open episodes are intentionally NOT persisted — an episode spanning a
         // restart lost its before-window's continuity and can't yield an honest
         // verdict; it re-opens fresh when the symptom is re-detected.
@@ -645,14 +670,18 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     loadJSON(raw): void {
-      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][] };
+      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
       if (!o || o.v !== 1) return;
-      control.clear(); action.clear(); fp.clear(); unver.clear();
+      control.clear(); action.clear(); fp.clear(); unver.clear(); armNodes.clear(); controlNodes.clear();
       for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, t);
       for (const [k, t] of o.action ?? []) if (validTally(t)) action.set(k, t);
       for (const [k, v] of o.fp ?? []) if (Number.isFinite(v) && v >= 0) fp.set(k, v);
       // Absent in pre-v0.36 files — an older ledger simply starts this counter at 0.
       for (const [k, v] of o.unver ?? []) if (Number.isFinite(v) && v >= 0) unver.set(k, v);
+      // Absent in pre-v0.36.5 files: an older ledger simply reports 0 nodes,
+      // which the renderer treats as "provenance unknown" rather than as one.
+      for (const [k, v] of o.armNodes ?? []) if (Array.isArray(v)) armNodes.set(k, new Set(v.filter((x) => Number.isFinite(x))));
+      for (const [k, v] of o.controlNodes ?? []) if (Array.isArray(v)) controlNodes.set(k, new Set(v.filter((x) => Number.isFinite(x))));
     },
   };
 }

@@ -447,8 +447,8 @@ const MUTANTS = [
     repl: '    if (started == null) continue;',
     what: 'auto-ping waits its configured dwell before the first probe' },
   { id: 'autoping-attempt-cap', file: 'src/zwave/autoPing.ts',
-    find: '    if (tries >= config.maxAttempts) continue;',
-    repl: '',
+    find: '    if (tries >= config.maxAttempts) {',
+    repl: '    if (false) {',
     what: 'auto-ping stops at the attempt cap instead of retrying forever' },
   { id: 'autoping-episode-reset', file: 'src/zwave/autoPing.ts',
     // Without the clear, a node that recovers keeps its exhausted budget and is
@@ -915,6 +915,34 @@ const MUTANTS = [
     find: '      state.gaveUpAnnounced.delete(n.nodeId);',
     repl: '      void n;',
     what: 'recovery re-arms the give-up notice for the next outage' },
+  /* ── v0.36.5: transient vs persistent, and evidence breadth ─────────── */
+  { id: 'miss-streak-is-consecutive', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Never resets on a successful probe, so "3rd miss" comes to mean three
+    // since boot rather than three in a row — which is the difference between
+    // a failing node and a node that has dropped three packets all year.
+    find: '    if (answered) state.missStreak.delete(nodeId);',
+    repl: '    if (answered) void nodeId;',
+    what: 'the miss streak counts CONSECUTIVE failures; one answer resets it' },
+  { id: 'first-miss-is-not-a-warning', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Warns on every transient miss again. Measured live at ~2% of probes to
+    // healthy nodes, that is a steady drip of false alarm sitting beside the
+    // genuine article, which teaches an operator to skim past both.
+    find: "      o.log(misses >= 2 ? 'warn' : 'info', nodeId, m);",
+    repl: "      o.log('warn', nodeId, m);",
+    what: 'a single lost packet is info; a streak is a warning' },
+  { id: 'arm-provenance-counts-nodes', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Drops the node set, so `n=6` cannot be told apart from six nodes agreeing
+    // — the exact reading that made one flapping device look like fleet-wide
+    // evidence.
+    find: '        noteNode(armNodes, ak, ep.nodeId);',
+    repl: '        void ak;',
+    what: 'an action arm records which distinct nodes taught it' },
+  { id: 'provenance-silent-when-unknown', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Renders "0 nodes" on a ledger that predates the tracking — a fabricated
+    // claim about evidence breadth where silence is the honest answer.
+    find: "  const prov = e.nodes > 0 ? ` · ${e.nodes} node${e.nodes === 1 ? '' : 's'}` : '';",
+    repl: "  const prov = ` · ${e.nodes} node${e.nodes === 1 ? '' : 's'}`;",
+    what: 'an unknown node count renders as nothing, never as zero nodes' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
@@ -1016,15 +1044,15 @@ const MUTANTS = [
   { id: 'ledger-blocked-never-endorses', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // Drops the blocked framing: a green "✓ helped 80%" now sits directly under
     // advice that says NOT recommended.
-    find: "    return blocked\n      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n})${base} — the block above still applies`)\n      : c.green(`✓ helped ${pct}% (n=${n})${base}`);",
-    repl: '    return c.green(`✓ helped ${pct}% (n=${n})${base}`);',
+    find: "    return blocked\n      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n}${prov})${base} — the block above still applies`)\n      : c.green(`✓ helped ${pct}% (n=${n}${prov})${base}`);",
+    repl: '    return c.green(`✓ helped ${pct}% (n=${n}${prov})${base}`);',
     what: 'a blocked candidate is never endorsed in the voice of a recommendation' },
   { id: 'ledger-never-judges-block', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // Restores the review defect verbatim: `blocked` carries safety and config
     // gates too, and "the block above is lore" told an operator a BATTERY/FLiRS
     // safety gate was unfounded folklore contradicted by measurement.
-    find: '      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n})${base} — the block above still applies`)',
-    repl: '      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n})${base}; the block above is lore`)',
+    find: '      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n}${prov})${base} — the block above still applies`)',
+    repl: '      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n}${prov})${base}; the block above is lore`)',
     what: 'the note reports measurement without ever characterizing the block' },
   { id: 'false-positives-only-above-zero', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // A clean detector boasts a zero — noise on every card, and it trains the
@@ -1117,8 +1145,8 @@ const MUTANTS = [
     // Routes verification probes around the suppression ladder — they would
     // then fire during a storm, a rebuild, the boot window, or with write
     // actions off, which is a second and less-guarded path to the mesh.
-    find: "  const verify = (input.verifyDue ?? []).filter((id) => candidates.has(id));",
-    repl: "  const verify = input.verifyDue ?? [];",
+    find: "  const verify = (input.verifyDue?.() ?? []).filter((id) => candidates.has(id));",
+    repl: "  const verify = input.verifyDue?.() ?? [];",
     what: 'a verification probe passes every gate auto-ping itself passes' },
   { id: 'verify-skips-dead-nodes', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Lets the verification lane race the remediation lane on a Dead node,
@@ -1129,8 +1157,8 @@ const MUTANTS = [
   { id: 'probe-answer-from-evidence', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Calls every probe answered regardless of whether lastSeen moved —
     // restoring the v0.35 state where an unanswered probe was unobservable.
-    find: '    out.push({ nodeId, answered: seen != null && seen >= at });',
-    repl: '    out.push({ nodeId, answered: true });',
+    find: '    const answered = seen != null && seen >= at;',
+    repl: '    const answered = true;',
     what: 'a probe is judged answered only when the node lastSeen actually advanced' },
   { id: 'probe-answer-waits-grace', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Judges a probe before the round trip could possibly have completed, so

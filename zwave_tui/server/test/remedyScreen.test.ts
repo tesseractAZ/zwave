@@ -132,19 +132,20 @@ test('M4: the overflow footer survives even when one oversized block fills a tin
 });
 
 test('M5: a learned "beat self-healing" efficacy renders a green note on the executable candidate', () => {
-  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, ready: true };
+  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, nodes: 3, ready: true };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
-  assert.ok(/✓ helped 83% \(n=6\) vs 20% self-heal/.test(joined), 'efficacy note shows the win, the base rate, and n');
+  assert.ok(/✓ helped 83% \(n=6 · 3 nodes\) vs 20% self-heal/.test(joined),
+    'the note shows the win, the base rate, n, AND how many nodes taught it');
 });
 
 test('M5: a learned-but-not-distinguishable efficacy renders the honest "not distinguishable" note', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 8, baseRate: 0.9, ready: true };
+  const eff: Eff = { expectedEfficacy: null, n: 8, baseRate: 0.9, nodes: 3, ready: true };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
-  assert.ok(/≈ n=8: not distinguishable from self-healing/.test(joined), 'honest null-result note');
+  assert.ok(/≈ n=8 · 3 nodes: not distinguishable from self-healing/.test(joined), 'honest null-result note');
 });
 
 test('M5: while still learning (not ready) NO efficacy note is shown', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 1, baseRate: null, ready: false };
+  const eff: Eff = { expectedEfficacy: null, n: 1, baseRate: null, nodes: 3, ready: false };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(!/helped|not distinguishable/.test(joined), 'says nothing until it has an opinion');
 });
@@ -170,10 +171,10 @@ test('a BLOCKED candidate now reports what was measured — without judging the 
   // must NOT characterize the block (an earlier draft said "the block above is
   // lore", which read as calling a SAFETY gate unfounded folklore whenever the
   // block came from gateExecutable rather than the planner's advisory text).
-  const eff: Eff = { expectedEfficacy: 0.8, n: 10, baseRate: 0.2, ready: true };
+  const eff: Eff = { expectedEfficacy: 0.8, n: 10, baseRate: 0.2, nodes: 3, ready: true };
   const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
   assert.match(joined, /⊘ physical-link symptom/, 'the block is still stated');
-  assert.match(joined, /ledger measured 80% here \(n=10\) vs 20% self-heal — the block above still applies/,
+  assert.match(joined, /ledger measured 80% here \(n=10 · 3 nodes\) vs 20% self-heal — the block above still applies/,
     'the measurement reaches the screen AND the block is never undermined');
   assert.ok(!/✓ helped/.test(joined),
     'never as a green endorsement of advice the screen just told you not to take');
@@ -184,13 +185,13 @@ test('a BLOCKED candidate now reports what was measured — without judging the 
 });
 
 test('a blocked candidate with a NULL result reports it plainly, endorsing nothing', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 12, baseRate: 0.5, ready: true };
+  const eff: Eff = { expectedEfficacy: null, n: 12, baseRate: 0.5, nodes: 3, ready: true };
   const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
   assert.match(joined, /measured — not distinguishable from self-healing/);
 });
 
 test('a blocked candidate with no opinion yet still says NOTHING', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 2, baseRate: null, ready: false };
+  const eff: Eff = { expectedEfficacy: null, n: 2, baseRate: null, nodes: 3, ready: false };
   const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
   assert.ok(!/ledger measured|block above|helped|distinguishable/.test(joined),
     'not-ready is silence, blocked or not');
@@ -201,11 +202,11 @@ test('one plan can carry BOTH voices — green on the runnable, disagreement on 
   // ledger has the same opinion of each. The note must therefore switch VOICE
   // per candidate, not per plan: the reader has to be able to tell which row
   // the measurement is talking about.
-  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, ready: true };
+  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, nodes: 3, ready: true };
   const rows = plain(renderRemedy(ctx(140, 40, [sym()], () => eff))).split('\n');
-  assert.ok(rows.some((l) => /✓ helped 83% \(n=6\) vs 20% self-heal/.test(l)),
+  assert.ok(rows.some((l) => /✓ helped 83% \(n=6 · 3 nodes\) vs 20% self-heal/.test(l)),
     'the runnable candidate keeps the plain green note');
-  assert.ok(rows.some((l) => /ledger measured 83% here/.test(l) && /block above still applies/.test(l)),
+  assert.ok(rows.some((l) => /ledger measured 83% here \(n=6 · 3 nodes\)/.test(l) && /block above still applies/.test(l)),
     'the blocked candidate gets the measurement-plus-block framing');
   assert.ok(!rows.some((l) => /✓ helped/.test(l) && /ledger measured/.test(l)),
     'and never both on one row');
@@ -284,4 +285,27 @@ test('the exact-rows contract survives the extra unscoreable row at every size',
     assert.equal(out.length, rows, `rows at ${cols}x${rows}`);
     for (const l of out) assert.ok(l.replace(/\x1b\[[0-9;]*m/g, '').length <= cols, `width at ${cols}x${rows}`);
   }
+});
+
+/* ── v0.36.5: provenance — one node repeating is not six nodes agreeing ────── */
+
+test('the note says how many DISTINCT nodes taught the arm', () => {
+  // Observed live within hours of the ledger starting to work: one flapping
+  // device produced six no-change episodes and pushed the fleet-wide
+  // (rtt-degraded, ping) arm past its readiness threshold on its own. The
+  // statistics were honest; the provenance was invisible.
+  const solo: Eff = { expectedEfficacy: null, n: 6, baseRate: 0.2, nodes: 1, ready: true };
+  const broad: Eff = { expectedEfficacy: null, n: 6, baseRate: 0.2, nodes: 6, ready: true };
+  assert.match(plain(renderRemedy(ctx(140, 40, [sym()], () => solo))), /n=6 · 1 node:/);
+  assert.match(plain(renderRemedy(ctx(140, 40, [sym()], () => broad))), /n=6 · 6 nodes:/);
+});
+
+test('a ledger that predates the tracking claims NO node count', () => {
+  // A pre-v0.36.5 file has no provenance recorded. Rendering "1 node" there
+  // would be a fabricated claim about evidence breadth; silence is honest.
+  const old: Eff = { expectedEfficacy: 0.9, n: 8, baseRate: 0.2, nodes: 0, ready: true };
+  const joined = plain(renderRemedy(ctx(140, 40, [sym()], () => old)));
+  assert.match(joined, /✓ helped 90% \(n=8\) vs 20% self-heal/);
+  assert.ok(!/node/.test(joined.split('\n').find((l) => /helped 90%/.test(l)) ?? ''),
+    'no node count rather than a made-up one');
 });

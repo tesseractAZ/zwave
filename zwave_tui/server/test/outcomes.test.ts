@@ -764,3 +764,51 @@ test('a confirm window shorter than the after-window is due immediately, never n
   assert.equal(confirmBurstDue(1000, 1000, 60_000, 300_000), true,
     'a degenerate config must not compute a negative wait and stall forever');
 });
+
+test('an arm records the DISTINCT nodes that fed it, and one node repeating stays one', () => {
+  // The live case: node 23 flapped a dozen times and taught the fleet-wide
+  // (rtt-degraded, ping) arm on its own. n grows; the node count must not.
+  const o = store();
+  for (let i = 0; i < 6; i++) {
+    o.open(23, 'rtt-degraded', 1000 + i * 10, WT(200));
+    o.recordAction(23, 'ping', false, 1005 + i * 10);
+    o.resolve(23, 'rtt-degraded', 2000 + i * 10, WT(190));
+  }
+  const solo = o.efficacyFor('rtt-degraded', 'ping');
+  assert.equal(Math.round(solo.n), 6, 'six episodes');
+  assert.equal(solo.nodes, 1, 'from ONE node — the number that tells repetition from agreement');
+
+  // A second node broadens the evidence.
+  o.open(31, 'rtt-degraded', 5000, WT(200));
+  o.recordAction(31, 'ping', false, 5005);
+  o.resolve(31, 'rtt-degraded', 6000, WT(190));
+  assert.equal(o.efficacyFor('rtt-degraded', 'ping').nodes, 2);
+});
+
+test('arm provenance survives a save/load round trip, and is absent-tolerant', () => {
+  const o = store();
+  o.open(23, 'rtt-degraded', 1000, WT(200));
+  o.recordAction(23, 'ping', false, 1005);
+  o.resolve(23, 'rtt-degraded', 2000, WT(190));
+  const o2 = store();
+  o2.loadJSON(o.toJSON());
+  assert.equal(o2.efficacyFor('rtt-degraded', 'ping').nodes, 1, 'round-trips');
+
+  const old = store();
+  old.loadJSON({ v: 1, control: [], action: [], fp: [] }); // pre-v0.36.5 file
+  assert.equal(old.efficacyFor('rtt-degraded', 'ping').nodes, 0,
+    'unknown provenance reports 0, which the renderer shows as nothing');
+});
+
+test('a MESH-scoped episode contributes no node to provenance', () => {
+  // No mutant for this one, deliberately: the guard narrows `nodeId` from
+  // `number | null` to `number` for the Set.add below it, so removing it is a
+  // COMPILE error (TS2345), not a behaviour change. The type system pins the
+  // invariant more tightly than a mutant could, and a mutant that cannot build
+  // proves nothing. This test pins the observable half.
+  const o = store();
+  o.open(null, 'mesh-interference', 1000, WT(200));
+  o.resolve(null, 'mesh-interference', 2000, WT(190));
+  assert.equal(o.efficacyFor('mesh-interference', 'ping').nodes, 0,
+    'a mesh event is not a node and must not be counted as one');
+});

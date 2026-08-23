@@ -196,6 +196,17 @@ export interface Efficacy {
   n: number;
   /** The kind's spontaneous-recovery base rate (control arm), for context. */
   baseRate: number | null;
+  /**
+   * How many DISTINCT nodes fed this action arm (v0.36.5); 0 when unknown
+   * (a ledger file written before this was tracked).
+   *
+   * The arms are marginal by design, so one pathological device can saturate
+   * one — observed live, a single flapping node taught the fleet-wide
+   * (rtt-degraded, ping) arm six episodes on its own. `n=6` reads as six nodes
+   * agreeing when it was one node repeating, and only this number tells them
+   * apart.
+   */
+  nodes: number;
   // NOTE: there is deliberately no `beatsSelfHealing` flag (dropped v0.35). It
   // was `expectedEfficacy != null` by construction — two fields encoding one
   // fact, read by nothing but its own tests, and one refactor away from
