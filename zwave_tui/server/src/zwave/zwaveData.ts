@@ -159,10 +159,25 @@ const ENTITY_REFRESH_MS = 10 * 60_000;
 const COARSE_INTERVAL_MS = 60_000;
 /** v0.22: min gap before a FAILED config-param fetch is retried, so a Detail
  *  screen that re-requests every frame can't hammer a flaky device. */
-/** Verification probes requested per episode boundary (v0.36). Three readings
- *  is exactly the verifier's evidence floor (outcomes MIN_OBS) — enough to make
- *  a verdict possible, and no more traffic than that requires. */
-const VERIFY_BURST = 3;
+/**
+ * Verification probes requested per episode boundary.
+ *
+ * v0.36 used 3 — "exactly the verifier's evidence floor (MIN_OBS), and no more
+ * traffic than that requires". Measured in production, that reasoning was
+ * wrong: choosing exactly the floor leaves no room for the ordinary. Three
+ * readings must all land, all be sampled, and all carry a non-null RTT inside
+ * one 300 s window, from a burst whose effective spacing is ~120 s (the 70 s
+ * request spacing rounding up to the next tick) and which therefore already
+ * spans 240 s. Lose one probe to transient RF — measured at ~2 % of probes on
+ * this mesh — or slip a single tick, and the window holds 2 of 3 and the
+ * verdict fails closed.
+ *
+ * Five gives margin for one lost probe plus jitter, at one extra ping per
+ * episode boundary. The alternative diagnosis (contention between nodes owed
+ * bursts) was measured and REFUTED: at 1-3 nodes owed the spacing held at a
+ * steady +120 s, and a node scored `improved` at the highest contention seen.
+ */
+const VERIFY_BURST = 5;
 /** Spacing between probes in one burst — far enough apart that each is a
  *  separate observation, close enough that all three land inside one window. */
 const VERIFY_SPACING_MS = 70_000;

@@ -956,7 +956,7 @@ test('the verification probe line carries its own spacing and the contention (v0
   clock = T + BOOT_WINDOW_MS + MIN;
   h.tick();
   const first = lines.find((l) => /verification probe/.test(l))!;
-  assert.match(first, /first/, 'the first probe of a burst has no prior gap to report');
+  assert.match(first, /burst start/, 'the first probe of a burst has no prior gap to report');
   assert.match(first, /2 owed/, 'and states how many nodes are dividing the queue');
 
   lines.length = 0;
@@ -964,5 +964,37 @@ test('the verification probe line carries its own spacing and the contention (v0
   h.tick();
   const second = lines.find((l) => /verification probe/.test(l))!;
   assert.match(second, /\+140s/, `the measured gap must appear, got: ${second}`);
+  h.stop();
+});
+
+test('the reported gap resets at a BURST boundary, not just per node (v0.37.2)', async () => {
+  // v0.37.1 measured time since the node's previous verification probe whatever
+  // burst it belonged to, so the minutes-long pause between an episode's
+  // open-burst and its confirm-burst read as one stretched burst — and looked
+  // exactly like the contention the number existed to test for. That is how a
+  // diagnostic lies.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const nodes = mesh(20);
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+    verifyRequests: () => [100], verifyOwedCount: () => 1,
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  const probeLine = (): string => lines.filter((l) => /verification probe/.test(l)).slice(-1)[0];
+
+  clock = T + BOOT_WINDOW_MS + MIN; h.tick();
+  assert.match(probeLine(), /burst start/, 'the first probe ever');
+
+  clock += 120_000; h.tick();
+  assert.match(probeLine(), /\+120s/, 'a probe within the burst reports its real spacing');
+
+  // A pause longer than a burst's own span: this is the confirm-burst, not a
+  // slow open-burst.
+  clock += 8 * MIN; h.tick();
+  assert.match(probeLine(), /burst start/,
+    `an inter-burst pause must not masquerade as a stretched burst: ${probeLine()}`);
   h.stop();
 });

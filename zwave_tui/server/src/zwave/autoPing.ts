@@ -132,6 +132,16 @@ function ordinal(n: number): string {
   }
 }
 
+/**
+ * Beyond this, a verification probe belongs to a NEW burst rather than a slow
+ * one (v0.37.2). A burst's own probes arrive ~120 s apart (70 s requested,
+ * rounded up to the next tick); the pause between an episode's open-burst and
+ * its confirm-burst is minutes. Without the distinction the reported gap
+ * conflated the two and made a normal inter-burst pause look like the
+ * contention it existed to measure.
+ */
+const BURST_GAP_MAX_MS = 4 * 60_000;
+
 /** How long to wait before judging whether a probe was answered (v0.36).
  *  A ping is a round trip plus a stats push; 90 s is generous for a routed
  *  mesh hop and still well inside one tick of slack. */
@@ -652,9 +662,17 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // because the add-on log has no timestamps and the decision trace only
       // prints on change. Without this number the spacing is unmeasurable from
       // outside and any fix would be aimed at a story rather than a cause.
+      // Reset the gap at a BURST boundary. v0.37.1 measured "time since this
+      // node's previous verification probe" regardless of which burst it
+      // belonged to, so the pause between an episode's open-burst and its
+      // confirm-burst — minutes by design — read as a single stretched burst
+      // and looked like the contention it was there to test for. Anything
+      // longer than a burst's own span is a new burst, not a slow one.
       const prevVerify = state.lastVerifyAt.get(nodeId);
+      const sinceMs = prevVerify == null ? null : t - prevVerify;
+      const newBurst = sinceMs == null || sinceMs > BURST_GAP_MAX_MS;
       state.lastVerifyAt.set(nodeId, t);
-      const gap = prevVerify == null ? 'first' : `+${Math.round((t - prevVerify) / 1000)}s`;
+      const gap = newBurst ? 'burst start' : `+${Math.round((sinceMs as number) / 1000)}s`;
       const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)`;
       o.log('info', nodeId, msg);
       o.log2?.(msg);

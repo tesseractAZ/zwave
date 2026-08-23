@@ -350,9 +350,11 @@ test('drainVerifyRequests hands out ONE node per tick, spaced, and stops after t
     const t0 = 1_800_000_000_000;
     assert.deepEqual(zd.drainVerifyRequests(t0), [7], 'first probe is due immediately');
     assert.deepEqual(zd.drainVerifyRequests(t0 + 1_000), [], 'the next is spaced, not back-to-back');
-    assert.deepEqual(zd.drainVerifyRequests(t0 + 80_000), [7], 'second lands after the spacing');
-    assert.deepEqual(zd.drainVerifyRequests(t0 + 160_000), [7], 'third');
-    assert.deepEqual(zd.drainVerifyRequests(t0 + 240_000), [], 'burst exhausted — it does not probe forever');
+    for (let i = 1; i <= 4; i++) {
+      assert.deepEqual(zd.drainVerifyRequests(t0 + i * 80_000), [7], `probe ${i + 1} of the burst`);
+    }
+    assert.deepEqual(zd.drainVerifyRequests(t0 + 5 * 80_000), [],
+      'burst exhausted at five — it does not probe forever');
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });
@@ -376,7 +378,7 @@ test('repeated requests CAP the outstanding budget — a flapping symptom cannot
     for (let i = 0; i < 10; i++) q.requestVerification(7); // ten flaps, back to back
     let fired = 0;
     for (let i = 0; i < 40; i++) if (zd.drainVerifyRequests(t0 + i * 80_000).length) fired++;
-    assert.equal(fired, 3, `ten requests must still owe ONE burst, not thirty probes — fired ${fired}`);
+    assert.equal(fired, 5, `ten requests must still owe ONE burst, not fifty probes — fired ${fired}`);
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });
@@ -393,5 +395,33 @@ test('with no engine configured the queue is inert — no probes requested at al
       'no outcome ledger means nothing to verify — and nothing to write to the mesh for');
   } finally {
     zd.stop();
+  }
+});
+
+test('a verification burst carries MARGIN over the evidence floor (v0.37.2)', async () => {
+  // v0.36 used exactly MIN_OBS (3) on the reasoning that the floor is "no more
+  // traffic than required". Measured in production that leaves no room for the
+  // ordinary: three readings must all land, be sampled, and carry a non-null
+  // RTT inside one 300s window, from a burst already spanning ~240s at the
+  // effective 120s tick-rounded spacing. One lost probe — ~2% of probes on this
+  // mesh — and the window holds 2 of 3 and fails closed.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-burst-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const q = zd as unknown as { requestVerification: (n: number) => void };
+    q.requestVerification(7);
+    const t0 = 1_800_000_000_000;
+    let fired = 0;
+    for (let i = 0; i < 40; i++) if (zd.drainVerifyRequests(t0 + i * 80_000).length) fired++;
+    assert.ok(fired >= 4, `a burst must exceed the 3-reading floor, got ${fired}`);
+    assert.equal(fired, 5, 'five: margin for one lost probe plus tick jitter');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

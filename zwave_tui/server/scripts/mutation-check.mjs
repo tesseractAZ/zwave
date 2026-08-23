@@ -860,8 +860,8 @@ const MUTANTS = [
     // container log an operator greps — the exact shape of failure that once had
     // auto-ping itself diagnosed as a no-op, and which made the v0.36.0 deploy
     // unverifiable from outside.
-    find: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence)`;\n      o.log('info', nodeId, msg);\n      o.log2?.(msg);",
-    repl: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence)`;\n      o.log('info', nodeId, msg);\n      o.log2?.debug?.(msg);",
+    find: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)`;\n      o.log('info', nodeId, msg);\n      o.log2?.(msg);",
+    repl: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)`;\n      o.log('info', nodeId, msg);\n      o.log2?.debug?.(msg);",
     what: 'an autonomous write is visible in BOTH the event ring and the server log' },
   { id: 'verify-drain-past-the-gates', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Re-creates the v0.36.0/.1 seam defect: resolving the ledger's queue BEFORE
@@ -1004,9 +1004,25 @@ const MUTANTS = [
     // add-on log cannot show whether a burst landed inside its window — it has
     // no timestamps, and the decision trace only prints on change — so the next
     // unverifiable episode is again diagnosed by guesswork.
-    find: "      const gap = prevVerify == null ? 'first' : `+${Math.round((t - prevVerify) / 1000)}s`;",
-    repl: "      const gap = 'first';",
+    find: "      const gap = newBurst ? 'burst start' : `+${Math.round((sinceMs as number) / 1000)}s`;",
+    repl: "      const gap = 'burst start';",
     what: 'a verification probe reports the real gap since the node last got one' },
+  { id: 'burst-has-margin-over-floor', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Back to exactly MIN_OBS. Measured in production that leaves no room for
+    // the ordinary: three readings must all land, be sampled, and carry a
+    // non-null RTT inside one 300s window, from a burst already spanning ~240s.
+    // One lost probe (~2% of probes on this mesh) and the verdict fails closed.
+    find: 'const VERIFY_BURST = 5;',
+    repl: 'const VERIFY_BURST = 3;',
+    what: 'a verification burst carries margin over the evidence floor, not exactly it' },
+  { id: 'gap-resets-per-burst', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Reports time since the node's previous probe whatever burst it belonged
+    // to, so a minutes-long inter-burst pause reads as one stretched burst —
+    // which is precisely the contention the number exists to test for. A
+    // diagnostic that cannot tell those apart argues for the wrong fix.
+    find: '      const newBurst = sinceMs == null || sinceMs > BURST_GAP_MAX_MS;',
+    repl: '      const newBurst = sinceMs == null;',
+    what: 'the reported gap resets at a burst boundary, so it cannot fake contention' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
