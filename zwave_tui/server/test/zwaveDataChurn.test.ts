@@ -425,3 +425,113 @@ test('a verification burst carries MARGIN over the evidence floor (v0.37.2)', as
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a burst SPANS LESS than the window it must fill — the check that was missing twice', async () => {
+  // The defect this pins, stated as arithmetic so it survives any later change
+  // to the constants: a burst is useless if it takes longer to deliver than the
+  // window that measures it. v0.36 chose the count against MIN_OBS and never
+  // checked the span against WINDOW_MS; at the then-effective 120s spacing a
+  // 5-probe burst ran 480s against a 300s window, so probes 1-2 aged out before
+  // 4-5 arrived and the window never held more than two or three readings.
+  // Adding probes lengthened the stream without filling the window.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-span-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const TICK = 60_000, WINDOW = 5 * 60_000;
+    const q = zd as unknown as { requestVerification: (n: number) => void };
+    q.requestVerification(7);
+    const t0 = 1_800_000_000_000;
+    const fired: number[] = [];
+    for (let i = 0; i < 40; i++) {
+      const at = t0 + i * TICK;
+      if (zd.drainVerifyRequests(at).includes(7)) fired.push(at);
+    }
+    assert.ok(fired.length >= 3, `a burst must clear the evidence floor, got ${fired.length}`);
+    const span = fired[fired.length - 1] - fired[0];
+    assert.ok(span < WINDOW,
+      `the burst spans ${span / 1000}s but the window is ${WINDOW / 1000}s — every probe past the ` +
+      `window's edge is one the verdict can never see`);
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('every contending node STARTS its burst promptly — a delayed burst misses its window', async () => {
+  // The invariant one-per-tick breaks, and the one a span check cannot see.
+  // Draining one node per tick is FIFO (Map iteration is insertion-ordered), so
+  // each burst stays contiguous and tight — but node B's burst does not BEGIN
+  // until node A's five probes are done, five minutes later. A confirmation
+  // burst is timed to land inside a specific 300s window; starting it five
+  // minutes late puts every probe past the window's edge, where the verdict
+  // can never see them. Tight but late is exactly as useless as spread out.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-start-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const TICK = 60_000;
+    const q = zd as unknown as { requestVerification: (n: number) => void };
+    for (const id of [7, 8, 9, 10]) q.requestVerification(id);
+    const t0 = 1_800_000_000_000;
+    const firstAt = new Map<number, number>();
+    for (let i = 0; i < 40; i++) {
+      const at = t0 + i * TICK;
+      for (const id of zd.drainVerifyRequests(at)) if (!firstAt.has(id)) firstAt.set(id, at);
+    }
+    assert.equal(firstAt.size, 4, 'all four nodes must get a burst');
+    for (const [id, at] of firstAt) {
+      const delayTicks = (at - t0) / TICK;
+      assert.ok(delayTicks <= 1,
+        `node ${id} waited ${delayTicks} ticks to start its burst — a confirmation burst ` +
+        'is timed to a specific window, and a late start puts every probe outside it');
+    }
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CONTENTION does not stretch a burst past its window', async () => {
+  // The other half, and why tightening the spacing alone was not enough:
+  // releasing one node per tick globally re-serialises the bursts, so with N
+  // nodes owed each one's probes land N ticks apart and the burst outgrows the
+  // window again — undoing the fix that had just been applied.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-cont-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const TICK = 60_000, WINDOW = 5 * 60_000;
+    const q = zd as unknown as { requestVerification: (n: number) => void };
+    for (const id of [7, 8, 9, 10]) q.requestVerification(id);
+    const t0 = 1_800_000_000_000;
+    const seen = new Map<number, number[]>();
+    for (let i = 0; i < 40; i++) {
+      const at = t0 + i * TICK;
+      for (const id of zd.drainVerifyRequests(at)) {
+        seen.set(id, [...(seen.get(id) ?? []), at]);
+      }
+    }
+    for (const [id, times] of seen) {
+      assert.ok(times.length >= 3, `node ${id} got only ${times.length} probes`);
+      const span = times[times.length - 1] - times[0];
+      assert.ok(span < WINDOW,
+        `with four nodes competing, node ${id}'s burst spans ${span / 1000}s > ${WINDOW / 1000}s window`);
+    }
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

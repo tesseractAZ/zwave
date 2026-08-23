@@ -1023,6 +1023,22 @@ const MUTANTS = [
     find: '      const newBurst = sinceMs == null || sinceMs > BURST_GAP_MAX_MS;',
     repl: '      const newBurst = sinceMs == null;',
     what: 'the reported gap resets at a burst boundary, so it cannot fake contention' },
+  { id: 'burst-spans-less-than-window', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Restores the 70s request spacing, which rounds UP to the next 60s tick and
+    // makes the real gap 120s — so a 5-probe burst spans 480s against a 300s
+    // window and the verdict can never see more than two or three of its
+    // readings. The count was checked against MIN_OBS twice; the SPAN against
+    // WINDOW_MS was checked neither time.
+    find: 'const VERIFY_SPACING_MS = 30_000;',
+    repl: 'const VERIFY_SPACING_MS = 70_000;',
+    what: 'burst spacing is below the tick, so the burst fits inside its window' },
+  { id: 'burst-survives-contention', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Back to one node per tick globally: with N nodes owed bursts, each one's
+    // probes land N ticks apart and the burst outgrows the window again,
+    // undoing the spacing fix by a different route.
+    find: '    for (const id of due.slice(0, VERIFY_MAX_PER_TICK)) {',
+    repl: '    for (const id of due.slice(0, 1)) {',
+    what: 'several nodes may be probed per tick, so contention cannot stretch a burst' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
@@ -1261,8 +1277,8 @@ const MUTANTS = [
   { id: 'verify-burst-is-spaced', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     // Fires the whole burst in one second — three packets carrying one
     // observation's worth of information, at three times the airtime.
-    find: '    else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });',
-    repl: '    else this.verifyOwed.set(id, { left, nextAt: now });',
+    find: '      else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });',
+    repl: '      else this.verifyOwed.set(id, { left, nextAt: now });',
     what: 'a verification burst is spaced so each probe is a separate reading' },
   { id: 'unscoreable-row-above-zero', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // A clean ledger boasts a zero on every card, training the operator to stop
