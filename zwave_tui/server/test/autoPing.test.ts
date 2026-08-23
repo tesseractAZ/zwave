@@ -591,7 +591,7 @@ test('a probe whose node lastSeen advanced is judged ANSWERED', () => {
   const s = createAutoPingState();
   s.awaitingAnswer.set(7, T);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 5_000 } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: true }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: true, misses: 0 }]);
   assert.equal(s.awaitingAnswer.size, 0, 'and the pending entry is cleared');
 });
 
@@ -599,14 +599,14 @@ test('a probe whose node stayed silent is judged UNANSWERED — the signal that 
   const s = createAutoPingState();
   s.awaitingAnswer.set(7, T);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T - 60_000 } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: false }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1 }]);
 });
 
 test('a node that has NEVER been heard from is unanswered, not silently skipped', () => {
   const s = createAutoPingState();
   s.awaitingAnswer.set(7, T);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: null } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: false }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1 }]);
 });
 
 test('a probe is NOT judged before its grace period — no verdict on an in-flight round trip', () => {
@@ -779,4 +779,67 @@ test('a node still inside its budget is NOT reported as given up', () => {
   const d = tick(s, nodes, clock);
   assert.deepEqual(d.ping, [7], 'it is still being probed');
   assert.deepEqual(d.gaveUp, [], 'so it has not been given up on');
+});
+
+/* ── v0.36.5: transient miss vs persistent failure ────────────────────────── */
+
+test('the miss streak counts CONSECUTIVE failures and one answer resets it', () => {
+  // Measured live: excluding one genuinely broken node, ~2% of probes to healthy
+  // nodes went unanswered — a steady drip of ordinary transient loss producing
+  // lines textually identical to a device that was actually down.
+  const s = createAutoPingState();
+  const silent = (t: number) => [node(7, { stats: { lastSeen: t } as never })];
+  const miss = (i: number): number => {
+    s.awaitingAnswer.set(7, T + i * 1000);
+    return judgeProbeAnswers(s, silent(T - 60_000), T + i * 1000 + 120_000)[0].misses;
+  };
+  assert.equal(miss(1), 1, 'first miss');
+  assert.equal(miss(2), 2, 'second in a row');
+  assert.equal(miss(3), 3, 'third in a row');
+
+  // One answer wipes the streak — "3rd miss" must always mean three in a row,
+  // never three since the beginning of time.
+  s.awaitingAnswer.set(7, T + 10_000);
+  const ok = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 11_000 } as never })], T + 200_000)[0];
+  assert.equal(ok.answered, true);
+  assert.equal(ok.misses, 0);
+  assert.equal(miss(20), 1, 'and the next failure starts a fresh streak');
+});
+
+test('a FIRST miss is info; a streak is a warning — neither is suppressed', async () => {
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const ring: Array<{ sev: string; text: string }> = [];
+  // A node that never updates lastSeen: every probe to it goes unanswered.
+  const nodes = [node(1, { isController: true }), node(100, { stats: { lastSeen: null } as never })];
+  let due = true;
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {},
+    log: (sev, _n, text) => { ring.push({ sev, text }); },
+    log2: Object.assign(() => {}, { debug: () => {} }),
+    verifyRequests: () => (due ? [100] : []),
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN; h.tick();   // probe 1
+  due = false;
+  clock += 5 * MIN; h.tick();                   // judged: 1st miss
+  due = true;  clock += MIN; h.tick();          // probe 2
+  due = false; clock += 5 * MIN; h.tick();      // judged: 2nd miss
+
+  const misses = ring.filter((r) => /did NOT answer/.test(r.text));
+  assert.equal(misses.length, 2, `expected two miss lines, got ${JSON.stringify(misses)}`);
+  assert.match(misses[0].text, /1st consecutive miss/);
+  assert.equal(misses[0].sev, 'info', 'a single lost packet is not a warning');
+  assert.match(misses[1].text, /2nd consecutive miss/);
+  assert.equal(misses[1].sev, 'warn', 'a streak is');
+  h.stop();
+});
+
+test('ordinals read correctly past the awkward teens', async () => {
+  const { judgeProbeAnswers: judge } = await import('../src/zwave/autoPing');
+  const s = createAutoPingState();
+  s.missStreak.set(7, 10);
+  s.awaitingAnswer.set(7, T);
+  assert.equal(judge(s, [node(7, { stats: { lastSeen: null } as never })], T + 200_000)[0].misses, 11);
 });

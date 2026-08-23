@@ -2800,9 +2800,24 @@ interface Efficacy {
   expectedEfficacy: number | null; // P(improved | action), but NULL until it beats the control arm
   n: number;                       // decayed episode count backing the estimate
   baseRate: number | null;         // the kind's spontaneous-recovery rate (control arm), for context
+  nodes: number;                   // DISTINCT nodes that fed this arm (0 = unknown)
   ready: boolean;                  // n ≥ minEpisodes — "learning" vs "learned: not distinguishable"
 }
 ```
+
+> **Provenance (v0.36.5).** The arms are marginal by design (§9.8), so a single
+> pathological device can saturate one — observed within hours of the ledger
+> first working: one flapping node produced six `no-change` episodes and pushed
+> the fleet-wide `(rtt-degraded, ping)` arm past `minEpisodes` on its own. The
+> statistics were honest and the provenance was invisible: `n=6` reads as six
+> nodes agreeing when it was one node repeating. `nodes` is the count of
+> distinct node ids that fed the arm — cumulative and deliberately **not**
+> decayed, because it answers "how broad is this evidence", which does not
+> narrow with age the way a rate does. REMEDY renders it inline
+> (`n=6 · 1 node`). A ledger written before this was tracked reports `0`, which
+> renders as **nothing** rather than as a fabricated "0 nodes". Mesh-scoped
+> episodes contribute no node — enforced by the type system, since the guard
+> narrows `nodeId` from `number | null` for the set insert.
 
 > **`beatsSelfHealing` removed in v0.35.** The shape used to carry a boolean
 > alongside `expectedEfficacy`. It was `expectedEfficacy != null` **by
@@ -3519,7 +3534,7 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 
 ### 11.12 Auto-ping — the autonomous writes (v0.30, extended v0.36)
 
-> **A probe's answer is judged from evidence, not from the call (v0.36).** The ping verb is `call_service button.press`, and HA's zwave_js ping button awaits `node.async_ping()`, which returns a boolean and raises nothing when the node stays silent. The service call therefore fulfils whether or not the node answered, so the `.catch` around it can only ever fire on "this node has no ping button" or a WebSocket transport fault — never on the outcome auto-ping exists to detect. Through v0.35 the two `did not answer` log lines were unreachable for their stated purpose. `judgeProbeAnswers` now asks the only question that can be answered: `ANSWER_GRACE_MS` (90 s) after a probe, did the node's `lastSeen` advance past the moment we sent it? A node absent from the roster is judged **neither** way — a roster gap is not evidence of a failed probe.
+> **A probe's answer is judged from evidence, not from the call (v0.36).** The ping verb is `call_service button.press`, and HA's zwave_js ping button awaits `node.async_ping()`, which returns a boolean and raises nothing when the node stays silent. The service call therefore fulfils whether or not the node answered, so the `.catch` around it can only ever fire on "this node has no ping button" or a WebSocket transport fault — never on the outcome auto-ping exists to detect. Through v0.35 the two `did not answer` log lines were unreachable for their stated purpose. `judgeProbeAnswers` now asks the only question that can be answered: `ANSWER_GRACE_MS` (90 s) after a probe, did the node's `lastSeen` advance past the moment we sent it? A node absent from the roster is judged **neither** way — a roster gap is not evidence of a failed probe. **Consecutive misses are counted (v0.36.5)** and the line says which (`3rd consecutive miss`); any answer resets the streak, so the ordinal always means "in a row". Severity follows it: a **first** miss logs `info`, a **streak** logs `warn`. Measured on the live mesh, healthy nodes drop about 2 % of probes to ordinary transient loss — across 35 candidates probed two-hourly that is a steady drip, and warning on each would sit a stream of false alarm beside the genuine article and teach an operator to skim past both. Nothing is suppressed; a single lost packet is simply not called a warning.
 
 > **Giving up is now SAID, not just done (v0.36.4).** `maxAttempts` is documented as "attempts per dead episode, after which we stop and leave it to a human" — and through v0.36.3 it did the stopping only. The gate was a bare `continue`, and because `attempts` resets solely when a node LEAVES Dead, a node that stays down was abandoned permanently and in silence. Observed live: node 23 exhausted 3/3 and auto-ping said nothing for the next 80 minutes, while the operator had no way to distinguish "given up" from "resolved" — both look like an absence of lines. The node was very likely revivable throughout by a single manual ping, which is in fact how it was eventually recovered. `decideAutoPings` now returns a `gaveUp` lane and the runner announces it at **error** severity on both destinations, once per outage (`gaveUpAnnounced`), re-arming when the node recovers so a device that dies again is reported again. It is the one auto-ping message that asks for action rather than reporting activity.
 

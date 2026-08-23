@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.36.5 — 2026-08-20
+
+Two refinements to signals this release cycle created, both driven by what the
+live mesh actually did rather than by what the design assumed.
+
+**A single lost packet is not a warning.** Measured across ~98 probes: excluding
+one genuinely broken node, 2 went unanswered — about 2 %, one each on two
+different healthy nodes. Each produced a line textually identical to the
+fifteenth consecutive failure of a device that was actually down. Consecutive
+misses are now counted (`3rd consecutive miss`), any answer resets the streak so
+the ordinal always means "in a row", and severity follows: first miss `info`,
+streak `warn`. Nothing is hidden — a first miss is still logged — it is simply
+no longer called a warning, because a steady drip of false alarm beside the
+genuine article teaches an operator to skim past both.
+
+**One node repeating is not six nodes agreeing.** The outcome arms are marginal
+by design, so a single pathological device can saturate one. Within hours of the
+ledger first working, one flapping node produced six `no-change` episodes and
+pushed the fleet-wide `(rtt-degraded, ping)` arm past `minEpisodes` entirely on
+its own. The statistics were honest; the provenance was invisible. `Efficacy`
+now carries `nodes`, the count of distinct nodes that fed the arm, and REMEDY
+renders it inline: `≈ n=6 · 1 node: not distinguishable from self-healing`. It
+is cumulative and deliberately not decayed — it answers how *broad* the evidence
+is, which does not narrow with age the way a rate does. A ledger predating the
+tracking reports `0`, which renders as nothing rather than a fabricated
+"0 nodes".
+
+**Harness hygiene.** The full mutation run surfaced **5 MISSING mutants** whose
+anchors this cycle's own releases had edited out from under them — the attempt
+cap that became a block in v0.36.4, two remedy notes that gained provenance
+here, `verifyDue` becoming a thunk in v0.36.2, and the probe-answer line that
+gained the streak. A MISSING mutant is silent rot: it sits in the list looking
+like coverage while protecting nothing, and a green suite says nothing about it.
+All five repointed and individually verified killing.
+
+747 tests. 214 mutation entries: 210 killed, 0 survived, 0 missing, 4 equivalent.
+
 ## 0.36.4 — 2026-08-20
 
 **The engine gave up on a node and never mentioned it.** `maxAttempts` is
