@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.37.2 — 2026-08-23
+
+**The diagnostic refuted my hypothesis, and the real cause was simpler.**
+
+v0.37.1 shipped a measurement rather than a fix, on the theory that verification
+bursts were being stretched by contention for the one-per-tick queue. The
+numbers came back:
+
+    burst start, 3 owed
+    +120s, 2 owed
+    +120s, 1 owed
+    +120s, 2 owed
+
+Intra-burst spacing held at a steady **+120 s** at every contention level
+observed, and a node scored `improved` at the *highest* contention seen. The
+contention hypothesis is **refuted**. Shipping the FIFO rewrite it implied would
+have been effort spent on a story.
+
+**The actual cause is that the burst had no margin.** `VERIFY_BURST` was 3 —
+"exactly the verifier's floor, and no more traffic than that requires", which I
+wrote myself. But `MIN_OBS = 3` means three readings must all land, all be
+sampled, and all carry a non-null RTT inside one 300 s window, from a burst
+whose tick-rounded spacing already makes it span 240 s. Lose one probe to
+ordinary transient RF — measured at ~2 % on this mesh today — or slip a single
+tick, and the window holds 2 of 3 and the verdict fails closed. Choosing exactly
+the floor left no room for the ordinary. It is now **5**: margin for one lost
+probe plus jitter, at one extra ping per episode boundary.
+
+**The diagnostic was also lying slightly, and is fixed.** It reported time since
+the node's previous verification probe regardless of which burst it belonged to,
+so the minutes-long pause between an episode's open-burst and its confirm-burst
+read as a single stretched burst — indistinguishable from the contention it
+existed to test for. A gap longer than a burst's own span is now reported as
+`burst start`.
+
+**Also documented: battery/FLiRS nodes can never be verified.** `isPingCandidate`
+requires `isListening`, so a sleeping device is never probed by any lane — waking
+one every cadence would flatten it. Their episodes therefore close `unverifiable`
+by construction, which is neither a fault nor fixable, and which dilutes the
+"could not be scored" counter that was built to flag the fixable kind. Confirmed
+in production: nodes 60 and 61 have never appeared in a single auto-ping line in
+the entire retained buffer, while node 32 — listening — scored `improved`.
+
+767 tests. 225 mutation entries.
+
 ## 0.37.1 — 2026-08-23
 
 **A diagnostic, shipped deliberately ahead of a fix.**
