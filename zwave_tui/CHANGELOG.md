@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.38.1 — 2026-08-24
+
+**The measurement instrument was the treatment.** A 26-hour audit of v0.38.0
+found the system healthy — 15 scoreable closures, zero unverifiable on listening
+nodes, learned arms persisting across restarts — and one confirmed design
+defect, adversarially verified two-for-two:
+
+Every probe the engine fired — liveness sweeps and verification bursts alike —
+was recorded as a `ping` remediation action against any open episode on that
+node. All three auto-ping lanes shared the learning `ping` verb; the open-burst
+fires within a minute of every episode opening; first action wins. Consequence:
+**not one scoreable "(no action)" closure exists in the entire retained log.**
+The control arm was structurally starved, `baseRate` stayed null, and
+`expectedEfficacy` could never be computed — the "cannot learn" defect
+re-created one level up, in the very machinery built to fix it. The stamp even
+fired for unanswered probes, since the service call resolves regardless.
+
+`ActionRunner.probe` is the same NoOp ping with `learn=false` (the existing
+convention for `controlEntity`/`setConfigParam`). The sweep and verification
+lanes ride it; the dead-node remediation ladder deliberately keeps the learning
+verb, because there the ping genuinely is the treatment — and a mutant pins each
+lane in each direction.
+
+**Unprobeable nodes open no episodes.** The v0.38.0 split counter made the
+structural churn visible; one audit window later a single sleeping sensor had
+closed 16 unverifiable episodes, each unscoreable by construction. Episode
+opening is now gated on `isPingCandidate`, as `node-down` already was. The
+symptom still renders; only the pretence of an experiment is dropped. The
+counter and resolve-time flag remain for history and for the isListening
+mid-episode flip.
+
+Also from the audit, cleared: the second v0.38.0 boot was a clean supervisor
+stop/start; the old ws-churn was an HA Core restart; zero probe misses in ~614
+is benign (the judge was proven live by the same binary's earlier miss streaks,
+and the old 2% baseline came from a quiet-only population plus one sick node).
+
+785 tests. 237 mutation entries.
+
 ## 0.38.0 — 2026-08-23
 
 **The last declared-but-unreachable kind, and a counter that conflated two facts.**

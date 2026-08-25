@@ -180,3 +180,31 @@ test('a disabled runner removes nothing and forgets nothing', async () => {
   assert.deepEqual(sent, []);
   assert.deepEqual(removed, []);
 });
+
+/* ── v0.38.1: the probe verb never reaches the ledger ──────────────────────── */
+
+test('probe() pings the node but NEVER fires onOutcome — measurement is not treatment', async () => {
+  // The audit finding: all three auto-ping lanes shared the learning ping, so
+  // every sweep and every verification burst stamped `ping` onto any open
+  // episode. Not one scoreable "(no action)" closure exists in the entire
+  // retained log — the control arm was structurally starved and
+  // expectedEfficacy could never be computed.
+  const { runner, sent, outcomes } = mk(true);
+  const r = await runner.probe(6);
+  assert.equal(r.ok, true);
+  assert.equal(sent.length, 1, 'the NoOp ping is really sent');
+  assert.deepEqual(outcomes, [], 'and the ledger never hears about it');
+});
+
+test('ping() still learns — the remediation lane is the one place attribution belongs', async () => {
+  const { runner, outcomes } = mk(true);
+  await runner.ping(6);
+  assert.deepEqual(outcomes, [{ kind: 'ping', nodeId: 6, ok: true }]);
+});
+
+test('probe() obeys the master gate like every write', async () => {
+  const { runner, sent } = mk(false);
+  const r = await runner.probe(6);
+  assert.equal(r.ok, false);
+  assert.equal(sent.length, 0);
+});

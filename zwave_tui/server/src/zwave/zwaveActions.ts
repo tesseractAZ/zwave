@@ -94,6 +94,12 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
         if (!ent) throw new Error(`node ${n} has no ping button`);
         await o.client.send({ type: 'call_service', domain: 'button', service: 'press', service_data: { entity_id: ent } });
       }),
+    probe: (n) =>
+      run('ping', n, `probe node ${n}`, async () => {
+        const ent = o.pingEntityOf(n);
+        if (!ent) throw new Error(`node ${n} has no ping button`);
+        await o.client.send({ type: 'call_service', domain: 'button', service: 'press', service_data: { entity_id: ent } });
+      }, /* learn */ false),
     refreshValues: (n) => run('refreshValues', n, `refresh values node ${n}`, () => deviceCmd('zwave_js/refresh_node_values', n)),
     reInterview: (n) => run('reInterview', n, `re-interview node ${n}`, () => deviceCmd('zwave_js/refresh_node_info', n)),
     healNode: (n) => run('healNode', n, `rebuild routes node ${n}`, () => deviceCmd('zwave_js/rebuild_node_routes', n)),

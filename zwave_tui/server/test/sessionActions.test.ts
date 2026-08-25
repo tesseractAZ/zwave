@@ -28,7 +28,7 @@ function mkActions(enabled = true) {
   const ok = (tag: string) => async (n?: number) => { calls.push(n == null ? tag : `${tag}:${n}`); return { ok: true, message: 'ok' }; };
   const runner: ActionRunner = {
     enabled,
-    ping: ok('ping'), refreshValues: ok('refresh'), reInterview: ok('reInterview'),
+    ping: ok('ping'), probe: ok('probe'), refreshValues: ok('refresh'), reInterview: ok('reInterview'),
     healNode: ok('heal'), rebuildAll: ok('rebuildAll'), stopRebuild: ok('stopRebuild'), removeFailed: ok('remove'),
     controlEntity: async (n, eid, verb) => { calls.push(`control:${n}:${eid}:${verb}`); return { ok: true, message: 'ok' }; },
     setConfigParam: async (n, param, value) => { calls.push(`setParam:${n}:${param.property}:${value}`); return { ok: true, message: 'ok' }; },

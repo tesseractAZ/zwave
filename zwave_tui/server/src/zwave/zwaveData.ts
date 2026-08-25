@@ -1094,6 +1094,18 @@ class ZwaveDataImpl implements ZwaveData {
       // starvation. The symptom still surfaces on REMEDY; it simply does not
       // pretend to be an experiment.
       if (s.kind === 'node-down') continue;
+      // An UNPROBEABLE node opens no episode either (v0.38.1). Its evidence
+      // windows can never be filled — no lane may wake a sleeping battery or
+      // FLiRS device — so every episode it opened closed `unverifiable` by
+      // construction (node 61 alone: 16 such closures in one retained buffer).
+      // The SYMPTOM still renders on REMEDY; only the pretence of an
+      // experiment is dropped. Mesh-scoped symptoms (nodeId null) still open.
+      // The structural counter stays: it holds history, and still catches the
+      // edge where a node's isListening flips mid-episode.
+      if (s.nodeId != null) {
+        const node = this.snapshot().find((x) => x.nodeId === s.nodeId);
+        if (!(node && isPingCandidate(node))) continue;
+      }
       const since = sinceOf.get(`${s.nodeId ?? 'mesh'}:${s.kind}`) ?? now;
       oc.open(s.nodeId, s.kind, now, this.degradedWindow(s.nodeId, since, now));
       // Ask for verification probes while the symptom is LIVE, so the degraded

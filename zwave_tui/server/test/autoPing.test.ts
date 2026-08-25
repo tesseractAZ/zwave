@@ -998,3 +998,39 @@ test('the reported gap resets at a BURST boundary, not just per node (v0.37.2)',
     `an inter-burst pause must not masquerade as a stretched burst: ${probeLine()}`);
   h.stop();
 });
+
+/* ── v0.38.1: measurement lanes use the non-learning probe ─────────────────── */
+
+test('the SWEEP and VERIFY lanes use probe(); only the DEAD ladder uses the learning ping()', async () => {
+  // Which function a lane calls decides whether the ledger hears about it, and
+  // getting it backwards in either direction is a defect: measurement lanes on
+  // ping() starve the control arm (the audit finding); the dead ladder on
+  // probe() would un-instrument the one autonomous remediation this module's
+  // autonomy is justified by.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const pinged: number[] = [];
+  const probed: number[] = [];
+  const deadNode = dead(7);
+  const staleNode = node(50, { stats: { lastSeen: T - 300 * MIN } as never });
+  // Background nodes need FRESH lastSeen: a null lastSeen means "never heard",
+  // which sorts as maximally stale and would outrank the node under test.
+  const nodes = [node(1, { isController: true }), deadNode, staleNode,
+    ...Array.from({ length: 18 }, (_v, i) => node(100 + i, { stats: { lastSeen: T + 4 * MIN } as never }))];
+  let due = false;
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async (n) => { pinged.push(n); },
+    probe: async (n) => { probed.push(n); },
+    verifyRequests: () => (due ? [100] : []),
+    log: () => {},
+    config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN; h.tick();       // observe dead; sweep fires for stalest
+  clock += 11 * MIN; due = true; h.tick();          // dead ladder due + a verification probe
+  h.stop();
+  assert.ok(probed.includes(50), `the sweep must use probe(): ${JSON.stringify({ pinged, probed })}`);
+  assert.ok(probed.includes(100), 'the verification lane must use probe()');
+  assert.ok(pinged.includes(7), 'the dead ladder must use the LEARNING ping()');
+  assert.ok(!pinged.includes(50) && !pinged.includes(100), 'and no measurement lane may leak onto it');
+});
