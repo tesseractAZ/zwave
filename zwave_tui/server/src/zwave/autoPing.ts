@@ -478,6 +478,13 @@ export interface AutoPingRunnerOptions {
   controller: () => ControllerSnapshot | null;
   ready: () => boolean;
   ping: (nodeId: number) => Promise<unknown>;
+  /** Non-learning ping for the MEASUREMENT lanes — the liveness sweep and the
+   *  verification bursts (v0.38.1). Falls back to `ping` when absent so old
+   *  tests and callers behave as before, but production must wire it: with the
+   *  learning verb, every probe stamps `ping` onto any open episode and the
+   *  control arm can never accrue. Only the dead-node remediation ladder keeps
+   *  the learning verb, because there the ping genuinely IS the treatment. */
+  probe?: (nodeId: number) => Promise<unknown>;
   /** Writes into the event ring so an autonomous action is never invisible. */
   log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string) => void;
   /**
@@ -616,8 +623,12 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // stays silent, so the answer is judged from evidence a moment later
       // (judgeProbeAnswers). The catch here is left for what it can actually
       // catch: no ping button, or a WS transport fault.
+      //
+      // MEASUREMENT lane: the non-learning probe (v0.38.1). With the learning
+      // verb, every sweep stamped `ping` onto any open episode and the control
+      // arm could never accrue — the instrument was the recorded treatment.
       state.awaitingAnswer.set(nodeId, t);
-      void o.ping(nodeId).catch(() => {
+      void (o.probe ?? o.ping)(nodeId).catch(() => {
         state.awaitingAnswer.delete(nodeId);
         const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
         o.log('warn', nodeId, m); o.log2?.(m);
@@ -633,6 +644,10 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       o.log2?.(msg);
       // Fire and forget: the ping runner records its own outcome into the M5
       // ledger, and a failed probe is information, not an error to escalate.
+      // This lane DELIBERATELY keeps the learning verb (v0.38.1): a ping fired
+      // at a dead node past its dwell is a remediation attempt, and its
+      // attribution is the self-instrumentation this module's autonomy is
+      // justified by. The measurement lanes above use the non-learning probe.
       state.awaitingAnswer.set(nodeId, t);
       void o.ping(nodeId).catch(() => {
         state.awaitingAnswer.delete(nodeId);
@@ -676,8 +691,11 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)`;
       o.log('info', nodeId, msg);
       o.log2?.(msg);
+      // MEASUREMENT lane too (v0.38.1) — a verification probe exists to fill
+      // the evidence window, and recording it as the remediation would make
+      // the verdict about the measurement rather than the recovery.
       state.awaitingAnswer.set(nodeId, t);
-      void o.ping(nodeId).catch(() => {
+      void (o.probe ?? o.ping)(nodeId).catch(() => {
           state.awaitingAnswer.delete(nodeId);
           const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
           o.log('warn', nodeId, m); o.log2?.(m);

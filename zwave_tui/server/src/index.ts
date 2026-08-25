@@ -111,6 +111,9 @@ async function main(): Promise<void> {
       controller: () => provider.controller(),
       ready: () => provider.ready(),
       ping: (n) => actions.ping(n),
+      // v0.38.1: measurement lanes (sweep + verification) must not stamp the
+      // ledger — see ActionRunner.probe.
+      probe: (n) => actions.probe(n),
       // v0.36: the outcome ledger's verification probes ride the same runner,
       // so they inherit every gate auto-ping already applies rather than
       // opening a second, less-guarded path to the mesh.

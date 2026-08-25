@@ -538,6 +538,21 @@ export interface ActionRunner {
   /** Master gate — false = read-only, the session must not offer actions. */
   readonly enabled: boolean;
   ping(nodeId: number): Promise<ActionResult>;
+  /**
+   * The same NoOp ping, but NEVER attributed to the outcome ledger (v0.38.1).
+   *
+   * The audit finding this exists for: all three auto-ping lanes shared the
+   * learning `ping`, so every liveness sweep and every verification burst
+   * stamped `ping` as the remediation action on any open episode — the
+   * measurement instrument WAS the recorded treatment. Since v0.36 guarantees
+   * every listening-node episode receives open-burst probes while its symptom
+   * is live, not one scoreable "(no action)" closure exists in the entire
+   * retained log: the control arm was structurally starved and
+   * `expectedEfficacy` could never be computed. Measurement probes use this;
+   * only a ping fired AS a remediation (the dead-node ladder, or an operator
+   * keypress) uses the learning verb.
+   */
+  probe(nodeId: number): Promise<ActionResult>;
   refreshValues(nodeId: number): Promise<ActionResult>;
   reInterview(nodeId: number): Promise<ActionResult>;
   healNode(nodeId: number): Promise<ActionResult>;

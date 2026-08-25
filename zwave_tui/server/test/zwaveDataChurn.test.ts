@@ -536,19 +536,19 @@ test('CONTENTION does not stretch a burst past its window', async () => {
   }
 });
 
-test('the UNPROBEABLE flag actually reaches the ledger (v0.38)', async () => {
-  // The seam: the ledger half was tested and the caller half was not, so a
-  // mutant that hardcoded `unprobeable = false` survived a green suite. The
-  // ledger cannot compute this for itself — probeability is a property of the
-  // device that only the data layer knows — so if the flag never arrives, the
-  // two kinds of unscoreable stay conflated no matter how well the store
-  // separates them.
+test('an UNPROBEABLE node opens NO episode at all (v0.38.1)', async () => {
+  // Supersedes the v0.38 test that asserted the structural counter accrued for
+  // this case. The audit showed a sleeping node churning 16 unverifiable
+  // episodes in one buffer — every one unscoreable BY CONSTRUCTION, since no
+  // lane may probe the device to fill its windows. The fix moved upstream: the
+  // episode never opens, so there is nothing to count. The resolve-time flag
+  // and its counter remain (pinned at the outcomes-store level) for the one
+  // edge they still cover — a node whose isListening flips mid-episode.
   //
   // The fixture's node 7 carries no `is_listening`, which parses to null under
-  // the strict-boolean rule, so it is NOT a ping candidate — exactly the
-  // sleeping-device case.
+  // the strict-boolean rule, so it is NOT a ping candidate.
   const ha = fakeHa();
-  const dir = mkdtempSync(join(tmpdir(), 'zwtui-unprobe-'));
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-noep-'));
   const zd = await bootedZwaveData(ha, {
     refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
@@ -557,19 +557,56 @@ test('the UNPROBEABLE flag actually reaches the ledger (v0.38)', async () => {
   try {
     await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
     assert.notEqual(zd.snapshot().find((n: NodeSnapshot) => n.nodeId === 7)!.isListening, true,
-      'fixture precondition: node 7 must be non-listening for this test to mean anything');
+      'fixture precondition: node 7 must be non-listening');
 
     const priv = zd as unknown as { updateEpisodes: (s: unknown[], now: number) => void };
     const t0 = 1_800_000_000_000;
     const symptom = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
-    priv.updateEpisodes([symptom], t0);                 // open
-    priv.updateEpisodes([], t0 + 60_000);               // symptom absent -> pending
-    priv.updateEpisodes([], t0 + 12 * 60_000);          // past CONFIRM_MS -> resolve
+    priv.updateEpisodes([symptom], t0);
+    priv.updateEpisodes([], t0 + 60_000);
+    priv.updateEpisodes([], t0 + 12 * 60_000);
+
+    assert.equal(zd.unverifiableUnprobeableCount('rtt-degraded'), 0,
+      'no episode opened, so nothing accrues — the churn is gone at the source');
+    assert.equal(zd.unverifiableCount('rtt-degraded'), 0);
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a node whose isListening FLIPS mid-episode still resolves as unprobeable (v0.38.1)', async () => {
+  // The one case the resolve-time flag still covers now that unprobeable nodes
+  // never open episodes: the episode opened while the node was listening, and
+  // by resolve time it is not (a re-interview can change capability flags, and
+  // a re-included device can come back different). Without this test the
+  // caller-side mutant — hardcoding `unprobeable = false` — survives a green
+  // suite, and the structural counter silently loses its last live feeder.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-flip-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+    const real = zd.snapshot();
+    const asListening = real.map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+    const asSleeping = real.map((n) => (n.nodeId === 7 ? { ...n, isListening: false } : n));
+    const shadow = zd as unknown as { snapshot: () => NodeSnapshot[]; updateEpisodes: (s: unknown[], now: number) => void };
+
+    const t0 = 1_800_000_000_000;
+    const symptom = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+    shadow.snapshot = () => asListening;      // listening at OPEN — the gate admits it
+    shadow.updateEpisodes([symptom], t0);
+    shadow.snapshot = () => asSleeping;       // capability flipped mid-episode
+    shadow.updateEpisodes([], t0 + 60_000);
+    shadow.updateEpisodes([], t0 + 12 * 60_000);  // past CONFIRM_MS -> resolve
 
     assert.equal(zd.unverifiableUnprobeableCount('rtt-degraded'), 1,
-      'a sleeping node\'s unscoreable episode must be counted as STRUCTURAL');
-    assert.equal(zd.unverifiableCount('rtt-degraded'), 0,
-      'and must not inflate the starvation counter it would otherwise drain');
+      'the flip is judged at RESOLVE, so the closure lands in the structural counter');
+    assert.equal(zd.unverifiableCount('rtt-degraded'), 0);
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });

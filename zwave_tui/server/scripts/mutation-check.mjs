@@ -1071,6 +1071,36 @@ const MUTANTS = [
     find: '      const unprobeable = r.nodeId != null && !(n != null && isPingCandidate(n));',
     repl: '      const unprobeable = false;',
     what: 'the caller tells the ledger whether the node could be probed at all' },
+  /* ── v0.38.1: measurement is not treatment ──────────────────────────── */
+  { id: 'probe-verb-never-learns', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // Restores the audit finding at its root: the measurement probe fires
+    // onOutcome and stamps `ping` onto every open episode — not one scoreable
+    // "(no action)" closure existed in the entire retained log, the control arm
+    // starved, and expectedEfficacy was uncomputable.
+    find: "      }, /* learn */ false),",
+    repl: "      }, /* learn */ true),",
+    what: 'a measurement probe is never attributed to the outcome ledger' },
+  { id: 'sweep-lane-uses-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: "      state.awaitingAnswer.set(nodeId, t);\n      void (o.probe ?? o.ping)(nodeId).catch(() => {\n        state.awaitingAnswer.delete(nodeId);\n        const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;\n        o.log('warn', nodeId, m); o.log2?.(m);",
+    repl: "      state.awaitingAnswer.set(nodeId, t);\n      void o.ping(nodeId).catch(() => {\n        state.awaitingAnswer.delete(nodeId);\n        const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;\n        o.log('warn', nodeId, m); o.log2?.(m);",
+    what: 'the liveness sweep rides the non-learning probe' },
+  { id: 'verify-lane-uses-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: "      state.awaitingAnswer.set(nodeId, t);\n      void (o.probe ?? o.ping)(nodeId).catch(() => {\n          state.awaitingAnswer.delete(nodeId);",
+    repl: "      state.awaitingAnswer.set(nodeId, t);\n      void o.ping(nodeId).catch(() => {\n          state.awaitingAnswer.delete(nodeId);",
+    what: 'the verification burst rides the non-learning probe' },
+  { id: 'dead-ladder-keeps-learning', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Un-instruments the one autonomous remediation whose attribution justifies
+    // this module's autonomy — the opposite failure from the audit finding.
+    find: "      // This lane DELIBERATELY keeps the learning verb (v0.38.1): a ping fired",
+    repl: "      // This lane DELIBERATELY keeps the learning verb (v0.38.1): a ping fired\n      if (o.probe) { void o.probe(nodeId); continue; }",
+    what: 'the dead-node ladder keeps the LEARNING ping' },
+  { id: 'unprobeable-opens-no-episode', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Re-opens the churn: a sleeping node's episodes can never verify (node 61
+    // alone closed 16 unverifiable in one buffer), and counting a permanent
+    // condition as data drains every counter it touches.
+    find: '      if (s.nodeId != null) {\n        const node = this.snapshot().find((x) => x.nodeId === s.nodeId);\n        if (!(node && isPingCandidate(node))) continue;\n      }',
+    repl: '      void isPingCandidate;',
+    what: 'an unprobeable node opens no episode — its windows can never be filled' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
