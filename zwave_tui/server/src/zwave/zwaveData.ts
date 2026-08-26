@@ -371,8 +371,13 @@ export interface ZwaveData {
   unverifiableCount(kind: SymptomKind): number;
   /** Of those, on nodes that cannot be probed at all (v0.38). */
   unverifiableUnprobeableCount(kind: SymptomKind): number;
-  /** Drain the node ids owed a verification probe this tick (v0.36). */
-  drainVerifyRequests(now?: number): number[];
+  /** Drain the nodes owed a verification probe this tick (v0.36). Each entry
+   *  carries `first` — whether this is the first probe of that node's burst —
+   *  straight from the queue's own bookkeeping (v0.38.2). The runner's label
+   *  used a TIME heuristic before, and it lied: a symptom clearing mid-burst
+   *  makes the open→confirm pause ~180s, under the 240s threshold, so a burst
+   *  BOUNDARY printed as "+180s" and read as slow spacing in an audit. */
+  drainVerifyRequests(now?: number): { id: number; first: boolean }[];
   /** How many nodes have an outstanding verification burst (v0.37.1). */
   verifyOwedCount(): number;
   /** Record one liveness-probe outcome for the persisted reply rate (v0.37). */
@@ -1281,7 +1286,7 @@ class ZwaveDataImpl implements ZwaveData {
    * packets in one second (which would be one observation's worth of
    * information and three times the airtime).
    */
-  drainVerifyRequests(now = Date.now()): number[] {
+  drainVerifyRequests(now = Date.now()): { id: number; first: boolean }[] {
     const due: number[] = [];
     for (const [id, st] of this.verifyOwed) {
       if (st.left <= 0) { this.verifyOwed.delete(id); continue; }
@@ -1293,13 +1298,17 @@ class ZwaveDataImpl implements ZwaveData {
     // fills, and serialising nodes one-per-tick stretches each burst by the
     // number of nodes competing — which is how a 5-probe burst came to span
     // 480 s against a 300 s window on the live mesh.
-    const out: number[] = [];
+    const out: { id: number; first: boolean }[] = [];
     for (const id of due.slice(0, VERIFY_MAX_PER_TICK)) {
       const st = this.verifyOwed.get(id)!;
+      // Ground truth for the burst boundary: a full budget means nothing of
+      // this burst has been handed out yet. (A mid-burst top-up also reads as
+      // first — correct, since a top-up IS a new episode boundary asking.)
+      const first = st.left === VERIFY_BURST;
       const left = st.left - 1;
       if (left <= 0) this.verifyOwed.delete(id);
       else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });
-      out.push(id);
+      out.push({ id, first });
     }
     return out;
   }

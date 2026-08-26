@@ -890,3 +890,18 @@ test('both counters survive a save/load, and a pre-v0.38 file starts at zero', (
   assert.equal(old.unverifiableUnprobeable('rtt-degraded'), 0,
     'and none of it is retroactively reclassified — we do not know which were which');
 });
+
+test('a closure line shows its arithmetic — the per-window evidence counts (v0.38.2)', () => {
+  // Three rtt-degraded episodes on probed, ANSWERING nodes closed unverifiable
+  // while rate-fallback scored 6-for-6 under identical probes, and the log
+  // could not say which floor failed or by how much. A verdict that cannot
+  // show its arithmetic invites the next guessed fix; this cycle has had four.
+  const logged: string[] = [];
+  const o = createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  o.open(7, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 90, rttN: 1, freshN: 5 }));
+  o.resolve(7, 'rtt-degraded', 2000, W(50, 0, 50, { rttMedian: null, rttN: 0, freshN: 5 }));
+  const line = logged.find((l) => /episode 7:rtt-degraded/.test(l));
+  assert.ok(line, 'the closure is logged');
+  assert.match(line!, /\[before fresh=5 rtt=1 rssi=0 rate=n \| after fresh=5 rtt=0 rssi=0 rate=n\]/,
+    `the failing floor must be readable off the line: ${line}`);
+});

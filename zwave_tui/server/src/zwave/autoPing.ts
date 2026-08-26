@@ -132,16 +132,6 @@ function ordinal(n: number): string {
   }
 }
 
-/**
- * Beyond this, a verification probe belongs to a NEW burst rather than a slow
- * one (v0.37.2). A burst's own probes arrive ~120 s apart (70 s requested,
- * rounded up to the next tick); the pause between an episode's open-burst and
- * its confirm-burst is minutes. Without the distinction the reported gap
- * conflated the two and made a normal inter-burst pause look like the
- * contention it existed to measure.
- */
-const BURST_GAP_MAX_MS = 4 * 60_000;
-
 /** How long to wait before judging whether a probe was answered (v0.36).
  *  A ping is a round trip plus a stats push; 90 s is generous for a routed
  *  mesh hop and still well inside one tick of slack. */
@@ -174,7 +164,7 @@ export interface AutoPingInput {
    * Worse, that is precisely when episodes cluster: a restart re-detects many
    * symptoms at once. Resolved below, after every gate has passed.
    */
-  verifyDue?: () => number[];
+  verifyDue?: () => { id: number; first: boolean }[];
   /** How many nodes currently have an outstanding verification burst (v0.37.1).
    *  Reported in the probe line so the contention dividing the one-per-tick
    *  queue is visible rather than inferred. */
@@ -195,6 +185,9 @@ export interface AutoPingDecision {
   stale: number[];
   /** Ledger-requested verification probes cleared for this tick (v0.36). */
   verify: number[];
+  /** Of those, the nodes whose probe is the FIRST of its burst (v0.38.2) —
+   *  from the queue's own bookkeeping, not a time heuristic. */
+  verifyFirst: number[];
   /** How many DISTINCT nodes were owed a verification probe when this tick was
    *  decided (v0.37.1) — the contention the one-per-tick queue is dividing. */
   verifyOwed: number;
@@ -274,7 +267,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const { now, nodes, controller, config, booting } = input;
   const listeningNodes = nodes.filter(isPingCandidate);
   const dead = listeningNodes.filter((n) => n.status === NodeStatus.Dead);
-  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], verifyOwed: 0, gaveUp: [] as number[],
+  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyOwed: 0, gaveUp: [] as number[],
     deadListening: dead.length,
     listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
@@ -373,10 +366,12 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const candidates = new Set(listeningNodes.filter((n) => n.status !== NodeStatus.Dead).map((n) => n.nodeId));
   // Resolved HERE, past every suppressor, so a gated tick never spends the
   // ledger's budget on a probe it is not going to send.
-  const verify = (input.verifyDue?.() ?? []).filter((id) => candidates.has(id));
+  const verifyEntries = (input.verifyDue?.() ?? []).filter((e) => candidates.has(e.id));
+  const verify = verifyEntries.map((e) => e.id);
+  const verifyFirst = verifyEntries.filter((e) => e.first).map((e) => e.id);
   base.verifyOwed = input.verifyOwedCount?.() ?? verify.length;
 
-  return { ...base, ping, stale, verify, gaveUp, suppressed: 'none' };
+  return { ...base, ping, stale, verify, verifyFirst, gaveUp, suppressed: 'none' };
 }
 
 /**
@@ -504,7 +499,7 @@ export interface AutoPingRunnerOptions {
   now?: () => number;
   /** Drain the outcome ledger's pending verification probes (v0.36). Optional:
    *  without it the runner behaves exactly as it did before. */
-  verifyRequests?: (now: number) => number[];
+  verifyRequests?: (now: number) => { id: number; first: boolean }[];
   /** Nodes with an outstanding verification burst, for the probe line (v0.37.1). */
   verifyOwedCount?: () => number;
   /** One liveness-probe outcome, for the persisted per-node reply rate (v0.37).
@@ -677,17 +672,20 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // because the add-on log has no timestamps and the decision trace only
       // prints on change. Without this number the spacing is unmeasurable from
       // outside and any fix would be aimed at a story rather than a cause.
-      // Reset the gap at a BURST boundary. v0.37.1 measured "time since this
-      // node's previous verification probe" regardless of which burst it
-      // belonged to, so the pause between an episode's open-burst and its
-      // confirm-burst — minutes by design — read as a single stretched burst
-      // and looked like the contention it was there to test for. Anything
-      // longer than a burst's own span is a new burst, not a slow one.
+      // Burst boundary from GROUND TRUTH, not a time heuristic (v0.38.2).
+      // Two generations of heuristic each lied in an audit: v0.37.1's
+      // per-node gap conflated inter-burst pauses with stretched bursts, and
+      // v0.37.2's 4-minute threshold mislabeled the boundary as "+180s"
+      // whenever a symptom cleared mid-burst and the open→confirm pause came
+      // in UNDER it — reading as slow spacing and sending the reviewer (me)
+      // down the wrong path a second time. The queue knows which probe starts
+      // a burst; the label now comes from its bookkeeping and cannot drift.
       const prevVerify = state.lastVerifyAt.get(nodeId);
       const sinceMs = prevVerify == null ? null : t - prevVerify;
-      const newBurst = sinceMs == null || sinceMs > BURST_GAP_MAX_MS;
       state.lastVerifyAt.set(nodeId, t);
-      const gap = newBurst ? 'burst start' : `+${Math.round((sinceMs as number) / 1000)}s`;
+      const gap = decision.verifyFirst.includes(nodeId) || sinceMs == null
+        ? 'burst start'
+        : `+${Math.round(sinceMs / 1000)}s`;
       const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)`;
       o.log('info', nodeId, msg);
       o.log2?.(msg);

@@ -868,8 +868,8 @@ const MUTANTS = [
     // the suppression ladder consumes a probe from the node's burst on every
     // gated tick without sending one — a 5-minute boot window silently exhausts
     // a whole burst, and that is exactly when episodes cluster.
-    find: '  const verify = (input.verifyDue?.() ?? []).filter((id) => candidates.has(id));',
-    repl: '  const verify = (input.verifyDue?.() ?? []).filter(() => true).filter((id) => candidates.has(id));',
+    find: '  const verifyEntries = (input.verifyDue?.() ?? []).filter((e) => candidates.has(e.id));',
+    repl: '  const verifyEntries = (input.verifyDue?.() ?? []).filter(() => true).filter((e) => candidates.has(e.id));',
     what: 'the ledger queue is drained only on a tick that will actually probe',
     equivalent: true,
     why: 'the DRAIN-ORDER invariant cannot be expressed as a single-line substitution here — moving the resolve above the gates requires editing two places at once. It is pinned directly by the runner test "a SUPPRESSED tick does not spend the ledger budget it will not use", which was verified to FAIL against a hand-applied eager-resolve regression.' },
@@ -1004,7 +1004,7 @@ const MUTANTS = [
     // add-on log cannot show whether a burst landed inside its window — it has
     // no timestamps, and the decision trace only prints on change — so the next
     // unverifiable episode is again diagnosed by guesswork.
-    find: "      const gap = newBurst ? 'burst start' : `+${Math.round((sinceMs as number) / 1000)}s`;",
+    find: "      const gap = decision.verifyFirst.includes(nodeId) || sinceMs == null\n        ? 'burst start'\n        : `+${Math.round(sinceMs / 1000)}s`;",
     repl: "      const gap = 'burst start';",
     what: 'a verification probe reports the real gap since the node last got one' },
   { id: 'burst-has-margin-over-floor', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
@@ -1015,14 +1015,18 @@ const MUTANTS = [
     find: 'const VERIFY_BURST = 5;',
     repl: 'const VERIFY_BURST = 3;',
     what: 'a verification burst carries margin over the evidence floor, not exactly it' },
-  { id: 'gap-resets-per-burst', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
-    // Reports time since the node's previous probe whatever burst it belonged
-    // to, so a minutes-long inter-burst pause reads as one stretched burst —
-    // which is precisely the contention the number exists to test for. A
-    // diagnostic that cannot tell those apart argues for the wrong fix.
-    find: '      const newBurst = sinceMs == null || sinceMs > BURST_GAP_MAX_MS;',
-    repl: '      const newBurst = sinceMs == null;',
-    what: 'the reported gap resets at a burst boundary, so it cannot fake contention' },
+  { id: 'burst-label-follows-queue', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Reverts to a pure clock: the queue's first-of-burst flag is ignored, so a
+    // short inter-burst pause prints as spacing again — the exact mislabel that
+    // sent an audit down the wrong path twice.
+    find: '      const gap = decision.verifyFirst.includes(nodeId) || sinceMs == null',
+    repl: '      const gap = sinceMs == null',
+    what: 'the burst-start label comes from the queue, never from a clock' },
+  { id: 'burst-first-flag-is-truthful', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Flags every hand-out as a burst start, which hides real spacing entirely.
+    find: '      const first = st.left === VERIFY_BURST;',
+    repl: '      const first = true;',
+    what: 'first is true exactly for the first probe of a burst' },
   { id: 'burst-spans-less-than-window', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     // Restores the 70s request spacing, which rounds UP to the next 60s tick and
     // makes the real gap 120s — so a 5-probe burst spans 480s against a 300s
@@ -1101,6 +1105,15 @@ const MUTANTS = [
     find: '      if (s.nodeId != null) {\n        const node = this.snapshot().find((x) => x.nodeId === s.nodeId);\n        if (!(node && isPingCandidate(node))) continue;\n      }',
     repl: '      void isPingCandidate;',
     what: 'an unprobeable node opens no episode — its windows can never be filled' },
+  { id: 'closure-shows-its-arithmetic', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Drops the per-window evidence counts from the closure line. Three
+    // rtt-degraded episodes on probed, answering nodes closed unverifiable
+    // while rate-fallback scored 6-for-6 under identical probes, and the log
+    // could not say WHICH floor failed — a verdict that cannot show its
+    // arithmetic invites the next guessed fix.
+    find: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]`);",
+    repl: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'}`);",
+    what: 'an episode closure logs the per-window evidence counts behind its verdict' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
@@ -1303,8 +1316,8 @@ const MUTANTS = [
     // Routes verification probes around the suppression ladder — they would
     // then fire during a storm, a rebuild, the boot window, or with write
     // actions off, which is a second and less-guarded path to the mesh.
-    find: "  const verify = (input.verifyDue?.() ?? []).filter((id) => candidates.has(id));",
-    repl: "  const verify = input.verifyDue?.() ?? [];",
+    find: "  const verifyEntries = (input.verifyDue?.() ?? []).filter((e) => candidates.has(e.id));",
+    repl: "  const verifyEntries = input.verifyDue?.() ?? [];",
     what: 'a verification probe passes every gate auto-ping itself passes' },
   { id: 'verify-skips-dead-nodes', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Lets the verification lane race the remediation lane on a Dead node,

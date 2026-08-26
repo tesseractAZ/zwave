@@ -57,7 +57,7 @@ function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
     controller: over.controller ?? null,
     config: over.config ?? cfg(),
     booting: over.booting ?? false,
-    verifyDue: over.verifyDue ? () => over.verifyDue! : undefined,
+    verifyDue: over.verifyDue ? () => over.verifyDue!.map((id) => ({ id, first: true })) : undefined,
   });
 }
 
@@ -699,7 +699,7 @@ test('a verification probe is visible in BOTH log destinations, not just the rin
     ping: async (n) => { pinged.push(n); },
     log: (_s, _n, text) => { ring.push(text); },
     log2,
-    verifyRequests: () => [100],
+    verifyRequests: () => [{ id: 100, first: false }],
     config: cfg(), tickMs: 1_000_000, now: () => clock,
   });
   clock = T + BOOT_WINDOW_MS + MIN;
@@ -723,7 +723,7 @@ test('an UNANSWERED probe is warned on both destinations; the answered case stay
   const h = startAutoPing({
     nodes: () => nodes, controller: () => null, ready: () => true,
     ping: async () => {}, log: () => {}, log2,
-    verifyRequests: () => (clock === T + BOOT_WINDOW_MS + MIN ? [100] : []),
+    verifyRequests: () => (clock === T + BOOT_WINDOW_MS + MIN ? [{ id: 100, first: false }] : []),
     config: cfg(), tickMs: 1_000_000, now: () => clock,
   });
   clock = T + BOOT_WINDOW_MS + MIN;
@@ -761,7 +761,7 @@ test('a SUPPRESSED tick does not spend the ledger budget it will not use', () =>
       controller: over.controller ?? null,
       config: over.config ?? cfg(),
       booting: over.booting ?? false,
-      verifyDue: () => { drained++; return [100]; },
+      verifyDue: () => { drained++; return [{ id: 100, first: true }]; },
     });
     assert.notEqual(d.suppressed, 'none', `${label} should suppress`);
     assert.deepEqual(d.verify, [], `${label}: nothing may be probed`);
@@ -776,7 +776,7 @@ test('an UNsuppressed tick drains exactly once', () => {
   trackEpisodes(s, nodes, T);
   const d = decideAutoPings({
     now: T, state: s, nodes, controller: null, config: cfg(), booting: false,
-    verifyDue: () => { drained++; return [100]; },
+    verifyDue: () => { drained++; return [{ id: 100, first: true }]; },
   });
   assert.equal(d.suppressed, 'none');
   assert.deepEqual(d.verify, [100]);
@@ -873,7 +873,7 @@ test('a FIRST miss is info; a streak is a warning — neither is suppressed', as
     ping: async () => {},
     log: (sev, _n, text) => { ring.push({ sev, text }); },
     log2: Object.assign(() => {}, { debug: () => {} }),
-    verifyRequests: () => (due ? [100] : []),
+    verifyRequests: () => (due ? [{ id: 100, first: false }] : []),
     config: cfg(), tickMs: 1_000_000, now: () => clock,
   });
   clock = T + BOOT_WINDOW_MS + MIN; h.tick();   // probe 1
@@ -949,7 +949,7 @@ test('the verification probe line carries its own spacing and the contention (v0
   const h = startAutoPing({
     nodes: () => nodes, controller: () => null, ready: () => true,
     ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
-    verifyRequests: () => [100],
+    verifyRequests: () => [{ id: 100, first: false }],
     verifyOwedCount: () => owed,
     config: cfg(), tickMs: 1_000_000, now: () => clock,
   });
@@ -967,37 +967,49 @@ test('the verification probe line carries its own spacing and the contention (v0
   h.stop();
 });
 
-test('the reported gap resets at a BURST boundary, not just per node (v0.37.2)', async () => {
-  // v0.37.1 measured time since the node's previous verification probe whatever
-  // burst it belonged to, so the minutes-long pause between an episode's
-  // open-burst and its confirm-burst read as one stretched burst — and looked
-  // exactly like the contention the number existed to test for. That is how a
-  // diagnostic lies.
+test('the burst-start label comes from the QUEUE, not from a clock (v0.38.2)', async () => {
+  // Two generations of time heuristic each lied in an audit: the per-node gap
+  // conflated inter-burst pauses with stretched bursts (v0.37.1), then the
+  // 4-minute threshold mislabeled the boundary as "+180s" whenever a symptom
+  // cleared mid-burst and the open->confirm pause came in UNDER it (v0.37.2) —
+  // reading as slow spacing and sending the reviewer down the wrong path a
+  // second time. The queue KNOWS which probe starts a burst; the label now
+  // rides that flag and no pause of any length can forge or hide a boundary.
   const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
   let clock = T;
   const lines: string[] = [];
   const nodes = mesh(20);
+  let entry: { id: number; first: boolean } = { id: 100, first: true };
   const h = startAutoPing({
     nodes: () => nodes, controller: () => null, ready: () => true,
     ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
-    verifyRequests: () => [100], verifyOwedCount: () => 1,
+    verifyRequests: () => [entry], verifyOwedCount: () => 1,
     config: cfg(), tickMs: 1_000_000, now: () => clock,
   });
   const probeLine = (): string => lines.filter((l) => /verification probe/.test(l)).slice(-1)[0];
 
   clock = T + BOOT_WINDOW_MS + MIN; h.tick();
-  assert.match(probeLine(), /burst start/, 'the first probe ever');
+  assert.match(probeLine(), /burst start/, 'the queue says first — the label agrees');
 
+  entry = { id: 100, first: false };
   clock += 120_000; h.tick();
-  assert.match(probeLine(), /\+120s/, 'a probe within the burst reports its real spacing');
+  assert.match(probeLine(), /\+120s/, 'mid-burst reports the measured spacing');
 
-  // A pause longer than a burst's own span: this is the confirm-burst, not a
-  // slow open-burst.
-  clock += 8 * MIN; h.tick();
+  // A pause SHORTER than any heuristic threshold, but the queue says a new
+  // burst began — the label must follow the queue, not the clock.
+  entry = { id: 100, first: true };
+  clock += 60_000; h.tick();
   assert.match(probeLine(), /burst start/,
-    `an inter-burst pause must not masquerade as a stretched burst: ${probeLine()}`);
+    `a 60s-later first-of-burst is still a burst start: ${probeLine()}`);
+
+  // And a LONG pause mid-burst must NOT forge a boundary.
+  entry = { id: 100, first: false };
+  clock += 10 * MIN; h.tick();
+  assert.match(probeLine(), /\+600s/,
+    `a slow mid-burst probe reports its real gap, never a fake boundary: ${probeLine()}`);
   h.stop();
 });
+
 
 /* ── v0.38.1: measurement lanes use the non-learning probe ─────────────────── */
 
@@ -1022,7 +1034,7 @@ test('the SWEEP and VERIFY lanes use probe(); only the DEAD ladder uses the lear
     nodes: () => nodes, controller: () => null, ready: () => true,
     ping: async (n) => { pinged.push(n); },
     probe: async (n) => { probed.push(n); },
-    verifyRequests: () => (due ? [100] : []),
+    verifyRequests: () => (due ? [{ id: 100, first: false }] : []),
     log: () => {},
     config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
   });

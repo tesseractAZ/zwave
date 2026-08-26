@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.38.2 — 2026-08-25
+
+**Instrumentation for the one residual defect, and a label that lied twice.**
+
+A 25-hour review of v0.38.1 confirmed both its fixes working — five control-arm
+closures against zero in the project's prior history, `baseRate` computable for
+the first time, zero sleeping-node episodes — and isolated one residual defect
+with a perfectly clean signature: every `rate-fallback` closure scored (6/6),
+every `rtt-degraded` closure on the same nodes went `unverifiable` (3/3), under
+identical ten-probe treatment. Same node, same probes, same windows; only the
+metric differs. `rate` needs one fresh reading per window; `rtt` needs three
+non-null RTT readings, and something starves them even when every probe answers.
+
+Three candidate mechanisms — the driver omitting `rtt` from statistics events,
+the sampling cadence collapsing probes, the before-window refinement stopping
+early — and the log could not tell them apart. So, per this cycle's hard-won
+rule, the fix is measurement first:
+
+**Every closure now shows its arithmetic.**
+
+    episode 3:rtt-degraded unverifiable (no action)
+      [before fresh=5 rtt=1 rssi=5 rate=y | after fresh=5 rtt=0 rssi=5 rate=y]
+
+The next rtt-degraded closure names the failing floor and its shortfall.
+
+**The burst-start label is now queue ground truth.** The review also caught the
+diagnostic itself lying: the "+180s slow gaps" reported by the previous audit
+were burst BOUNDARIES, mislabeled because a symptom clearing mid-burst makes the
+open→confirm pause shorter than the 4-minute heuristic threshold. Second
+generation of time heuristic to lie in an audit. `drainVerifyRequests` now
+returns `{ id, first }` from the queue's own budget bookkeeping, and the label
+rides the flag — no pause of any length can forge or hide a boundary.
+
+The type change rippled through nine call sites; the compiler found every one.
+The full harness caught two MISSING anchors from the change (sixth and seventh
+of the cycle) and one direction of the flag initially untested — all closed.
+
+786 tests. 239 mutation entries: 235 killed, 0 survived, 0 missing, 4 equivalent.
+
 ## 0.38.1 — 2026-08-24
 
 **The measurement instrument was the treatment.** A 26-hour audit of v0.38.0
