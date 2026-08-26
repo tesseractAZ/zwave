@@ -348,10 +348,10 @@ test('drainVerifyRequests hands out ONE node per tick, spaced, and stops after t
     const q = zd as unknown as { requestVerification: (n: number) => void };
     q.requestVerification(7);
     const t0 = 1_800_000_000_000;
-    assert.deepEqual(zd.drainVerifyRequests(t0), [7], 'first probe is due immediately');
+    assert.deepEqual(zd.drainVerifyRequests(t0).map((e) => e.id), [7], 'first probe is due immediately');
     assert.deepEqual(zd.drainVerifyRequests(t0 + 1_000), [], 'the next is spaced, not back-to-back');
     for (let i = 1; i <= 4; i++) {
-      assert.deepEqual(zd.drainVerifyRequests(t0 + i * 80_000), [7], `probe ${i + 1} of the burst`);
+      assert.deepEqual(zd.drainVerifyRequests(t0 + i * 80_000).map((e) => e.id), [7], `probe ${i + 1} of the burst`);
     }
     assert.deepEqual(zd.drainVerifyRequests(t0 + 5 * 80_000), [],
       'burst exhausted at five — it does not probe forever');
@@ -449,7 +449,7 @@ test('a burst SPANS LESS than the window it must fill — the check that was mis
     const fired: number[] = [];
     for (let i = 0; i < 40; i++) {
       const at = t0 + i * TICK;
-      if (zd.drainVerifyRequests(at).includes(7)) fired.push(at);
+      if (zd.drainVerifyRequests(at).some((e) => e.id === 7)) fired.push(at);
     }
     assert.ok(fired.length >= 3, `a burst must clear the evidence floor, got ${fired.length}`);
     const span = fired[fired.length - 1] - fired[0];
@@ -485,7 +485,7 @@ test('every contending node STARTS its burst promptly — a delayed burst misses
     const firstAt = new Map<number, number>();
     for (let i = 0; i < 40; i++) {
       const at = t0 + i * TICK;
-      for (const id of zd.drainVerifyRequests(at)) if (!firstAt.has(id)) firstAt.set(id, at);
+      for (const { id } of zd.drainVerifyRequests(at)) if (!firstAt.has(id)) firstAt.set(id, at);
     }
     assert.equal(firstAt.size, 4, 'all four nodes must get a burst');
     for (const [id, at] of firstAt) {
@@ -520,7 +520,7 @@ test('CONTENTION does not stretch a burst past its window', async () => {
     const seen = new Map<number, number[]>();
     for (let i = 0; i < 40; i++) {
       const at = t0 + i * TICK;
-      for (const id of zd.drainVerifyRequests(at)) {
+      for (const { id } of zd.drainVerifyRequests(at)) {
         seen.set(id, [...(seen.get(id) ?? []), at]);
       }
     }
@@ -607,6 +607,40 @@ test('a node whose isListening FLIPS mid-episode still resolves as unprobeable (
     assert.equal(zd.unverifiableUnprobeableCount('rtt-degraded'), 1,
       'the flip is judged at RESOLVE, so the closure lands in the structural counter');
     assert.equal(zd.unverifiableCount('rtt-degraded'), 0);
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the first-of-burst flag is true EXACTLY once per burst (v0.38.2)', async () => {
+  // The label rides this flag; a flag that is always true hides real spacing,
+  // and one that is always false hides every boundary — both directions killed.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-first-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const q = zd as unknown as { requestVerification: (n: number) => void };
+    q.requestVerification(7);
+    const t0 = 1_800_000_000_000;
+    const flags: boolean[] = [];
+    for (let i = 0; i < 12; i++) {
+      for (const e of zd.drainVerifyRequests(t0 + i * 80_000)) if (e.id === 7) flags.push(e.first);
+    }
+    assert.equal(flags.length, 5, 'the whole burst drained');
+    assert.deepEqual(flags, [true, false, false, false, false],
+      'first on probe 1, and ONLY probe 1');
+
+    q.requestVerification(7); // a new boundary → a new burst
+    const flags2: boolean[] = [];
+    for (let i = 12; i < 24; i++) {
+      for (const e of zd.drainVerifyRequests(t0 + i * 80_000)) if (e.id === 7) flags2.push(e.first);
+    }
+    assert.equal(flags2[0], true, 'the next burst announces itself too');
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });

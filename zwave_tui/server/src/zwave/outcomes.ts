@@ -604,7 +604,19 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         noteNode(armNodes, ak, ep.nodeId);
         dirty = true;
       }
-      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'}`);
+      // The per-window evidence counts ride the closure line (v0.38.2). Three
+      // rtt-degraded episodes on probed, answering nodes closed `unverifiable`
+      // in one audit window while rate-fallback scored 6-for-6 under identical
+      // probes — and the log could not say WHICH floor failed or by how much,
+      // so the candidate mechanisms (stats events omitting rtt vs the sampling
+      // cadence collapsing probes vs the before-window refinement stopping
+      // early) were indistinguishable. A verdict that cannot show its
+      // arithmetic invites another guessed fix; this cycle has had four.
+      const win = (w: WindowMetrics | null): string =>
+        w == null
+          ? 'none'
+          : `fresh=${w.freshN} rtt=${w.rttN} rssi=${w.rssiN} rate=${w.rateKbpsMin != null ? 'y' : 'n'}`;
+      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]`);
       return ep;
     },
 
