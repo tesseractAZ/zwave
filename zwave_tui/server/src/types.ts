@@ -348,6 +348,9 @@ export interface DataProvider {
    *  sleeping battery/FLiRS device, whose windows can never be filled. A
    *  different fact from thin evidence, and previously indistinguishable. */
   unverifiableUnprobeableCount?(kind: SymptomKind): number;
+  /** Of the unverifiable, transient blinks — the degraded state ended before
+   *  its evidence floor could fill (v0.39). Unscoreable by construction. */
+  unverifiableTransientCount?(kind: SymptomKind): number;
   /**
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.

@@ -683,13 +683,17 @@ test('a refined before-window turns an UNSCOREABLE episode into a scored one', (
   const starved = store();
   starved.open(7, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 200, rttN: 1, freshN: 1 }));
   starved.resolve(7, 'rtt-degraded', 2000, WT(40));
-  assert.equal(starved.unverifiable('rtt-degraded'), 1, 'one reading cannot be judged');
+  // One reading still cannot be judged — but with the after-window fed, v0.39
+  // classifies this exact shape as a transient blink rather than a fixable gap.
+  assert.equal(starved.unverifiableTransient('rtt-degraded'), 1, 'one reading cannot be judged');
+  assert.equal(starved.unverifiable('rtt-degraded'), 0, 'a filled after-window means the gap was never fixable');
 
   const probed = store();
   probed.open(7, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 200, rttN: 1, freshN: 1 }));
   probed.refineBefore(7, 'rtt-degraded', W(50, 0, 50, { rttMedian: 200, rttN: 4, freshN: 4 }));
   probed.resolve(7, 'rtt-degraded', 2000, WT(40));
   assert.equal(probed.unverifiable('rtt-degraded'), 0, 'the probes made the verdict possible');
+  assert.equal(probed.unverifiableTransient('rtt-degraded'), 0, 'a scored episode is no kind of unscoreable');
   assert.equal(probed.baseRate('rtt-degraded'), null, 'still below minEpisodes, but now in the arm');
 });
 
@@ -904,4 +908,113 @@ test('a closure line shows its arithmetic — the per-window evidence counts (v0
   assert.ok(line, 'the closure is logged');
   assert.match(line!, /\[before fresh=5 rtt=1 rssi=0 rate=n \| after fresh=5 rtt=0 rssi=0 rate=n\]/,
     `the failing floor must be readable off the line: ${line}`);
+});
+
+// ── v0.39: transient blinks are split out of the fixable-unverifiable counter ──
+// The 08-27 exemplar: `episode 55:rtt-degraded unverifiable (no action)
+// [before fresh=1 rtt=1 rssi=1 rate=y | after fresh=5 rtt=5 rssi=5 rate=y]`
+// — the node answered all ten probes, refineBefore correctly froze the moment
+// the symptom cleared, and the degraded state simply ended before MIN_OBS
+// could accrue. Booking that against the fixable-gap counter is the same
+// conflation the v0.38 unprobeable split fixed.
+
+test('a before-window that never reached its floor while the after met its own is a TRANSIENT, not a fixable gap (v0.39)', () => {
+  const logged: string[] = [];
+  const o = createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  o.open(55, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1, rssiN: 1 }));
+  o.resolve(55, 'rtt-degraded', 2000, WT(30));
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 1, 'counted as a transient blink');
+  assert.equal(o.unverifiable('rtt-degraded'), 0, 'NOT counted as a fixable gap');
+  const line = logged.find((l) => /episode 55:rtt-degraded/.test(l));
+  assert.ok(line, 'the closure is logged');
+  assert.match(line!, /\(transient — degraded state ended before its evidence floor\)/,
+    `the closure line names the blink: ${line}`);
+});
+
+test('an after-side starvation stays in the FIXABLE counter — more probes could have filled it (v0.39)', () => {
+  const logged: string[] = [];
+  const o = createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  o.open(7, 'rtt-degraded', 1000, WT(90));
+  o.resolve(7, 'rtt-degraded', 2000, W(50, 0, 50, { rttMedian: 80, rttN: 1, freshN: 1 }));
+  assert.equal(o.unverifiable('rtt-degraded'), 1, 'the fixable counter holds it');
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 0);
+  const line = logged.find((l) => /episode 7:rtt-degraded/.test(l));
+  assert.ok(line);
+  assert.doesNotMatch(line!, /transient/, `no blink tag on a fixable gap: ${line}`);
+});
+
+test('both sides starved is NOT a transient — the after-side gap alone is fixable (v0.39)', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 90, rttN: 1, freshN: 1 }));
+  o.resolve(7, 'rtt-degraded', 2000, W(50, 0, 50, { rttMedian: null, rttN: 0, freshN: 1 }));
+  assert.equal(o.unverifiable('rtt-degraded'), 1);
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 0);
+});
+
+test('unprobeable outranks transient — a sleeping device is structural before it is anything else (v0.39)', () => {
+  const o = store();
+  o.open(61, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }));
+  o.resolve(61, 'rtt-degraded', 2000, WT(30), { unprobeable: true });
+  assert.equal(o.unverifiableUnprobeable('rtt-degraded'), 1);
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 0);
+  assert.equal(o.unverifiable('rtt-degraded'), 0);
+});
+
+test('the transient counter survives save/load (v0.39)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'outcomes-transient-'));
+  const path = join(dir, 'o.json');
+  try {
+    const o = createOutcomeStore({ path, releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0 });
+    o.open(55, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }));
+    o.resolve(55, 'rtt-degraded', 2000, WT(30));
+    o.save();
+    const o2 = createOutcomeStore({ path, releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0 });
+    o2.load();
+    assert.equal(o2.unverifiableTransient('rtt-degraded'), 1, 'restored across the restart');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a one-sample before-window on rate-fallback still SCORES — rate\'s floor is one fresh reading, so no transient fires (v0.39)', () => {
+  const logged: string[] = [];
+  const o = createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  o.open(9, 'rate-fallback', 1000, W(50, 0, 50, { rateKbpsMin: 40, freshN: 1 }));
+  o.resolve(9, 'rate-fallback', 2000, WK(100));
+  assert.equal(o.unverifiableTransient('rate-fallback'), 0);
+  assert.equal(o.unverifiable('rate-fallback'), 0);
+  const line = logged.find((l) => /episode 9:rate-fallback/.test(l));
+  assert.match(line!, /improved/, `the thin-before rate episode scored: ${line}`);
+});
+
+test('the rtt evidence floor is MIN_OBS=3 on BOTH sides — one or two readings never score (v0.39 floor pin)', () => {
+  for (const n of [1, 2]) {
+    const o = store();
+    o.open(7, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 400, rttN: n, freshN: n }));
+    o.resolve(7, 'rtt-degraded', 2000, WT(30));
+    assert.equal(o.unverifiableTransient('rtt-degraded'), 1, `rttN=${n} before-window must be under the floor`);
+  }
+  const o3 = store();
+  o3.open(7, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 400, rttN: 3, freshN: 3 }));
+  o3.resolve(7, 'rtt-degraded', 2000, WT(30));
+  assert.equal(o3.unverifiableTransient('rtt-degraded'), 0, 'rttN=3 meets the floor and scores');
+});
+
+test('a DARK route lane is a fixable evidence problem, never a transient — real churn under a dark LWR must not leave the fixable counter (v0.39 review)', () => {
+  const logged: string[] = [];
+  const o = createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  // Real churn (routeChanges 2) but the lane was dark (routeKnown 0) while the
+  // node stayed fully alive — the degradation may have lasted hours.
+  o.open(12, 'route-churn', 1000, W(50, 0, 50, { routeChanges: 2, routeKnown: 0, freshN: 6 }));
+  o.resolve(12, 'route-churn', 2000, W(50, 0, 50, { routeChanges: 0, routeKnown: 6, freshN: 6 }));
+  assert.equal(o.unverifiable('route-churn'), 1, 'a dark lane stays in the FIXABLE counter');
+  assert.equal(o.unverifiableTransient('route-churn'), 0, 'never books as a blink');
+  const line = logged.find((l) => /episode 12:route-churn/.test(l));
+  assert.doesNotMatch(line!, /transient/, `no false cause on the closure line: ${line}`);
+});
+
+test('a NULL before-window is not a transient either — zero evidence is no basis to claim the state was brief (v0.39 review)', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, null);
+  o.resolve(7, 'rtt-degraded', 2000, WT(30));
+  assert.equal(o.unverifiable('rtt-degraded'), 1);
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 0);
 });

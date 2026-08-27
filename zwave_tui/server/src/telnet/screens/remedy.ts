@@ -96,6 +96,8 @@ interface Ledger {
   unverifiable: (kind: SymptomKind) => number;
   /** Of those, on devices that cannot be probed at all (v0.38). */
   unverifiableUnprobeable: (kind: SymptomKind) => number;
+  /** Of those, transient blinks — over before the evidence floor filled (v0.39). */
+  unverifiableTransient: (kind: SymptomKind) => number;
 }
 
 function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, ledger: Ledger, selected = false): string[] {
@@ -159,6 +161,12 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     if (unprobe > 0) {
       rows.push(truncate(
         '    ' + c.grey(`○ ${unprobe} more on sleeping device${unprobe === 1 ? '' : 's'} that cannot be probed — ` +
+          'unscoreable by design, not a gap'), W));
+    }
+    const transient = ledger.unverifiableTransient(sym.kind);
+    if (transient > 0) {
+      rows.push(truncate(
+        '    ' + c.grey(`○ ${transient} transient blink${transient === 1 ? '' : 's'} — over before the evidence floor filled; ` +
           'unscoreable by design, not a gap'), W));
     }
   }
@@ -274,6 +282,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     falsePositives: (kind) => data.falsePositives?.(kind) ?? 0,
     unverifiable: (kind) => data.unverifiableCount?.(kind) ?? 0,
     unverifiableUnprobeable: (kind) => data.unverifiableUnprobeableCount?.(kind) ?? 0,
+    unverifiableTransient: (kind) => data.unverifiableTransientCount?.(kind) ?? 0,
   };
 
   const body: string[] = [];
