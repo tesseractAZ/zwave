@@ -325,3 +325,18 @@ test('the sleeping-device line is silent when there are none', () => {
   (cx.data as { unverifiableUnprobeableCount?: (k: SymptomKind) => number }).unverifiableUnprobeableCount = () => 0;
   assert.ok(!/cannot be probed/.test(plain(renderRemedy(cx))));
 });
+
+test('a transient blink renders its own unscoreable-by-design row (v0.39)', () => {
+  const cx = ctx(140, 40, [sym()]);
+  (cx.data as { unverifiableCount?: (k: SymptomKind) => number }).unverifiableCount = () => 3;
+  (cx.data as { unverifiableTransientCount?: (k: SymptomKind) => number }).unverifiableTransientCount = () => 2;
+  const joined = plain(renderRemedy(cx));
+  assert.match(joined, /2 transient blinks — over before the evidence floor filled; unscoreable by design/);
+});
+
+test('the transient-blink line is silent at zero (v0.39)', () => {
+  const cx = ctx(140, 40, [sym()]);
+  (cx.data as { unverifiableCount?: (k: SymptomKind) => number }).unverifiableCount = () => 3;
+  (cx.data as { unverifiableTransientCount?: (k: SymptomKind) => number }).unverifiableTransientCount = () => 0;
+  assert.ok(!/transient blink/.test(plain(renderRemedy(cx))));
+});

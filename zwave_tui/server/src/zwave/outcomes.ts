@@ -82,6 +82,11 @@ export interface Episode {
   /** The node could not be probed at all (v0.38) — a sleeping battery/FLiRS
    *  device — so an `unverifiable` verdict here is structural, not starvation. */
   unprobeable?: boolean;
+  /** The before-window never reached its kind's evidence floor while the
+   *  after-window met its own (v0.39) — the node answered everything and the
+   *  degraded state simply ended before it could be measured. A transient
+   *  blink, unscoreable by construction; not a fixable evidence gap. */
+  transient?: boolean;
 }
 
 /** A decayed tally of episodes and their successes. */
@@ -154,6 +159,10 @@ export interface OutcomeStore {
    * flag evidence starvation, which IS fixable.
    */
   unverifiableUnprobeable(kind: SymptomKind): number;
+  /** Of the unverifiable, transient blinks: the before-window never reached its
+   *  kind's floor while the after-window met its own (v0.39) — the degraded
+   *  state ended before it could be measured. Unscoreable by construction. */
+  unverifiableTransient(kind: SymptomKind): number;
   /**
    * Replace an OPEN episode's before-window with a better-evidenced one (v0.36).
    *
@@ -313,7 +322,7 @@ function comparable(a: WindowMetrics, b: WindowMetrics): boolean {
 // a different scale. Scoring every episode by the timeout rate (the original M5
 // behaviour) meant non-timeout kinds could never register improvement. Each kind
 // is mapped to the signal its recovery actually moves.
-type RecoveryMetric = 'timeout' | 'flap' | 'rssi' | 'rtt' | 'rate' | 's2' | 'route' | 'none';
+export type RecoveryMetric = 'timeout' | 'flap' | 'rssi' | 'rtt' | 'rate' | 's2' | 'route' | 'none';
 
 function metricOf(kind: SymptomKind): RecoveryMetric {
   switch (kind) {
@@ -383,14 +392,51 @@ const RSSI_MIN_GAIN = 4; // dB — a meaningful signal-strength improvement
 const RTT_DROP_FRAC = 0.25; // ≥25% faster …
 const RTT_MIN_DROP_MS = 20; // … AND at least this many ms (guards tiny-baseline noise)
 
+/** Per-SIDE evidence floors, factored out of `scoreRecovery` so the resolve
+ *  path can ask WHICH side of an `unverifiable` verdict starved (v0.39). The
+ *  distinction carries meaning: a before-side failure with a fed after-window
+ *  means the degraded state ended before it could be measured (a transient),
+ *  while an after-side failure is a gap more evidence could have filled. Joint
+ *  checks (the timeout tx-ratio) are not floors and stay in `scoreRecovery`:
+ *  they compare the sides to each other, so neither side alone can fail them. */
+export function sideFloorMet(m: RecoveryMetric, w: WindowMetrics | null, side: 'before' | 'after'): boolean {
+  if (w == null) return false;
+  switch (m) {
+    case 'timeout':
+      return w.rate != null && w.tx >= MIN_WINDOW_TX;
+    case 'flap':
+      // Event drain: the before-window needs only prior flapping; the
+      // after-window must prove the node ALIVE (see scoreRecovery's comments,
+      // which remain the rationale of record for every branch here).
+      return side === 'before' ? w.flaps >= 1 : w.freshN >= MIN_LIVE;
+    case 's2':
+      return side === 'before' ? w.s2 >= 1 && w.s2Known >= 1 : w.s2Known >= MIN_LIVE && w.freshN >= MIN_LIVE;
+    case 'route':
+      return side === 'before' ? w.routeChanges >= 1 && w.routeKnown >= 1 : w.routeKnown >= MIN_LIVE && w.freshN >= MIN_LIVE;
+    case 'rssi':
+      return w.rssiMedian != null && w.rssiN >= MIN_OBS;
+    case 'rtt':
+      return w.rttMedian != null && w.rttN >= MIN_OBS;
+    case 'rate':
+      return w.rateKbpsMin != null;
+    case 'none':
+      return false;
+  }
+}
+
 /** Score an episode's recovery by its kind's metric. Each branch keeps the same
  *  honesty contract as the timeout metric: an incomparable / evidence-poor pair
  *  is `unverifiable` (never a fabricated win), and a regression is `worse`. Every
  *  branch gates on evidence of ITS OWN signal (rssiN/rttN readings, fresh-only
- *  rateKbps, live after-window for flaps) — never the shared freshN. */
+ *  rateKbps, live after-window for flaps) — never the shared freshN. The floors
+ *  themselves live in `sideFloorMet` (single source of truth with the resolve
+ *  path's transient classification); each branch keeps only its comparison. */
 function scoreRecovery(m: RecoveryMetric, before: WindowMetrics, after: WindowMetrics, releaseRate: number, minEffect: number): Verdict {
+  if (!sideFloorMet(m, before, 'before') || !sideFloorMet(m, after, 'after')) return 'unverifiable';
   switch (m) {
     case 'timeout': {
+      // rate null-checks re-stated for TS narrowing only — the floor already
+      // ran in sideFloorMet. comparable() is the joint tx-ratio check.
       if (before.rate == null || after.rate == null || !comparable(before, after)) return 'unverifiable';
       if (after.rate > before.rate * WORSE_FACTOR && after.rate > releaseRate) return 'worse';
       return after.rate <= releaseRate && before.rate - after.rate >= minEffect ? 'improved' : 'no-change';
@@ -401,8 +447,7 @@ function scoreRecovery(m: RecoveryMetric, before: WindowMetrics, after: WindowMe
       // mostly-Dead flapping node rarely meets. The after-window, though, must
       // prove the node is ALIVE and communicating (MIN_LIVE fresh samples), so a
       // node that simply went hard-dead (0 flaps because 0 transitions) is not
-      // mistaken for a recovery.
-      if (before.flaps < 1 || after.freshN < MIN_LIVE) return 'unverifiable';
+      // mistaken for a recovery. Both floors enforced in sideFloorMet.
       if (after.flaps > before.flaps) return 'worse';
       return after.flaps === 0 ? 'improved' : 'no-change'; // a clean, live after-window = flapping stopped
     }
@@ -417,10 +462,7 @@ function scoreRecovery(m: RecoveryMetric, before: WindowMetrics, after: WindowMe
       // driver-WS log lane, and the two fail independently. Without s2Known,
       // a storm-stop or an operator log-level change mid-episode switched the
       // measurement off and the resulting run of zeros scored as a recovery
-      // the action never earned (v0.26 review).
-      if (before.s2 < 1 || before.s2Known < 1) return 'unverifiable';
-      if (after.s2Known < MIN_LIVE) return 'unverifiable'; // lane dark ⇒ unknown, never "improved"
-      if (after.freshN < MIN_LIVE) return 'unverifiable';
+      // the action never earned (v0.26 review). All floors in sideFloorMet.
       if (after.s2 > before.s2) return 'worse';
       return after.s2 === 0 ? 'improved' : 'no-change';
     }
@@ -431,20 +473,20 @@ function scoreRecovery(m: RecoveryMetric, before: WindowMetrics, after: WindowMe
       // `lwr` went dark scores a run of zeros and reads as settled. And the
       // after-window must prove the node is still alive: a node that stopped
       // talking altogether cannot re-route, and that is not a cure either.
-      if (before.routeChanges < 1 || before.routeKnown < 1) return 'unverifiable';
-      if (after.routeKnown < MIN_LIVE) return 'unverifiable'; // route invisible ⇒ unknown, never "improved"
-      if (after.freshN < MIN_LIVE) return 'unverifiable';
+      // All floors in sideFloorMet.
       if (after.routeChanges > before.routeChanges) return 'worse';
       return after.routeChanges === 0 ? 'improved' : 'no-change';
     }
     case 'rssi': {
-      if (before.rssiMedian == null || after.rssiMedian == null || before.rssiN < MIN_OBS || after.rssiN < MIN_OBS) return 'unverifiable';
+      // Null-checks for TS narrowing only — the MIN_OBS floors ran in sideFloorMet.
+      if (before.rssiMedian == null || after.rssiMedian == null) return 'unverifiable';
       const gain = after.rssiMedian - before.rssiMedian; // higher (less negative) = stronger
       if (gain <= -RSSI_MIN_GAIN) return 'worse';
       return gain >= RSSI_MIN_GAIN ? 'improved' : 'no-change';
     }
     case 'rtt': {
-      if (before.rttMedian == null || after.rttMedian == null || before.rttN < MIN_OBS || after.rttN < MIN_OBS) return 'unverifiable';
+      // Null-checks for TS narrowing only — the MIN_OBS floors ran in sideFloorMet.
+      if (before.rttMedian == null || after.rttMedian == null) return 'unverifiable';
       if (after.rttMedian >= before.rttMedian * WORSE_FACTOR) return 'worse';
       return after.rttMedian <= before.rttMedian * (1 - RTT_DROP_FRAC) && before.rttMedian - after.rttMedian >= RTT_MIN_DROP_MS
         ? 'improved' : 'no-change';
@@ -500,6 +542,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   const unver = new Map<SymptomKind, number>();
   /** Unscoreable on a node we are not allowed to probe — see the interface. */
   const unverUnprobe = new Map<SymptomKind, number>();
+  // Episodes closed `unverifiable` because the degraded state ended before the
+  // before-window could reach its kind's floor, while the after-window met its
+  // own (v0.39) — transient blinks, unscoreable by construction.
+  const unverTransient = new Map<SymptomKind, number>();
   /**
    * Which DISTINCT nodes fed each arm (v0.36.5).
    *
@@ -585,7 +631,34 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         // though (v0.36): an unscoreable episode is not nothing, it is the
         // ledger telling you its evidence was too thin, and that fact has to
         // reach a screen or a structurally-inert loop looks like a patient one.
-        unver.set(kind, (unver.get(kind) ?? 0) + 1);
+        //
+        // Two different facts hide inside a starved verdict, and conflating
+        // them drains the fixable signal — the same defect class the v0.38
+        // unprobeable split fixed, forced here by the 08-27 exemplar
+        // (`before fresh=1 | after fresh=5` on a node that answered all ten
+        // probes): a before-window that never reached its kind's floor WHILE
+        // the after-window met its own means the degraded state ended before
+        // it could be measured. refineBefore correctly stops refining once
+        // the symptom clears, so no amount of probing can ever fill that
+        // window — a transient blink, not a gap more evidence could fix.
+        // Only an after-side starvation stays in the fixable counter.
+        //
+        // …and only when the metric's lane was actually WATCHING (v0.39
+        // review): the route/s2 before-floors conjoin symptom presence with
+        // lane visibility, and a dark lane is a fixable, operator-actionable
+        // evidence problem — hours of real churn under a dark LWR lane must
+        // not close as "over before the floor filled". A null before-window
+        // fails the same way: with zero evidence there is no basis to claim
+        // the state was brief.
+        const m = metricOf(kind);
+        const laneVisible = ep.before != null
+          && (m === 'route' ? ep.before.routeKnown >= 1 : m === 's2' ? ep.before.s2Known >= 1 : true);
+        if (laneVisible && !sideFloorMet(m, ep.before, 'before') && sideFloorMet(m, ep.after, 'after')) {
+          ep.transient = true;
+          unverTransient.set(kind, (unverTransient.get(kind) ?? 0) + 1);
+        } else {
+          unver.set(kind, (unver.get(kind) ?? 0) + 1);
+        }
         dirty = true;
       } else if (ep.action == null) {
         // Control arm: a symptom that resolved with no action taken.
@@ -616,7 +689,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         w == null
           ? 'none'
           : `fresh=${w.freshN} rtt=${w.rttN} rssi=${w.rssiN} rate=${w.rateKbpsMin != null ? 'y' : 'n'}`;
-      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]`);
+      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]${ep.transient ? ' (transient — degraded state ended before its evidence floor)' : ''}`);
       return ep;
     },
 
@@ -667,6 +740,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       return unverUnprobe.get(kind) ?? 0;
     },
 
+    unverifiableTransient(kind): number {
+      return unverTransient.get(kind) ?? 0;
+    },
+
     refineBefore(nodeId, kind, window): boolean {
       if (!window) return false;
       const ep = open.get(key(nodeId, kind));
@@ -683,7 +760,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     reset(): void {
-      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); armNodes.clear(); controlNodes.clear();
+      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); armNodes.clear(); controlNodes.clear();
     },
 
     load(): void {
@@ -720,6 +797,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         fp: [...fp.entries()],
         unver: [...unver.entries()],
         unverUnprobe: [...unverUnprobe.entries()],
+        unverTransient: [...unverTransient.entries()],
         armNodes: [...armNodes.entries()].map(([k, v]) => [k, [...v]] as [string, number[]]),
         controlNodes: [...controlNodes.entries()].map(([k, v]) => [k, [...v]] as [SymptomKind, number[]]),
         // Open episodes are intentionally NOT persisted — an episode spanning a
@@ -729,15 +807,16 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     loadJSON(raw): void {
-      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
+      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; unverTransient?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
       if (!o || o.v !== 1) return;
-      control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); armNodes.clear(); controlNodes.clear();
+      control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); armNodes.clear(); controlNodes.clear();
       for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, t);
       for (const [k, t] of o.action ?? []) if (validTally(t)) action.set(k, t);
       for (const [k, v] of o.fp ?? []) if (Number.isFinite(v) && v >= 0) fp.set(k, v);
       // Absent in pre-v0.36 files — an older ledger simply starts this counter at 0.
       for (const [k, v] of o.unver ?? []) if (Number.isFinite(v) && v >= 0) unver.set(k, v);
       for (const [k, v] of o.unverUnprobe ?? []) if (Number.isFinite(v) && v >= 0) unverUnprobe.set(k, v);
+      for (const [k, v] of o.unverTransient ?? []) if (Number.isFinite(v) && v >= 0) unverTransient.set(k, v);
       // Absent in pre-v0.36.5 files: an older ledger simply reports 0 nodes,
       // which the renderer treats as "provenance unknown" rather than as one.
       for (const [k, v] of o.armNodes ?? []) if (Array.isArray(v)) armNodes.set(k, new Set(v.filter((x) => Number.isFinite(x))));

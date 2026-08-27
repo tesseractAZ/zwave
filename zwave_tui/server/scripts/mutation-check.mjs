@@ -295,8 +295,8 @@ const MUTANTS = [
   { id: 'route-known-gate', file: 'src/zwave/outcomes.ts',
     // Drops the visibility floor, so a node whose route went dark scores its
     // run of zeros as a cure.
-    find: "      if (after.routeKnown < MIN_LIVE) return 'unverifiable';",
-    repl: '',
+    find: "      return side === 'before' ? w.routeChanges >= 1 && w.routeKnown >= 1 : w.routeKnown >= MIN_LIVE && w.freshN >= MIN_LIVE;",
+    repl: "      return side === 'before' ? w.routeChanges >= 1 && w.routeKnown >= 1 : w.freshN >= MIN_LIVE;",
     what: 'a route that went INVISIBLE is unknown, never a settled route' },
   /* ── v0.34 audit fixes: span, ranking, and the production bridge ─────── */
   { id: 'stability-span-is-min', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
@@ -729,8 +729,8 @@ const MUTANTS = [
     repl: '      const s2Resyncs = this.s2Accum.get(n.nodeId) ?? 0;',
     what: 'a dark S2 log lane records UNKNOWN, not a fabricated zero' },
   { id: 's2-outcome-lane-gate', file: 'src/zwave/outcomes.ts',
-    find: "      if (after.s2Known < MIN_LIVE) return 'unverifiable'; // lane dark ⇒ unknown, never \"improved\"",
-    repl: '',
+    find: "      return side === 'before' ? w.s2 >= 1 && w.s2Known >= 1 : w.s2Known >= MIN_LIVE && w.freshN >= MIN_LIVE;",
+    repl: "      return side === 'before' ? w.s2 >= 1 && w.s2Known >= 1 : w.freshN >= MIN_LIVE;",
     what: 'a switched-off S2 lane cannot score an `improved` recovery verdict' },
   { id: 's2-no-double-count', file: 'src/zwave/driverWsClient.ts',
     find: "  if (msg.includes('re-transmission with SPAN extension')) return null;",
@@ -1111,9 +1111,62 @@ const MUTANTS = [
     // while rate-fallback scored 6-for-6 under identical probes, and the log
     // could not say WHICH floor failed — a verdict that cannot show its
     // arithmetic invites the next guessed fix.
-    find: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]`);",
-    repl: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'}`);",
+    find: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]${ep.transient ? ' (transient — degraded state ended before its evidence floor)' : ''}`);",
+    repl: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'}${ep.transient ? ' (transient — degraded state ended before its evidence floor)' : ''}`);",
     what: 'an episode closure logs the per-window evidence counts behind its verdict' },
+  { id: 'transient-needs-after-evidence', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Classifying on the before-side alone would call a BOTH-sides-starved
+    // episode a transient — but an after-side gap is fixable (more probes),
+    // and folding it into "unscoreable by design" hides exactly the signal
+    // the fixable counter exists to carry.
+    find: "        if (laneVisible && !sideFloorMet(m, ep.before, 'before') && sideFloorMet(m, ep.after, 'after')) {",
+    repl: "        if (laneVisible && !sideFloorMet(m, ep.before, 'before')) {",
+    what: 'a transient requires the after-window to have MET its floor — a starved after-side stays fixable' },
+  { id: 'transient-counter-not-conflated', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Re-conflates the split: books the blink against the fixable counter,
+    // which is the exact defect the classification exists to fix.
+    find: '          unverTransient.set(kind, (unverTransient.get(kind) ?? 0) + 1);',
+    repl: '          unver.set(kind, (unver.get(kind) ?? 0) + 1);',
+    what: 'a transient blink lands in ITS counter, never the fixable-gap one' },
+  { id: 'transient-tag-renders', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Silences the closure-line tag: the counter would still be right but the
+    // log — the thing audits read — would stop distinguishing the blink.
+    find: "${ep.transient ? ' (transient — degraded state ended before its evidence floor)' : ''}`);",
+    repl: '`);',
+    what: 'a transient closure names itself on the closure line' },
+  { id: 'rtt-floor-is-three', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Lowers the rtt evidence floor to one reading — a median-of-one would
+    // pass as robust, the exact failure MIN_OBS exists to prevent.
+    find: '      return w.rttMedian != null && w.rttN >= MIN_OBS;',
+    repl: '      return w.rttMedian != null && w.rttN >= 1;',
+    what: 'the rtt floor demands MIN_OBS readings a side, not a median-of-one' },
+  { id: 'sideFloor-flap-sides-differ', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Swaps the flap metric's asymmetric floors: the before-window needs prior
+    // flapping, the after-window needs liveness — reversed, a hard-dead node
+    // (0 flaps because 0 transitions) reads as a recovery.
+    find: '      return side === \'before\' ? w.flaps >= 1 : w.freshN >= MIN_LIVE;',
+    repl: '      return side === \'before\' ? w.freshN >= MIN_LIVE : w.flaps >= 1;',
+    what: "the flap floors are side-specific: prior flapping before, liveness after" },
+  { id: 'transient-needs-visible-lane', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Drops the route-lane visibility guard from the classification: hours of
+    // real churn under a dark LWR lane would book as a "blink" and leave the
+    // fixable counter — the false cause the v0.39 review caught pre-release.
+    find: "          && (m === 'route' ? ep.before.routeKnown >= 1 : m === 's2' ? ep.before.s2Known >= 1 : true);",
+    repl: "          && (m === 'route' ? true : m === 's2' ? ep.before.s2Known >= 1 : true);",
+    what: 'a dark measurement lane is a fixable gap, never a transient blink' },
+  { id: 'transient-row-above-zero', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // The v0.36 unscoreable row's lesson, applied to the v0.39 row: a zero on
+    // every card trains the operator to stop reading the line.
+    find: '    if (transient > 0) {',
+    repl: '    if (transient >= 0) {',
+    what: 'the transient-blink row appears only when there ARE transient blinks' },
+  { id: 'bridge-forwards-transient', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    // The v0.33 hole, checked on the v0.39 member: a screen reading an
+    // optional member that the production bridge forgot to wire renders a
+    // silent 0 with every gate green.
+    find: '    unverifiableTransientCount: (k) => zd.unverifiableTransientCount(k),',
+    repl: '    unverifiableTransientCount: () => 0,',
+    what: 'the production bridge forwards unverifiableTransientCount to the data layer' },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
@@ -1289,8 +1342,13 @@ const MUTANTS = [
     // The counter must not become a back door into the control arm: counting an
     // episode is not the same as scoring it, and an unscoreable one is still
     // evidence of nothing.
+    // `&& false` no longer compiles here (the v0.39 branch body references
+    // `ep`, and TS strips the resolve-head narrowing inside dead code — the
+    // v0.35 lesson). The reachable form routes a NO-ACTION unverifiable
+    // episode past this branch into the control arm, the exact promotion the
+    // invariant forbids.
     find: "      } else if (ep.verdict === 'unverifiable') {",
-    repl: "      } else if (ep.verdict === 'unverifiable' && false) {",
+    repl: "      } else if (ep.verdict === 'unverifiable' && ep.action != null) {",
     what: 'counting an unscoreable episode never promotes it into an arm' },
   { id: 'refine-before-strictly-better', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     // Lets a POORER window overwrite a richer one — the probes would then be

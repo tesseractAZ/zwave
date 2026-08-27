@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.39.0 — 2026-08-27
+
+**The instrument fired, the diagnosis landed, and a transient is no longer an
+evidence gap.**
+
+v0.38.2's closure arithmetic paid for itself on its first unverifiable closure:
+
+    episode 55:rtt-degraded unverifiable (no action)
+      [before fresh=1 rtt=1 rssi=1 rate=y | after fresh=5 rtt=5 rssi=5 rate=y]
+
+Ten probes asked, ten answered — and the counts settle the three-mechanism
+question the release was shipped to answer. The driver delivers `rtt` on every
+fresh sample (eight windows observed, rtt == fresh in all of them); probes do
+not collapse (five probes → five readings in the after-window). The starving
+side is the BEFORE-window, and correctly so: `refineBefore` stops the moment
+the symptom clears, because folding recovered readings into the degraded
+window would compare the node against itself healthy. A degradation that lasts
+one sample freezes its before-window below MIN_OBS forever.
+
+That is structural, not fixable — the same distinction the v0.38 unprobeable
+split drew, and conflating it with fixable starvation drains the same signal.
+So `resolve()` now classifies: an `unverifiable` whose before-window failed its
+kind's floor while the after-window met its own counts as a TRANSIENT — its
+own persisted counter, a cause tag on the closure line, its own REMEDY row.
+The per-side floors are factored into one exported `sideFloorMet` (verdict and
+classification share it; `scoreRecovery` keeps only its comparisons), which
+also names the original asymmetry in one line: rate's floor is one fresh
+reading, rtt's is three, so the same one-sample blink scores the first and
+starves the second.
+
+Considered and rejected: skipping the confirm burst once the before-window is
+frozen. Those five probes fill the after-window on quiet nodes — without them
+the transient would misclassify as an after-side starvation and land back in
+the fixable counter.
+
+A pre-release adversarial review (10 agents; the verdict-preservation lens
+fuzzed old-vs-new scoreRecovery over ~1M boundary-heavy windows, 0 diffs)
+caught one real defect before it shipped: the route metric's before-floor
+conjoins symptom presence with lane VISIBILITY, so hours of real churn under
+a dark LWR lane would have booked as a "blink" and left the fixable counter.
+The classification now also requires the metric's lane to have been watching
+(and a null before-window never classifies — zero evidence is no basis to
+claim the state was brief). The review also found the REMEDY row and its
+provider hop were wire-only — the v0.33 dead-M-key class — now pinned by
+screen and bridge tests plus mirrored mutants.
+
+The full harness caught four broken entries across the refactor: two true
+anchor drifts from the floor factoring (route/s2 gates), one from the closure
+line gaining its tag, and one `&& false` mutant that stopped compiling for
+exactly the v0.35 reason (dead code strips the resolve-head narrowing) —
+rewritten reachable.
+
+799 tests. 247 mutation entries: 243 killed, 0 survived, 0 missing, 4 equivalent.
+
 ## 0.38.2 — 2026-08-25
 
 **Instrumentation for the one residual defect, and a label that lied twice.**
