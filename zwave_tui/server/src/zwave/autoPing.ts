@@ -95,8 +95,32 @@ export interface AutoPingState {
    * detect. Whether the node ANSWERED is therefore not knowable from the call;
    * it is knowable from the evidence, by asking a moment later whether the
    * node's `lastSeen` moved.
+   *
+   * Per-PROBE pending list, not a single slot (v0.40): burst spacing (60 s)
+   * runs under the answer grace (90 s), so a single slot was overwritten by
+   * each new probe before it matured — only the LAST probe of every 5-probe
+   * burst was ever judged, and a node dying mid-burst logged five misses as
+   * one "1st consecutive miss". Every probe now gets its own judgment, and
+   * CARRIES its own self-proven flag: the old per-node flag slot had the same
+   * overwrite disease — a newer sweep rewrote the flag before the older probe
+   * was judged, so the judgment reported the wrong probe's context. Non-sweep
+   * lanes (dead-remediation, verification) carry `self: false`: the flag
+   * means "spoke on its own since the last sweep", which only a sweep asks.
    */
-  awaitingAnswer: Map<number, number>;
+  awaitingAnswer: Map<number, { at: number; self: boolean }[]>;
+  /** nodeId → the `lastSeen` value most recently ATTRIBUTED to one of our own
+   *  probe answers (v0.40). The sweep's self-proven flag compares against it:
+   *  a lastSeen that has not advanced past our probe's answer is the app
+   *  hearing its own echo, not the node speaking on its own.
+   *
+   *  Two documented edges, both conservative-by-choice: the value is stamped
+   *  at JUDGMENT time (up to ~2.5 min after the probe), so a node whose own
+   *  report lands inside that window has it attributed to the probe — the
+   *  window is genuinely ambiguous (probe-induced supervision chatter lands
+   *  there too) and the tiebreak under-credits rather than fabricates; and
+   *  the map is in-memory, so the first sweep per node after a restart has
+   *  no attribution and an echo can read self-proven once per boot. */
+  lastProbeSeen: Map<number, number>;
   /** Nodes already announced as abandoned this outage (v0.36.4), so the notice
    *  fires once rather than every tick for as long as the node stays down. */
   gaveUpAnnounced: Set<number>;
@@ -114,10 +138,6 @@ export interface AutoPingState {
   /** nodeId → epoch ms of this node's previous VERIFICATION probe (v0.37.1),
    *  so the burst's real spacing is visible in the log. */
   lastVerifyAt: Map<number, number>;
-  /** nodeId → whether, at the moment of its last probe, the node had already
-   *  communicated on its own since the previous sweep (v0.37). Read when the
-   *  probe is judged, so the outcome records WHY the node was reachable. */
-  selfProvenAtProbe: Map<number, boolean>;
 }
 
 /** 1st, 2nd, 3rd, 4th … for the miss-streak label (v0.36.5). */
@@ -132,13 +152,31 @@ function ordinal(n: number): string {
   }
 }
 
+/** Append a probe to the node's pending-judgment list (v0.40) — every probe
+ *  gets its own entry, so a burst leaves several in flight at once. */
+export function pendProbe(state: AutoPingState, nodeId: number, t: number, self = false): void {
+  const pending = state.awaitingAnswer.get(nodeId);
+  if (pending) pending.push({ at: t, self });
+  else state.awaitingAnswer.set(nodeId, [{ at: t, self }]);
+}
+
+/** Withdraw ONE pending probe after a transport failure — the packet never
+ *  left, so there is nothing to judge; the node's other probes stay judged. */
+export function unpendProbe(state: AutoPingState, nodeId: number, t: number): void {
+  const pending = state.awaitingAnswer.get(nodeId);
+  if (!pending) return;
+  const i = pending.findIndex((p) => p.at === t);
+  if (i >= 0) pending.splice(i, 1);
+  if (pending.length === 0) state.awaitingAnswer.delete(nodeId);
+}
+
 /** How long to wait before judging whether a probe was answered (v0.36).
  *  A ping is a round trip plus a stats push; 90 s is generous for a routed
  *  mesh hop and still well inside one tick of slack. */
 const ANSWER_GRACE_MS = 90_000;
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), selfProvenAtProbe: new Map(), lastVerifyAt: new Map() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map() };
 }
 
 export interface AutoPingInput {
@@ -371,7 +409,17 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const verifyFirst = verifyEntries.filter((e) => e.first).map((e) => e.id);
   base.verifyOwed = input.verifyOwedCount?.() ?? verify.length;
 
-  return { ...base, ping, stale, verify, verifyFirst, gaveUp, suppressed: 'none' };
+  // One measurement probe per node per tick (v0.40 review): a node owed a
+  // verification probe this tick is dropped from the sweep — the verify probe
+  // is the same NoOp ping and satisfies the sweep's question, while twin
+  // same-tick probes shared one `at`, let a transport failure on one lane
+  // withdraw the OTHER lane's pending entry, and double-counted one silent
+  // instant as two consecutive misses. The node stays due (lastStaleAt is not
+  // advanced), so its sweep runs on the next tick if it still owes nothing.
+  const verifySet = new Set(verify);
+  const staleDeduped = stale.filter((id) => !verifySet.has(id));
+
+  return { ...base, ping, stale: staleDeduped, verify, verifyFirst, gaveUp, suppressed: 'none' };
 }
 
 /**
@@ -388,24 +436,37 @@ export function judgeProbeAnswers(
   nodes: NodeSnapshot[],
   now: number,
   graceMs = ANSWER_GRACE_MS,
-): { nodeId: number; answered: boolean; misses: number }[] {
+): { nodeId: number; answered: boolean; misses: number; self: boolean }[] {
   const seenOf = new Map<number, number | null>();
   for (const n of nodes) seenOf.set(n.nodeId, n.stats?.lastSeen ?? null);
-  const out: { nodeId: number; answered: boolean; misses: number }[] = [];
-  for (const [nodeId, at] of [...state.awaitingAnswer]) {
-    if (now - at < graceMs) continue;
-    state.awaitingAnswer.delete(nodeId);
+  const out: { nodeId: number; answered: boolean; misses: number; self: boolean }[] = [];
+  for (const [nodeId, pending] of [...state.awaitingAnswer]) {
+    // Judge EVERY matured probe, oldest first (v0.40) — the entries are
+    // appended chronologically, and a burst leaves several in flight at once.
+    const mature = pending.filter((p) => now - p.at >= graceMs);
+    if (mature.length === 0) continue;
+    const young = pending.filter((p) => now - p.at < graceMs);
+    if (young.length > 0) state.awaitingAnswer.set(nodeId, young);
+    else state.awaitingAnswer.delete(nodeId);
     // A node absent from the roster cannot be judged either way — say nothing
     // rather than call a roster gap a failed probe.
     if (!seenOf.has(nodeId)) continue;
     const seen = seenOf.get(nodeId) ?? null;
-    const answered = seen != null && seen >= at;
-    // The streak is CONSECUTIVE: one answer resets it, so "3rd miss" always
-    // means three in a row rather than three since the beginning of time.
-    const misses = answered ? 0 : (state.missStreak.get(nodeId) ?? 0) + 1;
-    if (answered) state.missStreak.delete(nodeId);
-    else state.missStreak.set(nodeId, misses);
-    out.push({ nodeId, answered, misses });
+    for (const { at, self } of mature) {
+      const answered = seen != null && seen >= at;
+      // The streak is CONSECUTIVE: one answer resets it, so "3rd miss" always
+      // means three in a row rather than three since the beginning of time.
+      const misses = answered ? 0 : (state.missStreak.get(nodeId) ?? 0) + 1;
+      if (answered) {
+        state.missStreak.delete(nodeId);
+        // Remember what OUR probe put on the record, so the sweep's
+        // self-proven flag can tell the node's own voice from our echo.
+        if (seen != null) state.lastProbeSeen.set(nodeId, seen);
+      } else {
+        state.missStreak.set(nodeId, misses);
+      }
+      out.push({ nodeId, answered, misses, self });
+    }
   }
   return out;
 }
@@ -439,6 +500,9 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
   for (const id of [...state.attempts.keys()]) if (!seen.has(id)) state.attempts.delete(id);
   for (const id of [...state.lastPingAt.keys()]) if (!seen.has(id)) state.lastPingAt.delete(id);
   for (const id of [...state.lastStaleAt.keys()]) if (!seen.has(id)) state.lastStaleAt.delete(id);
+  // …and attribution (v0.40): a re-included device reusing the nodeId must not
+  // inherit the departed node's last attributed probe answer.
+  for (const id of [...state.lastProbeSeen.keys()]) if (!seen.has(id)) state.lastProbeSeen.delete(id);
 }
 
 /** Record that a STALE liveness probe was issued. */
@@ -604,13 +668,26 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // device silent for eleven hours to be confirming itself. "Did it speak
       // within one sweep interval" needs no probe history and is true on the
       // first sweep as readily as the hundredth.
+      //
+      // …and against ATTRIBUTION (v0.40): a probe answer advances lastSeen
+      // too, so cadence alone counted the app's own echo as the node's voice.
+      // An audit caught the tell — "already heard 120m ago on its own —
+      // confirming" is a full threshold of silence described as confirming,
+      // and for quiet-but-answering nodes the confirming/unheard split was a
+      // sticky sub-minute scheduling bias, persisted as if it were device
+      // behavior. Self-proven now additionally requires lastSeen to have
+      // advanced PAST what our own last answered probe put on the record.
       const seenAt = nodes.find((x) => x.nodeId === nodeId)?.stats?.lastSeen ?? null;
-      const selfProven = seenAt != null && t - seenAt < o.config.staleMs;
-      state.selfProvenAtProbe.set(nodeId, selfProven);
+      const attributed = state.lastProbeSeen.get(nodeId) ?? null;
+      const heardRecently = seenAt != null && t - seenAt < o.config.staleMs;
+      const spokeOnItsOwn = seenAt != null && (attributed == null || seenAt > attributed);
+      const selfProven = heardRecently && spokeOnItsOwn;
       const msg = `auto-ping: node ${nodeId} liveness sweep ` +
         (selfProven
           ? `(already heard ${silence} ago on its own — confirming)`
-          : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`);
+          : heardRecently
+            ? '(nothing heard past our last probe\'s answer — probing for its own voice)'
+            : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`);
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       // The service call resolving proves only that HA ACCEPTED the request —
@@ -622,9 +699,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // MEASUREMENT lane: the non-learning probe (v0.38.1). With the learning
       // verb, every sweep stamped `ping` onto any open episode and the control
       // arm could never accrue — the instrument was the recorded treatment.
-      state.awaitingAnswer.set(nodeId, t);
+      pendProbe(state, nodeId, t, selfProven);
       void (o.probe ?? o.ping)(nodeId).catch(() => {
-        state.awaitingAnswer.delete(nodeId);
+        unpendProbe(state, nodeId, t);
         const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
         o.log('warn', nodeId, m); o.log2?.(m);
       });
@@ -643,9 +720,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // at a dead node past its dwell is a remediation attempt, and its
       // attribution is the self-instrumentation this module's autonomy is
       // justified by. The measurement lanes above use the non-learning probe.
-      state.awaitingAnswer.set(nodeId, t);
+      pendProbe(state, nodeId, t);
       void o.ping(nodeId).catch(() => {
-        state.awaitingAnswer.delete(nodeId);
+        unpendProbe(state, nodeId, t);
         const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
         o.log('warn', nodeId, m); o.log2?.(m);
       });
@@ -692,9 +769,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // MEASUREMENT lane too (v0.38.1) — a verification probe exists to fill
       // the evidence window, and recording it as the remediation would make
       // the verdict about the measurement rather than the recovery.
-      state.awaitingAnswer.set(nodeId, t);
+      pendProbe(state, nodeId, t);
       void (o.probe ?? o.ping)(nodeId).catch(() => {
-          state.awaitingAnswer.delete(nodeId);
+          unpendProbe(state, nodeId, t);
           const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
           o.log('warn', nodeId, m); o.log2?.(m);
         });
@@ -719,13 +796,13 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
      * moment we probed it. An unanswered probe is the signal auto-ping exists
      * to produce, and until now it could not be observed at all.
      */
-    for (const { nodeId, answered, misses } of judgeProbeAnswers(state, nodes, t)) {
+    for (const { nodeId, answered, misses, self } of judgeProbeAnswers(state, nodes, t)) {
       // The expected case stays at debug — one line per probe on every healthy
       // node is several hundred a day saying "as designed", which is the noise
       // that trains an operator to stop reading. The UNANSWERED case below is
       // the signal, and it is warn on both destinations.
       if (answered) {
-        o.onProbeResult?.(nodeId, true, state.selfProvenAtProbe.get(nodeId) ?? false);
+        o.onProbeResult?.(nodeId, true, self);
         o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`);
         continue;
       }
@@ -735,7 +812,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // beside the genuine article and teach an operator to skim past both. The
       // count is in the text either way — this suppresses nothing, it only
       // stops calling a single lost packet a warning.
-      o.onProbeResult?.(nodeId, false, state.selfProvenAtProbe.get(nodeId) ?? false);
+      o.onProbeResult?.(nodeId, false, self);
       const ord = ordinal(misses);
       const m = `auto-ping: node ${nodeId} did NOT answer its probe ` +
         `(${ord} consecutive miss, lastSeen did not advance)`;

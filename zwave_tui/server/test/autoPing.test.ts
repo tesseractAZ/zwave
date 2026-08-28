@@ -11,6 +11,8 @@ import { test } from 'node:test';
 
 import {
   createAutoPingState,
+  pendProbe,
+  unpendProbe,
   noteStale,
   decideAutoPings,
   noteAttempt,
@@ -644,29 +646,29 @@ test('a probe whose node lastSeen advanced is judged ANSWERED', () => {
   // observable that separates "the probe got through" from "we sent a packet
   // into the dark".
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, T);
+  s.awaitingAnswer.set(7, [{ at: T, self: false }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 5_000 } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: true, misses: 0 }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: true, misses: 0, self: false }]);
   assert.equal(s.awaitingAnswer.size, 0, 'and the pending entry is cleared');
 });
 
 test('a probe whose node stayed silent is judged UNANSWERED — the signal that never existed', () => {
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, T);
+  s.awaitingAnswer.set(7, [{ at: T, self: false }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T - 60_000 } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1 }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, self: false }]);
 });
 
 test('a node that has NEVER been heard from is unanswered, not silently skipped', () => {
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, T);
+  s.awaitingAnswer.set(7, [{ at: T, self: false }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: null } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1 }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, self: false }]);
 });
 
 test('a probe is NOT judged before its grace period — no verdict on an in-flight round trip', () => {
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, T);
+  s.awaitingAnswer.set(7, [{ at: T, self: false }]);
   assert.deepEqual(judgeProbeAnswers(s, [node(7)], T + 10_000), []);
   assert.equal(s.awaitingAnswer.size, 1, 'still pending, still judgeable later');
 });
@@ -675,7 +677,7 @@ test('a node that vanished from the roster is judged NEITHER way', () => {
   // A roster gap is not evidence of a failed probe, and calling it one would
   // manufacture exactly the false alarm this signal exists to avoid.
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, T);
+  s.awaitingAnswer.set(7, [{ at: T, self: false }]);
   const out = judgeProbeAnswers(s, [node(8)], T + 120_000);
   assert.deepEqual(out, []);
   assert.equal(s.awaitingAnswer.size, 0, 'but it is dropped rather than pending forever');
@@ -845,7 +847,7 @@ test('the miss streak counts CONSECUTIVE failures and one answer resets it', () 
   const s = createAutoPingState();
   const silent = (t: number) => [node(7, { stats: { lastSeen: t } as never })];
   const miss = (i: number): number => {
-    s.awaitingAnswer.set(7, T + i * 1000);
+    s.awaitingAnswer.set(7, [{ at: T + i * 1000, self: false }]);
     return judgeProbeAnswers(s, silent(T - 60_000), T + i * 1000 + 120_000)[0].misses;
   };
   assert.equal(miss(1), 1, 'first miss');
@@ -854,7 +856,7 @@ test('the miss streak counts CONSECUTIVE failures and one answer resets it', () 
 
   // One answer wipes the streak — "3rd miss" must always mean three in a row,
   // never three since the beginning of time.
-  s.awaitingAnswer.set(7, T + 10_000);
+  s.awaitingAnswer.set(7, [{ at: T + 10_000, self: false }]);
   const ok = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 11_000 } as never })], T + 200_000)[0];
   assert.equal(ok.answered, true);
   assert.equal(ok.misses, 0);
@@ -895,7 +897,7 @@ test('ordinals read correctly past the awkward teens', async () => {
   const { judgeProbeAnswers: judge } = await import('../src/zwave/autoPing');
   const s = createAutoPingState();
   s.missStreak.set(7, 10);
-  s.awaitingAnswer.set(7, T);
+  s.awaitingAnswer.set(7, [{ at: T, self: false }]);
   assert.equal(judge(s, [node(7, { stats: { lastSeen: null } as never })], T + 200_000)[0].misses, 11);
 });
 
@@ -1045,4 +1047,117 @@ test('the SWEEP and VERIFY lanes use probe(); only the DEAD ladder uses the lear
   assert.ok(probed.includes(100), 'the verification lane must use probe()');
   assert.ok(pinged.includes(7), 'the dead ladder must use the LEARNING ping()');
   assert.ok(!pinged.includes(50) && !pinged.includes(100), 'and no measurement lane may leak onto it');
+});
+
+/* ── v0.40: per-probe judgment + attribution-aware self-proven ─────────────── */
+
+test('every probe in a burst is judged — a dying node logs five misses, not one (v0.40)', () => {
+  // The single-slot map meant 60s burst spacing under the 90s grace overwrote
+  // each pending judgment: only the LAST probe of every burst was ever judged,
+  // and a node dying mid-burst had five consecutive misses recorded as a
+  // "1st consecutive miss".
+  const s = createAutoPingState();
+  s.awaitingAnswer.set(7, [{ at: T, self: false }, { at: T + 60_000, self: false }, { at: T + 120_000, self: false }, { at: T + 180_000, self: false }, { at: T + 240_000, self: false }]);
+  const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T - 60_000 } as never })], T + 240_000 + 120_000);
+  assert.deepEqual(out.map((o) => o.misses), [1, 2, 3, 4, 5], 'five probes, five judgments, one honest streak');
+});
+
+test('young probes stay pending while matured ones are judged (v0.40)', () => {
+  const s = createAutoPingState();
+  s.awaitingAnswer.set(7, [{ at: T, self: false }, { at: T + 60_000, self: false }]);
+  const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T - 60_000 } as never })], T + 100_000);
+  assert.equal(out.length, 1, 'only the matured probe is judged');
+  assert.deepEqual(s.awaitingAnswer.get(7), [{ at: T + 60_000, self: false }], 'the in-flight probe is still pending');
+});
+
+test('an answered probe records what OUR probe put on the record (v0.40)', () => {
+  const s = createAutoPingState();
+  s.awaitingAnswer.set(7, [{ at: T, self: false }]);
+  judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 5_000 } as never })], T + 120_000);
+  assert.equal(s.lastProbeSeen.get(7), T + 5_000, 'the attributed lastSeen is remembered for the sweep');
+});
+
+test('a node heard ONLY answering our probe is not "on its own" — the echo is not the voice (v0.40)', async () => {
+  // The audit's tell: "already heard 120m ago on its own — confirming" was a
+  // full staleness threshold of silence described as confirming, because the
+  // "heard" event was the node answering the PREVIOUS sweep's probe. For
+  // quiet-but-answering nodes the confirming/unheard split was a sticky
+  // sub-minute scheduling bias persisted as if it were device behavior.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const results: Array<{ id: number; ok: boolean; self: boolean }> = [];
+  const quiet = node(9, { stats: { lastSeen: T } as never });
+  const nodes = [node(1, { isController: true }), quiet];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+    onProbeResult: (id, ok, self) => { results.push({ id, ok, self }); },
+    config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
+  });
+  const T0 = T + BOOT_WINDOW_MS + MIN;
+  clock = T0; h.tick();                                  // sweep 1 probes node 9
+  (quiet.stats as { lastSeen: number | null }).lastSeen = T0 + 5_000; // it answers
+  clock = T0 + 2 * MIN; h.tick();                        // judged: answered, attributed
+  lines.length = 0;
+  clock = T0 + 240 * MIN; h.tick();                      // sweep 2: only contact is our echo
+  const echo = lines.find((l) => l.includes('liveness sweep'));
+  assert.ok(echo, 'the node is swept again at cadence');
+  assert.match(echo!, /nothing heard past our last probe's answer — probing for its own voice/,
+    `the echo must not read as the node's own voice: ${echo}`);
+  assert.ok(!/on its own — confirming/.test(echo!), 'and never as confirming');
+
+  // Now the node genuinely speaks on its own — confirming returns.
+  (quiet.stats as { lastSeen: number | null }).lastSeen = T0 + 242 * MIN;
+  lines.length = 0;
+  clock = T0 + 481 * MIN; h.tick();                      // due again; heard 239m ago on its own
+  const own = lines.find((l) => l.includes('liveness sweep'));
+  assert.match(own!, /on its own — confirming/, `a real advance past the echo confirms: ${own}`);
+  clock = T0 + 483 * MIN; h.tick();                      // judge the third probe too
+  h.stop();
+  // The persisted flag followed each probe's OWN context — first sweep true
+  // (nothing attributed yet), the echo false, the own-voice sweep true again.
+  // Pinning all three also pins that a newer sweep can no longer overwrite an
+  // older probe's flag before judgment (the single-slot disease, both maps).
+  const flags = results.filter((r) => r.id === 9).map((r) => r.self);
+  assert.deepEqual(flags, [true, false, true], `persisted selfProven must match the labels: ${JSON.stringify(results)}`);
+});
+
+test('unpendProbe withdraws exactly ONE entry — the failed probe, not the pending list (v0.40 review)', () => {
+  // A transport failure on one probe must not discard the judgments owed to
+  // the node's other in-flight probes.
+  const s = createAutoPingState();
+  pendProbe(s, 9, T, true);
+  pendProbe(s, 9, T + 60_000, false);
+  unpendProbe(s, 9, T + 60_000);
+  assert.deepEqual(s.awaitingAnswer.get(9), [{ at: T, self: true }],
+    'only the failed probe was withdrawn; its sibling still awaits judgment');
+  unpendProbe(s, 9, T);
+  assert.equal(s.awaitingAnswer.has(9), false, 'the emptied list is cleaned up');
+});
+
+test('a node owed a verification probe this tick is dropped from the sweep — one measurement probe per node per tick (v0.40 review)', () => {
+  // Twin same-tick probes shared one `at`: a transport failure on one lane
+  // withdrew the OTHER lane's entry, and one silent instant counted as two
+  // consecutive misses. The verify probe answers the sweep's question.
+  const s = createAutoPingState();
+  // Node 9 must actually be the sweep queue's head: everyone else was heard a
+  // minute ago (a null lastSeen sorts to the very front and would steal it).
+  const quiet = node(9, { stats: { lastSeen: T - 300 * MIN } as never });
+  const chatty = [node(1, { isController: true }), node(100, { stats: { lastSeen: T - MIN } as never }), node(101, { stats: { lastSeen: T - MIN } as never })];
+  const nodes = [...chatty, quiet];
+  const s2 = createAutoPingState();
+  const control = decideAutoPings({
+    now: T, state: s2, nodes, controller: null,
+    config: cfg({ staleMs: 240 * MIN }), booting: false,
+  });
+  assert.deepEqual(control.stale, [9], 'fixture check: without a verify owed, node 9 IS the sweep head');
+  const d = decideAutoPings({
+    now: T, state: s, nodes, controller: null,
+    config: cfg({ staleMs: 240 * MIN }), booting: false,
+    verifyDue: () => [{ id: 9, first: true }],
+  });
+  assert.deepEqual(d.verify, [9], 'the verification probe goes out');
+  assert.deepEqual(d.stale, [], 'the sweep stands down for this node this tick');
+  assert.ok(d.staleDue >= 1, 'the node is still counted due — it is deferred, not forgotten');
 });

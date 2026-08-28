@@ -98,6 +98,8 @@ interface Ledger {
   unverifiableUnprobeable: (kind: SymptomKind) => number;
   /** Of those, transient blinks — over before the evidence floor filled (v0.39). */
   unverifiableTransient: (kind: SymptomKind) => number;
+  /** No-action closures confounded by a mid-episode death/remediation (v0.40). */
+  confounded: (kind: SymptomKind) => number;
 }
 
 function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, ledger: Ledger, selected = false): string[] {
@@ -168,6 +170,12 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       rows.push(truncate(
         '    ' + c.grey(`○ ${transient} transient blink${transient === 1 ? '' : 's'} — over before the evidence floor filled; ` +
           'unscoreable by design, not a gap'), W));
+    }
+    const conf = ledger.confounded(sym.kind);
+    if (conf > 0) {
+      rows.push(truncate(
+        '    ' + c.grey(`○ ${conf} confounded by a mid-episode death or remediation — ` +
+          'credited to neither arm'), W));
     }
   }
   // Narrative — one line of diagnostic context (the plan headline carries the
@@ -283,6 +291,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     unverifiable: (kind) => data.unverifiableCount?.(kind) ?? 0,
     unverifiableUnprobeable: (kind) => data.unverifiableUnprobeableCount?.(kind) ?? 0,
     unverifiableTransient: (kind) => data.unverifiableTransientCount?.(kind) ?? 0,
+    confounded: (kind) => data.confoundedCount?.(kind) ?? 0,
   };
 
   const body: string[] = [];

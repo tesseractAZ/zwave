@@ -490,6 +490,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       falsePositives: (k: string) => (k === 'route-churn' ? 4 : 0),
       unverifiableCount: (k: string) => (k === 'rtt-degraded' ? 16 : 0),
       unverifiableTransientCount: (k: string) => (k === 'rtt-degraded' ? 5 : 0),
+      confoundedCount: (k: string) => (k === 'rtt-degraded' ? 2 : 0),
       rssiNormal: (n: number) => ({ median: -n, scale: 3, ready: true, days: 7 }),
   } as never);
   const provider = src.createTuiDataProvider({
@@ -509,6 +510,8 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
     assert.equal(provider.provider.unverifiableCount?.('dead-flap'), 0);
     assert.equal(provider.provider.unverifiableTransientCount?.('rtt-degraded'), 5, 'the v0.39 member crosses the bridge');
     assert.equal(provider.provider.unverifiableTransientCount?.('dead-flap'), 0);
+    assert.equal(provider.provider.confoundedCount?.('rtt-degraded'), 2, 'the v0.40 member crosses the bridge');
+    assert.equal(provider.provider.confoundedCount?.('dead-flap'), 0);
     assert.deepEqual(provider.provider.rssiNormal?.(62), { median: -62, scale: 3, ready: true, days: 7 });
   } finally {
     provider.stop();

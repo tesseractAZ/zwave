@@ -372,6 +372,7 @@ export interface ZwaveData {
   /** Of those, on nodes that cannot be probed at all (v0.38). */
   unverifiableUnprobeableCount(kind: SymptomKind): number;
   unverifiableTransientCount(kind: SymptomKind): number;
+  confoundedCount(kind: SymptomKind): number;
   /** Drain the nodes owed a verification probe this tick (v0.36). Each entry
    *  carries `first` — whether this is the first probe of that node's burst —
    *  straight from the queue's own bookkeeping (v0.38.2). The runner's label
@@ -1118,6 +1119,26 @@ class ZwaveDataImpl implements ZwaveData {
       // window can reach the verifier's evidence floor before it is scored.
       this.requestVerification(s.nodeId);
     }
+    // A node going Dead mid-episode confounds any later "no action" credit
+    // (v0.40) — marked here, where node status is in front of us; resolve()
+    // cannot see it. Runs for EVERY open episode, including those already in
+    // their confirmation window: a death during confirmation is exactly the
+    // audited case (the remediation ping's revival booked as spontaneous).
+    {
+      const snap = this.snapshot();
+      for (const ep of oc.openEpisodes()) {
+        if (ep.nodeId == null) continue;
+        // NEVER dead-flap (v0.40 review, critical): Dead status is that
+        // symptom's own DEFINITION — its node is Dead by construction while
+        // the episode is open, so marking it would structurally starve the
+        // dead-flap control arm forever (the v0.36 inert-learning-loop
+        // disease, reintroduced by the guard built to protect the arms). A
+        // confound is a death EXTERNAL to the measured signal.
+        if (ep.kind === 'dead-flap') continue;
+        const nd = snap.find((x) => x.nodeId === ep.nodeId);
+        if (nd && nd.status === NodeStatus.Dead) oc.markConfounded(ep.nodeId, ep.kind);
+      }
+    }
     // Keep improving each LIVE episode's before-window as probe evidence lands
     // (v0.36). Refining on the ping's own resolution would be too early — the
     // service call returns when HA accepts it, while the node's statistics push
@@ -1265,6 +1286,10 @@ class ZwaveDataImpl implements ZwaveData {
 
   unverifiableTransientCount(kind: SymptomKind): number {
     return this.outcomes ? this.outcomes.unverifiableTransient(kind) : 0;
+  }
+
+  confoundedCount(kind: SymptomKind): number {
+    return this.outcomes ? this.outcomes.confounded(kind) : 0;
   }
 
   /**

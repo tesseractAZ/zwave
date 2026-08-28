@@ -14,7 +14,7 @@ import { mkdtempSync, statSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createZwaveData, type ZwaveData } from '../src/zwave/zwaveData';
-import type { NodeSnapshot } from '../src/types';
+import { NodeStatus, type NodeSnapshot } from '../src/types';
 import type { HaWsClient, HaEventHandler, HaSubscription } from '../src/ha/haWsClient';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -641,6 +641,54 @@ test('the first-of-burst flag is true EXACTLY once per burst (v0.38.2)', async (
       for (const e of zd.drainVerifyRequests(t0 + i * 80_000)) if (e.id === 7) flags2.push(e.first);
     }
     assert.equal(flags2[0], true, 'the next burst announces itself too');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a node going DEAD mid-episode is marked confounded by the data layer — the ledger cannot see status (v0.40)', async () => {
+  // The audited exemplar: rtt-degraded → node death → dead-remediation revival
+  // → booked "improved (no action)". The ledger's guard needs the mark, and
+  // only this layer owns node status; a deleted call-site line would leave the
+  // guard permanently inert with every gate green (the v0.33 class).
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-confound-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+    const real = zd.snapshot();
+    const asAlive = real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+    const asDead = real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Dead, isListening: true } : n));
+    const shadow = zd as unknown as {
+      snapshot: () => NodeSnapshot[];
+      updateEpisodes: (s: unknown[], now: number) => void;
+      outcomes: { markConfounded: (n: number | null, k: string) => void };
+    };
+    const marked: Array<[number | null, string]> = [];
+    const orig = shadow.outcomes.markConfounded.bind(shadow.outcomes);
+    shadow.outcomes.markConfounded = (n, k) => { marked.push([n, k]); orig(n, k); };
+
+    const t0 = 1_800_000_000_000;
+    const symptom = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+    shadow.snapshot = () => asAlive;
+    shadow.updateEpisodes([symptom], t0);          // episode opens, node alive
+    assert.equal(marked.length, 0, 'an alive node is never marked');
+    // A dead-flap episode on the same node opens too — Dead status is that
+    // symptom's own DEFINITION, so it must NEVER be marked (v0.40 review,
+    // critical): marking it would starve the dead-flap control arm forever.
+    const flapSymptom = { kind: 'dead-flap', nodeId: 7, severity: 'crit', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+    shadow.updateEpisodes([symptom, flapSymptom], t0 + 30_000);
+    shadow.snapshot = () => asDead;
+    shadow.updateEpisodes([symptom, flapSymptom], t0 + 60_000); // node goes Dead mid-episode
+    assert.ok(marked.some(([n, k]) => n === 7 && k === 'rtt-degraded'),
+      `the Dead transition must mark the open episode confounded: ${JSON.stringify(marked)}`);
+    assert.ok(!marked.some(([, k]) => k === 'dead-flap'),
+      `dead-flap is its own definition, never a confound: ${JSON.stringify(marked)}`);
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });
