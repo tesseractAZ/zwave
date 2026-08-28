@@ -140,16 +140,31 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
           log(`history: schema ${String(obj.v)} unsupported — starting fresh`);
           return map;
         }
-        // Guard (b): host just booted → wall clock may be pre-NTP (no RTC), so
-        // any "fresh"-looking savedAt is untrustworthy. See the file header.
-        if (bootGraceMs > 0 && uptimeMs() < bootGraceMs) {
-          log(`history: host up ${Math.round(uptimeMs() / 1000)}s (< ${Math.round(bootGraceMs / 1000)}s) — clock may be pre-NTP, starting fresh`);
+        const savedAt = typeof obj.savedAt === 'number' ? obj.savedAt : 0;
+        const ageMs = now() - savedAt;
+        // Guard (b), v0.40: early boot alone no longer discards. The premise
+        // ("no battery RTC, clock may be hours stale pre-NTP") is falsified on
+        // this hardware — through a 59-minute power cut the Pi 5's RTC held
+        // time to within 0.2 s, and this guard threw the sparklines away ~20 s
+        // AFTER NTP had confirmed the clock. The trusted case is a clock that
+        // PROVABLY CARRIED THROUGH THE OUTAGE: an age reading strictly greater
+        // than this boot's uptime plus a minute of slack, which only a clock
+        // that kept running while the host was down can show. A pre-NTP
+        // RTC-less clock restores either near epoch (age negative) or from a
+        // shutdown-time file (age ≈ uptime) — both fail this test and start
+        // fresh, exactly as before v0.40 (these rings carry no per-point
+        // timestamps, so a wrongly-admitted stale ring could not self-heal
+        // after the NTP step; the carried proof is what makes admission safe).
+        // Residual: an unclean cut more than the save cadence after the last
+        // flush lets a file-restored clock read as carried by the flush-to-cut
+        // gap — bounded by the dirty-save cadence, not by the outage.
+        const clockCarried = savedAt > 0 && ageMs > uptimeMs() + 60_000;
+        if (bootGraceMs > 0 && uptimeMs() < bootGraceMs && !clockCarried) {
+          log(`history: host up ${Math.round(uptimeMs() / 1000)}s without proof the clock carried through the outage — starting fresh`);
           return map;
         }
         // Guard (a): wall-clock age. `ageMs < 0` = future-dated (clock stepped
         // backwards since the save) — equally untrustworthy, so also discard.
-        const savedAt = typeof obj.savedAt === 'number' ? obj.savedAt : 0;
-        const ageMs = now() - savedAt;
         if (maxAgeMs > 0 && (savedAt <= 0 || ageMs < 0 || ageMs > maxAgeMs)) {
           const why = savedAt <= 0 ? 'has no savedAt' : ageMs < 0 ? 'is future-dated' : `is ${Math.round(ageMs / 60000)}m old`;
           log(`history: snapshot ${why} — starting fresh`);

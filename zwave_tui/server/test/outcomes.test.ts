@@ -1018,3 +1018,77 @@ test('a NULL before-window is not a transient either — zero evidence is no bas
   assert.equal(o.unverifiable('rtt-degraded'), 1);
   assert.equal(o.unverifiableTransient('rtt-degraded'), 0);
 });
+
+// ── v0.40: confounded closures are credited to neither arm ──────────────────
+
+test('a skipped (confirmation-window) action CONFOUNDS the episode — no control credit for a revival we caused (v0.40)', () => {
+  // The audited exemplar: rtt-degraded cleared, a dead-remediation ping ran
+  // during the confirmation window and revived the node, and the ledger booked
+  // "improved (no action)" — a spontaneous recovery that was nothing of the
+  // sort. The skip already refused to attribute the action; now it also
+  // refuses the control claim.
+  const logged: string[] = [];
+  const o = createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  o.open(57, 'rtt-degraded', 1000, WT(400));
+  o.recordAction(57, 'ping', false, 1500, () => true); // symptom already absent → skip
+  o.resolve(57, 'rtt-degraded', 2000, WT(30));
+  assert.equal(o.confounded('rtt-degraded'), 1, 'counted as confounded');
+  assert.equal(o.baseRate('rtt-degraded'), null, 'and the control arm gained nothing');
+  const line = logged.find((l) => /episode 57:rtt-degraded/.test(l));
+  assert.match(line!, /\(confounded — the node died or was remediated mid-episode; credited to neither arm\)/,
+    `the closure names the confound: ${line}`);
+});
+
+test('markConfounded (node went Dead mid-episode) blocks control credit the same way (v0.40)', () => {
+  const o = store();
+  o.open(49, 'rtt-degraded', 1000, WT(400));
+  o.markConfounded(49, 'rtt-degraded');
+  o.resolve(49, 'rtt-degraded', 2000, WT(30));
+  assert.equal(o.confounded('rtt-degraded'), 1);
+  assert.equal(o.baseRate('rtt-degraded'), null);
+});
+
+test('an ATTRIBUTED action is the experiment — its arm is untouched by the confound guard (v0.40)', () => {
+  const logged: string[] = [];
+  const o = createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  o.open(7, 'rtt-degraded', 1000, WT(400));
+  o.recordAction(7, 'ping', false, 1500); // live symptom → attributed
+  o.resolve(7, 'rtt-degraded', 2000, WT(30));
+  assert.equal(o.confounded('rtt-degraded'), 0, 'an attributed action is not a confound');
+  const line = logged.find((l) => /episode 7:rtt-degraded/.test(l));
+  assert.match(line!, /improved after ping/, `the action arm scored it: ${line}`);
+  assert.doesNotMatch(line!, /confounded/);
+});
+
+test('a confounded UNVERIFIABLE episode keeps its unverifiable classification — the starvation taxonomy wins (v0.40)', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }));
+  o.markConfounded(7, 'rtt-degraded');
+  o.resolve(7, 'rtt-degraded', 2000, WT(30));
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 1, 'still a transient');
+  assert.equal(o.confounded('rtt-degraded'), 0, 'not double-counted as confounded');
+});
+
+test('a confounded NON-improvement is excluded from the control n as well — no back-door bias on the base rate (v0.40)', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1000, WT(90));
+  o.markConfounded(7, 'rtt-degraded');
+  o.resolve(7, 'rtt-degraded', 2000, WT(89)); // no-change
+  assert.equal(o.confounded('rtt-degraded'), 1);
+  assert.equal(o.baseRate('rtt-degraded'), null, 'the n did not move either');
+});
+
+test('the confounded counter survives save/load (v0.40)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'outcomes-confounded-'));
+  const path = join(dir, 'o.json');
+  try {
+    const o = createOutcomeStore({ path, releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0 });
+    o.open(57, 'rtt-degraded', 1000, WT(400));
+    o.markConfounded(57, 'rtt-degraded');
+    o.resolve(57, 'rtt-degraded', 2000, WT(30));
+    o.save();
+    const o2 = createOutcomeStore({ path, releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0 });
+    o2.load();
+    assert.equal(o2.confounded('rtt-degraded'), 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

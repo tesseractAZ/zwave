@@ -77,6 +77,8 @@ export interface ZwaveDataSource {
   unverifiableUnprobeableCount(kind: SymptomKind): number;
   /** Of those, transient blinks — over before the floor filled (v0.39). REQUIRED — see ackEvent. */
   unverifiableTransientCount(kind: SymptomKind): number;
+  /** No-action closures confounded by a mid-episode death/remediation (v0.40). REQUIRED — see ackEvent. */
+  confoundedCount(kind: SymptomKind): number;
   /** Learned RSSI normal for a node (v0.35). REQUIRED — see ackEvent. */
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** Has the first roster load completed? Falls back to "roster non-empty". */
@@ -187,6 +189,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     unverifiableCount: (k) => zd.unverifiableCount(k),
     unverifiableUnprobeableCount: (k) => zd.unverifiableUnprobeableCount(k),
     unverifiableTransientCount: (k) => zd.unverifiableTransientCount(k),
+    confoundedCount: (k) => zd.confoundedCount(k),
     rssiNormal: (n) => zd.rssiNormal(n),
   };
 }
@@ -290,6 +293,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     unverifiableCount: (kind) => zwaveData.unverifiableCount(kind),
     unverifiableUnprobeableCount: (kind) => zwaveData.unverifiableUnprobeableCount(kind),
     unverifiableTransientCount: (kind) => zwaveData.unverifiableTransientCount(kind),
+    confoundedCount: (kind) => zwaveData.confoundedCount(kind),
     rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,

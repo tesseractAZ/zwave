@@ -351,6 +351,9 @@ export interface DataProvider {
   /** Of the unverifiable, transient blinks — the degraded state ended before
    *  its evidence floor could fill (v0.39). Unscoreable by construction. */
   unverifiableTransientCount?(kind: SymptomKind): number;
+  /** Scoreable no-action closures whose node died or was remediated
+   *  mid-episode (v0.40) — credited to neither arm. */
+  confoundedCount?(kind: SymptomKind): number;
   /**
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.

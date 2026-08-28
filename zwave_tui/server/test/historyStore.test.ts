@@ -73,10 +73,20 @@ test('future-dated snapshot (clock stepped back since save) is discarded', () =>
   assert.equal(mkStore(path, { now: () => FIXED - 10 * 60_000 }).load().size, 0);
 });
 
-test('host-boot guard: fresh snapshot discarded while host uptime < bootGraceMs', () => {
+test('host-boot guard trusts only a clock that PROVABLY CARRIED through the outage (v0.40)', () => {
+  // The Pi 5's RTC carried correct time through a 59-minute cut while the
+  // uptime-only guard started fresh anyway. The proof of carrying is an age
+  // reading strictly greater than this boot's uptime (plus slack) — a
+  // file-restored RTC-less clock reads age ≈ uptime and must still start
+  // fresh, because these rings carry no timestamps and could never self-heal.
   const path = freshPath();
-  mkStore(path).save(mapOf({ 8: { rssi: [-50], rtt: [9] } }));
-  assert.equal(mkStore(path, { uptimeMs: () => 30_000 }).load().size, 0);
+  mkStore(path).save(mapOf({ 8: { rssi: [-50], rtt: [9] } })); // savedAt = FIXED
+  assert.equal(mkStore(path, { uptimeMs: () => 30_000, now: () => FIXED + 120_000 }).load().size, 1,
+    'age 120s > uptime 30s + slack: the clock carried — loads during early boot');
+  assert.equal(mkStore(path, { uptimeMs: () => 30_000, now: () => FIXED + 35_000 }).load().size, 0,
+    'age ≈ uptime is the file-restored signature — starts fresh');
+  assert.equal(mkStore(path, { uptimeMs: () => 30_000, now: () => FIXED - 60_000 }).load().size, 0,
+    'a clock behind the save starts fresh during early boot');
   assert.equal(mkStore(path, { uptimeMs: () => 200_000 }).load().size, 1);
   assert.equal(mkStore(path, { uptimeMs: () => 1, bootGraceMs: 0 }).load().size, 1);
 });

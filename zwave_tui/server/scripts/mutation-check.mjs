@@ -914,8 +914,8 @@ const MUTANTS = [
     // Never resets on a successful probe, so "3rd miss" comes to mean three
     // since boot rather than three in a row — which is the difference between
     // a failing node and a node that has dropped three packets all year.
-    find: '    if (answered) state.missStreak.delete(nodeId);',
-    repl: '    if (answered) void nodeId;',
+    find: '      if (answered) {\n        state.missStreak.delete(nodeId);',
+    repl: '      if (answered) {\n        void nodeId;',
     what: 'the miss streak counts CONSECUTIVE failures; one answer resets it' },
   { id: 'first-miss-is-not-a-warning', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Warns on every transient miss again. Measured live at ~2% of probes to
@@ -972,13 +972,13 @@ const MUTANTS = [
     // time after noteStale has overwritten it compares against NOW, and nothing
     // is ever newer — so every node reads as unheard and the distinction the
     // sweep exists to draw disappears.
-    find: '      const selfProven = seenAt != null && t - seenAt < o.config.staleMs;',
-    repl: '      const selfProven = seenAt != null && seenAt > (state.lastStaleAt.get(nodeId) ?? 0);',
+    find: '      const heardRecently = seenAt != null && t - seenAt < o.config.staleMs;',
+    repl: '      const heardRecently = seenAt != null && seenAt > (state.lastStaleAt.get(nodeId) ?? 0);',
     what: 'self-proven is measured against the CADENCE, not against a just-overwritten probe time' },
   { id: 'probe-outcome-is-recorded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // The rate never accrues: probes fire, outcomes are judged, and nothing is
     // persisted — leaving the same ephemeral log lines v0.36 had.
-    find: "      o.onProbeResult?.(nodeId, false, state.selfProvenAtProbe.get(nodeId) ?? false);",
+    find: '      o.onProbeResult?.(nodeId, false, self);',
     repl: '      void nodeId;',
     what: 'a missed probe is recorded to the persisted reply rate' },
   { id: 'probe-row-needs-a-sample', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
@@ -1085,12 +1085,12 @@ const MUTANTS = [
     repl: "      }, /* learn */ true),",
     what: 'a measurement probe is never attributed to the outcome ledger' },
   { id: 'sweep-lane-uses-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
-    find: "      state.awaitingAnswer.set(nodeId, t);\n      void (o.probe ?? o.ping)(nodeId).catch(() => {\n        state.awaitingAnswer.delete(nodeId);\n        const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;\n        o.log('warn', nodeId, m); o.log2?.(m);",
-    repl: "      state.awaitingAnswer.set(nodeId, t);\n      void o.ping(nodeId).catch(() => {\n        state.awaitingAnswer.delete(nodeId);\n        const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;\n        o.log('warn', nodeId, m); o.log2?.(m);",
+    find: "      pendProbe(state, nodeId, t, selfProven);\n      void (o.probe ?? o.ping)(nodeId).catch(() => {",
+    repl: "      pendProbe(state, nodeId, t, selfProven);\n      void o.ping(nodeId).catch(() => {",
     what: 'the liveness sweep rides the non-learning probe' },
   { id: 'verify-lane-uses-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
-    find: "      state.awaitingAnswer.set(nodeId, t);\n      void (o.probe ?? o.ping)(nodeId).catch(() => {\n          state.awaitingAnswer.delete(nodeId);",
-    repl: "      state.awaitingAnswer.set(nodeId, t);\n      void o.ping(nodeId).catch(() => {\n          state.awaitingAnswer.delete(nodeId);",
+    find: "      pendProbe(state, nodeId, t);\n      void (o.probe ?? o.ping)(nodeId).catch(() => {\n          unpendProbe(state, nodeId, t);",
+    repl: "      pendProbe(state, nodeId, t);\n      void o.ping(nodeId).catch(() => {\n          unpendProbe(state, nodeId, t);",
     what: 'the verification burst rides the non-learning probe' },
   { id: 'dead-ladder-keeps-learning', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Un-instruments the one autonomous remediation whose attribution justifies
@@ -1111,8 +1111,8 @@ const MUTANTS = [
     // while rate-fallback scored 6-for-6 under identical probes, and the log
     // could not say WHICH floor failed — a verdict that cannot show its
     // arithmetic invites the next guessed fix.
-    find: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]${ep.transient ? ' (transient — degraded state ended before its evidence floor)' : ''}`);",
-    repl: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'}${ep.transient ? ' (transient — degraded state ended before its evidence floor)' : ''}`);",
+    find: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]${tag}`);",
+    repl: "      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'}${tag}`);",
     what: 'an episode closure logs the per-window evidence counts behind its verdict' },
   { id: 'transient-needs-after-evidence', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     // Classifying on the before-side alone would call a BOTH-sides-starved
@@ -1131,8 +1131,8 @@ const MUTANTS = [
   { id: 'transient-tag-renders', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     // Silences the closure-line tag: the counter would still be right but the
     // log — the thing audits read — would stop distinguishing the blink.
-    find: "${ep.transient ? ' (transient — degraded state ended before its evidence floor)' : ''}`);",
-    repl: '`);',
+    find: "        ? ' (transient — degraded state ended before its evidence floor)'",
+    repl: "        ? ''",
     what: 'a transient closure names itself on the closure line' },
   { id: 'rtt-floor-is-three', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     // Lowers the rtt evidence floor to one reading — a median-of-one would
@@ -1167,6 +1167,116 @@ const MUTANTS = [
     find: '    unverifiableTransientCount: (k) => zd.unverifiableTransientCount(k),',
     repl: '    unverifiableTransientCount: () => 0,',
     what: 'the production bridge forwards unverifiableTransientCount to the data layer' },
+  /* ── v0.40: per-probe judgment, honest self-proven, confound guard, clock trust ── */
+  { id: 'probe-judgment-per-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Judges only the newest matured probe — the single-slot disease
+    // reintroduced: a dying node's five-probe burst collapses to one miss.
+    find: '    const mature = pending.filter((p) => now - p.at >= graceMs);',
+    repl: '    const mature = pending.filter((p) => now - p.at >= graceMs).slice(-1);',
+    what: 'EVERY matured probe is judged — a burst is five judgments, not one' },
+  { id: 'young-probes-stay-pending', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Drops in-flight probes at judgment time: an answer arriving inside the
+    // grace would never be judged at all.
+    find: '    const young = pending.filter((p) => now - p.at < graceMs);',
+    repl: '    const young: { at: number; self: boolean }[] = [];',
+    what: 'a probe younger than the answer grace stays pending, never vanishes' },
+  { id: 'selfproven-requires-own-voice', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Reverts to the cadence-only definition the audit refuted: the node's
+    // answer to OUR previous probe reads as it speaking on its own.
+    find: '      const spokeOnItsOwn = seenAt != null && (attributed == null || seenAt > attributed);',
+    repl: '      const spokeOnItsOwn = seenAt != null;',
+    what: "self-proven means the node spoke PAST our own probe's answer" },
+  { id: 'selfproven-strictly-past', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // The boundary case IS the defect: lastSeen exactly equal to our probe's
+    // answer is the echo, and >= would bless it.
+    find: '      const spokeOnItsOwn = seenAt != null && (attributed == null || seenAt > attributed);',
+    repl: '      const spokeOnItsOwn = seenAt != null && (attributed == null || seenAt >= attributed);',
+    what: 'a lastSeen equal to our own answer is the echo, not the voice' },
+  { id: 'probe-flag-rides-the-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Reports every judgment with a hardcoded flag instead of the probe's own
+    // context — the persisted reply-rate dimension goes blind.
+    find: '      out.push({ nodeId, answered, misses, self });',
+    repl: '      out.push({ nodeId, answered, misses, self: false });',
+    what: "each judgment carries ITS probe's self-proven context, not a constant" },
+  { id: 'lastprobeseen-recorded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Never records what our probe put on the record — attribution goes blind
+    // and every echo reads as the node's own voice again.
+    find: '        if (seen != null) state.lastProbeSeen.set(nodeId, seen);',
+    repl: '        void seen;',
+    what: 'an answered probe records the lastSeen it produced, for attribution' },
+  { id: 'skip-marks-confounded', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // The skip keeps refusing attribution but forgets the confound — the
+    // audited false control credit ships again.
+    find: '          ep.confounded = true;\n          continue;',
+    repl: '          continue;',
+    what: 'a confirmation-window action confounds the episode it cannot be credited to' },
+  { id: 'confounded-not-control', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Lets confounded closures back into the control arm (ep.transient is
+    // never set on a scoreable verdict, so the branch goes dead).
+    find: '        if (ep.confounded) {',
+    repl: '        if (ep.transient) {',
+    what: 'a confounded no-action closure is credited to neither arm' },
+  { id: 'markconfounded-sets-flag', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    find: '      const ep = open.get(key(nodeId, kind));\n      if (ep) ep.confounded = true;',
+    repl: '      void open.get(key(nodeId, kind));',
+    what: 'markConfounded actually marks the open episode' },
+  { id: 'dead-marks-confounded', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Deletes the only live feeder of the Dead-transition confound — the
+    // guard exists but nothing ever arms it (the v0.33 class).
+    find: '        if (nd && nd.status === NodeStatus.Dead) oc.markConfounded(ep.nodeId, ep.kind);',
+    repl: '        void nd;',
+    what: 'a node going Dead mid-episode reaches the ledger as a confound mark' },
+  { id: 'confounded-tag-renders', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    find: "          ? ' (confounded — the node died or was remediated mid-episode; credited to neither arm)'",
+    repl: "          ? ''",
+    what: 'a confounded closure names itself on the closure line' },
+  { id: 'confounded-row-above-zero', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: '    if (conf > 0) {',
+    repl: '    if (conf >= 0) {',
+    what: 'the confounded row appears only when there ARE confounded closures' },
+  { id: 'bridge-forwards-confounded', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    confoundedCount: (k) => zd.confoundedCount(k),',
+    repl: '    confoundedCount: () => 0,',
+    what: 'the production bridge forwards confoundedCount to the data layer' },
+  { id: 'history-grace-needs-behind-clock', file: 'src/zwave/historyStore.ts', tests: ['historyStore'],
+    // Reverts to the uptime-only guard whose premise the power cut falsified:
+    // an RTC that carried correct time still loses its data on every blip.
+    find: '        if (bootGraceMs > 0 && uptimeMs() < bootGraceMs && !clockCarried) {',
+    repl: '        if (bootGraceMs > 0 && uptimeMs() < bootGraceMs) {',
+    what: 'early boot trusts a clock that provably carried through the outage' },
+  { id: 'history-carried-needs-outage', file: 'src/zwave/historyStore.ts', tests: ['historyStore'],
+    // Weakens the proof to "age non-negative" — the file-restored RTC-less
+    // clock (age ≈ uptime) would then admit an outage-old ring that these
+    // untimestamped sparklines could never self-heal after the NTP step.
+    find: '        const clockCarried = savedAt > 0 && ageMs > uptimeMs() + 60_000;',
+    repl: '        const clockCarried = savedAt > 0 && ageMs >= 0;',
+    what: 'carried means age STRICTLY past this boot, not merely non-negative' },
+  { id: 'evidence-grace-needs-behind-clock', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    find: '        const grace = bootGraceMs > 0 && uptimeMs() < bootGraceMs && !clockCarried;',
+    repl: '        const grace = bootGraceMs > 0 && uptimeMs() < bootGraceMs;',
+    what: 'early boot keeps the fine ring for a clock that provably carried' },
+  { id: 'evidence-carried-needs-outage', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    find: '        const clockCarried = ageMs > uptimeMs() + 60_000;',
+    repl: '        const clockCarried = ageMs >= 0;',
+    what: 'carried means age STRICTLY past this boot, not merely non-negative' },
+  { id: 'twin-lanes-dedup', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores the same-tick twin probes: shared `at`, wrong-lane unpend on a
+    // transport failure, one silent instant counted as two misses.
+    find: '  const staleDeduped = stale.filter((id) => !verifySet.has(id));',
+    repl: '  const staleDeduped = stale;',
+    what: 'one measurement probe per node per tick — the verify probe answers the sweep' },
+  { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Withdraws the whole pending list on one transport failure — the other
+    // probes' owed judgments vanish with it.
+    find: '  if (i >= 0) pending.splice(i, 1);',
+    repl: '  if (i >= 0) pending.splice(0, pending.length);',
+    what: 'a transport failure withdraws only ITS probe, never the siblings' },
+  { id: 'deadflap-not-confounded', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Marks dead-flap episodes confounded by their own defining status —
+    // structurally starving that control arm forever (v0.40 review, critical).
+    find: "        if (ep.kind === 'dead-flap') continue;",
+    repl: '        ;',
+    what: "Dead status never confounds dead-flap — it is that symptom's own definition" },
   /* ── known-EQUIVALENT: cannot be killed under the current design ───── */
   { id: 'menu-network-target', file: 'src/telnet/session.ts',
     find: "    this.menuTarget = scope === 'device' ? (this.actionTargetNode() ?? null) : null;",
@@ -1392,8 +1502,8 @@ const MUTANTS = [
   { id: 'probe-answer-waits-grace', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Judges a probe before the round trip could possibly have completed, so
     // every probe reads as unanswered.
-    find: '    if (now - at < graceMs) continue;',
-    repl: '    if (false) continue;',
+    find: '    const mature = pending.filter((p) => now - p.at >= graceMs);\n    if (mature.length === 0) continue;',
+    repl: '    const mature = pending;\n    if (mature.length === 0) continue;',
     what: 'a probe is judged only after its round trip has had time to complete' },
   { id: 'probe-answer-roster-gap', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Calls a node missing from the roster a failed probe — manufacturing the

@@ -330,17 +330,45 @@ test('a future-dated snapshot is discarded entirely (bogus clock at save)', () =
   assert.equal(s.coarseForNode(6).length, 0);
 });
 
-test('BOOT-GRACE loads the coarse tier + coverage but drops the fine ring (daily power blip must not wipe baselines)', () => {
+test('BOOT-GRACE with the clock AT/PAST the save keeps the fine ring — an RTC that carried time is not distrusted (v0.40)', () => {
+  // The old premise ("no battery RTC, clock may be pre-NTP") is falsified on
+  // this hardware: the Pi 5's RTC held time to 0.2 s across a 59-minute power
+  // cut while the uptime-only guard threw the fine ring away ~20 s AFTER NTP
+  // had confirmed the clock. A clock reading at or past the last save yields
+  // sane non-negative ages — the normal age checks are the honest judge.
   const path = freshPath();
   const writer = mkStore(path);
   writer.registerNode(6, FIXED - 1000);
   writer.record(6, stats({ commandsTX: 10, rssi: -60 }), NodeStatus.Alive, FRESH, FIXED);
   writer.save();
-  const booting = createEvidenceStore({ path, cadenceMs: TICK, now: () => FIXED + 60_000, uptimeMs: () => 5_000, bootGraceMs: 180_000 });
+  const booting = createEvidenceStore({ path, cadenceMs: TICK, now: () => FIXED + 300_000, uptimeMs: () => 5_000, bootGraceMs: 180_000 });
   booting.load();
-  assert.equal(booting.forNode(6).length, 0, 'fine ring distrusted under boot-grace');
+  assert.equal(booting.forNode(6).length, 1, 'a carried clock keeps the fine ring through a reboot');
   assert.equal(booting.coarseForNode(6).length, 1, 'coarse tier survives the power blip');
   assert.equal(booting.coverage(6)?.firstSeenAt, FIXED - 1000, 'coverage survives too');
+});
+
+test('BOOT-GRACE with age ≈ uptime (the file-restored signature) still drops the fine ring (v0.40)', () => {
+  const path0 = freshPath();
+  const writer0 = mkStore(path0);
+  writer0.registerNode(6, FIXED - 1000);
+  writer0.record(6, stats({ commandsTX: 10, rssi: -60 }), NodeStatus.Alive, FRESH, FIXED);
+  writer0.save(); // savedAt = FIXED
+  const booting0 = createEvidenceStore({ path: path0, cadenceMs: TICK, now: () => FIXED + 30_000, uptimeMs: () => 25_000, bootGraceMs: 180_000 });
+  booting0.load();
+  assert.equal(booting0.forNode(6).length, 0, 'age ≈ uptime is no proof the clock carried — coarse tier only');
+  assert.equal(booting0.coarseForNode(6).length, 1, 'coarse tier still survives');
+});
+
+test('BOOT-GRACE with the clock BEHIND the save still drops the fine ring (the actual no-RTC signature)', () => {
+  const path = freshPath();
+  const writer = mkStore(path);
+  writer.registerNode(6, FIXED - 1000);
+  writer.record(6, stats({ commandsTX: 10, rssi: -60 }), NodeStatus.Alive, FRESH, FIXED);
+  writer.save(); // savedAt = FIXED
+  const booting = createEvidenceStore({ path, cadenceMs: TICK, now: () => FIXED - 4 * 60_000, uptimeMs: () => 5_000, bootGraceMs: 180_000 });
+  booting.load();
+  assert.equal(booting.forNode(6).length, 0, 'fine ring distrusted when the clock reads behind the save');
 });
 
 test('BOOT-GRACE with the clock BEHIND savedAt (the no-RTC reboot norm) still keeps the coarse tier', () => {

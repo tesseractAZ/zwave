@@ -87,6 +87,13 @@ export interface Episode {
    *  degraded state simply ended before it could be measured. A transient
    *  blink, unscoreable by construction; not a fixable evidence gap. */
   transient?: boolean;
+  /** The node died, or a successful remediation ran on it unattributed (the
+   *  confirmation-window skip), while this episode was open (v0.40). A
+   *  no-action closure here is not a spontaneous recovery — an audit caught
+   *  one booked control-arm `improved` whose clean after-window existed only
+   *  because a dead-remediation ping revived the node mid-episode. Credited
+   *  to NEITHER arm. */
+  confounded?: boolean;
 }
 
 /** A decayed tally of episodes and their successes. */
@@ -163,6 +170,13 @@ export interface OutcomeStore {
    *  kind's floor while the after-window met its own (v0.39) — the degraded
    *  state ended before it could be measured. Unscoreable by construction. */
   unverifiableTransient(kind: SymptomKind): number;
+  /** Scoreable no-action closures whose node died or was remediated
+   *  mid-episode (v0.40) — credited to neither arm. */
+  confounded(kind: SymptomKind): number;
+  /** Mark the open episode confounded: its node went Dead while the episode
+   *  was open (v0.40). The data layer owns node status; the ledger cannot see
+   *  it. The unattributed-action path marks itself inside recordAction. */
+  markConfounded(nodeId: number | null, kind: SymptomKind): void;
   /**
    * Replace an OPEN episode's before-window with a better-evidenced one (v0.36).
    *
@@ -546,6 +560,9 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   // before-window could reach its kind's floor, while the after-window met its
   // own (v0.39) — transient blinks, unscoreable by construction.
   const unverTransient = new Map<SymptomKind, number>();
+  // Scoreable no-action closures whose node died or was remediated
+  // mid-episode (v0.40) — credited to neither arm; see Episode.confounded.
+  const confoundedTally = new Map<SymptomKind, number>();
   /**
    * Which DISTINCT nodes fed each arm (v0.36.5).
    *
@@ -601,9 +618,25 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const prefix = `${nodeId ?? 'mesh'}:`;
       for (const [k, ep] of open) {
         if (!k.startsWith(prefix)) continue;
-        if (skip?.(k)) continue;
+        if (skip?.(k)) {
+          // The action ran on this node while this episode was already in its
+          // confirmation window — not attributable, but not ignorable either
+          // (v0.40): the recovery about to be booked "no action" may exist
+          // only because this action revived the node. Confounded: the
+          // spontaneous-recovery claim is dead, whatever the verdict.
+          ep.confounded = true;
+          continue;
+        }
         if (ep.action == null) ep.action = { kind: actionKind, atMs, refused };
       }
+    },
+
+    markConfounded(nodeId, kind): void {
+      // The node went Dead while this episode was open (v0.40) — whatever the
+      // windows end up showing, "it recovered on its own" is no longer a clean
+      // control observation. Marked by the data layer, which owns node status.
+      const ep = open.get(key(nodeId, kind));
+      if (ep) ep.confounded = true;
     },
 
     resolve(nodeId, kind, resolvedMs, after, resolveOpts): Episode | null {
@@ -661,9 +694,20 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         }
         dirty = true;
       } else if (ep.action == null) {
-        // Control arm: a symptom that resolved with no action taken.
-        control.set(kind, bump(control.get(kind), ep.verdict === 'improved'));
-        noteNode(controlNodes as unknown as Map<string, Set<number>>, kind, ep.nodeId);
+        if (ep.confounded) {
+          // NOT a control observation (v0.40): the node died or a remediation
+          // ran on it while the episode was open, so "recovered with no
+          // action" is a claim the evidence cannot support — in the audited
+          // exemplar the clean after-window existed only because the
+          // dead-remediation ping revived the node. Excluded from the n as
+          // well as the ok: a confounded non-improvement would bias the base
+          // rate exactly as dishonestly in the other direction.
+          confoundedTally.set(kind, (confoundedTally.get(kind) ?? 0) + 1);
+        } else {
+          // Control arm: a symptom that resolved with no action taken.
+          control.set(kind, bump(control.get(kind), ep.verdict === 'improved'));
+          noteNode(controlNodes as unknown as Map<string, Set<number>>, kind, ep.nodeId);
+        }
         dirty = true;
       } else {
         // Action arm — keyed by (kind, action) to match the un-banded control
@@ -689,7 +733,12 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         w == null
           ? 'none'
           : `fresh=${w.freshN} rtt=${w.rttN} rssi=${w.rssiN} rate=${w.rateKbpsMin != null ? 'y' : 'n'}`;
-      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]${ep.transient ? ' (transient — degraded state ended before its evidence floor)' : ''}`);
+      const tag = ep.transient
+        ? ' (transient — degraded state ended before its evidence floor)'
+        : ep.confounded && ep.action == null && ep.verdict !== 'unverifiable' && ep.verdict !== 'refused-misdiagnosis'
+          ? ' (confounded — the node died or was remediated mid-episode; credited to neither arm)'
+          : '';
+      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]${tag}`);
       return ep;
     },
 
@@ -744,6 +793,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       return unverTransient.get(kind) ?? 0;
     },
 
+    confounded(kind): number {
+      return confoundedTally.get(kind) ?? 0;
+    },
+
     refineBefore(nodeId, kind, window): boolean {
       if (!window) return false;
       const ep = open.get(key(nodeId, kind));
@@ -760,7 +813,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     reset(): void {
-      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); armNodes.clear(); controlNodes.clear();
+      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
     },
 
     load(): void {
@@ -798,6 +851,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         unver: [...unver.entries()],
         unverUnprobe: [...unverUnprobe.entries()],
         unverTransient: [...unverTransient.entries()],
+        confounded: [...confoundedTally.entries()],
         armNodes: [...armNodes.entries()].map(([k, v]) => [k, [...v]] as [string, number[]]),
         controlNodes: [...controlNodes.entries()].map(([k, v]) => [k, [...v]] as [SymptomKind, number[]]),
         // Open episodes are intentionally NOT persisted — an episode spanning a
@@ -807,9 +861,9 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     loadJSON(raw): void {
-      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; unverTransient?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
+      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; unverTransient?: [SymptomKind, number][]; confounded?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
       if (!o || o.v !== 1) return;
-      control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); armNodes.clear(); controlNodes.clear();
+      control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
       for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, t);
       for (const [k, t] of o.action ?? []) if (validTally(t)) action.set(k, t);
       for (const [k, v] of o.fp ?? []) if (Number.isFinite(v) && v >= 0) fp.set(k, v);
@@ -817,6 +871,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       for (const [k, v] of o.unver ?? []) if (Number.isFinite(v) && v >= 0) unver.set(k, v);
       for (const [k, v] of o.unverUnprobe ?? []) if (Number.isFinite(v) && v >= 0) unverUnprobe.set(k, v);
       for (const [k, v] of o.unverTransient ?? []) if (Number.isFinite(v) && v >= 0) unverTransient.set(k, v);
+      for (const [k, v] of o.confounded ?? []) if (Number.isFinite(v) && v >= 0) confoundedTally.set(k, v);
       // Absent in pre-v0.36.5 files: an older ledger simply reports 0 nodes,
       // which the renderer treats as "provenance unknown" rather than as one.
       for (const [k, v] of o.armNodes ?? []) if (Array.isArray(v)) armNodes.set(k, new Set(v.filter((x) => Number.isFinite(x))));

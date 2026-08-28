@@ -854,7 +854,17 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         // means the clock is bogus NOW, not that the file is bad. Under grace,
         // recency judgments (future-dated, fine-ring age) are all untrusted;
         // only an unstamped file (bogus at SAVE time) is discarded outright.
-        const grace = bootGraceMs > 0 && uptimeMs() < bootGraceMs;
+        //
+        // v0.40: grace lifts only for a clock that PROVABLY CARRIED through
+        // the outage — age reading strictly greater than this boot's uptime
+        // plus a minute of slack, which only a clock that kept running while
+        // the host was down can show (the Pi 5's RTC held to 0.2 s across a
+        // 59-minute cut while the uptime-only guard dropped the fine ring
+        // anyway). A file-restored RTC-less clock reads age ≈ uptime and
+        // stays under grace, exactly as before v0.40. See historyStore for
+        // the shared rationale and the save-cadence-bounded residual.
+        const clockCarried = ageMs > uptimeMs() + 60_000;
+        const grace = bootGraceMs > 0 && uptimeMs() < bootGraceMs && !clockCarried;
         if (savedAt <= 0) {
           log('evidence: snapshot has no savedAt — starting fresh');
           return fine;
@@ -872,7 +882,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         // Boot-grace: the coarse tier + coverage metadata are age-judgment-free
         // history — load them; drop only the recency-dependent fine ring.
         const fineTooOld = grace || (maxAgeMs > 0 && ageMs > maxAgeMs) || ageMs < 0;
-        if (grace) log(`evidence: host up ${Math.round(uptimeMs() / 1000)}s — clock untrusted, loading coarse tier only`);
+        if (grace) log(`evidence: host up ${Math.round(uptimeMs() / 1000)}s without proof the clock carried through the outage — loading coarse tier only`);
         else if (fineTooOld) log(`evidence: snapshot is ${Math.round(ageMs / 60000)}m old — fine ring discarded, coarse tier kept`);
 
         // Coverage metadata.

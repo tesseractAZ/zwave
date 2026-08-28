@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.40.0 — 2026-08-27
+
+**The audit queue, all four items — measurement integrity for the instruments
+the engine trusts most.**
+
+**Self-proven means the node's own voice, not our echo.** A probe answer
+advances `lastSeen` too, so "already heard 120m ago on its own — confirming"
+was routinely the node answering the PREVIOUS sweep's probe — a full staleness
+threshold of silence described as confirming — and for quiet-but-answering
+nodes the confirming/unheard split was a sticky sub-minute scheduling bias,
+persisted as if it were device behavior. Self-proven now requires lastSeen to
+have advanced strictly PAST what our own last answered probe put on the record,
+and the echo case gained its own honest sweep label ("silent since answering
+our probe Xm ago — probing for its own voice").
+
+**Every probe gets its own judgment.** awaitingAnswer was a single per-node
+slot, and 60s burst spacing under the 90s answer grace meant each new probe
+overwrote the pending judgment: only the LAST probe of every 5-probe burst was
+ever judged, and a node dying mid-burst logged five misses as one "1st
+consecutive miss". Pending probes are now a per-node list, judged oldest-first
+— and each entry carries its own self-proven flag, because the flag slot had
+the same overwrite disease (found by this release's own new test).
+
+**Confounded closures are credited to neither arm.** An episode whose node
+went Dead mid-episode, or on which a successful remediation ran unattributed
+(the confirmation-window skip), can no longer book a control-arm "improved" —
+the audited exemplar was a revival our own dead-remediation ping caused,
+recorded as spontaneous. Counted apart (counter, closure tag, REMEDY row),
+non-improvements excluded from the control n as well.
+
+**Boot-grace trusts only a clock that PROVABLY carried through the outage.**
+The "no battery RTC" premise is falsified on this host: the Pi 5's RTC held
+time to 0.2s through a 59-minute power cut while the uptime-only guard
+discarded the fine ring ~20s AFTER NTP had confirmed the clock. The proof of
+carrying is an age reading strictly greater than this boot's uptime plus
+slack — only a clock that kept running while the host was down can show it.
+Both RTC-less signatures (near-epoch and file-restored) start fresh exactly
+as before.
+
+**A 25-agent pre-release adversarial review earned its keep twice.** It caught
+one CRITICAL before ship: the Dead-transition confound guard marked dead-flap
+episodes — but Dead status is that symptom's own definition, so the guard
+built to protect the arms would have structurally starved the dead-flap
+control arm forever (the v0.36 inert-loop disease). It also caught the first
+draft of the clock rule failing open on RTC-less hosts (file-restored clocks
+read at-or-past the save), same-tick twin probes sharing one timestamp (a
+transport failure could withdraw the OTHER lane's pending judgment; one
+silent instant counted as two misses — the sweep now stands down for a node
+owed a verification probe that tick), an unpinned unpendProbe property, an
+attribution swallow window now documented as a conservative tiebreak, and a
+stale package-lock version. All fixed and mutation-pinned.
+
+The full harness caught eight anchor drifts across the refactors; all
+repointed and killed.
+
+816 tests. 267 mutation entries: 263 killed, 0 survived, 0 missing, 4 equivalent.
+
 ## 0.39.0 — 2026-08-27
 
 **The instrument fired, the diagnosis landed, and a transient is no longer an
