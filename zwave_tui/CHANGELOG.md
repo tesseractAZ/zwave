@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.40.1 — 2026-08-28
+
+**The echo label follows attribution, never the threshold boundary.**
+
+The first production audit of v0.40.0 (48 agents; 42 findings confirmed, zero
+critical, and a run with zero errors, 100% probe answering, nodes 49/57 clean
+for 40+ hours, both episodes at the 2-burst norm, every shipped feature
+verified live) surfaced one residual defect worth fixing now: the echo-vs-
+unheard label split still jittered at the staleness boundary. A probe-echo-
+only node whose answer was 119 minutes old read "nothing heard past our last
+probe's answer"; at 121 minutes it read "unheard for 120m" — the same
+physical situation split by sub-minute scheduling, sticky per node
+(production node 7: "unheard" on 8 of 10 sweeps while answering every single
+probe). "Unheard" was false in exactly the way this release cycle set out to
+eliminate.
+
+The echo label is now routed by attribution alone: a node whose lastSeen sits
+at or behind our own last answered probe reads echo at any age. "Unheard" is
+reserved for nodes with nothing on record past what our probes produced and
+no probe answer of ours to point to either — which keeps it honest for the
+one case that earns it (a node that last spoke on its own, long ago).
+
+The audit also observed the documented once-per-boot attribution reset at
+scale (~35 fabricated "confirming" labels per restart) — left as documented:
+bounded, diluted, and worth revisiting only if boots become frequent.
+
+817 tests. 268 mutation entries: 264 killed, 0 survived, 0 missing, 4 equivalent.
+
 ## 0.40.0 — 2026-08-27
 
 **The audit queue, all four items — measurement integrity for the instruments
