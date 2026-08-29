@@ -682,10 +682,19 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       const heardRecently = seenAt != null && t - seenAt < o.config.staleMs;
       const spokeOnItsOwn = seenAt != null && (attributed == null || seenAt > attributed);
       const selfProven = heardRecently && spokeOnItsOwn;
+      // The ECHO label is routed by attribution alone, NOT by recency
+      // (v0.40.1): a probe-echo-only node whose answer is 119 minutes old and
+      // one whose answer is 121 minutes old are the same physical situation,
+      // and the first audit of v0.40.0 caught the recency gate splitting them
+      // — "unheard for 120m" on a node answering every probe, decided by
+      // sub-minute scheduling jitter, sticky per node. "Unheard" is reserved
+      // for nodes with nothing on record past what our own probes produced,
+      // and no probe answer of ours to point to either.
+      const echoOnly = attributed != null && seenAt != null && seenAt <= attributed;
       const msg = `auto-ping: node ${nodeId} liveness sweep ` +
         (selfProven
           ? `(already heard ${silence} ago on its own — confirming)`
-          : heardRecently
+          : echoOnly
             ? '(nothing heard past our last probe\'s answer — probing for its own voice)'
             : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`);
       o.log('info', nodeId, msg);

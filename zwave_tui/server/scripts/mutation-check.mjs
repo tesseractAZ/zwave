@@ -1265,6 +1265,14 @@ const MUTANTS = [
     find: '  const staleDeduped = stale.filter((id) => !verifySet.has(id));',
     repl: '  const staleDeduped = stale;',
     what: 'one measurement probe per node per tick — the verify probe answers the sweep' },
+  { id: 'echo-follows-attribution-not-the-clock', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores the recency gate on the echo label: one physical situation
+    // (a node answering every probe, silent otherwise) splits into two labels
+    // on sub-minute scheduling jitter, sticky per node — production node 7
+    // read "unheard for 120m" on 8 of 10 sweeps while answering everything.
+    find: '      const echoOnly = attributed != null && seenAt != null && seenAt <= attributed;',
+    repl: '      const echoOnly = heardRecently && attributed != null && seenAt != null && seenAt <= attributed;',
+    what: 'the echo label follows attribution alone, never the threshold boundary' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.

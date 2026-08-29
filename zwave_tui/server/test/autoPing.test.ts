@@ -1161,3 +1161,32 @@ test('a node owed a verification probe this tick is dropped from the sweep — o
   assert.deepEqual(d.stale, [], 'the sweep stands down for this node this tick');
   assert.ok(d.staleDue >= 1, 'the node is still counted due — it is deferred, not forgotten');
 });
+
+test('a probe-echo-only node reads ECHO past the threshold too — the label follows attribution, not boundary jitter (v0.40.1)', async () => {
+  // The first v0.40.0 audit caught the recency gate splitting one physical
+  // situation into two labels: a node whose probe answer was 119m old read
+  // echo, 121m read "unheard for 120m" — sub-minute scheduling jitter, sticky
+  // per node (production node 7: 8/10 "unheard" while answering every probe).
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const quiet = node(9, { stats: { lastSeen: T } as never });
+  const nodes = [node(1, { isController: true }), quiet];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+    config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
+  });
+  const T0 = T + BOOT_WINDOW_MS + MIN;
+  clock = T0; h.tick();                                  // sweep 1 probes node 9
+  (quiet.stats as { lastSeen: number | null }).lastSeen = T0 + 5_000; // it answers
+  clock = T0 + 2 * MIN; h.tick();                        // judged: answered, attributed
+  lines.length = 0;
+  clock = T0 + 245 * MIN; h.tick();                      // sweep 2: the answer is now PAST the threshold
+  h.stop();
+  const probe = lines.find((l) => l.includes('liveness sweep'));
+  assert.ok(probe, 'the node is swept');
+  assert.match(probe!, /nothing heard past our last probe's answer — probing for its own voice/,
+    `attribution routes the label even past the threshold: ${probe}`);
+  assert.ok(!/unheard for/.test(probe!), 'a node answering our probes is never "unheard"');
+});
