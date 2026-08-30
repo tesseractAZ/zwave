@@ -74,7 +74,7 @@ export function renderTopology(ctx: ScreenCtx): string[] {
     return centeredNotice(view, 'TOPOLOGY / ROUTES', [
       c.grey('Loading route topology…'),
       ...(err ? ['', c.red(truncate(err, Math.min(W - 8, 60)))] : []),
-    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
+    ], [['1-9', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   // End nodes only (the controller is node 1 — it has no route to itself).
@@ -82,7 +82,7 @@ export function renderTopology(ctx: ScreenCtx): string[] {
   if (endNodes.length === 0) {
     return centeredNotice(view, 'TOPOLOGY / ROUTES', [
       c.grey('No end nodes in the mesh yet'),
-    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
+    ], [['1-9', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   const noise = data.noiseFloor();
@@ -268,7 +268,7 @@ export function renderTopology(ctx: ScreenCtx): string[] {
     rightStatus: rs,
     body,
     // Topology honours the dBm↔margin toggle, and now scrolls its route tree.
-    keys: [['↑↓', 'SCROLL'], ['1-8', 'SCREENS'], ['T', 'UNITS', 1], ['Q', 'BACK']],
+    keys: [['↑↓', 'SCROLL'], ['1-9', 'SCREENS'], ['T', 'UNITS', 1], ['Q', 'BACK']],
   });
 }
 

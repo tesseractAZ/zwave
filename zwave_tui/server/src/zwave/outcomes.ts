@@ -68,6 +68,21 @@ export interface WindowMetrics {
   rateKbpsMin: number | null; // worst FRESH negotiated rate seen — rate-fallback recovery (null = no fresh reading)
 }
 
+/** An open episode as a screen sees it (v0.41). */
+export interface OpenEpisodeView {
+  key: string;
+  nodeId: number | null;
+  kind: SymptomKind;
+  onsetMs: number;
+  /** The action attributed to this episode, if one has been. */
+  actionKind: ActionKind | null;
+  /** The episode has already been marked confounded (v0.40) — whatever it
+   *  closes as, it will be credited to neither arm. */
+  confounded: boolean;
+  /** freshN of the degraded window as it currently stands, or null. */
+  beforeFreshN: number | null;
+}
+
 /** One symptom episode: opens on symptom onset, closes on resolution. */
 export interface Episode {
   kind: SymptomKind;
@@ -137,6 +152,16 @@ export interface OutcomeStore {
   /** Currently-open episodes as (key, nodeId, kind) — for the caller's
    *  confirmation-window resolution loop (no key-parsing needed). */
   openEpisodes(): { key: string; nodeId: number | null; kind: SymptomKind }[];
+  /** Open episodes WITH the context a screen needs (v0.41): when the episode
+   *  started, and whether an action has been attributed to it yet. Until now
+   *  the ledger's live workload was invisible — REMEDY could read "All clear"
+   *  while an experiment was mid-flight. */
+  openEpisodeDetails(): OpenEpisodeView[];
+  /** The control arm itself, with the provenance behind it (v0.41). `baseRate`
+   *  returns the ratio and nothing else; `controlNodes` was tracked, persisted
+   *  and restored but had NO getter, so the one number that makes every
+   *  efficacy claim meaningful could not be shown with its n or its sources. */
+  controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
   /** Spontaneous-recovery base rate for a kind (control arm), or null if n too low. */
   baseRate(kind: SymptomKind): number | null;
   /** Learned efficacy of an action against a kind, for the planner. */
@@ -768,6 +793,24 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
 
     openEpisodes(): { key: string; nodeId: number | null; kind: SymptomKind }[] {
       return [...open.entries()].map(([k, ep]) => ({ key: k, nodeId: ep.nodeId, kind: ep.kind }));
+    },
+
+    openEpisodeDetails(): OpenEpisodeView[] {
+      return [...open.entries()].map(([k, ep]) => ({
+        key: k,
+        nodeId: ep.nodeId,
+        kind: ep.kind,
+        onsetMs: ep.onsetMs,
+        actionKind: ep.action?.kind ?? null,
+        confounded: ep.confounded === true,
+        beforeFreshN: ep.before?.freshN ?? null,
+      }));
+    },
+
+    controlArm(kind): { n: number; ok: number; nodes: number } | null {
+      const t = control.get(kind);
+      if (!t) return null;
+      return { n: t.n, ok: t.ok, nodes: controlNodes.get(kind)?.size ?? 0 };
     },
 
     baseRate(kind): number | null {

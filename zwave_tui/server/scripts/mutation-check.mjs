@@ -256,8 +256,8 @@ const MUTANTS = [
     find: "  while (out.length < o.rows) out.push('');", repl: '',
     what: 'renderLogin returns EXACTLY view.rows lines like every other path' },
   { id: 'log-keycap-priority', file: 'src/telnet/screens/log.ts',
-    find: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE', 2], ['⏎', 'DEVICE', 1], ['M', 'ACK', 5], ['D', 'DATE', 4],\n      ['O', 'ERRORS', 3], ['1-8', 'SCREENS'], ['Q', 'CLOSE'],",
-    repl: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE'], ['⏎', 'DEVICE'], ['M', 'ACK'], ['D', 'DATE'],\n      ['O', 'ERRORS'], ['1-8', 'SCREENS'], ['Q', 'CLOSE'],",
+    find: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE', 2], ['⏎', 'DEVICE', 1], ['M', 'ACK', 5], ['D', 'DATE', 4],\n      ['O', 'ERRORS', 3], ['1-9', 'SCREENS'], ['Q', 'CLOSE'],",
+    repl: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE'], ['⏎', 'DEVICE'], ['M', 'ACK'], ['D', 'DATE'],\n      ['O', 'ERRORS'], ['1-9', 'SCREENS'], ['Q', 'CLOSE'],",
     what: "the Log bar sheds its least-useful caps first, not navigation" },
   { id: 'controller-role-collision', file: 'src/telnet/screens/controller.ts',
     find: '  const tight = W < 72;', repl: '  const tight = false;',
@@ -1081,8 +1081,8 @@ const MUTANTS = [
     // onOutcome and stamps `ping` onto every open episode — not one scoreable
     // "(no action)" closure existed in the entire retained log, the control arm
     // starved, and expectedEfficacy was uncomputable.
-    find: "      }, /* learn */ false),",
-    repl: "      }, /* learn */ true),",
+    find: "      }, /* learn */ false, /* origin */ 'engine'),",
+    repl: "      }, /* learn */ true, /* origin */ 'engine'),",
     what: 'a measurement probe is never attributed to the outcome ledger' },
   { id: 'sweep-lane-uses-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     find: "      settleProbe(o, state, nodeId, t, (o.probe ?? o.ping)(nodeId), () => {\n        if (priorStale == null) state.lastStaleAt.delete(nodeId);",
@@ -1366,6 +1366,116 @@ const MUTANTS = [
     find: '        if (priorStale == null) state.lastStaleAt.delete(nodeId);\n        else state.lastStaleAt.set(nodeId, priorStale);',
     repl: '        state.lastStaleAt.set(nodeId, t);',
     what: 'a sweep launch that never left gives back the cadence clock it booked' },
+  /* ── v0.41: the ENGINE screen — the engine's own runtime, made visible ── */
+  { id: 'engine-shows-suppression', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Renders a suppressed engine as running: the operator then hunts a mesh
+    // fault while the engine is deliberately standing down.
+    find: "    const sup = ap.suppressed === 'none'\n      ? c.green('running')\n      : c.yellow(`suppressed: ${ap.suppressed}`);",
+    repl: "    const sup = c.green('running');",
+    what: 'ENGINE renders auto-ping suppression, never a blanket "running"' },
+  { id: 'engine-off-is-not-empty', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // A disabled feature renders as blank rather than saying it is off — the
+    // silence-reads-as-healthy failure this whole screen exists to end.
+    find: "    push('  ' + c.grey('◷ off — auto-ping is disabled, or write actions are off. Nothing here probes the mesh.'));",
+    repl: '    void 0;',
+    what: 'a disabled auto-ping SAYS it is off rather than rendering empty' },
+  { id: 'engine-idle-ledger-is-not-absent', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Conflates "no ledger wired" with "ledger has nothing open" — two very
+    // different facts that this screen was built to separate.
+    find: '  if (open == null) {',
+    repl: '  if (open == null || open.length === 0) {',
+    what: 'an idle ledger is distinguished from an absent one' },
+  { id: 'engine-confirming-is-labelled', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // A node in its confirmation window reads as currently degraded, which is
+    // the opposite of true: it has already recovered and is being scored.
+    find: "      bits.push(ep.confirming\n        ? c.green('confirming — symptom absent, scoring')\n        : c.yellow('degraded — symptom live'));",
+    repl: "      bits.push(c.yellow('degraded — symptom live'));",
+    what: 'an episode in its confirmation window is not shown as degraded' },
+  { id: 'engine-baserate-carries-its-n', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // The bare rate again — the exact class-D defect the gap analysis raised:
+    // a self-heal rate without its n invites overtrust in one episode.
+    find: "        c.grey(` (n=${arm.n.toFixed(1)}, ${arm.nodes} node${arm.nodes === 1 ? '' : 's'})`));",
+    repl: "        '');",
+    what: 'the self-heal base rate always renders with its n' },
+  { id: 'engine-confound-outranks-action', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Pushes `confounded` behind the action, where truncation eats it — a
+    // clipped confound reads as a clean control point.
+    find: "      if (ep.confounded) bits.push(c.grey('confounded \u2014 neither arm'));",
+    repl: "      if (false) bits.push(c.grey('confounded \u2014 neither arm'));",
+    what: 'a confounded episode says so before it says which action it carried' },
+  { id: 'bridge-forwards-autoping-state', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    autoPingState: () => zd.autoPingState(),',
+    repl: '    autoPingState: () => null,',
+    what: 'the production bridge forwards autoPingState to the data layer' },
+  { id: 'bridge-forwards-open-episodes', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    openEpisodes: () => zd.openEpisodes(),',
+    repl: '    openEpisodes: () => [],',
+    what: 'the production bridge forwards openEpisodes to the data layer' },
+  { id: 'bridge-forwards-control-arm', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    controlArm: (k) => zd.controlArm(k),',
+    repl: '    controlArm: () => null,',
+    what: 'the production bridge forwards controlArm to the data layer' },
+  { id: 'open-episode-confirming-joined', file: 'src/zwave/zwaveData.ts', tests: ['engineScreen', 'zwaveDataChurn'],
+    // pendingResolve lives here, not in the ledger; dropping the join makes
+    // every recovering episode read as currently degraded.
+    find: '      confirming: this.pendingResolve.has(ep.key),',
+    repl: '      confirming: false,',
+    what: 'the confirmation-window flag is joined onto open episodes' },
+  { id: 'autoping-snapshot-is-live', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Freezes the snapshot at defaults, so ENGINE renders a permanently idle
+    // engine however the real one behaves.
+    find: '      suppressed: lastDecision?.suppressed ?? \'none\',',
+    repl: "      suppressed: 'none',",
+    what: 'the auto-ping snapshot reports the LAST real decision, not a default' },
+  { id: 'engine-writes-are-not-yours', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Auto-ping's probes and give-up notices logged as source 'you', so the
+    // Log screen rendered every autonomous write as "operator" — the activity
+    // log telling the operator they had done what the engine did.
+    find: "    this.pushEvent('engine', severity, 'action', nodeId, text);",
+    repl: "    this.pushEvent('you', severity, 'action', nodeId, text);",
+    what: "an autonomous write is attributed to the ENGINE, never to the operator" },
+  { id: 'engine-source-renders-apart', file: 'src/telnet/screens/log.ts', tests: ['renderHonesty'],
+    find: "ev.source === 'you' ? c.cyan('operator') : ev.source === 'engine' ? c.yellow('engine (auto)') : c.grey('network')",
+    repl: "ev.source === 'net' ? c.grey('network') : c.cyan('operator')",
+    what: 'the Log screen renders engine provenance apart from the operator' },
+  { id: 'origin-follows-the-caller', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Pins the seam the first cut got wrong: one runner serves the operator's
+    // typed CONFIRM and auto-ping's ladder, so a fixed sink attributes engine
+    // probes — including the RED-latching failure line — to the human.
+    find: "    if (origin === 'engine') this.logEngineAction(severity, nodeId, text);",
+    repl: '    if (false) this.logEngineAction(severity, nodeId, text);',
+    what: "an action's log provenance follows its CALLER, not the runner" },
+  { id: 'probe-is-engine-origin', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    find: "      }, /* learn */ false, /* origin */ 'engine'),",
+    repl: '      }, /* learn */ false),',
+    what: 'a measurement probe logs as the engine, never as the operator' },
+  { id: 'run-carries-the-origin', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    find: "      o.log('error', nodeId, `${verb} → failed: ${msg}`, origin);",
+    repl: "      o.log('error', nodeId, `${verb} → failed: ${msg}`);",
+    what: "the failure line — the one that latches RED — carries its origin" },
+  { id: 'engine-alarms-survive-truncation', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Sorts the two human-summoning alarms last again, where an 80-column
+    // terminal drops them while cosmetic context survives.
+    find: "        if (n.gaveUp) bits.push(c.red('GAVE UP — needs a human'));",
+    repl: '        void 0;',
+    what: 'a GAVE UP alarm outranks context and survives a narrow terminal' },
+  { id: 'engine-bits-are-whole', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Back to blind clipping: a measured 41% renders as `4`.
+    find: '    if (visLen(candidate) + visLen(tail) > width) break;',
+    repl: '    if (false) break;',
+    what: 'a rendered bit is whole or absent — never a clipped number' },
+  { id: 'engine-uncomputed-is-not-zero', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: "    const num = (v: number | null): string => (v == null ? c.grey('—') : c.white(String(v)));",
+    repl: '    const num = (v: number | null): string => c.white(String(v ?? 0));',
+    what: 'a queue a suppressed pass never read renders as —, not as a measured 0' },
+  { id: 'suppressed-pass-reports-no-queue', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: "      staleDue: lastDecision == null || lastDecision.suppressed !== 'none' ? null : lastDecision.staleDue,",
+    repl: '      staleDue: lastDecision?.staleDue ?? null,',
+    what: 'a suppressed decision reports its unread queues as null' },
+  { id: 'abandoned-node-has-no-next-retry', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: '        if (!n.gaveUp && n.nextEligibleMs != null && n.nextEligibleMs > now) {',
+    repl: '        if (n.nextEligibleMs != null && n.nextEligibleMs > now) {',
+    what: 'a node the ladder abandoned is not promised a next attempt' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.

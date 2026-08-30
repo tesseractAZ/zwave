@@ -6,7 +6,7 @@ import type { HaWsClient } from '../src/ha/haWsClient';
 interface MkOpts { reject?: boolean; noDevice?: boolean; noPing?: boolean; entry?: string | null }
 function mk(enabled: boolean, opts: MkOpts = {}) {
   const sent: any[] = [];
-  const logs: Array<{ sev: string; nodeId: number | null; text: string }> = [];
+  const logs: Array<{ sev: string; nodeId: number | null; text: string; origin?: string }> = [];
   const outcomes: Array<{ kind: string; nodeId: number | null; ok: boolean }> = [];
   const configWritten: number[] = [];
   const removed: number[] = [];
@@ -18,7 +18,7 @@ function mk(enabled: boolean, opts: MkOpts = {}) {
     entryId: () => (opts.entry === undefined ? 'entry-1' : opts.entry),
     deviceIdOf: (n) => (opts.noDevice ? null : `dev-${n}`),
     pingEntityOf: (n) => (opts.noPing ? null : `button.node${n}_ping`),
-    log: (sev, nodeId, text) => logs.push({ sev, nodeId, text }),
+    log: (sev, nodeId, text, origin) => logs.push({ sev, nodeId, text, origin }),
     onOutcome: (kind, nodeId, ok) => outcomes.push({ kind, nodeId, ok }),
     onConfigWritten: (n) => configWritten.push(n),
     onNodeRemoved: (n) => removed.push(n),
@@ -207,4 +207,34 @@ test('probe() obeys the master gate like every write', async () => {
   const r = await runner.probe(6);
   assert.equal(r.ok, false);
   assert.equal(sent.length, 0);
+});
+
+/* ── v0.41.0: provenance follows the CALLER, not the runner ────────────────── */
+
+test('a probe logs as the ENGINE and an operator ping logs as YOU — from one runner (v0.41.0)', async () => {
+  // The first cut of the v0.41 provenance fix was wired one layer too high: it
+  // relabelled auto-ping's narration while run()'s own lines — including the
+  // RED-latching "→ failed", the one that demands an ACK — still said
+  // `operator`. A pre-release review measured half the ring misattributed on a
+  // purely autonomous run.
+  const { runner, logs } = mk(true);
+  await runner.probe(7);
+  await runner.ping(7, 'engine');
+  await runner.ping(7);
+  const probeLines = logs.filter((l) => l.text.startsWith('probe node 7'));
+  assert.ok(probeLines.length > 0, 'the probe logged something');
+  assert.ok(probeLines.every((l) => l.origin === 'engine'),
+    `every line describing an engine probe is the engine's: ${JSON.stringify(probeLines)}`);
+  // The FAILURE line is the one that latches RED and demands an ACK — it must
+  // carry its origin too, or the operator is asked to acknowledge an error the
+  // engine caused.
+  const { runner: failing, logs: failLogs } = mk(true, { reject: true });
+  await failing.probe(9);
+  const failLine = failLogs.find((l) => /→ failed/.test(l.text));
+  assert.ok(failLine, `a failing probe logs an error line: ${JSON.stringify(failLogs)}`);
+  assert.equal(failLine!.origin, 'engine', 'and it is the engine\'s, not the operator\'s');
+
+  const pings = logs.filter((l) => l.text.startsWith('ping node 7'));
+  assert.ok(pings.some((l) => l.origin === 'engine'), "the ladder ping is the engine's");
+  assert.ok(pings.some((l) => l.origin === 'you'), 'and an operator ping is still yours');
 });

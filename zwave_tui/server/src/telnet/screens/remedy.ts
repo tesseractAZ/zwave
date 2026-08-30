@@ -396,7 +396,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     keys: [
       ['↑↓', 'SYMPTOM'],
       ['A', 'ACTIONS', 1],
-      ['1-8', 'SCREENS'],
+      ['1-9', 'SCREENS'],
       ['Q', 'BACK'],
     ],
   });

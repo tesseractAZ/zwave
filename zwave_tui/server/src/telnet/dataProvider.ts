@@ -31,6 +31,8 @@ import type {
   NodeSnapshot,
   Symptom,
   SymptomKind,
+  AutoPingSnapshot,
+  OpenEpisodeSummary,
 } from '../types';
 import { scoreNode, DEFAULT_NOISE_FLOOR, rssiReading } from '../zwave/health';
 
@@ -79,6 +81,12 @@ export interface ZwaveDataSource {
   unverifiableTransientCount(kind: SymptomKind): number;
   /** No-action closures confounded by a mid-episode death/remediation (v0.40). REQUIRED — see ackEvent. */
   confoundedCount(kind: SymptomKind): number;
+  /** The ledger's live workload (v0.41). REQUIRED — see ackEvent. */
+  openEpisodes(): OpenEpisodeSummary[];
+  /** Control arm with provenance (v0.41). REQUIRED — see ackEvent. */
+  controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
+  /** Auto-ping runtime state (v0.41), null when off. REQUIRED — see ackEvent. */
+  autoPingState(): AutoPingSnapshot | null;
   /** Learned RSSI normal for a node (v0.35). REQUIRED — see ackEvent. */
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** Has the first roster load completed? Falls back to "roster non-empty". */
@@ -190,6 +198,9 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     unverifiableUnprobeableCount: (k) => zd.unverifiableUnprobeableCount(k),
     unverifiableTransientCount: (k) => zd.unverifiableTransientCount(k),
     confoundedCount: (k) => zd.confoundedCount(k),
+    openEpisodes: () => zd.openEpisodes(),
+    controlArm: (k) => zd.controlArm(k),
+    autoPingState: () => zd.autoPingState(),
     rssiNormal: (n) => zd.rssiNormal(n),
   };
 }
@@ -294,6 +305,9 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     unverifiableUnprobeableCount: (kind) => zwaveData.unverifiableUnprobeableCount(kind),
     unverifiableTransientCount: (kind) => zwaveData.unverifiableTransientCount(kind),
     confoundedCount: (kind) => zwaveData.confoundedCount(kind),
+    openEpisodes: () => zwaveData.openEpisodes(),
+    controlArm: (kind) => zwaveData.controlArm(kind),
+    autoPingState: () => zwaveData.autoPingState(),
     rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,

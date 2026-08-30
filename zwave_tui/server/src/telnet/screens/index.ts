@@ -26,6 +26,7 @@ import { renderHeatmap } from './heatmap';
 import { renderLog } from './log';
 import { renderRemedy } from './remedy';
 import { renderInterference } from './interference';
+import { renderEngine } from './engine';
 
 export { SCREENS } from '../../types';
 
@@ -39,6 +40,7 @@ export const SCREEN_LABEL: Record<ScreenView, string> = {
   log: 'Log',
   remedy: 'Remedy',
   interference: 'Interference',
+  engine: 'Engine',
 };
 
 /**
@@ -64,6 +66,8 @@ export function renderScreen(ctx: ScreenCtx): string[] {
       return renderRemedy(ctx);
     case 'interference':
       return renderInterference(ctx);
+    case 'engine':
+      return renderEngine(ctx);
     default: {
       // Exhaustiveness guard — a new ScreenView must be wired above or this
       // fails the typecheck.

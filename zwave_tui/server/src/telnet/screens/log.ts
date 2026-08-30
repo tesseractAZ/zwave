@@ -45,6 +45,14 @@ export function renderLog(ctx: ScreenCtx): string[] {
         ? [
             c.grey('No events match the current filters.'),
             c.grey(filterSummary(view) + ' — press ') + c.cyanB('D') + c.grey('/') + c.cyanB('O') + c.grey(' to widen'),
+            // The ring is in-memory and session-scoped (LOG_MAX entries, no
+            // disk), so a wide date range can be empty because the evidence was
+            // EVICTED or never survived a restart — not because the filter is
+            // too narrow. Blaming the filter sends the operator to widen one
+            // that is already at maximum (v0.41).
+            ...(view.logRange === 'yesterday' || view.logRange === '7d' || view.logRange === '24h'
+              ? [c.grey('This ring is in memory only — it holds recent activity and is empty after a restart.')]
+              : []),
           ]
         : [c.grey('Waiting for activity — device, status and route changes appear here live.')];
     const top = Math.max(0, Math.floor((listRows - msg.length) / 2));
@@ -73,7 +81,7 @@ export function renderLog(ctx: ScreenCtx): string[] {
     body,
     keys: [
       ['↑↓', 'MOVE'], ['␣/b', 'PAGE', 2], ['⏎', 'DEVICE', 1], ['M', 'ACK', 5], ['D', 'DATE', 4],
-      ['O', 'ERRORS', 3], ['1-8', 'SCREENS'], ['Q', 'CLOSE'],
+      ['O', 'ERRORS', 3], ['1-9', 'SCREENS'], ['Q', 'CLOSE'],
     ],
   });
 }
@@ -154,7 +162,7 @@ function detailLines(ev: LogEvent | undefined, data: DataProvider, W: number, ro
     lines.push(
       field(
         'Type',
-        `${kindWord(ev)} ${c.grey('·')} ${sevWord(ev.severity)} ${c.grey('·')} ${ev.source === 'you' ? c.cyan('operator') : c.grey('network')}`,
+        `${kindWord(ev)} ${c.grey('·')} ${sevWord(ev.severity)} ${c.grey('·')} ${ev.source === 'you' ? c.cyan('operator') : ev.source === 'engine' ? c.yellow('engine (auto)') : c.grey('network')}`,
         W,
       ),
     );
@@ -207,7 +215,10 @@ function kindWord(ev: LogEvent): string {
     status: 'node status',
     route: 'route change',
     notification: 'notification',
-    action: 'operator action',
+    // Not always the operator's (v0.41): auto-ping's autonomous probes carry
+    // kind 'action' too, and calling every one of them an OPERATOR action is
+    // the same fabricated provenance the source field just stopped making.
+    action: ev.source === 'engine' ? 'engine action' : 'operator action',
     symptom: 'engine symptom',
     system: 'system',
   };

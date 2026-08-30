@@ -63,7 +63,15 @@ import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from '
 import { createBaselineStore, type BaselineStore } from './baselines';
 import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
-import { isPingCandidate } from './autoPing';
+import { isPingCandidate, type AutoPingSnapshot } from './autoPing';
+import type { OpenEpisodeView } from './outcomes';
+
+/** An open episode plus the confirmation-window flag only this layer knows. */
+export interface OpenEpisodeSummary extends OpenEpisodeView {
+  /** The symptom has gone absent and the ledger is waiting out CONFIRM_MS
+   *  before scoring it — the node is recovering, not currently degraded. */
+  confirming: boolean;
+}
 import { computeInterference } from './interference';
 
 /**
@@ -349,6 +357,8 @@ export interface ZwaveData {
   pingEntityOf(nodeId: number): string | null;
   /** Append an operator-action outcome to the event ring. */
   logAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void;
+  logEngineAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void;
+  logByOrigin(severity: LogEvent['severity'], nodeId: number | null, text: string, origin?: 'you' | 'engine'): void;
   /** Event + command log ring (newest first). */
   events(): LogEvent[];
   /** Release an error event's RED latch by seq (v0.33) — see the impl. */
@@ -373,6 +383,10 @@ export interface ZwaveData {
   unverifiableUnprobeableCount(kind: SymptomKind): number;
   unverifiableTransientCount(kind: SymptomKind): number;
   confoundedCount(kind: SymptomKind): number;
+  openEpisodes(): OpenEpisodeSummary[];
+  controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
+  autoPingState(): AutoPingSnapshot | null;
+  setAutoPingSnapshot(fn: (() => AutoPingSnapshot) | null): void;
   /** Drain the nodes owed a verification probe this tick (v0.36). Each entry
    *  carries `first` — whether this is the first probe of that node's burst —
    *  straight from the queue's own bookkeeping (v0.38.2). The runner's label
@@ -1307,6 +1321,34 @@ class ZwaveDataImpl implements ZwaveData {
     return this.outcomes ? this.outcomes.confounded(kind) : 0;
   }
 
+  /** The ledger's LIVE workload (v0.41). `pendingResolve` lives here, not in
+   *  the ledger, so the confirmation-window flag is joined on at this layer —
+   *  without it a screen cannot tell "degraded right now" from "recovering,
+   *  being scored". */
+  openEpisodes(): OpenEpisodeSummary[] {
+    if (!this.outcomes) return [];
+    return this.outcomes.openEpisodeDetails().map((ep) => ({
+      ...ep,
+      confirming: this.pendingResolve.has(ep.key),
+    }));
+  }
+
+  controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null {
+    return this.outcomes ? this.outcomes.controlArm(kind) : null;
+  }
+
+  /** Auto-ping's live state, or null when the feature is off (v0.41). The
+   *  runner owns the state; index.ts hands its accessor down after start. */
+  autoPingState(): AutoPingSnapshot | null {
+    return this.autoPingSnapshotFn ? this.autoPingSnapshotFn() : null;
+  }
+
+  setAutoPingSnapshot(fn: (() => AutoPingSnapshot) | null): void {
+    this.autoPingSnapshotFn = fn;
+  }
+
+  private autoPingSnapshotFn: (() => AutoPingSnapshot) | null = null;
+
   /**
    * Ask for a burst of verification probes on a node (v0.36).
    *
@@ -1476,6 +1518,25 @@ class ZwaveDataImpl implements ZwaveData {
   pingEntityOf(nodeId: number): string | null {
     return this.pingEntityByNode.get(nodeId) ?? null;
   }
+  /** Route an action's log line by the CALLER's provenance (v0.41.0).
+   *
+   *  This lived as a ternary in index.ts, where no test could reach it — and a
+   *  pre-release review caught exactly that seam wired wrong, with autonomous
+   *  probes still logging as the operator. A decision guarded only by review is
+   *  a decision that ships broken; this one is now a function with a test. */
+  logByOrigin(severity: LogEvent['severity'], nodeId: number | null, text: string, origin?: 'you' | 'engine'): void {
+    if (origin === 'engine') this.logEngineAction(severity, nodeId, text);
+    else this.logAction(severity, nodeId, text);
+  }
+
+  /** Append an ENGINE-initiated write to the event ring (source 'engine',
+   *  v0.41). Auto-ping used `logAction`, so every autonomous probe and every
+   *  give-up notice rendered on the Log screen as "operator" — the activity
+   *  log claimed the human had done what the engine did. */
+  logEngineAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void {
+    this.pushEvent('engine', severity, 'action', nodeId, text);
+  }
+
   /** Append an operator-action outcome to the event ring (source 'you'). */
   logAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void {
     this.pushEvent('you', severity, 'action', nodeId, text);

@@ -10,7 +10,7 @@
  *   header   ID St Name             Sc      Signal  Hop  Rate  Seen  Bat  Flags   Trend
  *   rows     ▶  12 ● Kitchen Lamp  █94  ▁▃▅▇  +21dB    0   100k    3s   AC          ▁▂▄▆█
  *              7 ✕ Garage Sensor    —          —      —    —      4d  12%  D B
- *   legend   j/k move · / filter · s sort · ⏎ detail · 1-8 screens · q quit
+ *   legend   j/k move · / filter · s sort · ⏎ detail · 1-9 screens · q quit
  *
  * Graphics (from ../gauges) sit ON TOP of the already-correct data: a WiFi
  * signalBars strength cluster in the Signal column, a 1-cell vblock health mark
@@ -161,8 +161,8 @@ export function renderOverview(ctx: ScreenCtx): string[] {
     // Esc is offered explicitly: with every node filtered out this card is the
     // whole screen, and clearing the filter is the only way back to a roster.
     const keys: Keycap[] = active || ctx.filtering
-      ? [['/', 'FILTER'], ['Esc', 'CLEAR'], ['1-8', 'SCREENS'], ['Q', 'EXIT']]
-      : [['/', 'FILTER'], ['1-8', 'SCREENS'], ['Q', 'EXIT']];
+      ? [['/', 'FILTER'], ['Esc', 'CLEAR'], ['1-9', 'SCREENS'], ['Q', 'EXIT']]
+      : [['/', 'FILTER'], ['1-9', 'SCREENS'], ['Q', 'EXIT']];
     return centeredNotice(view, 'NO NODES', body, keys);
   }
 
@@ -230,7 +230,7 @@ export function renderOverview(ctx: ScreenCtx): string[] {
   // Reserve the counter's columns so commandBar drops WHOLE keycaps to make
   // room, instead of the bar and counter fighting over the same last row.
   out.push(truncate(commandBar(view, [
-    ['1-8', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS', 1],
+    ['1-9', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS', 1],
     ['/', 'FILTER', 2], ['S', 'SORT', 3], ['T', 'UNITS', 4], ['Q', 'EXIT'],
   ], visLen(moreTok)) + moreTok, W));
   // Defensive clamp — the session guarantees rows >= 16, but never overrun.

@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.41.0 — 2026-08-29
+
+**The ENGINE screen — the engine's own runtime, finally visible.**
+
+A 90-agent gap analysis asked what the TUI shows against what the engine knows
+and generates. 83 gaps survived adversarial verification, and the dominant
+theme was one sentence: the engine had outgrown its screens. Auto-ping — the
+one thing this add-on does WITHOUT a human pressing a key — had **no accessor
+anywhere in the codebase**, so its suppression state, ladder position, miss
+streaks and probe debt were reachable only by tailing the container log. The
+M5 ledger was write-only from the operator's chair: episodes opened, ran and
+closed with their verdicts going to stdout, so REMEDY could read "All clear"
+while an experiment was mid-flight, and `baseRate` reached a screen only as
+a parenthetical inside an efficacy claim on REMEDY (`vs 40% self-heal`) — never
+on its own, and never with the `n` or the node count that make it mean
+anything. `controlNodes` had been tracked, persisted and restored with no
+getter at all.
+
+**New: ENGINE (key `9`).** Three blocks, ordered so a small terminal drops the
+least operational content last, and pinned by tests at the modal 80x24:
+
+  AUTO-PING    live suppression and why, fleet counts, and one row per node the
+               ladder is tracking — dead-since, attempt n/max, next retry,
+               miss streak, unsent launches, and both give-up states.
+  LEDGER LIVE  the open episodes, with the confirmation window called out: a
+               node being scored has already recovered, and reading it as
+               "degraded" is the opposite of the truth.
+  LEARNED      per kind, the control arm WITH its n and node count, the action
+               arms with their efficacy, and the unscoreable tallies apart.
+
+Behind it: `AutoPingSnapshot`, `openEpisodeDetails()` and `controlArm()`, each
+pinned across the production bridge — a screen reading an optional provider
+member the bridge forgot to wire renders a silent blank, which is exactly the
+v0.33 defect this release exists to stop repeating.
+
+**Render honesty.** The sharpest instance was one the analysis itself
+under-weighted: auto-ping logged through the OPERATOR's sink, so the Log screen
+attributed every autonomous probe and every give-up notice to you. Events now
+carry `source: 'engine'`, rendered apart — and the kind word, which hardcoded
+"operator action" one layer up, follows. Also fixed: the quiet-node narrative
+no longer asserts "the sweep has asked and nothing has come back" on installs
+where auto-ping is off by default or the sweep is disabled; the planner no
+longer claims auto-ping "may already have" pinged when it cannot check; Detail's
+`Sig 2h` no longer labels a span that is three minutes on a chatty node and five
+days on a quiet one; and the Log's empty state stops blaming your filters for a
+ring that is in memory only and empty after a restart. Every screen's `1-8`
+keycap became `1-9` — a ninth screen made the old hint false.
+
+Known limitation, recorded rather than papered over: the `index.ts` wiring that
+points auto-ping at the engine log sink is not reachable from any test. The
+sink itself is pinned; the wiring is guarded by review only.
+
+**A pre-release review caught the first cut of the provenance fix wired one
+layer too high.** It relabelled auto-ping's *narration* while the lines that
+describe the write itself — `ping node 5 → failed: …`, emitted by the shared
+ActionRunner and RED-latched — still said `operator`: an error line demanding
+acknowledgement from a human who touched nothing. Provenance is now a property
+of the CALL (`ActionOrigin` threaded through `run()`), not of the runner. The
+review also caught the screen clipping a measured 41% to `4`, dropping a
+node's "GAVE UP — needs a human" entirely at 80x24 because it sorted last, and
+printing `sweep-due 0` on suppressed passes that never read the queue. Bits are
+now emitted whole in alarm-first order with the remainder disclosed as `+N`,
+and an uncomputed queue reads `—`.
+
+837 tests. 304 mutation entries: 300 killed, 0 survived, 0 missing, 4 equivalent.
+
 ## 0.40.2 — 2026-08-29
 
 **A probe that never left is never judged — and four more the audit found.**

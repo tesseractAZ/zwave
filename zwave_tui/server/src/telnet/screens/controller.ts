@@ -49,7 +49,7 @@ export function renderController(ctx: ScreenCtx): string[] {
   if (!ctrl) {
     return centeredNotice(view, 'CONTROLLER & NETWORK', [
       c.grey('Controller not loaded yet…'),
-    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
+    ], [['1-9', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   // Build the screen as a title line followed by four section blocks; adaptive
@@ -96,7 +96,7 @@ export function renderController(ctx: ScreenCtx): string[] {
     body,
     // The Controller screen IS the network view, so it owns the mesh-wide
     // actions — `a` here opens NETWORK ACTIONS, not the device menu.
-    keys: [['A', 'NETWORK ACTIONS', 1], ['1-8', 'SCREENS'], ['Q', 'BACK']],
+    keys: [['A', 'NETWORK ACTIONS', 1], ['1-9', 'SCREENS'], ['Q', 'BACK']],
   });
 }
 

@@ -18,6 +18,9 @@ import { sanitizeEventText } from './zwaveData';
 import type { ActionRunner, ActionResult, ActionKind, ConfigParam, EntityVerb } from '../types';
 import { resolveService, verbLabel } from './entityControl';
 
+/** Who asked for an action: a human at the keyboard, or the engine itself. */
+export type ActionOrigin = 'you' | 'engine';
+
 export interface ActionRunnerOptions {
   client: HaWsClient;
   /** Current zwave_js config-entry id (null until discovered). */
@@ -26,8 +29,18 @@ export interface ActionRunnerOptions {
   deviceIdOf: (nodeId: number) => string | null;
   /** node id → its `button.*_ping` entity_id (null if none). */
   pingEntityOf: (nodeId: number) => string | null;
-  /** Append an outcome line to the event ring (source 'you'). */
-  log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string) => void;
+  /**
+   * Append an outcome line to the event ring.
+   *
+   * `origin` is the CALLER's provenance, not the runner's (v0.41.0): one runner
+   * serves both the operator's typed CONFIRM and auto-ping's autonomous lanes,
+   * and attributing its lines to a fixed source made the Log screen tell the
+   * operator they had run probes the engine ran. Pre-release review caught the
+   * first cut of this fix wired one layer too high — it relabelled auto-ping's
+   * narration while `run()`'s own "ping node N → failed" lines, the ones that
+   * describe the write and latch RED, still said `operator`.
+   */
+  log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string, origin?: ActionOrigin) => void;
   /** M5: structured outcome hook — the outcome ledger attributes the action to
    *  its node's open episodes. Fired AFTER the action resolves. */
   onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean) => void;
@@ -68,19 +81,20 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     verb: string,
     fn: () => Promise<void>,
     learn = true,
+    origin: ActionOrigin = 'you',
   ): Promise<ActionResult> => {
     if (!o.enabled) return { ok: false, message: 'write actions are disabled' };
-    o.log('info', nodeId, `${verb} …`);
+    o.log('info', nodeId, `${verb} …`, origin);
     try {
       await fn();
-      o.log('info', nodeId, `${verb} → ok`);
+      o.log('info', nodeId, `${verb} → ok`, origin);
       if (learn) o.onOutcome?.(kind, nodeId, true);
       return { ok: true, message: `${verb}: ok` };
     } catch (e) {
       // SANITIZED: this is whatever an HA service call threw, and session.ts
       // puts it straight into the on-screen action-result card.
       const msg = sanitizeEventText(errMsg(e));
-      o.log('error', nodeId, `${verb} → failed: ${msg}`);
+      o.log('error', nodeId, `${verb} → failed: ${msg}`, origin);
       if (learn) o.onOutcome?.(kind, nodeId, false);
       return { ok: false, message: msg };
     }
@@ -88,18 +102,18 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
 
   return {
     enabled: o.enabled,
-    ping: (n) =>
+    ping: (n, origin = 'you') =>
       run('ping', n, `ping node ${n}`, async () => {
         const ent = o.pingEntityOf(n);
         if (!ent) throw new Error(`node ${n} has no ping button`);
         await o.client.send({ type: 'call_service', domain: 'button', service: 'press', service_data: { entity_id: ent } });
-      }),
+      }, /* learn */ true, origin),
     probe: (n) =>
       run('ping', n, `probe node ${n}`, async () => {
         const ent = o.pingEntityOf(n);
         if (!ent) throw new Error(`node ${n} has no ping button`);
         await o.client.send({ type: 'call_service', domain: 'button', service: 'press', service_data: { entity_id: ent } });
-      }, /* learn */ false),
+      }, /* learn */ false, /* origin */ 'engine'),
     refreshValues: (n) => run('refreshValues', n, `refresh values node ${n}`, () => deviceCmd('zwave_js/refresh_node_values', n)),
     reInterview: (n) => run('reInterview', n, `re-interview node ${n}`, () => deviceCmd('zwave_js/refresh_node_info', n)),
     healNode: (n) => run('healNode', n, `rebuild routes node ${n}`, () => deviceCmd('zwave_js/rebuild_node_routes', n)),
