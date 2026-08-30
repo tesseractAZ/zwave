@@ -665,10 +665,60 @@ export interface AutoPingRunnerOptions {
   onProbeResult?: (nodeId: number, answered: boolean, selfProven: boolean) => void;
 }
 
-export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tick: () => void } {
+/**
+ * A read-only view of auto-ping's live state (v0.41).
+ *
+ * The engine's ONE autonomous write had no accessor anywhere in the codebase:
+ * suppression, the dwell/attempt/backoff position of every Dead node, miss
+ * streaks, the sweep backlog and the verification debt were all computed every
+ * tick and reachable only by tailing the container log. A gap analysis called
+ * that the largest single class-A hole in the TUI, and it is the state an
+ * operator most needs when the mesh misbehaves.
+ */
+export interface AutoPingSnapshot {
+  /** null until the first tick has run. */
+  lastTickMs: number | null;
+  suppressed: AutoPingSuppression;
+  listening: number;
+  deadListening: number;
+  /** null when the last pass was SUPPRESSED and never computed them — a
+   *  structural absence rendered as `0` reads as a measurement (v0.41.0). */
+  staleDue: number | null;
+  stalestMs: number | null;
+  verifyOwed: number | null;
+  /** Config echoed back, so the screen never has to guess the active policy. */
+  config: AutoPingConfig;
+  nodes: AutoPingNodeState[];
+}
+
+/** Per-node auto-ping state — only nodes the engine is actually tracking. */
+export interface AutoPingNodeState {
+  nodeId: number;
+  /** Dead since (ms epoch), or null when the node is not in a dead episode. */
+  deadSinceMs: number | null;
+  /** Remediation attempts spent this episode. */
+  attempts: number;
+  /** Earliest ms epoch the ladder may probe again, or null when it may now. */
+  nextEligibleMs: number | null;
+  /** Consecutive unanswered probes (any lane). */
+  missStreak: number;
+  /** Consecutive probe LAUNCHES that never left this add-on (v0.40.2). */
+  launchFailures: number;
+  /** Probes awaiting judgment right now. */
+  pending: number;
+  /** The ladder has abandoned this node to a human. */
+  gaveUp: boolean;
+  /** The add-on could not send at all, maxAttempts in a row (v0.40.2). */
+  launchGaveUp: boolean;
+}
+
+export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tick: () => void; snapshot: () => AutoPingSnapshot } {
   const now = o.now ?? (() => Date.now());
   const startedAt = now();
   const state = createAutoPingState();
+  // Kept for `snapshot()` — the runtime state an operator cannot otherwise see.
+  let lastDecision: AutoPingDecision | null = null;
+  let lastTickMs: number | null = null;
   let lastSuppression: AutoPingSuppression | null = null;
   let lastTrace = '';
   let lastTraceAt = 0;
@@ -677,7 +727,8 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
     const t = now();
     const nodes = o.nodes();
     trackEpisodes(state, nodes, t);
-    const decision = decideAutoPings({
+    lastTickMs = t;
+    const decision = lastDecision = decideAutoPings({
       now: t,
       state,
       nodes,
@@ -961,6 +1012,46 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
     }
   };
 
+  const snapshot = (): AutoPingSnapshot => {
+    const ids = new Set<number>([
+      ...state.deadSince.keys(), ...state.attempts.keys(), ...state.missStreak.keys(),
+      ...state.launchFailures.keys(), ...state.awaitingAnswer.keys(), ...state.gaveUpAnnounced,
+      ...state.launchGaveUpAnnounced,
+    ]);
+    const nodes: AutoPingNodeState[] = [...ids].sort((a, b) => a - b).map((nodeId) => {
+      const attempts = state.attempts.get(nodeId) ?? 0;
+      const last = state.lastPingAt.get(nodeId);
+      // Mirrors the ladder's own arithmetic (see decideAutoPings) rather than
+      // re-deriving it: a screen that disagrees with the engine about when the
+      // next probe is due would be worse than no screen.
+      const wait = BACKOFF_MS[Math.max(0, Math.min(attempts - 1, BACKOFF_MS.length - 1))];
+      return {
+        nodeId,
+        deadSinceMs: state.deadSince.get(nodeId) ?? null,
+        attempts,
+        nextEligibleMs: last == null ? null : last + wait,
+        missStreak: state.missStreak.get(nodeId) ?? 0,
+        launchFailures: state.launchFailures.get(nodeId) ?? 0,
+        pending: state.awaitingAnswer.get(nodeId)?.length ?? 0,
+        gaveUp: state.gaveUpAnnounced.has(nodeId),
+        launchGaveUp: state.launchGaveUpAnnounced.has(nodeId),
+      };
+    });
+    return {
+      lastTickMs,
+      suppressed: lastDecision?.suppressed ?? 'none',
+      listening: lastDecision?.listening ?? 0,
+      deadListening: lastDecision?.deadListening ?? 0,
+      // A suppressed pass returns before the sweep/verify queues are read, so
+      // their fields are structural zeros, not counts. Say "not computed".
+      staleDue: lastDecision == null || lastDecision.suppressed !== 'none' ? null : lastDecision.staleDue,
+      stalestMs: lastDecision?.stalestMs ?? null,
+      verifyOwed: lastDecision == null || lastDecision.suppressed !== 'none' ? null : lastDecision.verifyOwed,
+      config: o.config,
+      nodes,
+    };
+  };
+
   const timer = setInterval(tick, o.tickMs ?? 60_000);
   // Node keeps the process alive for a bare interval; this one must not.
   if (typeof timer.unref === 'function') timer.unref();
@@ -968,5 +1059,5 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
   // of racing a timer. A first version of the runner test stopped the handle
   // before the interval could fire and then asserted nothing had been pinged —
   // which was true, and proved nothing.
-  return { stop: () => clearInterval(timer), tick };
+  return { stop: () => clearInterval(timer), tick, snapshot };
 }

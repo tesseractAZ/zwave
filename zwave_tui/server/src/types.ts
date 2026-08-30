@@ -185,6 +185,10 @@ export type LogKind =
 // Type-only import (no runtime cycle): the symptom engine's output shape, read
 // by DataProvider.symptoms() and the REMEDY screen.
 import type { Symptom, SymptomKind } from './zwave/symptoms';
+import type { AutoPingSnapshot } from './zwave/autoPing';
+import type { OpenEpisodeSummary } from './zwave/zwaveData';
+export type { AutoPingSnapshot, AutoPingNodeState } from './zwave/autoPing';
+export type { OpenEpisodeSummary } from './zwave/zwaveData';
 export type { Symptom, SymptomKind, Severity } from './zwave/symptoms';
 
 /** M5 learned efficacy of an action against a symptom kind — read by the planner
@@ -220,7 +224,12 @@ export interface Efficacy {
 export interface LogEvent {
   seq: number; // monotonic id (newest = highest) — a STABLE selection anchor as the ring grows
   ts: number; // epoch ms
-  source: 'net' | 'you'; // driver event vs operator action
+  /** Who caused this event: a driver/network event, an action YOU ran, or a
+   *  write the ENGINE made on its own (v0.41). Auto-ping's probes and give-up
+   *  notices were logged as `you` — the Log screen rendered every autonomous
+   *  write as "operator", telling you that you had pinged a node the engine
+   *  pinged. Provenance is the one thing an activity log must not fabricate. */
+  source: 'net' | 'you' | 'engine';
   severity: 'info' | 'warn' | 'error';
   kind: LogKind;
   nodeId: number | null;
@@ -354,6 +363,14 @@ export interface DataProvider {
   /** Scoreable no-action closures whose node died or was remediated
    *  mid-episode (v0.40) — credited to neither arm. */
   confoundedCount?(kind: SymptomKind): number;
+  /** The ledger's LIVE workload — open episodes and whether each is in its
+   *  confirmation window (v0.41). Absent ⇒ no ledger. */
+  openEpisodes?(): OpenEpisodeSummary[];
+  /** The control arm with its provenance (v0.41) — the n and node count behind
+   *  `baseRate`, without which an efficacy claim has no context. */
+  controlArm?(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
+  /** Auto-ping's live runtime state (v0.41), or null when the feature is off. */
+  autoPingState?(): AutoPingSnapshot | null;
   /**
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.
@@ -440,7 +457,8 @@ export type ScreenView =
   | 'heatmap'
   | 'log'
   | 'remedy'
-  | 'interference';
+  | 'interference'
+  | 'engine';
 
 export const SCREENS: ScreenView[] = [
   'overview',
@@ -451,6 +469,7 @@ export const SCREENS: ScreenView[] = [
   'log',
   'remedy',
   'interference',
+  'engine',
 ];
 
 /** Log-screen date window. `all` = the whole in-memory ring. */
@@ -543,7 +562,9 @@ export type EntityVerb = 'on' | 'off' | 'toggle' | 'lock' | 'unlock' | 'open' | 
 export interface ActionRunner {
   /** Master gate — false = read-only, the session must not offer actions. */
   readonly enabled: boolean;
-  ping(nodeId: number): Promise<ActionResult>;
+  /** `origin` marks WHO asked (v0.41.0): the dead-remediation ladder calls this
+   *  autonomously, and its lines must not be logged as the operator's. */
+  ping(nodeId: number, origin?: 'you' | 'engine'): Promise<ActionResult>;
   /**
    * The same NoOp ping, but NEVER attributed to the outcome ledger (v0.38.1).
    *

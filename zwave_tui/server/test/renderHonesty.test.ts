@@ -40,7 +40,7 @@ const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
 /* ── shared chrome: keycaps are atomic ─────────────────────────────────── */
 
 const KEYS = [
-  ['1-8', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS', 1],
+  ['1-9', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'], ['A', 'ACTIONS', 1],
   ['/', 'FILTER', 2], ['S', 'SORT', 3], ['T', 'UNITS', 4], ['Q', 'EXIT'],
 ] as const;
 
@@ -59,10 +59,10 @@ test('commandBar never cuts a keycap in half, at any width', () => {
 
 test('commandBar keeps the protected caps and discloses what it dropped', () => {
   // 80 columns is the default terminal: the full bar is 99 cells, so caps must
-  // be sacrificed. [Q] EXIT and [1-8] SCREENS are the way OUT — never droppable.
+  // be sacrificed. [Q] EXIT and [1-9] SCREENS are the way OUT — never droppable.
   const bar = strip(commandBar(mkView({ cols: 80 }), KEYS));
   assert.ok(bar.includes('[Q] EXIT'), `lost the exit key: ${bar}`);
-  assert.ok(bar.includes('[1-8] SCREENS'), `lost the screen keys: ${bar}`);
+  assert.ok(bar.includes('[1-9] SCREENS'), `lost the screen keys: ${bar}`);
   assert.match(bar, /\+\d+$/, `dropped caps silently: ${bar}`);
   // Least-valuable first: UNITS goes before ACTIONS.
   assert.ok(!bar.includes('UNITS'), `dropped the wrong cap first: ${bar}`);
@@ -980,7 +980,7 @@ test('frame() holds back the columns a caller reserved', () => {
   // and the token is what gets clipped.
   const view = mkView({ cols: 80, rows: 10 });
   const keys = [
-    ['1-8', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'],
+    ['1-9', 'SCREENS'], ['↑↓', 'NAV'], ['⏎', 'INSPECT'],
     ['A', 'ACTIONS', 1], ['/', 'FILTER', 2], ['Q', 'EXIT'],
   ] as const;
   const wide = frame(view, mockData(), { title: 'X', body: [], keys });

@@ -25,7 +25,7 @@ import { createAuthPolicy, describeTelnetAuth } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
 import { createActionRunner } from './zwave/zwaveActions';
-import { startAutoPing } from './zwave/autoPing';
+import { startAutoPing, type AutoPingSnapshot } from './zwave/autoPing';
 import { buildZwaveDataSource, createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
 import { registerWsConsole } from './telnet/wsConsole';
 import { startTelnetServer } from './telnet/server';
@@ -87,7 +87,11 @@ async function main(): Promise<void> {
     entryId: () => zwaveData.getEntryId(),
     deviceIdOf: (n) => zwaveData.deviceIdOf(n),
     pingEntityOf: (n) => zwaveData.pingEntityOf(n),
-    log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
+    // Provenance follows the CALLER (v0.41.0): one runner serves both the
+    // operator's typed CONFIRM and auto-ping's autonomous ladder, so a fixed
+    // source here made the Log screen attribute engine probes to the human —
+    // including the RED-latching "→ failed" line describing the write itself.
+    log: (sev, nodeId, text, origin) => zwaveData.logByOrigin(sev, nodeId, text, origin),
     // M5: feed operator-action outcomes into the learning ledger.
     onOutcome: (kind, nodeId, ok) => zwaveData.recordActionOutcome(kind, nodeId, ok),
     // v0.23: after a config write, drop the stale cache so DETAIL re-fetches.
@@ -104,13 +108,13 @@ async function main(): Promise<void> {
   // 4c) Auto-ping — the ONE thing this engine does without a human pressing a
   //     key. Off unless BOTH its own switch and write_actions_enabled are on;
   //     see autoPing.ts for why ping specifically, and for every suppressor.
-  let autoPing: { stop: () => void } | null = null;
+  let autoPing: { stop: () => void; snapshot: () => AutoPingSnapshot } | null = null;
   if (config.autoPing.enabled && config.writeActions) {
     autoPing = startAutoPing({
       nodes: () => provider.nodes(),
       controller: () => provider.controller(),
       ready: () => provider.ready(),
-      ping: (n) => actions.ping(n),
+      ping: (n) => actions.ping(n, 'engine'),
       // v0.38.1: measurement lanes (sweep + verification) must not stamp the
       // ledger — see ActionRunner.probe.
       probe: (n) => actions.probe(n),
@@ -120,7 +124,9 @@ async function main(): Promise<void> {
       verifyRequests: (now) => zwaveData.drainVerifyRequests(now),
       verifyOwedCount: () => zwaveData.verifyOwedCount(),
       onProbeResult: (nodeId, answered, selfProven) => zwaveData.recordProbeResult(nodeId, answered, selfProven),
-      log: (sev, nodeId, text) => zwaveData.logAction(sev, nodeId, text),
+      // v0.41: the ENGINE's own writes, not the operator's — the Log screen
+      // rendered every autonomous probe as "operator" before this.
+      log: (sev, nodeId, text) => zwaveData.logEngineAction(sev, nodeId, text),
       log2: log,
       config: {
         enabled: config.autoPing.enabled,
@@ -130,6 +136,11 @@ async function main(): Promise<void> {
         staleMs: config.autoPing.staleMs,
       },
     });
+    // The engine's one autonomous write now has a screen (v0.41): hand its
+    // read-only snapshot to the data layer so ENGINE can render live
+    // suppression, ladder position and probe debt instead of the operator
+    // tailing the container log for them.
+    zwaveData.setAutoPingSnapshot(() => autoPing!.snapshot());
     log(
       `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed ` +
         `(max ${config.autoPing.maxAttempts}/outage, backoff 10/30/60m; suppressed on storm, rebuild and restart)` +

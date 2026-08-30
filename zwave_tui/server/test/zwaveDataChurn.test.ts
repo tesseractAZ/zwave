@@ -647,6 +647,42 @@ test('the first-of-burst flag is true EXACTLY once per burst (v0.38.2)', async (
   }
 });
 
+test('an ENGINE write lands in the ring as the engine, not as the operator (v0.41)', async () => {
+  // Auto-ping routes its log through this sink. Before v0.41 it shared the
+  // operator's, so the Log screen attributed every autonomous probe to the
+  // human. NOTE: this pins the SINK; the index.ts wiring that points auto-ping
+  // at it is not reachable from a test and is guarded only by review.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-prov-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    zd.logEngineAction('info', 7, 'node 7 probed by the ladder');
+    zd.logAction('info', 7, 'node 7 pinged by you');
+    // The ROUTER is what index.ts actually calls — the seam a pre-release
+    // review caught wired wrong, with autonomous probes logging as operator.
+    zd.logByOrigin('error', 7, 'routed as engine', 'engine');
+    zd.logByOrigin('info', 7, 'routed as you', 'you');
+    zd.logByOrigin('info', 7, 'routed by default', undefined);
+    const evs = zd.events();
+    const eng = evs.find((e) => e.text.includes('by the ladder'));
+    const you = evs.find((e) => e.text.includes('by you'));
+    assert.equal(eng?.source, 'engine', 'an autonomous write is the engine\'s');
+    assert.equal(you?.source, 'you', 'and an operator action is still yours');
+    assert.equal(evs.find((e) => e.text === 'routed as engine')?.source, 'engine',
+      'the router sends engine-origin lines to the engine sink');
+    assert.equal(evs.find((e) => e.text === 'routed as you')?.source, 'you');
+    assert.equal(evs.find((e) => e.text === 'routed by default')?.source, 'you',
+      'an unmarked caller is the operator — the conservative default');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a node going DEAD mid-episode is marked confounded by the data layer — the ledger cannot see status (v0.40)', async () => {
   // The audited exemplar: rtt-degraded → node death → dead-remediation revival
   // → booked "improved (no action)". The ledger's guard needs the mark, and
@@ -687,6 +723,19 @@ test('a node going DEAD mid-episode is marked confounded by the data layer — t
     shadow.updateEpisodes([symptom, flapSymptom], t0 + 60_000); // node goes Dead mid-episode
     assert.ok(marked.some(([n, k]) => n === 7 && k === 'rtt-degraded'),
       `the Dead transition must mark the open episode confounded: ${JSON.stringify(marked)}`);
+    // The ENGINE screen reads `confirming` to tell "degraded right now" from
+    // "recovered, being scored" — and pendingResolve lives HERE, not in the
+    // ledger, so the join is this layer's job (v0.41).
+    {
+      const openNow = zd.openEpisodes();
+      const ep7 = openNow.find((e) => e.nodeId === 7 && e.kind === 'rtt-degraded');
+      assert.ok(ep7, `the open episode is visible to a screen: ${JSON.stringify(openNow)}`);
+      assert.equal(ep7!.confirming, false, 'symptom still live ⇒ not in its confirmation window');
+      shadow.updateEpisodes([], t0 + 70_000);          // symptom goes absent
+      const after = zd.openEpisodes().find((e) => e.nodeId === 7 && e.kind === 'rtt-degraded');
+      assert.equal(after?.confirming, true, 'absent symptom ⇒ confirming, joined from pendingResolve');
+      shadow.updateEpisodes([symptom], t0 + 80_000);   // and back, for the checks below
+    }
     assert.ok(!marked.some(([, k]) => k === 'dead-flap'),
       `dead-flap is its own definition, never a confound: ${JSON.stringify(marked)}`);
 

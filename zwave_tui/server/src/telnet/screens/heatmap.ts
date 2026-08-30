@@ -11,7 +11,7 @@
  *   rows     Garage          ▒▓          μ[██░░░] Back Door ↓ -4dB   3n
  *            Living Room      ▓████████   μ[████░] TV Lamp   ↓+11dB   8n
  *            (no area)        ··          — ·                  —      2n
- *   footer   sorted worst-first · q/Esc back · 1-8 screens
+ *   footer   sorted worst-first · q/Esc back · 1-9 screens
  *
  * Each cell = heatCell(marginFrac), marginFrac = clamp(margin / 25dB). Cells
  * are shaded ░▒▓█ and coloured red→yellow→green by that fraction. Margin =
@@ -63,7 +63,7 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
     return centeredNotice(view, 'SIGNAL HEATMAP', [
       c.grey('Connecting to Home Assistant…'),
       ...(err ? ['', c.red(truncate(err, Math.min(W - 8, 60)))] : []),
-    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
+    ], [['1-9', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   const noise = data.noiseFloor();
@@ -71,7 +71,7 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
   if (areas.length === 0) {
     return centeredNotice(view, 'SIGNAL HEATMAP', [
       c.grey('No Z-Wave nodes discovered yet'),
-    ], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
+    ], [['1-9', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   const totalNodes = areas.reduce((s, a) => s + a.nodeCount, 0);
@@ -118,7 +118,7 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
       c.grey('sorted worst-first'),
     ]),
     body,
-    keys: [['1-8', 'SCREENS'], ['Q', 'BACK']], // no [T] UNITS: this map is dB-margin only (T has no effect here)
+    keys: [['1-9', 'SCREENS'], ['Q', 'BACK']], // no [T] UNITS: this map is dB-margin only (T has no effect here)
   });
 }
 

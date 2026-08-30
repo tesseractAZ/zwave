@@ -1354,3 +1354,31 @@ test('a sweep launch that never left does not cost the node its cadence slot (v0
   h.stop();
   assert.equal(launches, 2, 'the node keeps its slot in the sweep queue');
 });
+
+test('the auto-ping snapshot reports the engine\'s REAL state, not defaults (v0.41)', async () => {
+  // The ENGINE screen renders straight off this. A snapshot frozen at defaults
+  // would show a permanently idle, unsuppressed engine however the real one
+  // behaves — a screen that lies is worse than no screen.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  // A third of the mesh dead trips the storm suppressor.
+  const deadOnes = Array.from({ length: 8 }, (_v, i) => dead(200 + i));
+  const nodes = mesh(20, deadOnes);
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: () => {}, log2: Object.assign(() => {}, { debug: () => {} }),
+    config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
+  });
+  assert.equal(h.snapshot().lastTickMs, null, 'before the first pass it says so rather than inventing one');
+  clock = T + BOOT_WINDOW_MS + MIN; h.tick();
+  const snap = h.snapshot();
+  h.stop();
+  assert.equal(snap.suppressed, 'storm', 'the real suppression reason reaches the snapshot');
+  // A suppressed pass returns BEFORE reading the sweep and verify queues, so
+  // reporting 0 there would assert an empty backlog nothing looked at.
+  assert.equal(snap.staleDue, null, 'an unread queue is null, never a fabricated 0');
+  assert.equal(snap.verifyOwed, null);
+  assert.equal(snap.lastTickMs, clock);
+  assert.ok(snap.deadListening >= 8, `the real dead count reaches the snapshot: ${snap.deadListening}`);
+  assert.ok(snap.nodes.some((n) => n.deadSinceMs != null), 'and per-node ladder state is populated');
+});

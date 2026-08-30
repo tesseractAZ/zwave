@@ -632,7 +632,7 @@ Statistics subscriptions are not on a timer at all — they are opened once per 
 
 ## 3. The Control-Room TUI: Screens, Navigation & Rendering
 
-The TUI is the human-facing half of the add-on: an instrument-panel–style console that renders over telnet (raw TCP) or an xterm.js WebSocket, driven by one per-session state machine. This chapter documents the rendering substrate — the eight screens, the key map that moves between them, the shared frame contract every screen wears, the ANSI-aware layout primitives and terminal gauges they draw with, the width-responsive Overview table, and the anti-flicker draw loop that repaints once a second without smearing. Two of the eight screens — **Remedy** and **Interference** — are the front ends of the remediation engine and get their own chapters; here they appear only as members of the registry and targets of the key map.
+The TUI is the human-facing half of the add-on: an instrument-panel–style console that renders over telnet (raw TCP) or an xterm.js WebSocket, driven by one per-session state machine. This chapter documents the rendering substrate — the nine screens, the key map that moves between them, the shared frame contract every screen wears, the ANSI-aware layout primitives and terminal gauges they draw with, the width-responsive Overview table, and the anti-flicker draw loop that repaints once a second without smearing. Three of the nine screens — **Remedy**, **Interference** and **Engine** — are the front ends of the remediation engine and get their own chapters; here they appear only as members of the registry and targets of the key map.
 
 Everything in this layer is **pure render over cached data**. The screen functions receive a `DataProvider` whose accessors return the last cached values (`server/src/types.ts`, the `DataProvider` interface) and must never recompute Z-Wave state inside `draw()`. The single source of truth for "what nodes, in what order" is `visibleNodes()` in `server/src/telnet/input.ts`; the session computes it once per frame and hands the same array to every screen so a selection index means the same node everywhere.
 
@@ -697,7 +697,7 @@ The telnet parser (`server.ts`, `parseInput`) strips IAC framing, decodes NAWS w
 
 | Key(s) | Action |
 |---|---|
-| `1`–`9` | `view.screen = SCREENS[n-1]` when `n-1 < SCREENS.length`; `9` is a no-op (only 8 screens) |
+| `1`–`9` | `view.screen = SCREENS[n-1]` when `n-1 < SCREENS.length`; `9` is ENGINE (v0.41.0) |
 | `c` | jump to **controller** · `e` → **log** · `y` → **remedy** · `f` → **interference** |
 | `↑`/`k` | move selection cursor up · `↓`/`j` down (`moveSelection`, clamped to the visible list) — **on Detail these scroll the dossier instead**, see below |
 | `←`/`→` | reserved (no-op) |
@@ -1287,6 +1287,51 @@ These are module-level `const`s, not runtime config options — tuning them is a
 **Out:** the render loop calls `DataProvider.scoreFor(nodeId)` — which caches `scoreNode()` — every frame. The resulting `HealthResult` drives the Overview table (grade, flag column, `state` colour), the Detail screen's per-lane breakdown, the health-based sort key, and feeds the symptom engine's baselines (Chapter 5). Because scoring is a pure function of the cached snapshot, the render path never recomputes it inside `draw()`.
 
 The route rebuild worth restating from the engine's constraints: none of these score signals ever triggers an automatic action. A low grade, an `R` flag, or a `W` flag is surfaced to the operator; any remediation flows through the type-CONFIRM Actions Menu (Chapter 7). In particular a route rebuild is never offered as a fix for a poor Route-lane score — it cannot repair a physical link, it deletes manual priority routes, and it throws on Long-Range nodes.
+
+## 4.15 ENGINE — the engine's own runtime (v0.41)
+
+The learned-remediation engine grew faster than its screens. A gap analysis of
+this TUI found 83 verified gaps between what the engine computes and what an
+operator can see, and the largest class was structural: **auto-ping had no
+accessor anywhere in the codebase.** Its suppression state, per-node dwell and
+backoff position, miss streaks, launch-failure budget and verification debt were
+all computed every tick and reachable only by tailing the container log. The M5
+ledger was in the same position from the other direction — open episodes, the
+control arm's `n`, and the node provenance behind it were tracked, persisted and
+restored with no path to any screen, so REMEDY could honestly print "All clear"
+while an experiment was mid-flight.
+
+ENGINE (key `9`) is the answer to one question: what is the engine doing right
+now, and what has it learned? It renders three blocks — AUTO-PING, LEDGER LIVE
+and LEARNED — ordered so that truncation on a small terminal drops the least
+operational content last, and `frame` owns the exactly-`view.rows` contract as
+on every other screen.
+
+Three rules the screen keeps, each one a gap-analysis class it closes:
+
+- **Every rate carries its n.** A self-heal rate of 82% means nothing without
+  `n=6.2` and the node count behind it — one pathological device can saturate a
+  marginal arm, and the ledger's own docs say so.
+- **A disabled feature says it is disabled.** Auto-ping off renders as "off",
+  never as an empty block. Silence reading as health is the failure mode this
+  screen exists to end.
+- **An idle ledger is not an absent one.** "No open episodes" and "no outcome
+  ledger" are different facts and print differently.
+
+The data comes from `AutoPingSnapshot` (the runner's read-only view of its own
+state), `openEpisodeDetails()` and `controlArm()`. The confirmation-window flag
+is joined on in `zwaveData`, not the ledger, because `pendingResolve` lives
+there — without it a recovering node reads as currently degraded. All three
+members are pinned across the production bridge in `driverWsClient.test.ts`: a
+screen reading an optional provider member the bridge forgot to wire renders a
+silent blank, which is the v0.33 dead-`M`-key defect in a new costume.
+
+**Provenance (v0.41).** `LogEvent.source` gained a third value, `engine`.
+Auto-ping logged through `logAction` — the OPERATOR's sink — so the Log screen
+rendered every autonomous probe and every "STILL DEAD" give-up as `operator`,
+telling the operator they had done what the engine did. Engine-initiated writes
+now go through `logEngineAction`, render as `engine (auto)`, and the kind word
+(which hardcoded "operator action" one layer above the source field) follows.
 
 ## 5. The Evidence Store (M2)
 
@@ -2964,7 +3009,7 @@ The diurnal chart is bound by the same two honesty rules as the strip beneath it
 
 Both charts are surplus-funded and absent below their row thresholds, so a compact frame renders exactly as it did before.
 
-The body is built into a `string[]` and handed to `frame(view, data, {...})` with `title: 'INTERFERENCE'`, a `rightStatus`, and the key legend `[['1-8','SCREENS'],['Q','BACK']]`. Because the correlated-degradation panel is the *last* body section and can be clipped on a short terminal, an active event is also mirrored into the never-clipped title rule:
+The body is built into a `string[]` and handed to `frame(view, data, {...})` with `title: 'INTERFERENCE'`, a `rightStatus`, and the key legend `[['1-9','SCREENS'],['Q','BACK']]`. Because the correlated-degradation panel is the *last* body section and can be clipped on a short terminal, an active event is also mirrored into the never-clipped title rule:
 
 ```
 right = iv.correlated.active

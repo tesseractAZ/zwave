@@ -153,3 +153,16 @@ test('on a WIDE frame both still fit and the name still leads', () => {
   assert.ok(line.indexOf('Back Porch Motion') < line.indexOf('sensor.node_27_illuminance'),
     'name first when it fits — the v0.35 behaviour is width-gated, not reverted');
 });
+
+test('an ENGINE-initiated write is attributed to the engine, never to the operator (v0.41)', () => {
+  // Auto-ping logged through the operator sink, so every autonomous probe and
+  // every give-up notice rendered as "operator" — an activity log claiming the
+  // human did what the engine did. Provenance is the one thing it must not
+  // fabricate.
+  const ev = mkEvent({ ts: 700, kind: 'action', source: 'engine', nodeId: 3, text: 'node 3 probed' });
+  const lines = renderLog(ctx({ view: mkView({ cols: 120, rows: 30, logCursor: 0 }), events: [ev], nodes: sampleNodes }));
+  const joined = lines.map(strip).join('\n');
+  const typeRow = lines.map(strip).find((l) => /Type/.test(l)) ?? '';
+  assert.match(typeRow, /engine \(auto\)/, `an engine write says so: ${typeRow}`);
+  assert.ok(!/operator/.test(typeRow), `and is never labelled operator: ${typeRow}`);
+});

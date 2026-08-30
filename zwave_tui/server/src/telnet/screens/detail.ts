@@ -77,7 +77,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     const why = view.filter
       ? `No node matches “${view.filter}”`
       : 'No node selected — pick one on the Overview';
-    return centeredNotice(view, 'NODE DETAIL', [c.grey(why)], [['1-8', 'SCREENS'], ['Q', 'BACK']]);
+    return centeredNotice(view, 'NODE DETAIL', [c.grey(why)], [['1-9', 'SCREENS'], ['Q', 'BACK']]);
   }
 
   const health = data.scoreFor(n.nodeId);
@@ -212,7 +212,11 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     pushG(trendRow('Latency', rttHist, 'ms', trendColor(rttHist, rttColor), inner));
     // Long-horizon coarse RSSI trend (~2h, 1 pt/min); needs a few points first.
     const longRssi = data.historyLong(n.nodeId).rssi.filter((v) => rssiReading(v) != null);
-    if (longRssi.length >= 3) pushG(trendRow('Sig 2h', longRssi, 'dBm', trendColor(longRssi, rssiColor), inner));
+    // NOT a fixed span (v0.41): the coarse ring is 1 point per minute of the
+    // node's OWN samples, so 120 points is two hours on a chatty node and five
+    // days on the quiet ones this detector exists for. Label what it is — a
+    // long-horizon trend — rather than a duration nothing measures.
+    if (longRssi.length >= 3) pushG(trendRow('Sig long', longRssi, 'dBm', trendColor(longRssi, rssiColor), inner));
 
     // Response-timeout % via the SHARED responseTimeoutPct — the same figure the
     // Overview TMO column shows. Numerator is timeoutResponse (ACKed Get whose
@@ -420,7 +424,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     ['↑↓', 'SCROLL'],
     ['< >', 'NODE', 2],
     ['A', 'ACTIONS', 1],
-    ['1-8', 'SCREENS'],
+    ['1-9', 'SCREENS'],
     ['Q', 'BACK'],
   ];
   return frame(view, data, {
@@ -689,7 +693,7 @@ function trendRow(
   if (sparkW < 8) return null;
   // Downsample so the drawing spans the WHOLE series. sparkline() tail-slices
   // to `width`, so the 120-sample coarse ring behind this ≤56-cell row drew
-  // only its newest ~56 minutes while the 'Sig 2h' label and the min…max
+  // only its newest ~56 minutes while the (then 'Sig 2h') label and the min…max
   // caption (computed over the full series, above) both claimed two hours —
   // an hour-long RF sag was invisible in the very graphic captioned with it.
   // interference.ts documents this exact trap and built downsampleMean for it.

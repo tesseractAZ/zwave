@@ -388,7 +388,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
         out.push({
           kind: 'quiet-node', nodeId: id, severity: 'warn', sinceMs: since, basis: 'measured',
           evidence: [{ label: 'last heard', value: `${silentH}h ago` }],
-          narrative: `${node.name} is a mains node that has not been heard from in ${silentH}h, far past the liveness sweep's cadence — the sweep has asked and nothing has come back. The driver still reports it Alive because it marks a node Dead only when a transmission it attempted fails. Silence this long on a device that never sleeps is the earlier signal.`,
+          narrative: `${node.name} is a mains node that has not been heard from in ${silentH}h, far past the liveness sweep's cadence. The driver still reports it Alive because it marks a node Dead only when a transmission it attempted fails. Silence this long on a device that never sleeps is the earlier signal.`,
         });
       }
     }

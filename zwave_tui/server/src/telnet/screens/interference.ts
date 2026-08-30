@@ -242,7 +242,7 @@ export function renderInterference(ctx: ScreenCtx): string[] {
     title: 'INTERFERENCE',
     rightStatus: right,
     body,
-    keys: [['1-8', 'SCREENS'], ['Q', 'BACK']],
+    keys: [['1-9', 'SCREENS'], ['Q', 'BACK']],
   });
 }
 
