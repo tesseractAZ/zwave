@@ -590,6 +590,10 @@ class ZwaveDataImpl implements ZwaveData {
    *  (DESIGN §3.1): Alive↔Dead transitions must be counted from EVENTS —
    *  level-sampling the roster status misses sub-window flaps by construction. */
   private flapAccum = new Map<number, number>();
+  /** nodeId → Alive↔Dead transitions drained on THIS tick (v0.40.2), so the
+   *  confound guard can see a sub-tick death the level-sampled status missed.
+   *  Cleared at the end of each engine pass. */
+  private flapsThisTick = new Map<number, number>();
   private routeChangeAccum = new Map<number, number>();
   /** S2 SPAN-resync log events per node since the last evidence sample (v0.26).
    *  Fed by the driver-ws log listener; drains beside flapAccum. Nonce desync
@@ -981,6 +985,11 @@ class ZwaveDataImpl implements ZwaveData {
         to: stats.timeoutResponse, dr: stats.commandsDroppedTX,
       });
       const flaps = this.flapAccum.get(n.nodeId) ?? 0;
+      // Carried for the confound guard below (v0.40.2): the guard LEVEL-samples
+      // status, so a Dead excursion that opens and closes between two samples is
+      // invisible to it — while this event-driven counter saw it. Same argument
+      // the evidence tier already makes for flaps generally.
+      if (flaps > 0) this.flapsThisTick.set(n.nodeId, flaps);
       const routeChanges = this.routeChangeAccum.get(n.nodeId) ?? 0;
       // null when the S2 log lane is not listening — "switched off" must not
       // read as "no resyncs" (v0.26 review). Same honest-unknown rule the
@@ -1056,6 +1065,8 @@ class ZwaveDataImpl implements ZwaveData {
     for (const k of [...this.loggedSymptomKeys]) if (!live.has(k)) this.loggedSymptomKeys.delete(k);
     // M5: advance the outcome ledger's episode lifecycle off the same signal.
     this.updateEpisodes(symptoms, now);
+    // Consumed by the confound guard inside updateEpisodes; one pass only.
+    this.flapsThisTick.clear();
     // Fold the freshest sample per node into the baselines, quarantining nodes
     // that are SYMPTOMATIC OR ARMING (any active dwell) — folding the pre-dwell
     // breach would ratchet the baseline toward the pathology (v0.14 review).
@@ -1136,7 +1147,11 @@ class ZwaveDataImpl implements ZwaveData {
         // confound is a death EXTERNAL to the measured signal.
         if (ep.kind === 'dead-flap') continue;
         const nd = snap.find((x) => x.nodeId === ep.nodeId);
-        if (nd && nd.status === NodeStatus.Dead) oc.markConfounded(ep.nodeId, ep.kind);
+        // Level-sampled Dead, OR an event-driven transition this tick that the
+        // level sample cannot see (v0.40.2). A death is a death whether or not
+        // it happened to straddle a sample boundary.
+        const flapped = (this.flapsThisTick.get(ep.nodeId) ?? 0) > 0;
+        if (flapped || (nd && nd.status === NodeStatus.Dead)) oc.markConfounded(ep.nodeId, ep.kind);
       }
     }
     // Keep improving each LIVE episode's before-window as probe evidence lands

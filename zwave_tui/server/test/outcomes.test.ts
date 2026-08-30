@@ -906,8 +906,12 @@ test('a closure line shows its arithmetic — the per-window evidence counts (v0
   o.resolve(7, 'rtt-degraded', 2000, W(50, 0, 50, { rttMedian: null, rttN: 0, freshN: 5 }));
   const line = logged.find((l) => /episode 7:rtt-degraded/.test(l));
   assert.ok(line, 'the closure is logged');
-  assert.match(line!, /\[before fresh=5 rtt=1 rssi=0 rate=n \| after fresh=5 rtt=0 rssi=0 rate=n\]/,
+  assert.match(line!, /\[before fresh=5 rtt=1\/90\.0ms .* \| after fresh=5 rtt=0\/– /,
     `the failing floor must be readable off the line: ${line}`);
+  // …and the DECIDING quantity too (v0.40.2): counts alone are equally
+  // consistent with improved, no-change and worse.
+  assert.match(line!, /rssi=0\/– rate=n flaps=0 s2=0\/\d+ rt=0\/\d+ tx=\d+ tmo=0\.0%/,
+    `the deciding quantities — including the s2/route visibility floors and tx — must ride the line: ${line}`);
 });
 
 // ── v0.39: transient blinks are split out of the fixable-unverifiable counter ──

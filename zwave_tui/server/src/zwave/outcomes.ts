@@ -729,10 +729,30 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // cadence collapsing probes vs the before-window refinement stopping
       // early) were indistinguishable. A verdict that cannot show its
       // arithmetic invites another guessed fix; this cycle has had four.
+      // The counts prove the FLOORS were met; they do not show WHY the verdict
+      // came out as it did — the rtt branch decides on medians, the flap/s2/
+      // route branches on event counts, the timeout branch on a rate. An audit
+      // put it plainly: a closure line printing only counts is equally
+      // consistent with `improved`, `no-change` AND `worse`. Since a resolved
+      // episode is never persisted, this line is the ONLY lasting record of the
+      // verdict's inputs, so it now carries the deciding quantity too (v0.40.2).
+      // One decimal, not Math.round: the rtt branch decides on a 25% drop AND a
+      // 20 ms floor, so a rounded median can contradict the verdict printed
+      // beside it at the threshold.
+      const num = (x: number | null, unit = ''): string => (x == null ? '–' : `${x.toFixed(1)}${unit}`);
+      // s2Known / routeKnown ride along because they are the s2 and route
+      // branches' OWN evidence floors — without them `s2=0` reads identically
+      // for "no resyncs happened" and "the lane was not listening", which is
+      // the exact blind spot the v0.26 review created those counters to close.
+      // `tx` likewise: it is the timeout family's denominator and the input to
+      // the comparability gate, so without it an `unverifiable` timeout verdict
+      // cannot be told from a scored one.
       const win = (w: WindowMetrics | null): string =>
         w == null
           ? 'none'
-          : `fresh=${w.freshN} rtt=${w.rttN} rssi=${w.rssiN} rate=${w.rateKbpsMin != null ? 'y' : 'n'}`;
+          : `fresh=${w.freshN} rtt=${w.rttN}/${num(w.rttMedian, 'ms')} rssi=${w.rssiN}/${num(w.rssiMedian)} ` +
+            `rate=${w.rateKbpsMin != null ? w.rateKbpsMin : 'n'} flaps=${w.flaps} s2=${w.s2}/${w.s2Known} ` +
+            `rt=${w.routeChanges}/${w.routeKnown} tx=${w.tx} tmo=${w.rate == null ? '–' : (w.rate * 100).toFixed(1) + '%'}`;
       const tag = ep.transient
         ? ' (transient — degraded state ended before its evidence floor)'
         : ep.confounded && ep.action == null && ep.verdict !== 'unverifiable' && ep.verdict !== 'refused-misdiagnosis'
