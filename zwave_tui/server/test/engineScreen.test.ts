@@ -186,3 +186,17 @@ test('a node the ladder has ABANDONED shows no next retry — it has no next att
   assert.match(joined, /GAVE UP/);
   assert.ok(!/next in/.test(joined), 'a given-up node is not promised a retry');
 });
+
+test('an arm whose node provenance was never recorded says so — 0 is unknown, not zero (v0.41.1)', () => {
+  // Seen on the live fleet minutes after this screen shipped:
+  //   route-churn  self-heal 100% (n=1.0, 0 nodes)
+  // Efficacy.nodes is 0 when UNKNOWN (a ledger written before provenance was
+  // tracked). Beside a positive n, "0 nodes" is a self-contradiction — and this
+  // is the number that separates "six nodes agreed" from "one node repeated".
+  const joined = plain(renderEngine(ctx(120, 30, {
+    controlArm: (k) => (k === 'route-churn' ? { n: 1.0, ok: 1.0, nodes: 0 } : null),
+  })));
+  assert.match(joined, /self-heal 100% \(n=1\.0, sources not recorded\)/,
+    `unknown provenance must say so: ${joined}`);
+  assert.ok(!/0 nodes/.test(joined), 'never asserts a measured zero');
+});
