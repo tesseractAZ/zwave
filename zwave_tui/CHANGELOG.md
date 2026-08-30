@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.41.1 — 2026-08-29
+
+**The ENGINE screen found a fabrication in its own first render.**
+
+Within minutes of v0.41.0 reaching the Pi, the new LEARNED block printed:
+
+    route-churn
+      self-heal 100% (n=1.0, 0 nodes)
+
+`Efficacy.nodes` is **0 when UNKNOWN** — a ledger file written before node
+provenance was tracked — not "zero nodes agreed". Beside a positive n that
+reads as a measured zero, and this is precisely the number that separates "six
+nodes agreed" from "one node repeated six times", which the arms being marginal
+by design makes load-bearing. An arm with no recorded provenance now says
+`sources not recorded`.
+
+A pre-release review had flagged this shape as a warn; seeing it on the live
+fleet settled it.
+
+838 tests. 305 mutation entries.
+
 ## 0.41.0 — 2026-08-29
 
 **The ENGINE screen — the engine's own runtime, finally visible.**

@@ -1394,7 +1394,7 @@ const MUTANTS = [
   { id: 'engine-baserate-carries-its-n', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     // The bare rate again — the exact class-D defect the gap analysis raised:
     // a self-heal rate without its n invites overtrust in one episode.
-    find: "        c.grey(` (n=${arm.n.toFixed(1)}, ${arm.nodes} node${arm.nodes === 1 ? '' : 's'})`));",
+    find: "        c.grey(` (n=${arm.n.toFixed(1)}${provenance(arm.nodes)})`));",
     repl: "        '');",
     what: 'the self-heal base rate always renders with its n' },
   { id: 'engine-confound-outranks-action', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
@@ -1476,6 +1476,13 @@ const MUTANTS = [
     find: '        if (!n.gaveUp && n.nextEligibleMs != null && n.nextEligibleMs > now) {',
     repl: '        if (n.nextEligibleMs != null && n.nextEligibleMs > now) {',
     what: 'a node the ladder abandoned is not promised a next attempt' },
+  { id: 'unknown-provenance-is-not-zero', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Efficacy.nodes is 0 when UNKNOWN, not when zero nodes agreed. Beside a
+    // positive n, "0 nodes" is a self-contradiction — and it appeared on the
+    // live fleet within minutes of the ENGINE screen shipping.
+    find: "  return nodes > 0 ? `, ${nodes} node${nodes === 1 ? '' : 's'}` : ', sources not recorded';",
+    repl: "  return `, ${nodes} node${nodes === 1 ? '' : 's'}`;",
+    what: 'an arm with no recorded provenance says so, never "0 nodes"' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.

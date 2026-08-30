@@ -71,6 +71,21 @@ function fitBits(prefix: string, bits: string[], width: number): string {
   return out;
 }
 
+/**
+ * Render an arm's node provenance (v0.41.1).
+ *
+ * `nodes: 0` means UNKNOWN — a ledger file written before provenance was
+ * tracked (see Efficacy.nodes) — NOT "zero nodes agreed". Printing "0 nodes"
+ * beside a positive n is a self-contradiction, and it appeared on the live
+ * fleet within minutes of this screen shipping: `self-heal 100% (n=1.0,
+ * 0 nodes)`. The arms are marginal by design, so this number is exactly the
+ * one that separates "six nodes agreed" from "one node repeated six times" —
+ * it must never assert a count it does not have.
+ */
+function provenance(nodes: number): string {
+  return nodes > 0 ? `, ${nodes} node${nodes === 1 ? '' : 's'}` : ', sources not recorded';
+}
+
 /** ms → a compact age. Never fabricates precision it does not have. */
 function age(ms: number | null): string {
   if (ms == null) return '—';
@@ -194,13 +209,13 @@ export function renderEngine(ctx: ScreenCtx): string[] {
       // The base rate ALWAYS with its n and its provenance: a self-heal rate
       // from one node is not a fact about the kind.
       parts.push(c.white(`self-heal ${Math.round((arm.ok / arm.n) * 100)}%`) +
-        c.grey(` (n=${arm.n.toFixed(1)}, ${arm.nodes} node${arm.nodes === 1 ? '' : 's'})`));
+        c.grey(` (n=${arm.n.toFixed(1)}${provenance(arm.nodes)})`));
     } else {
       parts.push(c.grey('self-heal not yet measured'));
     }
     for (const { a, e } of arms) {
       parts.push(e!.expectedEfficacy != null
-        ? c.green(`${a} ${Math.round(e!.expectedEfficacy * 100)}%`) + c.grey(` (n=${e!.n.toFixed(1)}, ${e!.nodes} node${e!.nodes === 1 ? '' : 's'})`)
+        ? c.green(`${a} ${Math.round(e!.expectedEfficacy * 100)}%`) + c.grey(` (n=${e!.n.toFixed(1)}${provenance(e!.nodes)})`)
         : c.grey(`${a} not distinguishable (n=${e!.n.toFixed(1)})`));
     }
     push('  ' + c.white(kind));
