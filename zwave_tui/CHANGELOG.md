@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.40.2 — 2026-08-29
+
+**A probe that never left is never judged — and four more the audit found.**
+
+A 36-agent audit of the v0.40.1 run refuted the regression this release was
+opened to investigate, and found something considerably worse underneath it.
+
+**CRITICAL — transport failures were silently blamed on the node.**
+`zwaveActions.run()` catches its own errors and RETURNS `{ok:false}`; it never
+re-throws. Every probe lane guarded its launch with `.catch(unpendProbe)` — a
+promise that could not reject. `unpendProbe` had never executed in production:
+zero "could not be probed" lines across the 1206 probes in the retained log — and the defect predates these three releases; the retained window is simply where it was measured. So an
+HA WebSocket outage, a Core restart, or a missing ping button was judged a
+moment later as THE NODE failing to answer. The audit caught it red-handed in
+the corpus: during a Core restart a node logged `did NOT answer` while never
+going Dead — because the button press never reached HA, so the driver never
+attempted a transmission. Costs: the log blamed the device; `probesAsked`
+incremented without `probesAnswered`, permanently poisoning a persisted counter
+the Detail screen colour-codes; and worst, the dead lane books its attempt
+BEFORE the call, spending a node's 3-attempt budget on packets never sent.
+Fixed: a resolved `ok:false` is treated exactly like a rejection, and the dead
+lane refunds the attempt it booked. (This release's own test caught the first
+version of that refund reading the counters after the increment — handing back
+the value the attempt had just spent.)
+
+**Only the fixed-cadence sweep feeds the persisted reply rate.** Verification
+bursts and dead-remediation probes are symptom-correlated — a node under
+investigation took 22 probes against every peer's 13 — so folding them into one
+denominator destroyed the cross-node comparability the v0.37 sweep was rebuilt
+to provide. Probes now carry their lane; only the sweep is counted. Misses in
+every lane still log and still move the streak.
+
+**Unknown attribution is no longer credited.** The first sweep after a restart
+cannot tell a node's own traffic from the previous process's probe echoes; the
+old code called it "on its own" and credited it — 35 fabricated labels and 35
+false persisted credits per boot, fleet-wide. It now says exactly that, and credits
+nothing while attribution is unknown — a node that speaks on its own before
+any probe of this run has been judged is also left uncredited, which
+under-credits rather than fabricates.
+
+**A closure line carries the deciding quantity.** The counts proved the floors
+were met but not why the verdict landed; a counts-only line is equally
+consistent with `improved`, `no-change` and `worse`, and the resolved episode
+is never persisted. Medians, event counts and the timeout rate now ride along.
+
+**The confound guard sees a sub-tick death.** It level-sampled status and
+missed excursions between samples, while the event-driven flap counter that
+saw them was discarded. It now consults both.
+
+Also: departed nodes no longer leave a miss streak, pending probe, verify
+timestamp or give-up flag for a re-included id to inherit; the echo label
+carries its measured silence; and the ledger's structural dead zone (a control
+base above ~0.847 makes its action arm uncreditable at any n, because decay
+caps n at 33.3) is now documented in DOCS rather than silently absorbed.
+
+Refuted by the audit and left alone: the "escalating unheard signal" v0.40.1
+was accused of destroying. 187 of v0.40.0's 187 unheard labels read exactly
+"120m" — staleMs is both the probe cadence and the recency threshold, so the
+sweep pinned the number it was thresholding, on nodes answering every probe.
+
+**A pre-release review caught a critical regression in the first cut of this
+release.** Refunding the dead lane's attempt ALSO handed back its backoff
+clock, and with `tries` back to 0 the ladder's `BACKOFF_MS[tries - 1]` indexed
+at −1 → `undefined`, so the throttle silently vanished: 190 pings in 200
+simulated minutes against the ladder's 3, "attempt 1/3" logged every minute,
+and the give-up notice unreachable — on a node the engine had never actually
+managed to probe. Worse, this release's own test was complicit, asserting the
+loop's existence as the desired outcome. Launch failures now carry their OWN
+bounded budget and announce themselves separately ("could not be probed 3× in
+a row — the probe never left this add-on"), the backoff index is defined at
+zero recorded attempts, and the test pins both the bound and the spacing. The
+same capture-order trap was found and fixed in the sweep lane's cadence clock.
+
+822 tests. 283 mutation entries.
+
 ## 0.40.1 — 2026-08-28
 
 **The echo label follows attribution, never the threshold boundary.**

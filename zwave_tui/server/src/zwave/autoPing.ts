@@ -107,7 +107,7 @@ export interface AutoPingState {
    * lanes (dead-remediation, verification) carry `self: false`: the flag
    * means "spoke on its own since the last sweep", which only a sweep asks.
    */
-  awaitingAnswer: Map<number, { at: number; self: boolean }[]>;
+  awaitingAnswer: Map<number, { at: number; self: boolean; lane: ProbeLane }[]>;
   /** nodeId → the `lastSeen` value most recently ATTRIBUTED to one of our own
    *  probe answers (v0.40). The sweep's self-proven flag compares against it:
    *  a lastSeen that has not advanced past our probe's answer is the app
@@ -119,7 +119,8 @@ export interface AutoPingState {
    *  window is genuinely ambiguous (probe-induced supervision chatter lands
    *  there too) and the tiebreak under-credits rather than fabricates; and
    *  the map is in-memory, so the first sweep per node after a restart has
-   *  no attribution and an echo can read self-proven once per boot. */
+   *  no attribution — which v0.40.2 no longer resolves as self-proof: the
+   *  sweep says so and credits nothing until a probe of this run is judged. */
   lastProbeSeen: Map<number, number>;
   /** Nodes already announced as abandoned this outage (v0.36.4), so the notice
    *  fires once rather than every tick for as long as the node stays down. */
@@ -138,7 +139,30 @@ export interface AutoPingState {
   /** nodeId → epoch ms of this node's previous VERIFICATION probe (v0.37.1),
    *  so the burst's real spacing is visible in the log. */
   lastVerifyAt: Map<number, number>;
+  /**
+   * nodeId → consecutive dead-lane LAUNCHES that never left (v0.40.2).
+   *
+   * A refunded remediation attempt must not become a licence to retry forever.
+   * The first cut of this release refunded `attempts` and got exactly that: a
+   * pre-release review measured 190 pings in 200 minutes against the ladder's
+   * 3, with `attempt 1/3` logged every minute and the give-up notice
+   * unreachable — because `tries` never advanced. The node's REMEDIATION
+   * budget is still not spent by a packet that never left, but launch
+   * failures carry their own budget, and exhausting it says so with a
+   * different message: the fault is on our side, not the node's.
+   */
+  launchFailures: Map<number, number>;
+  /** Nodes already announced as unlaunchable this outage (v0.40.2). */
+  launchGaveUpAnnounced: Set<number>;
 }
+
+/** Which lane issued a probe (v0.40.2). Only the fixed-cadence SWEEP feeds the
+ *  persisted reply rate: verification bursts and dead-remediation probes are
+ *  symptom-correlated, so folding them into the same denominator destroys the
+ *  cross-node comparability the v0.37 sweep was rebuilt to provide (a node
+ *  under investigation took 22 probes against every peer's 13). Misses in
+ *  every lane still log and still move the streak — a miss is a miss. */
+export type ProbeLane = 'sweep' | 'dead' | 'verify';
 
 /** 1st, 2nd, 3rd, 4th … for the miss-streak label (v0.36.5). */
 function ordinal(n: number): string {
@@ -154,10 +178,53 @@ function ordinal(n: number): string {
 
 /** Append a probe to the node's pending-judgment list (v0.40) — every probe
  *  gets its own entry, so a burst leaves several in flight at once. */
-export function pendProbe(state: AutoPingState, nodeId: number, t: number, self = false): void {
+export function pendProbe(state: AutoPingState, nodeId: number, t: number, lane: ProbeLane, self = false): void {
   const pending = state.awaitingAnswer.get(nodeId);
-  if (pending) pending.push({ at: t, self });
-  else state.awaitingAnswer.set(nodeId, [{ at: t, self }]);
+  if (pending) pending.push({ at: t, self, lane });
+  else state.awaitingAnswer.set(nodeId, [{ at: t, self, lane }]);
+}
+
+/**
+ * Settle a probe LAUNCH (v0.40.2) — the critical half of "did the packet leave".
+ *
+ * `zwaveActions.run()` catches its own errors and RETURNS `{ ok: false }`; it
+ * never re-throws. So the `.catch` these lanes relied on sat on a promise that
+ * could not reject, `unpendProbe` never executed in production (zero "could not
+ * be probed" lines in 1206 probes across three releases), and every add-on-side
+ * failure — HA WS down, Core restarting, no ping button — was judged a moment
+ * later as THE NODE failing to answer. An audit caught it red-handed: during a
+ * Core restart a node was logged "did NOT answer" while never going Dead,
+ * because the button press never reached HA and the driver therefore never
+ * attempted a transmission at all.
+ *
+ * A launch that failed is withdrawn from judgment: the node was never asked.
+ */
+function settleProbe(
+  o: {
+    log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string) => void;
+    log2?: ((msg: string) => void) & { debug?: (msg: string) => void };
+  },
+  state: AutoPingState,
+  nodeId: number,
+  t: number,
+  launched: Promise<unknown>,
+  onFailed?: () => void,
+): void {
+  const failed = (why: string): void => {
+    unpendProbe(state, nodeId, t);
+    onFailed?.();
+    const m = `auto-ping: node ${nodeId} could not be probed (${why}) — not judged`;
+    o.log('warn', nodeId, m);
+    o.log2?.(m);
+  };
+  void launched.then(
+    (res) => {
+      // A resolved ActionResult with ok:false is a REFUSED or failed write.
+      // `undefined` (the plain-void runners the tests use) is not a failure.
+      if ((res as { ok?: unknown } | null | undefined)?.ok === false) failed('write refused or transport error');
+    },
+    () => failed('no ping entity or transport error'),
+  );
 }
 
 /** Withdraw ONE pending probe after a transport failure — the packet never
@@ -176,7 +243,7 @@ export function unpendProbe(state: AutoPingState, nodeId: number, t: number): vo
 const ANSWER_GRACE_MS = 90_000;
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map(), launchFailures: new Map(), launchGaveUpAnnounced: new Set() };
 }
 
 export interface AutoPingInput {
@@ -246,6 +313,10 @@ export interface AutoPingDecision {
    * again.
    */
   gaveUp: number[];
+  /** Nodes whose dead-lane probe LAUNCH failed maxAttempts times in a row
+   *  (v0.40.2) — an add-on-side fault, announced apart from a node that was
+   *  genuinely asked and stayed silent. */
+  launchGaveUp: number[];
   /** Why nothing was pinged (or 'none' when the gates all passed). */
   suppressed: AutoPingSuppression;
   /** Listening nodes currently Dead — the storm-guard numerator. */
@@ -305,7 +376,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const { now, nodes, controller, config, booting } = input;
   const listeningNodes = nodes.filter(isPingCandidate);
   const dead = listeningNodes.filter((n) => n.status === NodeStatus.Dead);
-  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyOwed: 0, gaveUp: [] as number[],
+  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyOwed: 0, gaveUp: [] as number[], launchGaveUp: [] as number[],
     deadListening: dead.length,
     listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
@@ -323,11 +394,18 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   if (dead.length >= stormLimit) return { ...base, suppressed: 'storm' };
 
   const ping: number[] = [];
+  const launchGaveUp: number[] = [];
   const gaveUp: number[] = [];
   for (const n of dead) {
     const started = input.state.deadSince.get(n.nodeId);
     if (started == null || now - started < config.afterMs) continue;
     const tries = input.state.attempts.get(n.nodeId) ?? 0;
+    // Launches that never left have their own budget; exhausting it is an
+    // add-on-side fault, announced separately (v0.40.2).
+    if ((input.state.launchFailures.get(n.nodeId) ?? 0) >= config.maxAttempts) {
+      if (!input.state.launchGaveUpAnnounced.has(n.nodeId)) launchGaveUp.push(n.nodeId);
+      continue;
+    }
     if (tries >= config.maxAttempts) {
       // Budget spent and the node is still down. Say so ONCE — the runner
       // tracks which nodes have already been announced — rather than dropping
@@ -341,7 +419,11 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
     // contradicted the 10m/30m/60m ladder this file documents. (Only reachable
     // when tries >= 1: with no previous attempt `last` is undefined and this
     // whole check is skipped.)
-    const wait = BACKOFF_MS[Math.min(tries - 1, BACKOFF_MS.length - 1)];
+    // `Math.max(0, …)` because a REFUNDED attempt (v0.40.2) legitimately puts
+    // us here with tries === 0 while `lastPingAt` still stands: indexing at -1
+    // yields undefined, `now - last < undefined` is false, and the throttle
+    // this line exists to be would silently vanish.
+    const wait = BACKOFF_MS[Math.max(0, Math.min(tries - 1, BACKOFF_MS.length - 1))];
     if (last != null && now - last < wait) continue;
     ping.push(n.nodeId);
   }
@@ -419,7 +501,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const verifySet = new Set(verify);
   const staleDeduped = stale.filter((id) => !verifySet.has(id));
 
-  return { ...base, ping, stale: staleDeduped, verify, verifyFirst, gaveUp, suppressed: 'none' };
+  return { ...base, ping, stale: staleDeduped, verify, verifyFirst, gaveUp, launchGaveUp, suppressed: 'none' };
 }
 
 /**
@@ -436,10 +518,10 @@ export function judgeProbeAnswers(
   nodes: NodeSnapshot[],
   now: number,
   graceMs = ANSWER_GRACE_MS,
-): { nodeId: number; answered: boolean; misses: number; self: boolean }[] {
+): { nodeId: number; answered: boolean; misses: number; self: boolean; lane: ProbeLane }[] {
   const seenOf = new Map<number, number | null>();
   for (const n of nodes) seenOf.set(n.nodeId, n.stats?.lastSeen ?? null);
-  const out: { nodeId: number; answered: boolean; misses: number; self: boolean }[] = [];
+  const out: { nodeId: number; answered: boolean; misses: number; self: boolean; lane: ProbeLane }[] = [];
   for (const [nodeId, pending] of [...state.awaitingAnswer]) {
     // Judge EVERY matured probe, oldest first (v0.40) — the entries are
     // appended chronologically, and a burst leaves several in flight at once.
@@ -452,7 +534,7 @@ export function judgeProbeAnswers(
     // rather than call a roster gap a failed probe.
     if (!seenOf.has(nodeId)) continue;
     const seen = seenOf.get(nodeId) ?? null;
-    for (const { at, self } of mature) {
+    for (const { at, self, lane } of mature) {
       const answered = seen != null && seen >= at;
       // The streak is CONSECUTIVE: one answer resets it, so "3rd miss" always
       // means three in a row rather than three since the beginning of time.
@@ -465,7 +547,7 @@ export function judgeProbeAnswers(
       } else {
         state.missStreak.set(nodeId, misses);
       }
-      out.push({ nodeId, answered, misses, self });
+      out.push({ nodeId, answered, misses, self, lane });
     }
   }
   return out;
@@ -492,6 +574,8 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
       // Recovery ends the outage, so a device that dies again is announced
       // again rather than being silently remembered as already-reported.
       state.gaveUpAnnounced.delete(n.nodeId);
+      state.launchFailures.delete(n.nodeId);
+      state.launchGaveUpAnnounced.delete(n.nodeId);
     }
   }
   // A node that vanished from the roster (removed/excluded) must not leak its
@@ -503,6 +587,15 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
   // …and attribution (v0.40): a re-included device reusing the nodeId must not
   // inherit the departed node's last attributed probe answer.
   for (const id of [...state.lastProbeSeen.keys()]) if (!seen.has(id)) state.lastProbeSeen.delete(id);
+  // …and the judgment bookkeeping (v0.40.2): a re-included device reusing the
+  // nodeId must not inherit a departed node's miss streak, pending probes, or
+  // give-up announcement.
+  for (const id of [...state.missStreak.keys()]) if (!seen.has(id)) state.missStreak.delete(id);
+  for (const id of [...state.awaitingAnswer.keys()]) if (!seen.has(id)) state.awaitingAnswer.delete(id);
+  for (const id of [...state.lastVerifyAt.keys()]) if (!seen.has(id)) state.lastVerifyAt.delete(id);
+  for (const id of [...state.gaveUpAnnounced]) if (!seen.has(id)) state.gaveUpAnnounced.delete(id);
+  for (const id of [...state.launchFailures.keys()]) if (!seen.has(id)) state.launchFailures.delete(id);
+  for (const id of [...state.launchGaveUpAnnounced]) if (!seen.has(id)) state.launchGaveUpAnnounced.delete(id);
 }
 
 /** Record that a STALE liveness probe was issued. */
@@ -646,6 +739,10 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
     lastSuppression = decision.suppressed;
 
     for (const nodeId of decision.stale) {
+      // Captured BEFORE noteStale books the cadence clock, or the refund below
+      // hands back the value this sweep just booked (v0.40.2) — the same
+      // capture-order trap the dead lane's attempt refund fell into.
+      const priorStale = state.lastStaleAt.get(nodeId);
       noteStale(state, nodeId, t);
       // MEASURED silence, never the threshold. This line used to print
       // `config.staleMs` — so every probe claimed exactly "240m" regardless of
@@ -681,7 +778,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       const attributed = state.lastProbeSeen.get(nodeId) ?? null;
       const heardRecently = seenAt != null && t - seenAt < o.config.staleMs;
       const spokeOnItsOwn = seenAt != null && (attributed == null || seenAt > attributed);
-      const selfProven = heardRecently && spokeOnItsOwn;
+      // Unknown attribution is NOT self-proven: an unbacked credit is worse
+      // than a missing one, and it persists (v0.40.2).
+      const selfProven = heardRecently && spokeOnItsOwn && attributed != null;
       // The ECHO label is routed by attribution alone, NOT by recency
       // (v0.40.1): a probe-echo-only node whose answer is 119 minutes old and
       // one whose answer is 121 minutes old are the same physical situation,
@@ -691,12 +790,22 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // for nodes with nothing on record past what our own probes produced,
       // and no probe answer of ours to point to either.
       const echoOnly = attributed != null && seenAt != null && seenAt <= attributed;
+      // Attribution is per-PROCESS, so on the first sweep after a restart we
+      // cannot tell the node's own traffic from the previous process's probe
+      // echoes. v0.40/v0.40.1 resolved that ambiguity as "on its own" and
+      // credited it — an audit measured the cost: 35 fabricated `confirming`
+      // labels and 35 false self-proven credits into a persisted, never-decaying
+      // counter, once per boot, fleet-wide. Say what is actually known instead,
+      // and credit nothing (v0.40.2).
+      const attributionUnknown = attributed == null && heardRecently;
       const msg = `auto-ping: node ${nodeId} liveness sweep ` +
-        (selfProven
-          ? `(already heard ${silence} ago on its own — confirming)`
-          : echoOnly
-            ? '(nothing heard past our last probe\'s answer — probing for its own voice)'
-            : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`);
+        (attributionUnknown
+          ? `(heard ${silence} ago, but this run has no probe attribution yet — not credited)`
+          : selfProven
+            ? `(already heard ${silence} ago on its own — confirming)`
+            : echoOnly
+              ? `(nothing heard past our last probe's answer ${silence} ago — probing for its own voice)`
+              : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`);
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       // The service call resolving proves only that HA ACCEPTED the request —
@@ -708,15 +817,23 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // MEASUREMENT lane: the non-learning probe (v0.38.1). With the learning
       // verb, every sweep stamped `ping` onto any open episode and the control
       // arm could never accrue — the instrument was the recorded treatment.
-      pendProbe(state, nodeId, t, selfProven);
-      void (o.probe ?? o.ping)(nodeId).catch(() => {
-        unpendProbe(state, nodeId, t);
-        const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
-        o.log('warn', nodeId, m); o.log2?.(m);
+      // `noteStale` above booked the cadence clock; a launch that never left
+      // must give it back too, or the node waits a full staleMs having never
+      // been asked (v0.40.2).
+      pendProbe(state, nodeId, t, 'sweep', selfProven);
+      settleProbe(o, state, nodeId, t, (o.probe ?? o.ping)(nodeId), () => {
+        if (priorStale == null) state.lastStaleAt.delete(nodeId);
+        else state.lastStaleAt.set(nodeId, priorStale);
       });
     }
 
     for (const nodeId of decision.ping) {
+      // Captured BEFORE noteAttempt so a refund restores the PRE-attempt
+      // count — reading it afterwards would hand back the value the attempt
+      // had just spent (v0.40.2). `lastPingAt` is deliberately NOT refunded:
+      // it is the backoff clock, and giving it back turns a persistent launch
+      // failure into a once-per-tick ping loop.
+      const priorTries = state.attempts.get(nodeId);
       const attempt = (state.attempts.get(nodeId) ?? 0) + 1;
       noteAttempt(state, nodeId, t);
       const msg = `auto-ping: node ${nodeId} has been Dead past the dwell — ` +
@@ -729,11 +846,16 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // at a dead node past its dwell is a remediation attempt, and its
       // attribution is the self-instrumentation this module's autonomy is
       // justified by. The measurement lanes above use the non-learning probe.
-      pendProbe(state, nodeId, t);
-      void o.ping(nodeId).catch(() => {
-        unpendProbe(state, nodeId, t);
-        const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
-        o.log('warn', nodeId, m); o.log2?.(m);
+      // The attempt was booked BEFORE the call (noteAttempt above), so a launch
+      // that never left must give it back (v0.40.2) — otherwise an HA restart
+      // silently spends a node's 3-attempt remediation budget on packets that
+      // were never transmitted, and the ladder gives up on a node it never
+      // actually probed.
+      pendProbe(state, nodeId, t, 'dead');
+      settleProbe(o, state, nodeId, t, o.ping(nodeId), () => {
+        if (priorTries == null) state.attempts.delete(nodeId);
+        else state.attempts.set(nodeId, priorTries);
+        state.launchFailures.set(nodeId, (state.launchFailures.get(nodeId) ?? 0) + 1);
       });
     }
 
@@ -778,12 +900,12 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // MEASUREMENT lane too (v0.38.1) — a verification probe exists to fill
       // the evidence window, and recording it as the remediation would make
       // the verdict about the measurement rather than the recovery.
-      pendProbe(state, nodeId, t);
-      void (o.probe ?? o.ping)(nodeId).catch(() => {
-          unpendProbe(state, nodeId, t);
-          const m = `auto-ping: node ${nodeId} could not be probed (no ping entity or transport error)`;
-          o.log('warn', nodeId, m); o.log2?.(m);
-        });
+      const priorVerify = state.lastVerifyAt.get(nodeId);
+      pendProbe(state, nodeId, t, 'verify');
+      settleProbe(o, state, nodeId, t, (o.probe ?? o.ping)(nodeId), () => {
+        if (priorVerify == null) state.lastVerifyAt.delete(nodeId);
+        else state.lastVerifyAt.set(nodeId, priorVerify);
+      });
     }
 
     /* ── nodes the engine has given up on (v0.36.4) ──────────────────────
@@ -792,6 +914,14 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
      * both destinations: this is the one auto-ping message that asks for
      * action rather than reporting activity.
      */
+    for (const nodeId of decision.launchGaveUp) {
+      state.launchGaveUpAnnounced.add(nodeId);
+      const m = `auto-ping: node ${nodeId} could not be probed ${o.config.maxAttempts}× in a row — ` +
+        `the probe never left this add-on (no ping entity, or HA unreachable). This is OUR fault, not the node's; ` +
+        `the remediation ladder is untouched and will resume when a probe can be sent.`;
+      o.log('error', nodeId, m);
+      o.log2?.(m);
+    }
     for (const nodeId of decision.gaveUp) {
       state.gaveUpAnnounced.add(nodeId);
       const m = `auto-ping: node ${nodeId} is STILL DEAD after ${o.config.maxAttempts} attempts — ` +
@@ -805,13 +935,14 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
      * moment we probed it. An unanswered probe is the signal auto-ping exists
      * to produce, and until now it could not be observed at all.
      */
-    for (const { nodeId, answered, misses, self } of judgeProbeAnswers(state, nodes, t)) {
+    for (const { nodeId, answered, misses, self, lane } of judgeProbeAnswers(state, nodes, t)) {
       // The expected case stays at debug — one line per probe on every healthy
       // node is several hundred a day saying "as designed", which is the noise
       // that trains an operator to stop reading. The UNANSWERED case below is
       // the signal, and it is warn on both destinations.
       if (answered) {
-        o.onProbeResult?.(nodeId, true, self);
+        // Only the fixed-cadence sweep feeds the persisted reply rate (v0.40.2).
+        if (lane === 'sweep') o.onProbeResult?.(nodeId, true, self);
         o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`);
         continue;
       }
@@ -821,7 +952,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
       // beside the genuine article and teach an operator to skim past both. The
       // count is in the text either way — this suppresses nothing, it only
       // stops calling a single lost packet a warning.
-      o.onProbeResult?.(nodeId, false, self);
+      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, self);
       const ord = ordinal(misses);
       const m = `auto-ping: node ${nodeId} did NOT answer its probe ` +
         `(${ord} consecutive miss, lastSeen did not advance)`;

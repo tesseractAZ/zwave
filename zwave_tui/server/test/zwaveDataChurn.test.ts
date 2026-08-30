@@ -689,6 +689,37 @@ test('a node going DEAD mid-episode is marked confounded by the data layer — t
       `the Dead transition must mark the open episode confounded: ${JSON.stringify(marked)}`);
     assert.ok(!marked.some(([, k]) => k === 'dead-flap'),
       `dead-flap is its own definition, never a confound: ${JSON.stringify(marked)}`);
+
+    // A Dead excursion that opens and closes BETWEEN two level samples is
+    // invisible to the status read, but the event-driven flap counter saw it
+    // (v0.40.2). A death is a death whether or not it straddled a boundary.
+    marked.length = 0;
+    shadow.snapshot = () => asAlive;                       // status reads Alive again
+    // Drive the REAL producer: the event-driven accumulator the driver feeds,
+    // drained by sampleEvidence into the per-tick carry the guard reads. Setting
+    // the carry directly would prove the guard's branch and nothing about the
+    // wiring that fills it (the v0.33 dead-path class).
+    const priv = zd as unknown as {
+      flapAccum: Map<number, number>;
+      flapsThisTick: Map<number, number>;
+      statsByNode: Map<number, unknown>;
+      lastOkAt: number | null;
+      sampleEvidence: () => void;
+    };
+    priv.flapAccum.set(7, 2);
+    // The drain skips a node with no cached stats (fabricating zero counters
+    // would poison the delta guards), and bails entirely on a stale cache.
+    priv.statsByNode.set(7, {
+      rtt: 30, rssi: -60, lwr: null, nlwr: null, commandsTX: 10, commandsRX: 10,
+      commandsDroppedTX: 0, commandsDroppedRX: 0, timeoutResponse: 0, lastSeen: Date.now(),
+    } as never);
+    priv.lastOkAt = Date.now();
+    priv.sampleEvidence();
+    assert.ok(marked.some(([n, k]) => n === 7 && k === 'rtt-degraded'),
+      `a sub-tick death must still confound: ${JSON.stringify(marked)}`);
+    // …and the carry is consumed, not latched: a later pass with no new flap
+    // must not keep confounding every episode on this node forever.
+    assert.equal(priv.flapsThisTick.size, 0, 'the per-tick carry is cleared after use');
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });

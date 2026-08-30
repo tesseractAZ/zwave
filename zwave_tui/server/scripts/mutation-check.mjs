@@ -978,7 +978,7 @@ const MUTANTS = [
   { id: 'probe-outcome-is-recorded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // The rate never accrues: probes fire, outcomes are judged, and nothing is
     // persisted — leaving the same ephemeral log lines v0.36 had.
-    find: '      o.onProbeResult?.(nodeId, false, self);',
+    find: "      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, self);",
     repl: '      void nodeId;',
     what: 'a missed probe is recorded to the persisted reply rate' },
   { id: 'probe-row-needs-a-sample', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
@@ -1085,12 +1085,12 @@ const MUTANTS = [
     repl: "      }, /* learn */ true),",
     what: 'a measurement probe is never attributed to the outcome ledger' },
   { id: 'sweep-lane-uses-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
-    find: "      pendProbe(state, nodeId, t, selfProven);\n      void (o.probe ?? o.ping)(nodeId).catch(() => {",
-    repl: "      pendProbe(state, nodeId, t, selfProven);\n      void o.ping(nodeId).catch(() => {",
+    find: "      settleProbe(o, state, nodeId, t, (o.probe ?? o.ping)(nodeId), () => {\n        if (priorStale == null) state.lastStaleAt.delete(nodeId);",
+    repl: "      settleProbe(o, state, nodeId, t, o.ping(nodeId), () => {\n        if (priorStale == null) state.lastStaleAt.delete(nodeId);",
     what: 'the liveness sweep rides the non-learning probe' },
   { id: 'verify-lane-uses-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
-    find: "      pendProbe(state, nodeId, t);\n      void (o.probe ?? o.ping)(nodeId).catch(() => {\n          unpendProbe(state, nodeId, t);",
-    repl: "      pendProbe(state, nodeId, t);\n      void o.ping(nodeId).catch(() => {\n          unpendProbe(state, nodeId, t);",
+    find: "      settleProbe(o, state, nodeId, t, (o.probe ?? o.ping)(nodeId), () => {\n        if (priorVerify == null) state.lastVerifyAt.delete(nodeId);",
+    repl: "      settleProbe(o, state, nodeId, t, o.ping(nodeId), () => {\n        if (priorVerify == null) state.lastVerifyAt.delete(nodeId);",
     what: 'the verification burst rides the non-learning probe' },
   { id: 'dead-ladder-keeps-learning', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Un-instruments the one autonomous remediation whose attribution justifies
@@ -1178,7 +1178,7 @@ const MUTANTS = [
     // Drops in-flight probes at judgment time: an answer arriving inside the
     // grace would never be judged at all.
     find: '    const young = pending.filter((p) => now - p.at < graceMs);',
-    repl: '    const young: { at: number; self: boolean }[] = [];',
+    repl: '    const young = pending.filter(() => false);',
     what: 'a probe younger than the answer grace stays pending, never vanishes' },
   { id: 'selfproven-requires-own-voice', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Reverts to the cadence-only definition the audit refuted: the node's
@@ -1195,8 +1195,8 @@ const MUTANTS = [
   { id: 'probe-flag-rides-the-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Reports every judgment with a hardcoded flag instead of the probe's own
     // context — the persisted reply-rate dimension goes blind.
-    find: '      out.push({ nodeId, answered, misses, self });',
-    repl: '      out.push({ nodeId, answered, misses, self: false });',
+    find: '      out.push({ nodeId, answered, misses, self, lane });',
+    repl: '      out.push({ nodeId, answered, misses, self: false, lane });',
     what: "each judgment carries ITS probe's self-proven context, not a constant" },
   { id: 'lastprobeseen-recorded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Never records what our probe put on the record — attribution goes blind
@@ -1223,8 +1223,8 @@ const MUTANTS = [
   { id: 'dead-marks-confounded', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     // Deletes the only live feeder of the Dead-transition confound — the
     // guard exists but nothing ever arms it (the v0.33 class).
-    find: '        if (nd && nd.status === NodeStatus.Dead) oc.markConfounded(ep.nodeId, ep.kind);',
-    repl: '        void nd;',
+    find: '        if (flapped || (nd && nd.status === NodeStatus.Dead)) oc.markConfounded(ep.nodeId, ep.kind);',
+    repl: '        void nd; void flapped;',
     what: 'a node going Dead mid-episode reaches the ledger as a confound mark' },
   { id: 'confounded-tag-renders', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     find: "          ? ' (confounded — the node died or was remediated mid-episode; credited to neither arm)'",
@@ -1273,6 +1273,99 @@ const MUTANTS = [
     find: '      const echoOnly = attributed != null && seenAt != null && seenAt <= attributed;',
     repl: '      const echoOnly = heardRecently && attributed != null && seenAt != null && seenAt <= attributed;',
     what: 'the echo label follows attribution alone, never the threshold boundary' },
+  /* ── v0.40.2: a probe that never left is never judged ─────────────────── */
+  { id: 'failed-launch-not-judged', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores the unreachable-.catch defect: run() RETURNS {ok:false} rather
+    // than throwing, so an add-on-side failure (HA WS down, Core restarting,
+    // no ping button) is judged a moment later as THE NODE failing to answer —
+    // poisoning the persisted reply rate and burning remediation budget.
+    find: "      if ((res as { ok?: unknown } | null | undefined)?.ok === false) failed('write refused or transport error');",
+    repl: '      void res;',
+    what: 'a resolved ok:false withdraws the probe — a packet that never left is never judged' },
+  { id: 'failed-launch-refunds-attempt', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Keeps the burnt attempt: an HA restart then spends the 3-attempt budget
+    // on packets never transmitted and the ladder abandons a node it never
+    // actually probed.
+    find: '        if (priorTries == null) state.attempts.delete(nodeId);\n        else state.attempts.set(nodeId, priorTries);',
+    repl: '        void priorTries;',
+    what: 'a failed launch gives back the dead-ladder attempt it booked' },
+  { id: 'refund-restores-pre-attempt', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Captures the counters AFTER noteAttempt, so the "refund" hands back the
+    // value the attempt just spent — the exact bug this release's own test
+    // caught during development.
+    find: '      const priorTries = state.attempts.get(nodeId);\n      const attempt = (state.attempts.get(nodeId) ?? 0) + 1;\n      noteAttempt(state, nodeId, t);',
+    repl: '      const attempt = (state.attempts.get(nodeId) ?? 0) + 1;\n      noteAttempt(state, nodeId, t);\n      const priorTries = state.attempts.get(nodeId);',
+    what: 'the refund restores the PRE-attempt counter, not the one just spent' },
+  { id: 'reply-rate-is-sweep-only', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Folds symptom-correlated verification/dead probes back into the
+    // fixed-cadence denominator, destroying the cross-node comparability the
+    // v0.37 sweep was rebuilt to provide.
+    find: "      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, self);",
+    repl: '      o.onProbeResult?.(nodeId, false, self);',
+    what: 'only the fixed-cadence sweep feeds the persisted reply rate' },
+  { id: 'boot-attribution-not-credited', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores the once-per-boot fabrication: 35 nodes credited "on its own"
+    // for the PREVIOUS process's probe echoes, into a persisted counter.
+    find: '      const selfProven = heardRecently && spokeOnItsOwn && attributed != null;',
+    repl: '      const selfProven = heardRecently && spokeOnItsOwn;',
+    what: 'unknown attribution is never credited as self-proven' },
+  { id: 'boot-attribution-says-so', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '      const attributionUnknown = attributed == null && heardRecently;',
+    repl: '      const attributionUnknown = false;',
+    what: 'the first sweep of a run says its attribution is unknown' },
+  { id: 'judgment-bookkeeping-pruned', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '  for (const id of [...state.missStreak.keys()]) if (!seen.has(id)) state.missStreak.delete(id);',
+    repl: '  void seen;',
+    what: 'a departed node leaves no miss streak for a re-included id to inherit' },
+  { id: 'closure-prints-the-decider', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Back to counts-only: the line then reads identically for improved,
+    // no-change and worse, and the resolved episode is never persisted.
+    find: "          : `fresh=${w.freshN} rtt=${w.rttN}/${num(w.rttMedian, 'ms')} rssi=${w.rssiN}/${num(w.rssiMedian)} ` +",
+    repl: "          : `fresh=${w.freshN} rtt=${w.rttN} rssi=${w.rssiN} ` +",
+    what: 'a closure line carries the DECIDING quantity, not only the floors' },
+  { id: 'subtick-death-confounds', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Blind again to a Dead excursion that opens and closes between two level
+    // samples — while the event-driven counter that saw it is discarded.
+    find: '        const flapped = (this.flapsThisTick.get(ep.nodeId) ?? 0) > 0;',
+    repl: '        const flapped = false;',
+    what: 'a sub-tick death confounds the episode the level sample missed' },
+  { id: 'subtick-flaps-are-carried', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Kills the PRODUCER: the guard's branch survives but nothing ever feeds
+    // it — the v0.33 dead-path class, one layer down.
+    find: '      if (flaps > 0) this.flapsThisTick.set(n.nodeId, flaps);',
+    repl: '      void flaps;',
+    what: 'the drained flap count is carried to the confound guard' },
+  { id: 'subtick-flaps-are-cleared', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Never clears, so one flap confounds every later episode on that node
+    // forever — a stuck guard is as dishonest as a blind one.
+    find: '    this.flapsThisTick.clear();',
+    repl: '    void 0;',
+    what: 'the per-tick flap carry is consumed once, not latched forever' },
+  { id: 'answered-path-is-sweep-only', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // The ANSWERED half of the lane split — the release's headline invariant
+    // was only mutation-covered on the MISS path.
+    find: "        if (lane === 'sweep') o.onProbeResult?.(nodeId, true, self);",
+    repl: '        o.onProbeResult?.(nodeId, true, self);',
+    what: 'an ANSWERED verification probe does not move the comparable reply rate' },
+  { id: 'launch-failures-are-bounded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Removes the launch budget: a persistent launch failure becomes an
+    // unbounded once-per-tick ping loop with the give-up unreachable — the
+    // exact regression a pre-release review measured at 190 pings/200 min.
+    find: "    if ((input.state.launchFailures.get(n.nodeId) ?? 0) >= config.maxAttempts) {",
+    repl: '    if (false) {',
+    what: 'launches that never leave carry their own bounded budget' },
+  { id: 'backoff-defined-at-zero-tries', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // BACKOFF_MS[-1] is undefined and `now - last < undefined` is false, so the
+    // throttle silently vanishes for a node whose attempt was refunded.
+    find: '    const wait = BACKOFF_MS[Math.max(0, Math.min(tries - 1, BACKOFF_MS.length - 1))];',
+    repl: '    const wait = BACKOFF_MS[Math.min(tries - 1, BACKOFF_MS.length - 1)];',
+    what: 'the dead-lane backoff is defined even at zero recorded attempts' },
+  { id: 'sweep-cadence-refunded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Keeps the cadence clock a failed launch booked, so the node waits a full
+    // staleMs having never actually been asked.
+    find: '        if (priorStale == null) state.lastStaleAt.delete(nodeId);\n        else state.lastStaleAt.set(nodeId, priorStale);',
+    repl: '        state.lastStaleAt.set(nodeId, t);',
+    what: 'a sweep launch that never left gives back the cadence clock it booked' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.
