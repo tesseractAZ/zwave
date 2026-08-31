@@ -141,6 +141,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
         const bits: string[] = [];
         if (n.gaveUp) bits.push(c.red('GAVE UP — needs a human'));
         if (n.launchGaveUp) bits.push(c.red('CANNOT SEND — our fault, not the node\'s'));
+        if (n.talkingWhileDead) bits.push(c.yellow('reads Dead but TALKING — stale flag'));
         if (n.deadSinceMs != null) bits.push(c.red(`DEAD ${age(now - n.deadSinceMs)}`));
         if (n.launchFailures > 0) bits.push(c.red(`${n.launchFailures} unsent`));
         if (n.attempts > 0) bits.push(c.yellow(`attempt ${n.attempts}/${ap.config.maxAttempts}`));

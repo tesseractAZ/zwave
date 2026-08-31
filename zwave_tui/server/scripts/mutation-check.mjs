@@ -1511,6 +1511,42 @@ const MUTANTS = [
     find: '    unverifiableUndersampledCount: (k) => zd.unverifiableUndersampledCount(k),',
     repl: '    unverifiableUndersampledCount: () => 0,',
     what: 'the production bridge forwards unverifiableUndersampledCount' },
+  /* ── v0.42.0: traffic outranks the driver's Dead flag ──────────────────── */
+  { id: 'traffic-outranks-the-flag', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores the world in which node 49 was declared node-down: the driver's
+    // reactive Dead flag alone decides, so a node whose own traffic proves it
+    // reachable still burns remediation budget and still summons a human.
+    find: '    if (heard != null && now - heard < config.afterMs) {',
+    repl: '    if (false) {',
+    what: "a node heard from inside the dwell is reachable, whatever the flag says" },
+  { id: 'silent-dead-node-still-probed', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // The guard must not swallow the case the ladder exists for — a genuinely
+    // silent Dead node must still be remediated.
+    find: '    const heard = n.stats?.lastSeen ?? null;',
+    repl: '    const heard = now;',
+    what: 'a genuinely silent Dead node is still remediated' },
+  { id: 'stale-flag-is-announced', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Silently skipping the node is worse than the old behaviour: the operator
+    // sees a Dead node the engine never touches and never explains.
+    find: '      state.talkingAnnounced.add(nodeId);',
+    repl: '      continue;',
+    what: 'a Dead-but-talking node is explained, not silently skipped' },
+  { id: 'stale-flag-announced-once', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Once per outage, like every other latched notice — otherwise it repeats
+    // every tick for as long as the flag stays stale.
+    find: '      if (state.talkingAnnounced.has(nodeId)) continue;',
+    repl: '      void 0;',
+    what: 'the stale-flag notice fires once per outage, not every tick' },
+  { id: 'giveup-claims-only-nops', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Back to asserting unreachability from unanswered NOPs — the claim node
+    // 49 disproved by answering an ordinary command minutes later.
+    find: "        `That means it ignored ${tries} NOP frame${tries === 1 ? '' : 's'}, NOT that it is unreachable: ` +",
+    repl: "        `That means it is unreachable: ` +",
+    what: 'the give-up reports unanswered NOPs, never unreachability' },
+  { id: 'engine-shows-stale-flag', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: "        if (n.talkingWhileDead) bits.push(c.yellow('reads Dead but TALKING — stale flag'));",
+    repl: '        void 0;',
+    what: 'ENGINE shows a node whose Dead flag its own traffic contradicts' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.
