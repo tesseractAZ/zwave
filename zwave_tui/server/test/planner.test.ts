@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planFor, planAll, type Plan } from '../src/zwave/planner';
+import { planFor, planAll, REFUSAL_INDICTS, refusalScope, type Plan } from '../src/zwave/planner';
 import type { Symptom, SymptomKind } from '../src/zwave/symptoms';
 import { NodeStatus } from '../src/types';
 import type { NodeSnapshot, NodeStats } from '../src/types';
@@ -165,7 +165,7 @@ test('mesh-interference: inferred vs measured split — inferred is unconfirmed 
 });
 
 test('M5: efficacyFor is attached to EXECUTABLE candidates only (physical guidance is unscored)', () => {
-  const eff = { expectedEfficacy: 0.9, n: 6, baseRate: 0.2, nodes: 3, ready: true };
+  const eff = { expectedEfficacy: 0.9, n: 6, baseRate: 0.2, nodes: 3, ready: true, lowerBound: null, bar: null };
   const calls: string[] = [];
   const ctx = { writeActions: true, efficacyFor: (k: SymptomKind, a: string) => { calls.push(`${k}:${a}`); return eff; } };
   const p = planFor(sym('return-path-degraded', { nodeId: 7 }), node(7), ctx);
@@ -193,4 +193,35 @@ test('planAll skips symptoms subsumed under a mesh event (their recommendation i
   const plans: Plan[] = planAll(symptoms, nodeOf, ON);
   assert.equal(plans.length, 2, 'the subsumed rtt-degraded is dropped');
   assert.ok(!plans.some((p) => p.nodeId === 8), 'node 8 (subsumed) produces no standalone plan');
+});
+
+/* ── v0.43.1: a refusal's blast radius is the planner's own offer set ──────── */
+
+test('REFUSAL_INDICTS matches what planFor actually offers, for every symptom kind', () => {
+  // The table cannot be allowed to drift from the plans it summarises: if a
+  // future detector starts offering removeFailed, a refusal must indict it too;
+  // if ghost-suspect stops offering it, the table must stop naming it. Derive
+  // the truth from planFor over the exhaustive kind list and compare.
+  const offered = new Map<string, Set<SymptomKind>>();
+  for (const kind of ALL_KINDS) {
+    const nodeId = kind === 'controller-degraded' || kind === 'mesh-interference' ? null : 7;
+    for (const ctx of [ON, OFF]) {
+      for (const cand of planFor(sym(kind, { nodeId }), node(7), ctx).candidates) {
+        if (cand.action == null) continue;
+        if (!offered.has(cand.action)) offered.set(cand.action, new Set());
+        offered.get(cand.action)!.add(kind);
+      }
+    }
+  }
+  for (const [action, table] of Object.entries(REFUSAL_INDICTS)) {
+    const real = [...(offered.get(action) ?? new Set<SymptomKind>())].sort();
+    assert.deepEqual([...table].sort(), real,
+      `REFUSAL_INDICTS.${action} does not match the kinds planFor offers it to`);
+  }
+  // An action no plan offers has an empty scope — refusing it indicts nothing.
+  assert.equal(refusalScope('ping').size, 0, 'a refused ping indicts no detector');
+  // And the scope is genuinely narrower than "every kind" — a node-wide stamp
+  // is the defect this exists to prevent.
+  assert.ok(refusalScope('removeFailed').size < ALL_KINDS.length,
+    'a refusal must not reach every detector on the node');
 });

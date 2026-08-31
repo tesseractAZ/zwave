@@ -14,6 +14,8 @@ import { mkdtempSync, statSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createZwaveData, type ZwaveData } from '../src/zwave/zwaveData';
+import { bandOf, N_BANDS } from '../src/zwave/baselines';
+import type { OutcomeStore } from '../src/zwave/outcomes';
 import { NodeStatus, type NodeSnapshot } from '../src/types';
 import type { HaWsClient, HaEventHandler, HaSubscription } from '../src/ha/haWsClient';
 
@@ -769,6 +771,148 @@ test('a node going DEAD mid-episode is marked confounded by the data layer — t
     // …and the carry is consumed, not latched: a later pass with no new flap
     // must not keep confounding every episode on this node forever.
     assert.equal(priv.flapsThisTick.size, 0, 'the per-tick carry is cleared after use');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a refused removeFailed reaches the ledger as refused-misdiagnosis; a transport failure does not (v0.43.1)', async () => {
+  // The blanket `if (!ok) return;` made falsePositives structurally 0 forever.
+  // Both directions matter: recording every failure would fabricate accusations
+  // against detectors, which is the harm the old conservatism protected.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-refusal-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+    // An unprobeable node opens NO episode (v0.38.1), so the node must read as
+    // a ping candidate for the ledger to have anything to attribute to.
+    const real = zd.snapshot();
+    const asListening = real.map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+    const shadow = zd as unknown as {
+      snapshot: () => NodeSnapshot[];
+      updateEpisodes: (s: unknown[], now: number) => void;
+    };
+    shadow.snapshot = () => asListening;
+    const t0 = 1_800_000_000_000;
+    const sym = { kind: 'ghost-suspect', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+
+    shadow.updateEpisodes([sym], t0);
+    zd.recordActionOutcome('removeFailed', 7, false, 'transport');
+    shadow.updateEpisodes([], t0 + 60_000);
+    shadow.updateEpisodes([], t0 + 12 * 60_000);
+    assert.equal(zd.falsePositives('ghost-suspect'), 0,
+      'a transport failure must never be held against a detector');
+
+    shadow.updateEpisodes([sym], t0 + 20 * 60_000);
+    zd.recordActionOutcome('removeFailed', 7, false, 'refused');
+    shadow.updateEpisodes([], t0 + 21 * 60_000);
+    shadow.updateEpisodes([], t0 + 33 * 60_000);
+    assert.equal(zd.falsePositives('ghost-suspect'), 1,
+      'a driver REFUSAL is the detector being wrong, and the ledger records it');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ── v0.43.1: engineStatus counts three series, not one ────────────────────── */
+
+test('engineStatus counts EACH baseline series from its own store, not from timeouts', async () => {
+  // The pre-v0.43.1 predicate was one line — `timeoutNormal(...)?.ready` — and
+  // REMEDY rendered it as "every node has a graduated baseline". A fleet whose
+  // RSSI series had never graduated read fully learned. Stub the three series
+  // apart so a count that is secretly the timeout count cannot hide.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-engstat-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  const seen = { timeout: 0, rtt: 0, rssi: 0 };
+  const inner = zd as unknown as { baselines: unknown };
+  const real = inner.baselines;
+  try {
+    inner.baselines = {
+      timeoutNormal: () => { seen.timeout += 1; return { ready: true }; },
+      rttNormal: () => { seen.rtt += 1; return { ready: false }; },
+      rssiNormal: () => { seen.rssi += 1; return { ready: false }; },
+    };
+    const eng = zd.engineStatus();
+    assert.ok(eng.total > 0, 'the fixture has scoreable nodes');
+    assert.equal(eng.timeoutReady, eng.total, 'timeout series graduated fleet-wide');
+    assert.equal(eng.rttReady, 0, 'rtt series is NOT inferred from timeouts');
+    assert.equal(eng.rssiReady, 0, 'rssi series is NOT inferred from timeouts');
+    assert.equal(eng.ready, eng.timeoutReady, 'the legacy alias still means what it meant');
+    assert.equal(seen.rssi, eng.total, 'the rssi store was actually consulted, once per node');
+    assert.equal(seen.rtt, eng.total, 'and so was the rtt store');
+    assert.equal(eng.bands, N_BANDS, 'the band count is the real one, not a fallback');
+    assert.equal(eng.band, bandOf(Date.now()), 'the band NAMED is the band the counts were measured in');
+  } finally {
+    // Restore here, not after the asserts: a failing assertion used to skip the
+    // restore, and `zd.stop()` then threw a TypeError from the stub — which was
+    // the only message reported, hiding the real failure.
+    inner.baselines = real;
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the data layer applies the refusal SCOPE it computes, and only to refusals', async () => {
+  // Three wiring facts the ledger-level tests cannot see, because they call the
+  // store directly and the bug would live in the caller:
+  //   1. the computed scope actually reaches recordAction;
+  //   2. an action no detector offered indicts nothing at all;
+  //   3. SUCCESS attribution stays node-wide — scoping it would starve every
+  //      action arm whose kind did not happen to name the action.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-refscope-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const oc = (zd as unknown as { outcomes: OutcomeStore }).outcomes;
+    const W0 = { tx: 100, rx: 100, timeouts: 40, rate: 0.4, samples: 6, freshN: 6, flaps: 0, s2: 0, s2Known: 6,
+      routeChanges: 0, routeKnown: 6, rssiMedian: null, rssiN: 0, rttMedian: null, rttN: 0, rateKbpsMin: null };
+    const W1 = { ...W0, timeouts: 1, rate: 0.01 };
+
+    // (1) + the scope itself: a refused removeFailed on a node that is BOTH a
+    // ghost-suspect and has a degraded return path.
+    for (let i = 0; i < 4; i++) {
+      const id = 200 + i;
+      oc.open(id, 'ghost-suspect', 1000, W0);
+      oc.open(id, 'return-path-degraded', 1000, W0);
+      zd.recordActionOutcome('removeFailed', id, false, 'refused');
+      oc.resolve(id, 'ghost-suspect', Date.now() + 1, W1);
+      oc.resolve(id, 'return-path-degraded', Date.now() + 1, W1);
+    }
+    assert.equal(oc.falsePositives('ghost-suspect'), 4, 'the detector that called it a ghost is indicted');
+    assert.equal(oc.falsePositives('return-path-degraded'), 0,
+      'the unrelated detector is NOT — the controller said nothing about the return path');
+
+    // (2) an action no plan offers: refusing it indicts no detector anywhere.
+    oc.open(300, 'ghost-suspect', 1000, W0);
+    zd.recordActionOutcome('ping', 300, false, 'refused');
+    oc.resolve(300, 'ghost-suspect', Date.now() + 1, W1);
+    assert.equal(oc.falsePositives('ghost-suspect'), 4, 'unchanged — no detector asked for a ping');
+
+    // (3) success stays node-wide.
+    oc.open(400, 'chronic-return-path', 1000, W0);
+    oc.open(400, 'return-path-degraded', 1000, W0);
+    zd.recordActionOutcome('ping', 400, true);
+    oc.resolve(400, 'chronic-return-path', Date.now() + 1, W1);
+    oc.resolve(400, 'return-path-degraded', Date.now() + 1, W1);
+    assert.ok(oc.efficacyFor('chronic-return-path', 'ping').n > 0, 'credited');
+    assert.ok(oc.efficacyFor('return-path-degraded', 'ping').n > 0,
+      'credited too — a successful action may well have fixed both');
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });

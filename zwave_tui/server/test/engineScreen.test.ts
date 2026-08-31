@@ -42,7 +42,7 @@ function data(over: Partial<DataProvider> = {}): DataProvider {
     noiseFloor: () => -100, hasRealNoise: () => true,
     history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
     lastUpdated: () => NOW - 1000, ready: () => true, lastError: () => null, symptoms: () => [],
-    engineStatus: () => ({ enabled: true, ready: 3, total: 3 }), efficacyFor: () => null,
+    engineStatus: () => ({ enabled: true, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 0, bands: 6 }), efficacyFor: () => null,
     interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
     entityStates: () => [], configParams: () => ({ status: 'ready', params: [] }), requestConfigParams: () => {},
     ...over,
@@ -84,7 +84,7 @@ test('at the MODAL 80x24 the operator sees auto-ping state, the live ledger, and
   assert.match(joined, /#7 rtt-degraded/, 'the open episode is visible');
   assert.match(joined, /degraded — symptom live/, 'and its lifecycle state');
   assert.match(joined, /self-heal 82%/, 'the base rate renders');
-  assert.match(joined, /n=6\.2/, 'ALWAYS with its n');
+  assert.match(joined, /n≈6\.2/, 'ALWAYS with its n — as a WEIGHT, not a tally (v0.43.1)');
 });
 
 test('a suppressed engine says WHY, and a disabled one says it is off — neither renders as empty', () => {
@@ -156,13 +156,13 @@ test('a bit is rendered WHOLE or not at all — a clipped percentage is a false 
     })).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
     const line = raw.find((l) => l.includes('self-heal')) ?? '';
     if (line.includes('self-heal')) {
-      assert.match(line, /self-heal \d+% \(n=6\.3, 4 nodes\)/,
+      assert.match(line, /self-heal \d+% \(n≈6\.3, 4 nodes\)/,
         `${cols} cols: the self-heal bit must be whole: "${line}"`);
     }
     // Any action-arm percentage present must carry its complete n, never a
     // half-written one.
     const armed = raw.find((l) => /ping \d+%/.test(l));
-    if (armed) assert.match(armed, /ping \d+% \(n=12\.5, 3 nodes\)/, `${cols} cols: "${armed}"`);
+    if (armed) assert.match(armed, /ping \d+% \(n≈12\.5, 3 nodes\)/, `${cols} cols: "${armed}"`);
     // And an overflow is DISCLOSED rather than silently dropped.
     for (const l of raw) assert.ok(!/·\s*$/.test(l), `${cols} cols: dangling separator: "${l}"`);
   }
@@ -189,14 +189,14 @@ test('a node the ladder has ABANDONED shows no next retry — it has no next att
 
 test('an arm whose node provenance was never recorded says so — 0 is unknown, not zero (v0.41.1)', () => {
   // Seen on the live fleet minutes after this screen shipped:
-  //   route-churn  self-heal 100% (n=1.0, 0 nodes)
+  //   route-churn  self-heal 100% (n≈1.0, 0 nodes)
   // Efficacy.nodes is 0 when UNKNOWN (a ledger written before provenance was
   // tracked). Beside a positive n, "0 nodes" is a self-contradiction — and this
   // is the number that separates "six nodes agreed" from "one node repeated".
   const joined = plain(renderEngine(ctx(120, 30, {
     controlArm: (k) => (k === 'route-churn' ? { n: 1.0, ok: 1.0, nodes: 0 } : null),
   })));
-  assert.match(joined, /self-heal 100% \(n=1\.0, sources not recorded\)/,
+  assert.match(joined, /self-heal 100% \(n≈1\.0, sources not recorded\)/,
     `unknown provenance must say so: ${joined}`);
   assert.ok(!/0 nodes/.test(joined), 'never asserts a measured zero');
 });
@@ -236,4 +236,24 @@ test('ENGINE classifies the driver link on its STATE, never on the prose (v0.43.
   const rawOk = renderEngine(ctx(120, 30, { driverWsStatus: () => 'live (schema 41)', driverWsState: () => 'live' }))
     .find((l) => /DRIVER LINK/.test(l)) ?? '';
   assert.ok(!/\x1b\[93m/.test(rawOk), `a healthy link is not highlighted: ${JSON.stringify(rawOk)}`);
+});
+
+test('the n≈ legend renders only where a weight is on screen, and fits narrow terminals (v0.43.1)', () => {
+  // A legend explaining a notation that appears nowhere is noise, and at 40
+  // cols the long form truncated away the saturation figure it exists to give.
+  const empty = plain(renderEngine(ctx(120, 30)));
+  assert.match(empty, /nothing learned yet/);
+  assert.doesNotMatch(empty, /recent-weighted|decays, saturates/,
+    'no weight on screen ⇒ no legend explaining one');
+
+  const learned: Partial<DataProvider> = {
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, nodes: 3 } : null),
+  };
+  for (const cols of [40, 60, 80, 100, 140, 200]) {
+    const joined = plain(renderEngine(ctx(cols, 30, learned)));
+    const line = joined.split('\n').find((l) => /n≈ /.test(l) && !/self-heal|not distinguishable/.test(l));
+    assert.ok(line, `${cols} cols: legend missing entirely`);
+    assert.match(line, /33/, `${cols} cols: the saturation figure was truncated away — "${line.trim()}"`);
+    assert.ok(plain([line]).length <= cols, `${cols} cols: legend overflows`);
+  }
 });

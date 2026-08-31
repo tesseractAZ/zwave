@@ -149,7 +149,25 @@ export interface OutcomeStore {
    *  symptom has already gone absent (in the caller's confirmation window) — an
    *  action taken after the symptom already cleared must NOT be credited for the
    *  spontaneous recovery. */
-  recordAction(nodeId: number | null, actionKind: ActionKind, refused: boolean, atMs: number, skip?: (key: string) => boolean): void;
+  recordAction(
+    nodeId: number | null,
+    actionKind: ActionKind,
+    refused: boolean,
+    atMs: number,
+    skip?: (key: string) => boolean,
+    /**
+     * Restrict attribution to these symptom kinds (v0.43.1).
+     *
+     * An action targets a NODE, so a success is fairly credited to any of that
+     * node's open episodes — the action may well have fixed all of them. A
+     * REFUSAL is the opposite: the driver rejected one specific premise ("this
+     * node is failed"), which indicts only the detector that asserted it. A
+     * node that is both `ghost-suspect` and `rtt-degraded` must not have its
+     * RTT detector marked a false positive because the controller said the
+     * node is not failed — the driver said nothing whatever about RTT.
+     */
+    onlyKinds?: ReadonlySet<SymptomKind>,
+  ): void;
   /** Close an episode: the symptom resolved. Computes + folds the verdict. */
   resolve(nodeId: number | null, kind: SymptomKind, resolvedMs: number, after: WindowMetrics | null, opts?: { unprobeable?: boolean }): Episode | null;
   /** Drop an open episode without a verdict (e.g. node left the roster). */
@@ -663,7 +681,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       open.set(k, { kind, nodeId, band: bandOf(onsetMs), onsetMs, before, action: null, resolvedMs: null, after: null, verdict: null });
     },
 
-    recordAction(nodeId, actionKind, refused, atMs, skip): void {
+    recordAction(nodeId, actionKind, refused, atMs, skip, onlyKinds): void {
       // Attribute to EVERY open episode on this node (an action targets a node;
       // any of its active symptoms could be the one it addresses). First action
       // per episode wins — a later action can't cleanly be credited. Skip
@@ -672,6 +690,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const prefix = `${nodeId ?? 'mesh'}:`;
       for (const [k, ep] of open) {
         if (!k.startsWith(prefix)) continue;
+        // A refusal indicts only the detectors that ASKED for this action
+        // (v0.43.1) — see `onlyKinds` on the interface. Success attribution is
+        // deliberately unscoped and keeps the node-wide behaviour above.
+        if (onlyKinds && !onlyKinds.has(ep.kind)) continue;
         if (skip?.(k)) {
           // The action ran on this node while this episode was already in its
           // confirmation window — not attributable, but not ignorable either
@@ -864,7 +886,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const t = action.get(aKey(kind, act));
       const n = t?.n ?? 0, ok = t?.ok ?? 0;
       const nodes = armNodes.get(aKey(kind, act))?.size ?? 0;
-      if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, nodes, ready: false };
+      if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, nodes, ready: false, lowerBound: null, bar: null };
       const rate = ok / n;
       // "Beats self-healing" REQUIRES a measured control arm to beat — you cannot
       // out-perform a base rate you have not measured. With no base rate yet the
@@ -876,8 +898,15 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // min effect. This is what stops a 4/4 fluke from printing a confident
       // green "✓ helped 100%". The DISPLAYED efficacy stays the point estimate
       // (honest best guess) but is shown only once the lower bound earns it.
-      const beats = base != null && wilsonLower(ok, n) >= base + cfg.minEffect;
-      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, nodes, ready: true };
+      // The bound CROSSES the boundary now (v0.43.1). It decided every claim
+      // this engine makes and was thrown away at the return, so a screen could
+      // show "helped 75%" with no way to say how pessimistic the evidence
+      // allows that to be — and, more often, could not explain why a visibly
+      // good-looking arm was still withheld.
+      const lower = wilsonLower(ok, n);
+      const bar = base == null ? null : base + cfg.minEffect;
+      const beats = bar != null && lower >= bar;
+      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, nodes, ready: true, lowerBound: lower, bar };
     },
 
     falsePositives(kind): number {

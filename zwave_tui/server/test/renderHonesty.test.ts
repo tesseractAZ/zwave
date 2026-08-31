@@ -1337,3 +1337,34 @@ test('chartRows marks a null sample on the baseline so it reads as no-data', () 
   assert.ok(chartRows([null, null], 2, 2).map(strip).every((l) => /^·+$/.test(l)),
     'an all-null series must render as no-data across every row');
 });
+
+test('a decayed weight is never printed as an integer count (v0.43.1)', () => {
+  // INVARIANT. `n` is an exponentially-weighted effective sample size — seven
+  // closures on seven distinct nodes give Σ0.97^i = 6.4005 — while `nodes` is a
+  // true cumulative count. Rounding the first produced `n=6 · 7 nodes` on an
+  // ordinary run: a contradiction with nothing on screen to explain it, since
+  // the two numbers were styled identically. The notation itself has to carry
+  // the difference, at every width, on every screen that prints them.
+  const eff = { expectedEfficacy: 0.8, n: 6.4005, baseRate: 0.2, nodes: 7, ready: true, lowerBound: 0.55, bar: null };
+  const sym = {
+    kind: 'rtt-degraded' as const, nodeId: 6, severity: 'warn' as const, sinceMs: 20 * 60_000,
+    basis: 'measured' as const, evidence: [{ label: 'rtt', value: '140 ms' }],
+    narrative: 'Node 6 round-trip time is above its own normal.',
+  };
+  for (let cols = 60; cols <= 200; cols += 1) {
+    const lines = renderRemedy({
+      view: mkView({ screen: 'remedy', cols, rows: 40 }),
+      data: { ...mockData({ nodes: [mkNode({ nodeId: 6, name: 'Kitchen' })] }),
+        symptoms: () => [sym], efficacyFor: () => eff },
+      visibleNodes: [], filtering: false, actionsEnabled: true,
+    } as ScreenCtx).map(strip);
+    for (const l of lines) {
+      assert.ok(!l.includes('n=6') && !l.includes('n=7'),
+        `${cols} cols: a decayed weight rendered as an integer count — "${l.trim()}"`);
+      // And where the weight IS printed it must carry both its marker and its
+      // decimal, so it cannot be misread as one of the plain episode tallies
+      // ("N past episodes") that sit beside it in identical grey.
+      if (l.includes('6.4')) assert.ok(l.includes('n≈6.4'), `${cols} cols: weight lost its marker — "${l.trim()}"`);
+    }
+  }
+});

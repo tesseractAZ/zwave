@@ -9,8 +9,9 @@
  */
 
 import type { ScreenCtx, Symptom, NodeSnapshot, SymptomKind, ActionKind, Efficacy } from '../../types';
-import { c, truncate } from '../ansi';
-import { frame } from '../chrome';
+import { provenance, weight } from '../ledgerText';
+import { c, truncate, visLen } from '../ansi';
+import { frame, fieldStrip } from '../chrome';
 import { planFor, type PlanCandidate } from '../../zwave/planner';
 
 /** One-line learned-efficacy note for an executable candidate (M5): a green
@@ -40,24 +41,45 @@ import { planFor, type PlanCandidate } from '../../zwave/planner';
  */
 function efficacyNote(e: Efficacy | null | undefined, blocked = false): string | null {
   if (!e || !e.ready) return null; // still learning → say nothing (honest)
-  const n = Math.round(e.n);
+  // NOT Math.round (v0.43.1). `n` is a decayed weight, not a tally: seven
+  // closures on seven distinct nodes give 6.4005, which rounded to `n=6` beside
+  // `· 7 nodes` — a visible self-contradiction on an ordinary run.
+  const n = weight(e.n);
   const base = e.baseRate != null ? ` vs ${Math.round(e.baseRate * 100)}% self-heal` : '';
-  // PROVENANCE (v0.36.5). The arms are marginal by design, so `n=6` reads as
-  // six nodes agreeing when it may be one node repeating — which is exactly
-  // what happened live, a single flapping device teaching the fleet-wide arm
-  // past its readiness threshold. Silent when the ledger predates the tracking
-  // (0) rather than claiming a node count it does not have.
-  const prov = e.nodes > 0 ? ` · ${e.nodes} node${e.nodes === 1 ? '' : 's'}` : '';
+  // PROVENANCE (v0.36.5, shared v0.43.1). The arms are marginal by design, so
+  // `n≈6.4` reads as six nodes agreeing when it may be one node repeating —
+  // exactly what happened live, a single flapping device teaching the
+  // fleet-wide arm past its readiness threshold. This screen used to fall
+  // SILENT when the count was unknown while ENGINE said "sources not recorded"
+  // for the same row; one function now decides for both.
+  const prov = provenance(e.nodes, ' · ');
   if (e.expectedEfficacy != null) {
     // `n` first (after the headline %) so the trust signal survives truncation.
     const pct = Math.round(e.expectedEfficacy * 100);
     return blocked
-      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n}${prov})${base} — the block above still applies`)
-      : c.green(`✓ helped ${pct}% (n=${n}${prov})${base}`);
+      ? c.yellow(`⚠ ledger measured ${pct}% here (${n}${prov})${base} — the block above still applies`)
+      : c.green(`✓ helped ${pct}% (${n}${prov})${base}`);
   }
+  // WHY it is not distinguishable (v0.43.1). "Not distinguishable" was the
+  // engine's most common verdict and its least explicable: an operator looking
+  // at an arm that plainly succeeded most of the time had no way to see that
+  // the WILSON LOWER BOUND — not the point estimate — is what must clear the
+  // base rate, nor how far short it fell. The bound decided the verdict and was
+  // discarded at the ledger boundary; now it says so in its own terms.
+  // Against the BAR, not the bare base rate. The gate is `lower >= base +
+  // minEffect`, so an arm at 63% against a 60% base rate is withheld — and
+  // printing "63% vs 60% self-heal" under "not distinguishable" reads as a win
+  // beneath a verdict that says otherwise. Name the number it had to clear.
+  const selfHeal = e.baseRate != null ? `${Math.round(e.baseRate * 100)}% self-heal` : null;
+  const why = e.lowerBound != null
+    ? (selfHeal != null && e.bar != null
+        ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, short of the ` +
+          `${Math.round(e.bar * 100)}% bar (${selfHeal} + margin)`
+        : ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, and self-heal is not measured yet`)
+    : '';
   return blocked
-    ? c.grey(`≈ n=${n}${prov}: measured — not distinguishable from self-healing`)
-    : c.grey(`≈ n=${n}${prov}: not distinguishable from self-healing`);
+    ? c.grey(`≈ ${n}${prov}: measured — not distinguishable from self-healing${why}`)
+    : c.grey(`≈ ${n}${prov}: not distinguishable from self-healing${why}`);
 }
 
 const SEV_TAG: Record<Symptom['severity'], string> = {
@@ -283,6 +305,29 @@ function wrap(text: string, width: number): string[] {
   return out;
 }
 
+/**
+ * Names the time-of-day band a baseline count was measured in (v0.43.1).
+ *
+ * Every graduation count `engineStatus` returns is scoped to the band
+ * containing NOW — `bandOf` in baselines.ts is `hour / (24 / N_BANDS)` — and
+ * the screen used to state those counts as timeless facts. With the default
+ * six bands this reads "the 12:00–16:00 band"; the arithmetic is derived from
+ * `bands` so it stays honest if that constant ever moves.
+ */
+function bandLabel(eng: { band: number; bands: number }, compact = false): string {
+  if (!Number.isFinite(eng.bands) || eng.bands <= 0) return 'this time of day';
+  const width = 24 / eng.bands;
+  if (!Number.isInteger(width)) return `band ${eng.band + 1}/${eng.bands}`;
+  const from = eng.band * width;
+  // The last band ends at 24:00, not 00:00 — a range that appears to wrap back
+  // to its own start reads as zero-length. `from + width` never exceeds 24.
+  const hh = (h: number): string => `${String(h).padStart(2, '0')}:00`;
+  // The compact form exists so the qualifier SURVIVES a 40-column terminal.
+  // Truncation drops it from the right-hand end, and a headline that has lost
+  // its band is exactly the timeless assertion this release removes.
+  return compact ? `${from}–${from + width}h` : `the ${hh(from)}–${hh(from + width)} band`;
+}
+
 export function renderRemedy(ctx: ScreenCtx): string[] {
   const { view, data } = ctx;
   const W = view.cols;
@@ -314,17 +359,63 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       body.push('');
       body.push(c.grey('    The symptom engine is not running on this install (no baselines'));
       body.push(c.grey('    store configured), so nothing is being diagnosed.'));
-    } else if (eng.ready < eng.total) {
-      body.push(c.cyan(`    ◷ Learning — ${eng.ready}/${eng.total} nodes have a graduated baseline.`));
+    } else if (eng.total === 0) {
+      // The engine is on and has nothing to be on ABOUT (v0.43.1). Every count
+      // below is 0/0, which passes all three "fully graduated" comparisons —
+      // so this used to render the green all-clear, asserting three graduated
+      // series and a measurement band from zero observations. That is the state
+      // at boot, before the first roster poll returns.
+      body.push(c.cyan('    ◷ No nodes yet.'));
       body.push('');
-      body.push(c.grey('    Each node’s normal is learned from the evidence stream across'));
-      body.push(c.grey('    several distinct days before its detectors may fire. No symptoms'));
-      body.push(c.grey('    can be reported for a node until then — this is by design, not a fault.'));
+      body.push(c.grey('    The engine is running but the roster is empty — nothing has been'));
+      body.push(c.grey('    measured, so nothing can be diagnosed or cleared. This is normal'));
+      body.push(c.grey('    for the first seconds after a restart.'));
+    } else if (eng.timeoutReady < eng.total || eng.rttReady < eng.total || eng.rssiReady < eng.total) {
+      // Per-series, and scoped to the band it was measured in (v0.43.1).
+      // "N/total nodes have a graduated baseline" counted ONE series (timeouts)
+      // in ONE of six time-of-day bands, and said neither. A fleet with a full
+      // timeout baseline and an empty RSSI baseline read "Every node has a
+      // graduated baseline"; the same fleet could read learned at 03:00 and
+      // unlearned at 15:00 with nothing having changed.
+      //
+      // The counts go through fieldStrip: at 40 columns the fixed string clipped
+      // to `rssi 1` where the truth was 12/39 — a plausible, wrong measurement,
+      // which chrome.ts calls a bigger lie than a disclosed drop.
+      const headFull = `    ◷ Learning — graduated for ${bandLabel(eng)}:`;
+      body.push(c.cyan(visLen(headFull) <= W ? headFull
+        : `    ◷ Learning — graduated for ${bandLabel(eng, true)}:`));
+      body.push('');
+      body.push(fieldStrip(view, [
+        c.grey(`      timeouts ${eng.timeoutReady}/${eng.total}`),
+        c.grey(`rtt ${eng.rttReady}/${eng.total}`),
+        c.grey(`rssi ${eng.rssiReady}/${eng.total}`),
+      ]));
+      body.push('');
+      body.push(c.grey('    Each node’s normal is learned per series and per time-of-day band,'));
+      body.push(c.grey('    from the evidence stream across several distinct days, before its'));
+      body.push(c.grey('    detectors may fire. A detector stays silent while ITS series is'));
+      body.push(c.grey('    still learning — by design, not a fault.'));
     } else {
+      // "All clear" is a claim about the WHOLE engine, and this screen only
+      // knows about live symptoms (v0.43.1). An episode in its confirmation
+      // window has no live symptom by construction — that is what being in the
+      // window means — so the ledger could be mid-experiment on three nodes
+      // while this printed an unqualified all-clear. Say what is still moving.
+      const openEps = data.openEpisodes?.() ?? [];
       body.push(c.green(`    ✓ All clear — ${eng.total} nodes learned, no symptoms detected.`));
       body.push('');
-      body.push(c.grey('    Every node has a graduated baseline and none is currently anomalous.'));
-      body.push(c.grey('    New symptoms will surface here — advisory-first, nothing is acted on.'));
+      body.push(truncate(c.grey('    Every node has a graduated timeout, rtt and rssi baseline'), W));
+      const bandLine = `    for ${bandLabel(eng)}, and none is currently anomalous.`;
+      body.push(c.grey(visLen(bandLine) <= W ? bandLine
+        : `    for ${bandLabel(eng, true)}, none anomalous.`));
+      if (openEps.length > 0) {
+        const confirming = openEps.filter((e) => e.confirming).length;
+        body.push(c.grey(`    ◷ The ledger is still scoring ${openEps.length} episode${openEps.length === 1 ? '' : 's'}` +
+          (confirming > 0 ? ` (${confirming} in the confirmation window)` : '') +
+          ' — see ENGINE.'));
+      } else {
+        body.push(c.grey('    New symptoms will surface here — advisory-first, nothing is acted on.'));
+      }
     }
   } else {
     const crit = symptoms.filter((s) => s.severity === 'crit').length;

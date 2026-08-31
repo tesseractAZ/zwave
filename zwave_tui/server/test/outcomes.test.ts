@@ -1137,3 +1137,105 @@ test('the undersampled counter survives save/load (v0.41.2)', () => {
     assert.equal(o2.unverifiableUndersampled('rtt-degraded'), 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('the bound that WITHHELD the claim is carried out with it (v0.43.1)', () => {
+  // A 4/4 action arm looks perfect. It is withheld anyway, because the Wilson
+  // lower bound on 4/4 is ~0.51 — not because the point estimate is low. Before
+  // v0.43.1 that number was computed inside the gate and dropped at the return,
+  // so nothing downstream could say WHY a visibly perfect arm earned no claim.
+  const o = store();
+  for (let i = 0; i < 4; i++) { o.open(i, 'return-path-degraded', 1000, W(100, 20)); o.resolve(i, 'return-path-degraded', 2000, W(100, 1)); }
+  for (let i = 10; i < 14; i++) {
+    o.open(i, 'return-path-degraded', 1000, W(100, 20));
+    o.recordAction(i, 'refreshValues', false, 1500);
+    o.resolve(i, 'return-path-degraded', 2000, W(100, 1));
+  }
+  const eff = o.efficacyFor('return-path-degraded', 'refreshValues');
+  assert.equal(eff.expectedEfficacy, null, 'claim withheld');
+  assert.ok(eff.lowerBound != null, 'but the deciding bound is disclosed');
+  assert.ok(eff.lowerBound != null && eff.lowerBound > 0.4 && eff.lowerBound < 0.7,
+    `Wilson lower bound on a decayed 4/4, got ${eff.lowerBound}`);
+  // It must be the BOUND, not the point estimate — those differ sharply here.
+  assert.ok(eff.lowerBound != null && eff.lowerBound < 0.95,
+    'the disclosed number is the pessimistic bound, not the 100% success rate');
+});
+
+test('an arm below the ready threshold discloses no bound to over-read (v0.43.1)', () => {
+  const o = store();
+  o.open(0, 'rtt-degraded', 1000, W(100, 40));
+  o.recordAction(0, 'ping', false, 1500);
+  o.resolve(0, 'rtt-degraded', 2000, W(100, 1));
+  const eff = o.efficacyFor('rtt-degraded', 'ping');
+  assert.equal(eff.ready, false);
+  assert.equal(eff.lowerBound, null, 'no bound is offered before the arm is scoreable');
+});
+
+test('a refusal indicts ONLY the detector that asked for the action (v0.43.1)', () => {
+  // THE defect DESIGN.md deferred refusal detection over: an action targets a
+  // NODE, so a node-scoped refusal stamp marks every open symptom on that node
+  // a misdiagnosis. Node 7 is a ghost-suspect AND has a degraded return path;
+  // the controller refuses remove-failed. That says the node is not failed. It
+  // says nothing whatever about the return path — but the return-path card
+  // would have carried "this detector has been refused as a misdiagnosis 1×",
+  // an argument against acting on evidence that does not exist.
+  const o = store();
+  const ghostOnly = new Set<SymptomKind>(['ghost-suspect']);
+  for (let i = 0; i < 4; i++) {
+    const id = 100 + i;
+    o.open(id, 'ghost-suspect', 1000, W(100, 40));
+    o.open(id, 'return-path-degraded', 1000, W(100, 40));
+    o.recordAction(id, 'removeFailed', true /* refused */, 1500, undefined, ghostOnly);
+    assert.equal(o.resolve(id, 'ghost-suspect', 2000, W(100, 1))?.verdict, 'refused-misdiagnosis');
+    o.resolve(id, 'return-path-degraded', 2000, W(100, 1));
+  }
+  assert.equal(o.falsePositives('ghost-suspect'), 4, 'the detector that called it a ghost is indicted');
+  assert.equal(o.falsePositives('return-path-degraded'), 0,
+    'the unrelated detector is NOT — the driver said nothing about the return path');
+});
+
+test('a SUCCESSFUL action still credits every open episode on the node (v0.43.1)', () => {
+  // The narrowing applies to refusals only. A ping that revives a node may
+  // genuinely have fixed all of its symptoms, so success attribution stays
+  // node-wide — scoping it would starve the action arms.
+  const o = store();
+  o.open(50, 'chronic-return-path', 1000, W(100, 40));
+  o.open(50, 'return-path-degraded', 1000, W(100, 40));
+  o.recordAction(50, 'ping', false, 1500);
+  o.resolve(50, 'chronic-return-path', 2000, W(100, 1));
+  o.resolve(50, 'return-path-degraded', 2000, W(100, 1));
+  assert.ok(o.efficacyFor('chronic-return-path', 'ping').n > 0, 'credited');
+  assert.ok(o.efficacyFor('return-path-degraded', 'ping').n > 0, 'credited too — success is NOT scoped');
+});
+
+test('the bar the ledger applied is the one it reports (v0.43.1)', () => {
+  // Derived from the real store, not a hand-built literal: the gate is
+  // `lowerBound >= baseRate + minEffect`, and `bar` must BE that threshold —
+  // otherwise a screen explaining a withheld claim names the wrong number.
+  const o = store();
+  for (let i = 0; i < 4; i++) { o.open(i, 'return-path-degraded', 1000, W(100, 20)); o.resolve(i, 'return-path-degraded', 2000, W(100, 1)); }
+  for (let i = 10; i < 14; i++) {
+    o.open(i, 'return-path-degraded', 1000, W(100, 20));
+    o.recordAction(i, 'refreshValues', false, 1500);
+    o.resolve(i, 'return-path-degraded', 2000, W(100, 1));
+  }
+  const e = o.efficacyFor('return-path-degraded', 'refreshValues');
+  assert.ok(e.baseRate != null && e.bar != null, 'both are measured');
+  assert.ok(Math.abs((e.bar ?? 0) - ((e.baseRate ?? 0) + 0.05)) < 1e-9,
+    `bar ${e.bar} must be base ${e.baseRate} plus the effect-size margin`);
+  // And the gate agrees with the reported pair: withheld ⇒ bound below bar.
+  assert.equal(e.expectedEfficacy, null);
+  assert.ok((e.lowerBound ?? 1) < (e.bar ?? 0), 'the withheld claim is explained by the bound falling short');
+});
+
+test('no measured base rate ⇒ no bar to fall short of (v0.43.1)', () => {
+  const o = store();
+  for (let i = 0; i < 4; i++) {
+    o.open(i, 'return-path-degraded', 1000, W(100, 40));
+    o.recordAction(i, 'refreshValues', false, 1500);
+    o.resolve(i, 'return-path-degraded', 2000, W(100, 1));
+  }
+  const e = o.efficacyFor('return-path-degraded', 'refreshValues');
+  assert.equal(e.baseRate, null);
+  assert.equal(e.bar, null, 'a bar built on an unmeasured base rate would be fabricated');
+  assert.ok(e.lowerBound != null, 'the bound itself is still real and disclosed');
+});

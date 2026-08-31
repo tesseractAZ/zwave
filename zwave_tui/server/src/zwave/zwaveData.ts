@@ -47,6 +47,7 @@ import {
   type EntityLiveState,
   type ConfigParam,
   type ConfigParamsResult,
+  EngineStatus,
 } from '../types';
 import { createHistoryStore, type HistoryStore, type HistoryMap } from './historyStore';
 import {
@@ -60,10 +61,12 @@ import {
   isRouteChange,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
-import { createBaselineStore, type BaselineStore } from './baselines';
+import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
+import { refusalScope } from './planner';
 import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { isPingCandidate, type AutoPingSnapshot } from './autoPing';
+import type { ActionRefusal } from './zwaveActions';
 import type { DriverWsState } from './driverWsClient';
 import type { OpenEpisodeView } from './outcomes';
 
@@ -372,9 +375,9 @@ export interface ZwaveData {
   /** Engine-detected symptoms (M3), ranked. */
   symptoms(): Symptom[];
   /** Engine enabled + graduated-baseline count (M3 Remedy empty state). */
-  engineStatus(): { enabled: boolean; ready: number; total: number };
+  engineStatus(): EngineStatus;
   /** M5: fold an operator action's outcome into the learning ledger. */
-  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean): void;
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal): void;
   /** M5: learned efficacy of an action against a symptom kind (null if off). */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
   falsePositives(kind: SymptomKind): number;
@@ -1272,23 +1275,37 @@ class ZwaveDataImpl implements ZwaveData {
    *  ActionRunner AFTER each action. A driver refusal of a diagnosis-verifying
    *  action (removeFailed on a live node) is `refused` → refused-misdiagnosis;
    *  a plain failed action (couldn't run) is NOT attributed as "taken". */
-  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean): void {
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal): void {
     // Mesh-wide actions (rebuildAll/stopRebuild, nodeId == null) are NOT
     // attributed: they can't be credited to any single node's episode without
     // confounding, so they are deliberately dropped from the ledger.
     if (!this.outcomes || nodeId == null) return;
-    // Only SUCCESSFUL operator actions become episode data. A FAILED action is
-    // not "taken", and we intentionally do NOT infer `refused-misdiagnosis` from
-    // a failure here: the operator-action hook cannot distinguish a genuine
-    // driver refusal ("node is not failed") from a transient WS/connectivity
-    // error, and a node-scoped stamp would wrongly mark non-ghost symptoms. That
-    // verdict is reserved for a future executor that receives structured driver
-    // errors (§3.5); here we stay conservative and never fabricate a false
-    // positive against a detector.
-    if (!ok) return;
     // Do not credit an action against an episode whose symptom already went
     // absent (it's in the confirmation window recovering on its own).
     const skip = (key: string): boolean => this.pendingResolve.has(key);
+    // A DRIVER REFUSAL is now distinguishable, and is recorded (v0.43.1).
+    //
+    // This branch used to be a blanket `if (!ok) return;`, justified by the
+    // hook being unable to tell "the driver rejected the premise" from "a WS
+    // error stopped us trying". That was true — and it made the ledger's
+    // `refused-misdiagnosis` verdict, and the `falsePositives` counter two
+    // screens gate a warning on, structurally unreachable in production. The
+    // classification now happens in zwaveActions.run(), where the driver's own
+    // words are still in hand.
+    //
+    // DESIGN.md gave TWO reasons for deferring this, and the second one is not
+    // fixed by classification: a node-scoped stamp would wrongly mark non-ghost
+    // symptoms. `refusalScope` is that fix — the refusal reaches only the
+    // detectors whose own plan offered the action, so a node that is both
+    // `ghost-suspect` and `rtt-degraded` does not have its RTT detector called
+    // a false positive because the controller said the node is not failed.
+    if (!ok) {
+      if (refusal !== 'refused') return; // could not run ⇒ indicts nothing
+      const scope = refusalScope(actionKind);
+      if (scope.size === 0) return; // no detector asked for it ⇒ indicts nothing
+      this.outcomes.recordAction(nodeId, actionKind, /* refused */ true, Date.now(), skip, scope);
+      return;
+    }
     this.outcomes.recordAction(nodeId, actionKind, false, Date.now(), skip);
   }
 
@@ -1476,17 +1493,27 @@ class ZwaveDataImpl implements ZwaveData {
   /** Honest engine state for the Remedy screen: whether the engine is enabled,
    *  and how many nodes have a graduated timeout baseline vs total — so the
    *  screen can distinguish "off" / "still learning" / "all healthy". */
-  engineStatus(): { enabled: boolean; ready: number; total: number } {
-    if (!this.baselines) return { enabled: false, ready: 0, total: 0 };
+  engineStatus(): EngineStatus {
     const now = Date.now();
-    let ready = 0;
+    const band = bandOf(now);
+    if (!this.baselines) {
+      return { enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band, bands: N_BANDS };
+    }
+    // Three series, not one (v0.43.1). The single timeout count was rendered as
+    // a universal "every node has a graduated baseline"; RSSI in particular can
+    // be empty across the whole fleet while this reads 39/39.
+    let timeoutReady = 0;
+    let rttReady = 0;
+    let rssiReady = 0;
     let total = 0;
     for (const n of this.lastNodes) {
       if (n.isController) continue;
       total += 1;
-      if (this.baselines.timeoutNormal(n.nodeId, now)?.ready) ready += 1;
+      if (this.baselines.timeoutNormal(n.nodeId, now)?.ready) timeoutReady += 1;
+      if (this.baselines.rttNormal(n.nodeId, now)?.ready) rttReady += 1;
+      if (this.baselines.rssiNormal(n.nodeId, now)?.ready) rssiReady += 1;
     }
-    return { enabled: true, ready, total };
+    return { enabled: true, ready: timeoutReady, total, timeoutReady, rttReady, rssiReady, band, bands: N_BANDS };
   }
 
   /** Fold each node's since-last-tick interval mean into its coarse ring. */

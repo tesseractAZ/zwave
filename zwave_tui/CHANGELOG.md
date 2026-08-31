@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.43.1 — 2026-08-30
+
+**Four numbers the engine acted on and never showed, and one accusation it
+could not make honestly.**
+
+**A driver refusal now reaches the ledger — scoped to the detector that asked
+for the action.** `refused-misdiagnosis` and the `falsePositives` counter two
+screens gate a warning on were structurally unreachable: the action runner's
+catch discarded the driver's words and reported a bare `false`. DESIGN.md gave
+two reasons for deferring this, and both are addressed. Classification happens
+in `zwaveActions.run()` where the message is still in hand (`refused` only if
+the driver says the node is not failed or is responding; `transport` otherwise,
+which indicts nothing). And attribution is scoped by `REFUSAL_INDICTS` in
+planner.ts to the symptom kinds whose own plan offers that action — a refused
+`removeFailed` reaches `ghost-suspect` and nothing else. Without that scope, a
+node that was both `ghost-suspect` and `rtt-degraded` would have had its RTT
+detector marked a false positive because the controller said the node is not
+failed, an argument against acting on evidence that does not exist. The table
+is asserted against `planFor` itself so it cannot drift. **Success** attribution
+stays node-wide: an action that worked may well have fixed every symptom on the
+node.
+
+The exact production wording of a refusal is **unverified** — this add-on
+reaches the driver through Home Assistant's WS API and no genuine refusal has
+been captured on this fleet. The family of phrasings is a best reading, and a
+miss degrades to `transport` and indicts nothing. Because that silence is
+exactly what kept the verdict unreachable for four releases, every unmatched
+`removeFailed` failure now logs its verbatim text with the instruction for
+correcting the family, so the first real refusal captures itself.
+
+**The Wilson lower bound crosses the boundary.** It decides every efficacy
+claim the engine makes — `expectedEfficacy` is withheld until it clears the base
+rate plus the effect size — and it was computed inside the gate and discarded at
+the return. REMEDY could say "not distinguishable from self-healing" about an
+arm that visibly succeeded 8 of 9 times with no way to say why. It now reports
+the bound *and the bar it fell short of*: "even pessimistically 52%, short of
+the 65% bar (60% self-heal + margin)". Reporting the bound against the bare base
+rate would have been worse than silence — any arm in `[base, base+0.05)` would
+have printed two numbers saying it won, beneath a verdict saying it did not.
+
+**"Every node has a graduated baseline" measured one series in one time band.**
+`engineStatus()` counted nodes whose *timeout* baseline had graduated in the
+band containing now, and REMEDY rendered that as a claim over all three series
+and all six bands. A fleet with an empty RSSI baseline read fully learned; the
+same fleet could read learned at 03:00 and unlearned at 15:00 with nothing
+having changed. The status is now per-series and carries its band; the green
+all-clear waits for all three; an empty roster gets its own state instead of
+passing every `0 < 0` comparison and asserting three graduated series from zero
+observations. At 40 columns the counts are dropped whole rather than clipped to
+`rssi 1` where the truth was `12/39`, and the band survives in a compact form
+rather than being truncated off the end of the headline.
+
+**A decayed weight was printed as a count.** `n` saturates near 33 and is not a
+tally; the node count beside it is. Seven closures on seven nodes give 6.4005,
+which rounded to `n=6 · 7 nodes` — a self-contradiction in identical styling on
+an ordinary run. Both screens now write `n≈6.4`, share their wording through a
+new `ledgerText.ts`, and agree that `nodes === 0` means *unknown* and says so;
+REMEDY used to fall silent where ENGINE disclosed it. ENGINE's LEARNED block
+gains a one-line glossary, rendered only when a weight is actually on screen.
+
+**Also:** REMEDY's all-clear discloses episodes the ledger is still scoring — an
+episode in its confirmation window has no live symptom by construction, so the
+screen could print an unqualified all-clear while the ledger was mid-experiment
+on three nodes.
+
+877 tests, 350 mutants (0 survived, 0 missing, 0 invalid).
+
 ## 0.43.0 — 2026-08-30
 
 **Three things the TUI could not show, and one contract that lied.**

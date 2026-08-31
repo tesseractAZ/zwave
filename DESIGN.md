@@ -449,8 +449,13 @@ after-window without fresh evidence (wedge, no traffic) yields
 > populated by operator type-CONFIRM actions via the ActionRunner's `onOutcome`
 > hook (attributed to every open episode on the acted node); NO engine-initiated
 > execution this milestone. `expectedEfficacy` feeds the planner (§3.4) and the
-> Remedy screen renders "✓ helped X% vs Y% self-heal (n)" or "≈ not
-> distinguishable from self-healing (n)" — never a claim while `n < min`.
+> Remedy screen renders "✓ helped X% (n≈W · N nodes) vs Y% self-heal" or "≈ not
+> distinguishable from self-healing" — never a claim while `n < min`. As of
+> v0.43.1 the withheld case also names the Wilson lower bound and the bar it
+> fell short of ("even pessimistically 52%, short of the 65% bar"), since that
+> bound decides every claim and used to be discarded at the ledger boundary.
+> `n≈` is written with a decimal because it is a decayed weight saturating near
+> 33, not a tally — the node count beside it IS a cumulative tally.
 
 The ledger records **every symptom episode**, action taken or not — the
 no-action episodes are the control arm the learned layer cannot be honest
@@ -460,12 +465,26 @@ without:
   unverifiable`. `refused-misdiagnosis` (a driver refusal — e.g.
   `remove_failed_node` on a node that responds — keyed to the **symptom**,
   raising that detector's false-positive bar without touching action efficacy)
-  exists in the model but is **NOT auto-detected in M5**: the operator-action
-  hook cannot reliably tell a genuine refusal from a transient WS error, and a
-  node-scoped stamp would wrongly mark non-ghost symptoms. Only *successful*
-  operator actions are recorded; refusal detection is reserved for a future
-  executor (§3.5) that receives structured driver errors. So in M5 an action
-  either records a success/failure via the recovery window, or is not attributed.
+  is **auto-detected as of v0.43.1**. It was deferred for two reasons, both now
+  addressed:
+  - *The hook could not tell a genuine refusal from a transient WS error.* The
+    classification now happens in the action runner, where the driver's own
+    words are still in hand: a failure is `refused` only if the message says the
+    node is not failed / is responding, and `transport` otherwise. Anything
+    unmatched indicts nothing. The exact production wording is **unverified** —
+    this add-on reaches the driver through Home Assistant's WS API and no
+    genuine refusal has been captured on this fleet — so every unmatched
+    `remove_failed_node` failure logs its verbatim text for the family to be
+    corrected on first sighting.
+  - *A node-scoped stamp would wrongly mark non-ghost symptoms.* Refusal
+    attribution is scoped by `REFUSAL_INDICTS` (planner.ts) to the symptom kinds
+    whose own plan offers that action, so a refused `remove_failed_node` reaches
+    `ghost-suspect` and nothing else. The table is asserted against `planFor`
+    itself, so it cannot drift from the plans it summarises. **Success**
+    attribution is deliberately unscoped and stays node-wide: an action that
+    worked may well have fixed every symptom on the node.
+
+  A *successful* action still records via the recovery window as before.
 - **Spontaneous-recovery base rate** per symptom kind, measured from episodes
   that resolved with no action — the control arm. *(As-built:)* it is collected
   by **this ledger once it runs (M5+), advisory-only**, from live operator

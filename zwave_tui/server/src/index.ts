@@ -93,7 +93,7 @@ async function main(): Promise<void> {
     // including the RED-latching "→ failed" line describing the write itself.
     log: (sev, nodeId, text, origin) => zwaveData.logByOrigin(sev, nodeId, text, origin),
     // M5: feed operator-action outcomes into the learning ledger.
-    onOutcome: (kind, nodeId, ok) => zwaveData.recordActionOutcome(kind, nodeId, ok),
+    onOutcome: (kind, nodeId, ok, refusal) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal),
     // v0.23: after a config write, drop the stale cache so DETAIL re-fetches.
     onConfigWritten: (nodeId) => zwaveData.invalidateConfigParams(nodeId),
     onNodeRemoved: (nodeId) => zwaveData.forgetNodeBaselines(nodeId),
