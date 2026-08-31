@@ -382,6 +382,7 @@ export interface ZwaveData {
   /** Of those, on nodes that cannot be probed at all (v0.38). */
   unverifiableUnprobeableCount(kind: SymptomKind): number;
   unverifiableTransientCount(kind: SymptomKind): number;
+  unverifiableUndersampledCount(kind: SymptomKind): number;
   confoundedCount(kind: SymptomKind): number;
   openEpisodes(): OpenEpisodeSummary[];
   controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
@@ -1315,6 +1316,10 @@ class ZwaveDataImpl implements ZwaveData {
 
   unverifiableTransientCount(kind: SymptomKind): number {
     return this.outcomes ? this.outcomes.unverifiableTransient(kind) : 0;
+  }
+
+  unverifiableUndersampledCount(kind: SymptomKind): number {
+    return this.outcomes ? this.outcomes.unverifiableUndersampled(kind) : 0;
   }
 
   confoundedCount(kind: SymptomKind): number {

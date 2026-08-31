@@ -79,6 +79,8 @@ export interface ZwaveDataSource {
   unverifiableUnprobeableCount(kind: SymptomKind): number;
   /** Of those, transient blinks — over before the floor filled (v0.39). REQUIRED — see ackEvent. */
   unverifiableTransientCount(kind: SymptomKind): number;
+  /** Of those, undersampled by the node's own cadence (v0.41.2). REQUIRED — see ackEvent. */
+  unverifiableUndersampledCount(kind: SymptomKind): number;
   /** No-action closures confounded by a mid-episode death/remediation (v0.40). REQUIRED — see ackEvent. */
   confoundedCount(kind: SymptomKind): number;
   /** The ledger's live workload (v0.41). REQUIRED — see ackEvent. */
@@ -197,6 +199,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     unverifiableCount: (k) => zd.unverifiableCount(k),
     unverifiableUnprobeableCount: (k) => zd.unverifiableUnprobeableCount(k),
     unverifiableTransientCount: (k) => zd.unverifiableTransientCount(k),
+    unverifiableUndersampledCount: (k) => zd.unverifiableUndersampledCount(k),
     confoundedCount: (k) => zd.confoundedCount(k),
     openEpisodes: () => zd.openEpisodes(),
     controlArm: (k) => zd.controlArm(k),
@@ -304,6 +307,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     unverifiableCount: (kind) => zwaveData.unverifiableCount(kind),
     unverifiableUnprobeableCount: (kind) => zwaveData.unverifiableUnprobeableCount(kind),
     unverifiableTransientCount: (kind) => zwaveData.unverifiableTransientCount(kind),
+    unverifiableUndersampledCount: (kind) => zwaveData.unverifiableUndersampledCount(kind),
     confoundedCount: (kind) => zwaveData.confoundedCount(kind),
     openEpisodes: () => zwaveData.openEpisodes(),
     controlArm: (kind) => zwaveData.controlArm(kind),

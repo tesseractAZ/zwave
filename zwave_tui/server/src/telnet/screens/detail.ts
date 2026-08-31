@@ -364,7 +364,20 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         const self = cov.probesSelfProven > 0
           ? c.grey(` · ${cov.probesSelfProven} self-proven`)
           : '';
+        // These counters are CUMULATIVE across the add-on's whole life and are
+        // deliberately never migrated, so on a long-lived install they blend
+        // definitions that changed under them (v0.41.2): before v0.40.2 every
+        // lane fed the denominator, not just the fixed-cadence sweep, and every
+        // restart credited one fabricated "self-proven" per node from the
+        // previous process's own probe echoes. An audit found 13 of 35 nodes
+        // whose ONLY self-proven credit is one such boot wave. The number is
+        // still the best evidence there is — but it is a lifetime tally, not a
+        // clean measurement, and the screen must not present it as the latter.
+        const caveat = cov.probesSelfProven > 0
+          ? c.grey(' — lifetime tally; pre-v0.40.2 counts blend probe lanes and boot credits')
+          : '';
         body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${pct}%)`) + self, inner));
+        if (caveat) body.push(kv('', c.grey(caveat.trim()), inner));
       }
       // The engine's LEARNED yardstick for this node. Every per-node signal
       // verdict ("below its own normal") is measured against this and it was

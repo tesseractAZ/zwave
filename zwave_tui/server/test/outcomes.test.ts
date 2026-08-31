@@ -1096,3 +1096,44 @@ test('the confounded counter survives save/load (v0.40)', () => {
     assert.equal(o2.confounded('rtt-degraded'), 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── v0.41.2: "we could not sample it" is not "it was brief" ─────────────────
+
+test('a LONG episode whose before-window never filled is UNDERSAMPLED, not transient (v0.41.2)', () => {
+  // An audit found `transient` arithmetically guaranteed for an echo-only node:
+  // its only fresh readings are 120-minute sweep replies, so the before-side
+  // floor is unreachable whatever the symptom's duration — and the closure line
+  // asserted "ended before its evidence floor" on evidence that could not
+  // distinguish that from "we only ever got one look".
+  const logged: string[] = [];
+  const o = createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  o.open(49, 'rtt-degraded', 0, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }));
+  o.resolve(49, 'rtt-degraded', 30 * 60_000, WT(30));   // open for 30 minutes
+  assert.equal(o.unverifiableUndersampled('rtt-degraded'), 1, 'it had the time, never the readings');
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 0, 'and must not claim brevity');
+  const line = logged.find((l) => /episode 49:/.test(l));
+  assert.match(line!, /undersampled — this node reports too rarely to reach the floor/,
+    `the closure must say which it is: ${line}`);
+});
+
+test('a genuinely BRIEF episode is still transient (v0.41.2)', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 0, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }));
+  o.resolve(7, 'rtt-degraded', 60_000, WT(30));        // over in a minute
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 1);
+  assert.equal(o.unverifiableUndersampled('rtt-degraded'), 0);
+});
+
+test('the undersampled counter survives save/load (v0.41.2)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'outcomes-under-'));
+  const path = join(dir, 'o.json');
+  try {
+    const o = createOutcomeStore({ path, releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0 });
+    o.open(49, 'rtt-degraded', 0, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }));
+    o.resolve(49, 'rtt-degraded', 30 * 60_000, WT(30));
+    o.save();
+    const o2 = createOutcomeStore({ path, releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0 });
+    o2.load();
+    assert.equal(o2.unverifiableUndersampled('rtt-degraded'), 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

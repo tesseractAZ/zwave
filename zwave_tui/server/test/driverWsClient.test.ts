@@ -490,6 +490,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       falsePositives: (k: string) => (k === 'route-churn' ? 4 : 0),
       unverifiableCount: (k: string) => (k === 'rtt-degraded' ? 16 : 0),
       unverifiableTransientCount: (k: string) => (k === 'rtt-degraded' ? 5 : 0),
+      unverifiableUndersampledCount: (k: string) => (k === 'rtt-degraded' ? 4 : 0),
       confoundedCount: (k: string) => (k === 'rtt-degraded' ? 2 : 0),
       openEpisodes: () => [{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded', onsetMs: 1, actionKind: null, confounded: false, beforeFreshN: 4, confirming: true }],
       controlArm: (k: string) => (k === 'rtt-degraded' ? { n: 6, ok: 5, nodes: 3 } : null),
@@ -512,6 +513,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
     assert.equal(provider.provider.unverifiableCount?.('rtt-degraded'), 16);
     assert.equal(provider.provider.unverifiableCount?.('dead-flap'), 0);
     assert.equal(provider.provider.unverifiableTransientCount?.('rtt-degraded'), 5, 'the v0.39 member crosses the bridge');
+    assert.equal(provider.provider.unverifiableUndersampledCount?.('rtt-degraded'), 4, 'the v0.41.2 member crosses the bridge');
     assert.equal(provider.provider.unverifiableTransientCount?.('dead-flap'), 0);
     assert.equal(provider.provider.confoundedCount?.('rtt-degraded'), 2, 'the v0.40 member crosses the bridge');
     // v0.41: the ENGINE screen's three members. A screen reading an optional

@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.41.2 — 2026-08-30
+
+**"We could not sample it" is not "it was brief" — and three more the audit found.**
+
+A 44-agent audit spanning four version windows produced 39 verified findings.
+The one that mattered was about this project's own v0.39 work.
+
+**The transient taxonomy was over-claiming.** For an ECHO-ONLY node — one whose
+only fresh readings are its 120-minute sweep replies — the before-side evidence
+floor is unreachable *whatever the symptom's duration*. So `transient` was
+arithmetically guaranteed rather than measured, and every such closure asserted
+"degraded state ended before its evidence floor" on evidence that could not
+distinguish that from "we only ever got one look". That is the v0.36
+before-window starvation surviving, relabeled as a physical phenomenon — the
+exact dishonesty the taxonomy was built to end. Caught on the first transient
+closure to reach production.
+
+Duration is the signal that separates them. An episode open past five minutes —
+the span of a full verification burst, so every opportunity the engine can
+create to fill the window has passed — that STILL has not reached its floor was
+limited by the device's reporting rate, not the symptom's brevity. Those now
+close as `undersampled`, with their own counter, closure tag and screen rows.
+Genuinely brief episodes keep `transient`, which now means what it says.
+
+**A give-up no longer precedes its own evidence.** The answer grace (90 s)
+exceeds the tick (60 s), so the decision pass that exhausted the budget
+announced "STILL DEAD — needs a human" up to one tick BEFORE the final
+attempt's probe could be judged. The announcement now waits for no probe to be
+outstanding. The audit recommended hoisting the judgment loop above the
+decision instead — implemented, and a test immediately failed: judging first
+stamps probe attribution before the sweep reads it, so a node's own traffic
+gets credited to our probe. That trades a broad, permanent accuracy loss on
+every echo-only node for a narrow, rare ordering nicety. Reverted.
+
+**The persisted reply-rate counters now say what they are.** They are lifetime
+tallies, never migrated, and on a long-lived install they blend definitions
+that changed under them: before v0.40.2 every probe lane fed the denominator,
+and every restart credited one fabricated "self-proven" per node from the
+previous process's echoes. The audit found 13 of 35 nodes whose ONLY
+self-proven credit is one such boot wave. DETAIL now carries that caveat
+instead of presenting a lifetime tally as a clean measurement.
+
+**The advertised backoff ladder was wrong on four operator-facing surfaces** —
+startup banner, code comment, add-on config help, and the DOCS option table.
+At the shipped `max_attempts = 3` the waits are dwell 10 m + 10 m + 30 m, so a
+node reaches "needs a human" in about 50 minutes, not the ~110 that
+"backoff 10/30/60m" implies. The 60 m rung governs the third wait onward, which
+an operator reaches only by raising `max_attempts`.
+
+842 tests. 310 mutation entries: 306 killed, 0 survived, 0 missing, 4 equivalent.
+
 ## 0.41.1 — 2026-08-29
 
 **The ENGINE screen found a fabrication in its own first render.**
