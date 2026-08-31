@@ -511,11 +511,27 @@ test('a provider without routeFailures renders exactly as before', () => {
     'and WITH the provider it must actually reach the screen (the v0.33 bridge lesson)');
 });
 
-test('the failure panel is LEFTOVER-funded too — a scrolling tree loses nothing', () => {
+test('a FAILING LINK reaches the screen even when the tree fills the body (v0.43.0)', () => {
+  // This replaces the old "the failure panel is leftover-funded too" invariant,
+  // which was a deliberate v0.35 choice with a consequence nobody measured
+  // until an audit did: on the reference 39-node mesh the tree fills the body
+  // at every ordinary size, the pad is 0, and the ONLY panel in the TUI that
+  // names a suspect LINK rather than a suspect node never rendered at all.
+  //
+  // The guarantee is cheap because the panel is rare — see the healthy-mesh
+  // case below, which is still byte-identical.
   const t = Date.now();
   const withRf = lines(withFailures(bigMesh(), () => [{ t, between: [3, 2] }], { cols: 80, rows: 24 }));
+  assert.ok(withRf.join('\n').includes('Route failures'),
+    `a failing link must render at the modal size: ${withRf.join('\n').slice(0, 400)}`);
+});
+
+test('a HEALTHY mesh still pays nothing for the guarantee — the tree keeps every row (v0.43.0)', () => {
+  // routeFailurePanel returns [] when no pair has failed, so guaranteeing it
+  // costs rows only when there is something to say.
+  const none = lines(withFailures(bigMesh(), () => [], { cols: 80, rows: 24 }));
   const without = lines(ctxFor(bigMesh(), { cols: 80, rows: 24 }));
-  assert.deepEqual(withRf, without, 'no surplus ⇒ byte-identical frame');
+  assert.deepEqual(none, without, 'no failures ⇒ byte-identical frame');
 });
 
 test('failures outrank stability for the pad, and stability degrades HONESTLY', () => {
@@ -655,4 +671,34 @@ test('the stability disclosure invariant holds at EVERY pad size, not just the s
         `80x${rows}: stability rendered "+N more" above ZERO shown nodes`);
     }
   }
+});
+
+test('the "+N more" disclosure accounts for EVERY link — shown + N === total (v0.43.0)', () => {
+  // The panel is now guaranteed a small budget, so on a big mesh it discloses
+  // far more often than it used to. A "+N more" that double-subtracts its own
+  // row (or forgets to) silently loses links from an already-scarce panel, and
+  // this is the one panel that names a suspect LINK rather than a node.
+  const t = Date.now();
+  const pairs: Array<[number, number]> = [[3, 2], [4, 2], [5, 3], [6, 3], [7, 4], [8, 5], [9, 6]];
+  const ctx = withFailures(bigMesh(), (id) => {
+    const p = pairs.filter(([a]) => a === id);
+    return p.map(([a, b]) => ({ t, between: [a, b] as [number, number] }));
+  }, { cols: 100, rows: 24 });
+  const out = lines(ctx);
+  const joined = out.join('\n');
+  assert.ok(/Route failures/.test(joined), `the panel renders: ${joined.slice(0, 300)}`);
+  const shownRows = out.filter((l) => /⇢/.test(l)).length;
+  const m = joined.match(/\+(\d+) more link\(s\)/);
+  if (m) {
+    assert.equal(shownRows + Number(m[1]), pairs.length,
+      `every link is accounted for: showed ${shownRows}, disclosed ${m[1]}, total ${pairs.length}`);
+  } else {
+    assert.equal(shownRows, pairs.length, 'with no disclosure every link must be shown');
+  }
+  // …and the panel USES its whole allocation. At the guaranteed budget of 4
+  // that is header + 2 links + the disclosure row; an off-by-one in the
+  // disclosure arithmetic silently spends a row on nothing and drops a link
+  // from a panel that is already the scarcest thing on the screen.
+  assert.equal(shownRows, 2,
+    `the panel must fill its guaranteed budget, not waste a row: showed ${shownRows}`);
 });

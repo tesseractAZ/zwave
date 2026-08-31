@@ -64,6 +64,7 @@ import { createBaselineStore, type BaselineStore } from './baselines';
 import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { isPingCandidate, type AutoPingSnapshot } from './autoPing';
+import type { DriverWsState } from './driverWsClient';
 import type { OpenEpisodeView } from './outcomes';
 
 /** An open episode plus the confirmation-window flag only this layer knows. */
@@ -384,6 +385,8 @@ export interface ZwaveData {
   unverifiableTransientCount(kind: SymptomKind): number;
   unverifiableUndersampledCount(kind: SymptomKind): number;
   confoundedCount(kind: SymptomKind): number;
+  driverWsStatus(): string;
+  driverWsState(): DriverWsState;
   openEpisodes(): OpenEpisodeSummary[];
   controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
   autoPingState(): AutoPingSnapshot | null;
@@ -978,6 +981,17 @@ class ZwaveDataImpl implements ZwaveData {
   /** Driver-WS status line for logs/diagnostics (never payload data). */
   driverWsStatus(): string {
     return this.driverWs?.status() ?? 'disabled (no driver_ws_url)';
+  }
+
+  /** The driver-WS lifecycle as a STATE, not prose (v0.43.0).
+   *
+   *  A screen must not classify this link's health by pattern-matching the
+   *  human sentence: `'not started'` and every backoff line (`${reason} —
+   *  retry in Ns (attempt N)`) contain none of the words a naive regex looks
+   *  for, so all of them read as healthy. The client has carried a proper
+   *  enum since it shipped; publish that and let the prose stay prose. */
+  driverWsState(): DriverWsState {
+    return this.driverWs?.state() ?? 'disabled';
   }
 
   private sampleEvidence(): void {

@@ -494,6 +494,8 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       confoundedCount: (k: string) => (k === 'rtt-degraded' ? 2 : 0),
       openEpisodes: () => [{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded', onsetMs: 1, actionKind: null, confounded: false, beforeFreshN: 4, confirming: true }],
       controlArm: (k: string) => (k === 'rtt-degraded' ? { n: 6, ok: 5, nodes: 3 } : null),
+      driverWsStatus: () => 'live (schema 41)',
+      driverWsState: () => 'backoff',
       autoPingState: () => ({ lastTickMs: 42, suppressed: 'storm', listening: 35, deadListening: 1, staleDue: 2, stalestMs: 60, verifyOwed: 3, config: { enabled: true, writeActions: true, afterMs: 1, maxAttempts: 3, staleMs: 1 }, nodes: [] }),
       rssiNormal: (n: number) => ({ median: -n, scale: 3, ready: true, days: 7 }),
   } as never);
@@ -522,6 +524,8 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
     assert.equal(provider.provider.openEpisodes?.().length, 1, 'openEpisodes crosses the bridge');
     assert.equal(provider.provider.controlArm?.('rtt-degraded')?.n, 6, 'controlArm crosses the bridge');
     assert.equal(provider.provider.autoPingState?.()?.suppressed, 'storm', 'autoPingState crosses the bridge');
+    assert.equal(provider.provider.driverWsStatus?.(), 'live (schema 41)', 'driverWsStatus crosses the bridge');
+    assert.equal(provider.provider.driverWsState?.(), 'backoff', 'driverWsState crosses the bridge');
     assert.equal(provider.provider.confoundedCount?.('dead-flap'), 0);
     assert.deepEqual(provider.provider.rssiNormal?.(62), { median: -62, scale: 3, ready: true, days: 7 });
   } finally {

@@ -206,8 +206,23 @@ export function renderTopology(ctx: ScreenCtx): string[] {
   // strictly-more-actionable finding must not be the one that gets squeezed
   // out. Half the pad (floor 3) is enough for the ranked links plus the
   // "+N more" disclosure, and stability keeps the rest — neither starves.
-  const failCap = Math.min(padRows, Math.max(3, Math.floor(padRows / 2)));
-  const failures = failCap >= 3 ? routeFailurePanel(view, ctx, endNodes, nameBudget, failCap) : [];
+  //
+  // GUARANTEED, not leftover-funded (v0.43.0). Strict leftover funding had a
+  // consequence nobody measured until an audit did: on the reference 39-node
+  // mesh the tree fills the body at every ordinary terminal size, `padRows` is
+  // 0, and this panel — the only thing in the whole TUI that names a suspect
+  // LINK rather than a suspect node — NEVER rendered. A panel that never draws
+  // on the deployment it was written for is not a panel.
+  //
+  // Guaranteeing it is cheap precisely because it is rare: `routeFailurePanel`
+  // returns [] when no pair has failed, so a healthy mesh pays nothing and the
+  // tree keeps every row. It costs rows only when a link is actually failing,
+  // which is exactly when it outranks four more rows of a tree that scrolls.
+  // STABILITY keeps the leftover-only rule — it is always non-empty, so
+  // guaranteeing it would shrink the tree permanently.
+  const FAIL_GUARANTEE = 4;
+  const failCap = Math.max(FAIL_GUARANTEE, Math.min(padRows, Math.max(3, Math.floor(padRows / 2))));
+  const failures = routeFailurePanel(view, ctx, endNodes, nameBudget, failCap);
   const stabPad = Math.max(0, padRows - failures.length);
   const stability = stabPad >= 3 ? routeStabilityPanel(view, ctx, endNodes, nameBudget, stabPad) : [];
   const treeCap = Math.max(1, treeCapBase - stability.length - failures.length);
@@ -234,6 +249,13 @@ export function renderTopology(ctx: ScreenCtx): string[] {
     const below = Math.max(0, tree.length - scroll - shown);
     const where = above > 0 ? `▴${above} ▾${below}` : `▾ ${below}`;
     body.push(c.grey(`  ${where} more · ↑↓ scroll · ${scroll + 1}–${Math.min(tree.length, scroll + shown)}/${tree.length}`));
+    // A failing LINK still gets its rows here (v0.43.0). `treeCap` already
+    // reserved them, and this branch — the tree scrolling because the mesh is
+    // big — is precisely the case in which the old code dropped the panel on
+    // the floor: it was appended only in the non-scrolling branch, so on the
+    // reference 39-node mesh it never rendered at any size. Stability keeps
+    // the leftover-only rule and stays out of the scrolling branch.
+    body.push(...failures);
   }
   body.push(...panel);
 
