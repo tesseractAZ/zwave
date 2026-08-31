@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createActionRunner } from '../src/zwave/zwaveActions';
+import { createActionRunner, isNotFailedRefusal } from '../src/zwave/zwaveActions';
 import type { HaWsClient } from '../src/ha/haWsClient';
 
 interface MkOpts { reject?: boolean; noDevice?: boolean; noPing?: boolean; entry?: string | null }
@@ -237,4 +237,84 @@ test('a probe logs as the ENGINE and an operator ping logs as YOU — from one r
   const pings = logs.filter((l) => l.text.startsWith('ping node 7'));
   assert.ok(pings.some((l) => l.origin === 'engine'), "the ladder ping is the engine's");
   assert.ok(pings.some((l) => l.origin === 'you'), 'and an operator ping is still yours');
+});
+
+/* ── v0.43.1: a driver REFUSAL is not a transport failure ──────────────────── */
+
+test('removeFailed refused on a live node is classified `refused`; everything else is `transport` (v0.43.1)', async () => {
+  // `refused-misdiagnosis` — and with it falsePositives, the one number that
+  // argues AGAINST the card it sits on — was unreachable in production: the
+  // catch discarded the driver's own words and reported a bare `false`. TWO
+  // screens gate a warning on that counter and neither could ever fire.
+  const seen: Array<{ kind: string; ok: boolean; refusal?: string }> = [];
+  // The classifier is a pure function of (kind, message); exercise it through
+  // run() by making the service call throw the driver's exact text.
+  const { createActionRunner } = await import('../src/zwave/zwaveActions');
+  const build = (throwText: string) => createActionRunner({
+    client: { send: async () => { throw new Error(throwText); } } as never,
+    entryId: () => 'entry-1',
+    deviceIdOf: (n: number) => `dev-${n}`,
+    pingEntityOf: (n: number) => `button.node${n}_ping`,
+    log: () => {},
+    onOutcome: (kind: string, _n: number | null, ok: boolean, refusal?: string) => { seen.push({ kind, ok, refusal }); },
+    enabled: true,
+  } as never);
+
+  await build('Node 5 is not a failed node').removeFailed(5);
+  assert.deepEqual(seen.pop(), { kind: 'removeFailed', ok: false, refusal: 'refused' },
+    'the driver rejecting the premise indicts the detector');
+
+  seen.length = 0;
+  await build('Connection lost').removeFailed(5);
+  assert.equal(seen.pop()?.refusal, 'transport',
+    'a transport fault indicts nothing — it could not run');
+
+  seen.length = 0;
+  await build('Node 5 is not a failed node').healNode(5);
+  assert.equal(seen.pop()?.refusal, 'transport',
+    'only a DIAGNOSIS-VERIFYING action can be refused in a way that indicts a detector');
+});
+
+test('the refusal family covers the plausible phrasings, and nothing else (v0.43.1)', () => {
+  // The exact production string is UNOBSERVED — this add-on reaches the driver
+  // through HA's WS API and no genuine refusal has been captured on this fleet.
+  // A family that under-matches degrades to 'transport' and indicts nothing,
+  // which is safe but is also precisely the silence that made
+  // `refused-misdiagnosis` unreachable for four releases. Cover the readings.
+  for (const yes of [
+    'HA WS error (zwave_error): Node 5 is not a failed node',
+    'HA WS error (zwave_error): The node is not currently failed',
+    "HA WS error (zwave_error): The node is not in the controller's failed nodes list!",
+    'HA WS error (zwave_error): Z-Wave error 1 - the node is still alive',
+    'HA WS error (zwave_error): could not be removed because it has responded',
+  ]) assert.ok(isNotFailedRefusal(yes), `should read as a refusal: ${yes}`);
+
+  for (const no of [
+    'HA WS error (unknown_error): Failed to remove the node',
+    'HA WS error (timeout): Timeout waiting for a response',
+    'Connection lost',
+    'HA WS error (not_found): Config entry not found',
+    // An ordinary failure to act says NOTHING about whether the diagnosis was
+    // right — reading it as a refusal would fabricate the accusation.
+    'HA WS error (zwave_error): The removal process could not be completed',
+  ]) assert.ok(!isNotFailedRefusal(no), `must NOT read as a refusal: ${no}`);
+});
+
+test('an unmatched remove-failed failure LOGS its wording so the family can be corrected (v0.43.1)', () => {
+  // The self-capturing half: the first real refusal on this fleet must leave
+  // its verbatim text in the log rather than vanishing into a bare `false`.
+  const logs: string[] = [];
+  const runner = createActionRunner({
+    client: { send: async () => { throw new Error('HA WS error (zwave_error): some wording nobody predicted'); } } as never,
+    entryId: () => 'entry-1',
+    deviceIdOf: (n: number) => `dev-${n}`,
+    pingEntityOf: (n: number) => `button.node${n}_ping`,
+    log: (_s: string, _n: number | null, text: string) => { logs.push(text); },
+    enabled: true,
+  } as never);
+  return runner.removeFailed(5).then(() => {
+    const captured = logs.find((l) => /wording to add to isNotFailedRefusal/.test(l));
+    assert.ok(captured, `the unmatched text was not captured: ${JSON.stringify(logs)}`);
+    assert.match(captured, /some wording nobody predicted/, 'and it is the VERBATIM driver text');
+  });
 });

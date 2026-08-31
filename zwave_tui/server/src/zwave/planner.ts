@@ -103,6 +103,29 @@ function repeaterCandidate(): PlanCandidate {
 }
 
 /** Build the plan for one symptom. Pure. */
+/**
+ * Which detectors ASK for a given action — the scope of a driver refusal
+ * (v0.43.1).
+ *
+ * A refusal is the driver rejecting a specific premise. `removeFailed` refused
+ * means "this node is not failed", which indicts the detector that called it a
+ * ghost and nothing else. Attribution by node alone would mark every other open
+ * symptom on that node a false positive too — DESIGN.md §M5 deferred refusal
+ * detection partly for exactly this reason, and it is why the ledger scopes the
+ * stamp instead of widening it.
+ *
+ * This table is asserted against `planFor` itself in test/planner.test.ts, so
+ * it cannot drift from the plans it claims to summarise.
+ */
+export const REFUSAL_INDICTS: Readonly<Record<string, ReadonlySet<SymptomKind>>> = {
+  removeFailed: new Set<SymptomKind>(['ghost-suspect']),
+};
+
+/** The kinds a refusal of `action` may indict; empty ⇒ it indicts nothing. */
+export function refusalScope(action: ActionKind): ReadonlySet<SymptomKind> {
+  return REFUSAL_INDICTS[action] ?? new Set<SymptomKind>();
+}
+
 export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: PlanContext): Plan {
   const nodeId = symptom.nodeId;
   const lr = isLR(node, nodeId);

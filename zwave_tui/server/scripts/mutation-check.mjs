@@ -764,8 +764,8 @@ const MUTANTS = [
     repl: 'const b = flaps >= FLAPS_WINDOW;',
     what: 'one transient flap burst cannot mature a "persistent" dead-flap symptom' },
   { id: 'wilson-gate', file: 'src/zwave/outcomes.ts',
-    find: 'const beats = base != null && wilsonLower(ok, n) >= base + cfg.minEffect;',
-    repl: 'const beats = base != null && n > 0 && ok / n >= base + cfg.minEffect;',
+    find: 'const beats = bar != null && lower >= bar;',
+    repl: 'const beats = bar != null && n > 0 && ok / n >= bar;',
     what: 'the "✓ helped" advisory is gated on the Wilson lower bound, not the raw n=4 rate' },
   { id: 'never-measured', file: 'src/zwave/health.ts',
     find: '  if (!stats || neverMeasured) {', repl: '  if (!stats) {',
@@ -931,12 +931,6 @@ const MUTANTS = [
     find: '        noteNode(armNodes, ak, ep.nodeId);',
     repl: '        void ak;',
     what: 'an action arm records which distinct nodes taught it' },
-  { id: 'provenance-silent-when-unknown', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
-    // Renders "0 nodes" on a ledger that predates the tracking — a fabricated
-    // claim about evidence breadth where silence is the honest answer.
-    find: "  const prov = e.nodes > 0 ? ` · ${e.nodes} node${e.nodes === 1 ? '' : 's'}` : '';",
-    repl: "  const prov = ` · ${e.nodes} node${e.nodes === 1 ? '' : 's'}`;",
-    what: 'an unknown node count renders as nothing, never as zero nodes' },
   /* ── v0.37: node-down, the ordinary outage ──────────────────────────── */
   { id: 'node-down-fires-on-dead', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
     // Back to the pre-v0.37 blind spot: `dead-flap` needs THREE transitions, so
@@ -1394,7 +1388,7 @@ const MUTANTS = [
   { id: 'engine-baserate-carries-its-n', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     // The bare rate again — the exact class-D defect the gap analysis raised:
     // a self-heal rate without its n invites overtrust in one episode.
-    find: "        c.grey(` (n=${arm.n.toFixed(1)}${provenance(arm.nodes)})`));",
+    find: "        c.grey(` (${weight(arm.n)}${provenance(arm.nodes)})`));",
     repl: "        '');",
     what: 'the self-heal base rate always renders with its n' },
   { id: 'engine-confound-outranks-action', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
@@ -1434,7 +1428,7 @@ const MUTANTS = [
     find: "    this.pushEvent('engine', severity, 'action', nodeId, text);",
     repl: "    this.pushEvent('you', severity, 'action', nodeId, text);",
     what: "an autonomous write is attributed to the ENGINE, never to the operator" },
-  { id: 'engine-source-renders-apart', file: 'src/telnet/screens/log.ts', tests: ['renderHonesty'],
+  { id: 'engine-source-renders-apart', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
     find: "ev.source === 'you' ? c.cyan('operator') : ev.source === 'engine' ? c.yellow('engine (auto)') : c.grey('network')",
     repl: "ev.source === 'net' ? c.grey('network') : c.cyan('operator')",
     what: 'the Log screen renders engine provenance apart from the operator' },
@@ -1476,12 +1470,12 @@ const MUTANTS = [
     find: '        if (!n.gaveUp && n.nextEligibleMs != null && n.nextEligibleMs > now) {',
     repl: '        if (n.nextEligibleMs != null && n.nextEligibleMs > now) {',
     what: 'a node the ladder abandoned is not promised a next attempt' },
-  { id: 'unknown-provenance-is-not-zero', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+  { id: 'unknown-provenance-is-not-zero', file: 'src/telnet/ledgerText.ts', tests: ['engineScreen', 'remedyScreen'],
     // Efficacy.nodes is 0 when UNKNOWN, not when zero nodes agreed. Beside a
     // positive n, "0 nodes" is a self-contradiction — and it appeared on the
     // live fleet within minutes of the ENGINE screen shipping.
-    find: "  return nodes > 0 ? `, ${nodes} node${nodes === 1 ? '' : 's'}` : ', sources not recorded';",
-    repl: "  return `, ${nodes} node${nodes === 1 ? '' : 's'}`;",
+    find: "  return nodes > 0 ? `${sep}${nodes} node${nodes === 1 ? '' : 's'}` : `${sep}sources not recorded`;",
+    repl: "  return `${sep}${nodes} node${nodes === 1 ? '' : 's'}`;",
     what: 'an arm with no recorded provenance says so, never "0 nodes"' },
   /* ── v0.41.2: sampling limits are not brevity ──────────────────────────── */
   { id: 'undersampled-is-not-transient', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
@@ -1591,6 +1585,190 @@ const MUTANTS = [
     find: '  if (byPair.size === 0) return [];',
     repl: '  if (false) return [];',
     what: 'a healthy mesh pays no rows for the failure guarantee' },
+  /* ── v0.43.1: a driver REFUSAL is not a transport failure ──────────────── */
+  { id: 'refusal-is-classified', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // Back to reporting a bare failure: `refused-misdiagnosis` becomes
+    // unreachable again and falsePositives is pinned at 0 forever, leaving two
+    // screens gating a warning that can never fire.
+    find: "        kind === 'removeFailed' && isNotFailedRefusal(msg) ? 'refused' : 'transport';",
+    repl: "        'transport';",
+    what: 'a driver refusal of removeFailed is classified as a refusal' },
+  { id: 'transport-is-not-a-refusal', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // The opposite failure, and the worse one: every failed action indicts a
+    // detector, fabricating exactly the accusation this counter must earn.
+    find: "        kind === 'removeFailed' && isNotFailedRefusal(msg) ? 'refused' : 'transport';",
+    repl: "        'refused' as ActionRefusal;",
+    what: 'a transport fault is never held against a detector' },
+  { id: 'refusal-reaches-the-ledger', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: "      this.outcomes.recordAction(nodeId, actionKind, /* refused */ true, Date.now(), skip, scope);",
+    repl: "      this.outcomes.recordAction(nodeId, actionKind, /* refused */ false, Date.now(), skip, scope);",
+    what: 'a classified refusal is recorded against its detector' },
+  { id: 'only-refusals-reach-the-ledger', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: "      if (refusal !== 'refused') return; // could not run ⇒ indicts nothing",
+    repl: '      void refusal;',
+    what: 'a failure that is not a refusal still stops at the ledger boundary' },
+  { id: 'all-clear-discloses-open-episodes', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // An episode in its confirmation window has NO live symptom by
+    // construction, so a symptom-only all-clear reads as "the engine is idle"
+    // while the ledger is mid-experiment on several nodes.
+    find: '      if (openEps.length > 0) {',
+    repl: '      if (false) {',
+    what: 'the all-clear discloses episodes the ledger is still scoring' },
+  { id: 'all-clear-counts-confirming', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: '        const confirming = openEps.filter((e) => e.confirming).length;',
+    repl: '        const confirming = 0;',
+    what: 'the disclosure separates episodes being scored from those still degraded' },
+  { id: 'bound-crosses-boundary', file: 'src/zwave/outcomes.ts', tests: ['outcomes', 'remedyScreen'],
+    // The bound reverts to being computed and thrown away at the return — the
+    // exact pre-v0.43.1 defect: the number that decided the claim is private.
+    find: 'nodes, ready: true, lowerBound: lower, bar };',
+    repl: 'nodes, ready: true, lowerBound: null, bar };',
+    what: 'the bound that DECIDED the claim reaches the screen, not just the gate' },
+  { id: 'bound-is-the-real-one', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Reports a bound that is not the one the gate used.
+    find: '      const lower = wilsonLower(ok, n);',
+    repl: '      const lower = ok / Math.max(1, n);',
+    what: 'the disclosed bound is the WILSON bound, not the point estimate' },
+  { id: 'withheld-claim-explains-itself', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: "        ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, short of the ` +\n          `${Math.round(e.bar * 100)}% bar (${selfHeal} + margin)`",
+    repl: "        ? ''",
+    what: '"not distinguishable" says HOW FAR short the evidence fell' },
+  { id: 'no-fabricated-bar', file: 'src/zwave/outcomes.ts', tests: ['outcomes', 'remedyScreen'],
+    // Invents a bar from an unmeasured base rate, so the screen reports a
+    // threshold the evidence never established — and, downstream, prints a
+    // self-heal comparison against a rate nobody measured.
+    find: '      const bar = base == null ? null : base + cfg.minEffect;',
+    repl: '      const bar = (base ?? 0) + cfg.minEffect;',
+    what: 'no base rate ⇒ no bar; a threshold is never fabricated from a missing rate' },
+  { id: 'engine-measures-three-series', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn', 'remedyScreen'],
+    // Reverts to the pre-v0.43.1 defect: RSSI graduation is assumed from the
+    // timeout count, so an empty RSSI series reads fully learned.
+    find: "      if (this.baselines.rssiNormal(n.nodeId, now)?.ready) rssiReady += 1;",
+    repl: "      if (this.baselines.timeoutNormal(n.nodeId, now)?.ready) rssiReady += 1;",
+    what: 'each series is counted from ITS OWN baseline, not inferred from timeouts' },
+  { id: 'engine-rtt-counted-apart', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: "      if (this.baselines.rttNormal(n.nodeId, now)?.ready) rttReady += 1;",
+    repl: "      if (this.baselines.timeoutNormal(n.nodeId, now)?.ready) rttReady += 1;",
+    what: 'the rtt count is the rtt series, not a copy of the timeout series' },
+  { id: 'allclear-needs-every-series', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // The all-clear is gated on ONE series again — the original bug.
+    find: '    } else if (eng.timeoutReady < eng.total || eng.rttReady < eng.total || eng.rssiReady < eng.total) {',
+    repl: '    } else if (eng.timeoutReady < eng.total) {',
+    what: 'the green all-clear waits for ALL THREE series, not just timeouts' },
+  { id: 'baseline-counts-name-their-band', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Drops the band qualifier: counts true only for the band containing NOW
+    // are stated as timeless facts.
+    find: '  const from = eng.band * width;',
+    repl: '  const from = 0;',
+    what: 'the band named is the band the counts were MEASURED in' },
+  { id: 'band-end-not-wrapped', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: "  const hh = (h: number): string => `${String(h).padStart(2, '0')}:00`;",
+    repl: "  const hh = (h: number): string => `${String(h % 24).padStart(2, '0')}:00`;",
+    what: 'the last band reads 20:00–24:00, not a zero-length 20:00–00:00' },
+  { id: 'ledger-n-is-not-rounded', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen', 'renderHonesty'],
+    // Restores the rounding that manufactured `n=6 · 7 nodes` — a decayed
+    // weight printed as a tally, beside a true tally, in identical styling.
+    find: '  const n = weight(e.n);',
+    repl: '  const n = `n=${Math.round(e.n)}`;',
+    what: 'the decayed weight keeps its ≈ and its decimal — it is not a count' },
+  { id: 'remedy-unknown-provenance-is-not-silent', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // REMEDY falls silent on nodes===0 again while ENGINE says "sources not
+    // recorded" for the same ledger row — two screens, two stories, one key.
+    find: "  const prov = provenance(e.nodes, ' · ');",
+    repl: "  const prov = e.nodes > 0 ? ` · ${e.nodes} node${e.nodes === 1 ? '' : 's'}` : '';",
+    what: 'an unrecorded node count is NAMED on REMEDY, not silently omitted' },
+  { id: 'weight-marker-is-approximate', file: 'src/telnet/ledgerText.ts', tests: ['renderHonesty', 'engineScreen'],
+    find: '  return `n≈${n.toFixed(1)}`;',
+    repl: '  return `n=${n.toFixed(1)}`;',
+    what: 'the weight is marked ≈, distinguishing it from the exact tallies beside it' },
+  { id: 'weight-keeps-its-decimal', file: 'src/telnet/ledgerText.ts', tests: ['engineScreen', 'remedyScreen'],
+    find: '  return `n≈${n.toFixed(1)}`;',
+    repl: '  return `n≈${n.toFixed(0)}`;',
+    what: 'the weight keeps the decimal that proves it is not an integer count' },
+  { id: 'refusal-scoped-to-asking-detector', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Restores the node-wide stamp DESIGN.md deferred this feature over: a
+    // refused removeFailed marks EVERY open symptom on the node a misdiagnosis.
+    find: '        if (onlyKinds && !onlyKinds.has(ep.kind)) continue;',
+    repl: '        if (false && onlyKinds) continue;',
+    what: 'a refusal indicts only the detectors that asked for the action' },
+  { id: 'refusal-scope-reaches-the-ledger', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn', 'outcomes'],
+    // The data layer computes the scope and then does not pass it.
+    find: 'this.outcomes.recordAction(nodeId, actionKind, /* refused */ true, Date.now(), skip, scope);',
+    repl: 'this.outcomes.recordAction(nodeId, actionKind, /* refused */ true, Date.now(), skip);',
+    what: 'the computed refusal scope is actually applied, not just computed' },
+  { id: 'unasked-action-refusal-indicts-nothing', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: '      if (scope.size === 0) return; // no detector asked for it ⇒ indicts nothing',
+    repl: '      if (scope.size === 0) { /* fall through */ }',
+    what: 'a refusal of an action no detector offered indicts no detector',
+    // EQUIVALENT BY CONSTRUCTION. Falling through hands recordAction an EMPTY
+    // onlyKinds set, whose per-episode filter then rejects every episode — and
+    // that filter sits above the confound branch, so not even `confounded` is
+    // set. The observable result is identical to returning early. The guard is
+    // kept for intent and to skip a pointless walk of the open map; the
+    // behaviour it protects is enforced by the scope itself, which
+    // `refusal-scope-reaches-the-ledger` covers.
+    equivalent: true },
+  { id: 'success-attribution-stays-node-wide', file: 'src/zwave/zwaveData.ts', tests: ['outcomes', 'zwaveDataChurn'],
+    // Scopes SUCCESS the way refusals are scoped — starving every action arm
+    // whose kind did not name the action, for no honesty gain.
+    find: '    this.outcomes.recordAction(nodeId, actionKind, false, Date.now(), skip);',
+    repl: '    this.outcomes.recordAction(nodeId, actionKind, false, Date.now(), skip, refusalScope(actionKind));',
+    what: 'a successful action still credits every open episode on the node' },
+  { id: 'efficacy-bar-includes-min-effect', file: 'src/zwave/outcomes.ts', tests: ['outcomes', 'remedyScreen'],
+    // Reports the base rate as the bar, so an arm in [base, base+minEffect)
+    // renders as clearing a threshold that in fact withheld it.
+    find: '      const bar = base == null ? null : base + cfg.minEffect;',
+    repl: '      const bar = base == null ? null : base;',
+    what: 'the reported bar is the one the gate applied — base PLUS the effect size' },
+  { id: 'withheld-claim-names-the-bar', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: "        ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, short of the ` +",
+    repl: "        ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}% vs ` +",
+    what: 'the withheld claim names the BAR it fell short of, not a bare base-rate comparison' },
+  { id: 'empty-roster-is-not-all-clear', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // 0/0 passes every "fully graduated" comparison, so the green branch
+    // asserted three graduated series and a band from zero observations.
+    find: '    } else if (eng.total === 0) {',
+    repl: '    } else if (eng.total < 0) {',
+    what: 'an empty roster gets its own state, never an all-clear over nothing' },
+  { id: 'baseline-counts-not-clipped', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Back to the fixed-width string: at 40 cols `rssi 12/39` clipped to
+    // `rssi 1` — a plausible, wrong measurement, which chrome.ts calls a bigger
+    // lie than a disclosed drop.
+    find: '      body.push(fieldStrip(view, [',
+    repl: '      body.push(fieldStrip({ ...view, cols: 1000 }, [',
+    what: 'a count that does not fit is DROPPED whole, never clipped mid-number' },
+  { id: 'band-qualifier-survives-narrow', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Truncation drops the band from the right — the headline reverts to the
+    // timeless assertion this release removes.
+    find: '      body.push(c.cyan(visLen(headFull) <= W ? headFull\n        : `    ◷ Learning — graduated for ${bandLabel(eng, true)}:`));',
+    repl: '      body.push(truncate(c.cyan(headFull), W));',
+    what: 'the band qualifier survives every width, in a compact form if it must' },
+  { id: 'engine-band-is-measured-not-assumed', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // The screen would permanently name the 00:00–04:00 band whatever the
+    // clock says — the headline claim of the widening, silently false.
+    find: '    const band = bandOf(now);',
+    repl: '    const band = 0;',
+    what: 'the band NAMED is the band the counts were measured in' },
+  { id: 'refusal-family-covers-phrasings', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    find: "    /not in the .{0,24}failed nodes? list/i, // \"not in the controller's failed nodes list\"",
+    repl: '    /\\u0000never\\u0000/,',
+    what: 'the refusal family covers the plausible driver phrasings, not one invented string' },
+  { id: 'refusal-family-excludes-plain-failure', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // An ordinary failure to act says NOTHING about whether the diagnosis was
+    // right — reading it as a refusal fabricates the accusation.
+    find: '    /(has|it) responded/i,                // "could not be removed because it has responded"',
+    repl: '    /could not|responded/i,',
+    what: 'a plain "could not be removed" is NOT read as the driver refusing the premise' },
+  { id: 'unmatched-refusal-is-captured', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // The self-capturing half: without it the real production wording is lost
+    // to a bare `false`, exactly as it was for four releases.
+    find: "      if (kind === 'removeFailed' && refusal === 'transport') {",
+    repl: '      if (false) {',
+    what: 'an unmatched remove-failed failure logs its verbatim text for correction' },
+  { id: 'legend-only-with-a-weight', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: '    body.splice(legendAt, 0, c.grey(visLen(full) <= view.cols ? full : ',
+    repl: '    body.splice(legendAt, 0, c.grey(view.cols > 0 ? full : ',
+    what: 'the legend keeps its saturation figure at narrow widths instead of truncating it away' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.
@@ -1706,15 +1884,15 @@ const MUTANTS = [
   { id: 'ledger-blocked-never-endorses', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // Drops the blocked framing: a green "✓ helped 80%" now sits directly under
     // advice that says NOT recommended.
-    find: "    return blocked\n      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n}${prov})${base} — the block above still applies`)\n      : c.green(`✓ helped ${pct}% (n=${n}${prov})${base}`);",
-    repl: '    return c.green(`✓ helped ${pct}% (n=${n}${prov})${base}`);',
+    find: "    return blocked\n      ? c.yellow(`⚠ ledger measured ${pct}% here (${n}${prov})${base} — the block above still applies`)\n      : c.green(`✓ helped ${pct}% (${n}${prov})${base}`);",
+    repl: '    return c.green(`✓ helped ${pct}% (${n}${prov})${base}`);',
     what: 'a blocked candidate is never endorsed in the voice of a recommendation' },
   { id: 'ledger-never-judges-block', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // Restores the review defect verbatim: `blocked` carries safety and config
     // gates too, and "the block above is lore" told an operator a BATTERY/FLiRS
     // safety gate was unfounded folklore contradicted by measurement.
-    find: '      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n}${prov})${base} — the block above still applies`)',
-    repl: '      ? c.yellow(`⚠ ledger measured ${pct}% here (n=${n}${prov})${base}; the block above is lore`)',
+    find: '      ? c.yellow(`⚠ ledger measured ${pct}% here (${n}${prov})${base} — the block above still applies`)',
+    repl: '      ? c.yellow(`⚠ ledger measured ${pct}% here (${n}${prov})${base}; the block above is lore`)',
     what: 'the note reports measurement without ever characterizing the block' },
   { id: 'false-positives-only-above-zero', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // A clean detector boasts a zero — noise on every card, and it trains the

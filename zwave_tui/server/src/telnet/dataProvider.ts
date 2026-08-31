@@ -33,6 +33,7 @@ import type {
   SymptomKind,
   AutoPingSnapshot,
   OpenEpisodeSummary,
+  EngineStatus,
 } from '../types';
 import type { CoarseBucket } from '../zwave/evidenceStore';
 import type { DriverWsState } from '../zwave/driverWsClient';
@@ -118,7 +119,7 @@ export interface ZwaveDataSource {
    *  disabled" even though the engine was running). */
   symptoms(): Symptom[];
   /** Engine enabled + baseline-readiness (for the Remedy empty state). REQUIRED. */
-  engineStatus(): { enabled: boolean; ready: number; total: number };
+  engineStatus(): EngineStatus;
   /** M5 learned action efficacy (null when the ledger is off / no estimate). REQUIRED. */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
   /** M6 interference view (noise floor + serial health + diurnal heatmap). REQUIRED. */
@@ -190,7 +191,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     history: (n) => zd.history?.(n) ?? { rssi: [], rtt: [] },
     historyLong: (n) => zd.historyLong?.(n) ?? { rssi: [], rtt: [] },
     symptoms: () => zd.symptoms?.() ?? [],
-    engineStatus: () => zd.engineStatus?.() ?? { enabled: false, ready: 0, total: 0 },
+    engineStatus: () => zd.engineStatus?.() ?? { enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 0, bands: 0 },
     efficacyFor: (k, a) => zd.efficacyFor?.(k, a) ?? null,
     interference: () => zd.interference?.() ?? null,
     entityStates: (n) => zd.entityStates?.(n) ?? [],
@@ -332,7 +333,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     ready: () => cachedReady,
     lastError: () => cachedError,
     symptoms: () => zwaveData.symptoms?.() ?? [],
-    engineStatus: () => zwaveData.engineStatus?.() ?? { enabled: false, ready: 0, total: 0 },
+    engineStatus: () => zwaveData.engineStatus?.() ?? { enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 0, bands: 0 },
     efficacyFor: (kind, action) => zwaveData.efficacyFor?.(kind, action) ?? null,
     interference: () => zwaveData.interference(),
     entityStates: (n) => zwaveData.entityStates(n),

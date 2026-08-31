@@ -21,6 +21,11 @@ import { resolveService, verbLabel } from './entityControl';
 /** Who asked for an action: a human at the keyboard, or the engine itself. */
 export type ActionOrigin = 'you' | 'engine';
 
+/** Why an action failed (v0.43.1). `refused` means the DRIVER rejected the
+ *  premise — the diagnosis was wrong — and is the only failure the ledger may
+ *  hold against a detector. Everything else could not run and indicts nothing. */
+export type ActionRefusal = 'refused' | 'transport';
+
 export interface ActionRunnerOptions {
   client: HaWsClient;
   /** Current zwave_js config-entry id (null until discovered). */
@@ -43,7 +48,7 @@ export interface ActionRunnerOptions {
   log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string, origin?: ActionOrigin) => void;
   /** M5: structured outcome hook — the outcome ledger attributes the action to
    *  its node's open episodes. Fired AFTER the action resolves. */
-  onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean) => void;
+  onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal) => void;
   /** v0.23: invalidate a node's cached config parameters after a successful write,
    *  so the DETAIL screen re-fetches and shows the new value. */
   onConfigWritten?: (nodeId: number) => void;
@@ -56,6 +61,33 @@ export interface ActionRunnerOptions {
 }
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/**
+ * Does this driver error mean "the node is NOT failed" — i.e. the controller
+ * refused the premise rather than failing to act on it? (v0.43.1)
+ *
+ * UNVERIFIED AGAINST PRODUCTION. The wording below is a family of plausible
+ * phrasings, not an observed string: this add-on reaches the driver through
+ * Home Assistant's WS API (`HA WS error (<code>): <message>`), and no genuine
+ * `removeFailed` refusal has been captured on this fleet. A miss here is safe
+ * in the sense that it degrades to 'transport' and indicts no detector — but it
+ * is NOT harmless, because that is exactly the silence that made the
+ * `refused-misdiagnosis` verdict unreachable before. The caller logs every
+ * unmatched failure verbatim so the real text can be added on first sighting.
+ *
+ * Deliberately conservative: each pattern must express that the node is fine /
+ * responding / not in the failed list. Nothing matches a bare "failed to
+ * remove", which is an ordinary failure and says nothing about the diagnosis.
+ */
+export function isNotFailedRefusal(msg: string): boolean {
+  return [
+    /is not (a |an )?failed/i,            // "Node 5 is not a failed node"
+    /not (currently )?failed/i,           // "the node is not currently failed"
+    /not in the .{0,24}failed nodes? list/i, // "not in the controller's failed nodes list"
+    /node (is |was )?(still )?(alive|responding|responsive)/i,
+    /(has|it) responded/i,                // "could not be removed because it has responded"
+  ].some((re) => re.test(msg));
+}
 
 export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
   const deviceCmd = async (type: string, nodeId: number): Promise<void> => {
@@ -95,7 +127,35 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
       // puts it straight into the on-screen action-result card.
       const msg = sanitizeEventText(errMsg(e));
       o.log('error', nodeId, `${verb} → failed: ${msg}`, origin);
-      if (learn) o.onOutcome?.(kind, nodeId, false);
+      // A driver REFUSAL is not a transport failure (v0.43.1). The ledger's
+      // `refused-misdiagnosis` verdict — and with it `falsePositives`, the one
+      // number that argues AGAINST the card it sits on — was unreachable in
+      // production because this catch discarded the driver's own words and
+      // reported a bare `false`. Two screens gate a warning on that counter
+      // and neither could ever fire.
+      //
+      // Deliberately NARROW: only a DIAGNOSIS-VERIFYING action can be refused
+      // in a way that indicts the detector. `removeFailed` on a node the
+      // driver says is alive means the ghost-suspect call was wrong. Every
+      // other action, and every transport fault, stays 'transport' — inferring
+      // a false positive from an ordinary failure would fabricate exactly the
+      // accusation this counter exists to make honestly.
+      const refusal: ActionRefusal =
+        kind === 'removeFailed' && isNotFailedRefusal(msg) ? 'refused' : 'transport';
+      // SELF-CAPTURING (v0.43.1). The patterns below are a best reading of how
+      // the driver phrases "this node is not failed"; the exact production
+      // string has NOT been observed, and a family this narrow silently
+      // under-matching is the failure mode that kept `refused-misdiagnosis`
+      // unreachable in the first place. So every removeFailed failure that does
+      // NOT classify logs its verbatim text: the first real refusal on this
+      // fleet puts the true wording in the log, where it can be read and the
+      // family corrected — rather than being lost to a bare `false` again.
+      if (kind === 'removeFailed' && refusal === 'transport') {
+        o.log('warn', nodeId, `remove-failed failed WITHOUT matching a known refusal phrasing. ` +
+          `If the controller was refusing the premise, THIS is the wording to add ` +
+          `to isNotFailedRefusal: ${msg}`, origin);
+      }
+      if (learn) o.onOutcome?.(kind, nodeId, false, refusal);
       return { ok: false, message: msg };
     }
   };

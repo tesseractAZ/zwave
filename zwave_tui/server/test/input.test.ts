@@ -17,7 +17,7 @@ const score: HealthResult = { score: 79, grade: 'C', state: 'ok', flags: [] };
 const data: DataProvider = {
   nodes: () => [node], nodeById: () => node, controller: () => null, events: () => [],
   scoreFor: () => score, noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }),
-  historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0, ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0 }), efficacyFor: () => null, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
+  historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0, ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 0, bands: 6 }), efficacyFor: () => null, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
   entityStates: () => [], configParams: () => ({ status: 'ready', params: [] }), requestConfigParams: () => {},
 };
 const mkView = (screen: ViewState['screen'] = 'overview'): ViewState => ({

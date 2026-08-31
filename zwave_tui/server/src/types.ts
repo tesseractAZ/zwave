@@ -195,6 +195,42 @@ export type { AutoPingSnapshot, AutoPingNodeState } from './zwave/autoPing';
 export type { OpenEpisodeSummary } from './zwave/zwaveData';
 export type { Symptom, SymptomKind, Severity } from './zwave/symptoms';
 
+/**
+ * What the engine has actually LEARNED, per series and per time-of-day band
+ * (widened v0.43.1).
+ *
+ * The old shape was `{enabled, ready, total}`, and `ready` counted exactly one
+ * thing: nodes whose TIMEOUT baseline has graduated IN THE BAND CONTAINING NOW.
+ * REMEDY rendered that as "N nodes have a graduated baseline" and, at N ===
+ * total, as "Every node has a graduated baseline" — a claim over all three
+ * series and all six bands, from a measurement of one series in one band. A
+ * node could read fully learned at 03:00 and unlearned at 15:00 with nothing
+ * on screen having changed, and the RSSI series could be empty throughout.
+ *
+ * `ready` is retained as an alias of `timeoutReady` so no caller regresses.
+ */
+export interface EngineStatus {
+  enabled: boolean;
+  /**
+   * Alias of `timeoutReady`, kept so the widening is not a breaking rename.
+   *
+   * No production code reads it — REMEDY uses the per-series fields — so it is
+   * a compatibility shim for the shape, not for a caller.
+   */
+  ready: number;
+  total: number;
+  /** Nodes whose timeout baseline has graduated in `band`. */
+  timeoutReady: number;
+  /** Nodes whose RTT baseline has graduated in `band`. */
+  rttReady: number;
+  /** Nodes whose RSSI baseline has graduated in `band`. */
+  rssiReady: number;
+  /** The time-of-day band these counts were measured in (0-indexed). */
+  band: number;
+  /** How many bands exist — every count above is scoped to 1 of these. */
+  bands: number;
+}
+
 /** M5 learned efficacy of an action against a symptom kind — read by the planner
  *  so a recommendation can say "beat self-healing N×" or "not distinguishable". */
 export interface Efficacy {
@@ -202,6 +238,29 @@ export interface Efficacy {
   expectedEfficacy: number | null;
   /** Decayed episode count backing the estimate. */
   n: number;
+  /**
+   * The Wilson 95% LOWER bound on the action's success rate (v0.43.1), or null
+   * before the arm is ready.
+   *
+   * This number decides every efficacy claim the engine makes — `expectedEfficacy`
+   * is withheld until `lowerBound >= baseRate + minEffect` — and it used to be
+   * computed and discarded at the return statement. A screen could print
+   * "helped 75%" with no way to say how pessimistic the evidence allows that to
+   * be, and no way at all to explain why a good-LOOKING arm was still withheld.
+   * Carrying it lets a screen say "even pessimistically, N%".
+   */
+  lowerBound: number | null;
+  /**
+   * The success rate `lowerBound` had to CLEAR for the claim to be made
+   * (v0.43.1): `baseRate + minEffect`, null when no base rate is measured.
+   *
+   * Reporting `lowerBound` against `baseRate` alone omits the effect-size
+   * margin (0.05) that actually decided the gate, so any arm landing in
+   * `[base, base + minEffect)` reads as a win under a verdict that withheld it
+   * — "even pessimistically 63% vs 60% self-heal", not distinguishable. The
+   * screen must be able to name the bar it fell short of.
+   */
+  bar: number | null;
   /** The kind's spontaneous-recovery base rate (control arm), for context. */
   baseRate: number | null;
   /**
@@ -339,7 +398,7 @@ export interface DataProvider {
   symptoms(): Symptom[];
   /** Engine state: enabled + graduated-baseline count, for the REMEDY empty
    *  state to tell "off" from "learning" from "all healthy". */
-  engineStatus(): { enabled: boolean; ready: number; total: number };
+  engineStatus(): EngineStatus;
   /** M5 learned efficacy of an action against a symptom kind, or null when the
    *  outcome ledger is off / has no estimate yet. Read by the REMEDY screen so
    *  the planner's candidates can carry an evidence-backed efficacy note. */
