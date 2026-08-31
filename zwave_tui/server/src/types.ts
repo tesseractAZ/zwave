@@ -186,6 +186,10 @@ export type LogKind =
 // by DataProvider.symptoms() and the REMEDY screen.
 import type { Symptom, SymptomKind } from './zwave/symptoms';
 import type { AutoPingSnapshot } from './zwave/autoPing';
+import type { DriverWsState } from './zwave/driverWsClient';
+export type { DriverWsState } from './zwave/driverWsClient';
+import type { CoarseBucket } from './zwave/evidenceStore';
+export type { CoarseBucket } from './zwave/evidenceStore';
 import type { OpenEpisodeSummary } from './zwave/zwaveData';
 export type { AutoPingSnapshot, AutoPingNodeState } from './zwave/autoPing';
 export type { OpenEpisodeSummary } from './zwave/zwaveData';
@@ -319,7 +323,14 @@ export interface DataProvider {
   } | null;
   /** Persisted long-horizon buckets for a node (v0.35) — the tier that outlives
    *  the fine ring, so the dossier can state the window behind its numbers. */
-  evidenceCoarse?(nodeId: number): { t0: number; samples: number; routeChanges?: number }[];
+  /** Long-horizon buckets for a node. Declared as the REAL CoarseBucket
+   *  (v0.43.0): the old inline shape named a `samples` field the runtime
+   *  object does not have — its count is `n` — so the compiler asserted a
+   *  member that would have read `undefined`, and the whole RF content of the
+   *  persisted multi-day tier (per-bucket rssi min/mean/max, rtt, timeouts,
+   *  drops, flaps, S2 resyncs, worst negotiated rate) was unreachable BY
+   *  CONTRACT from any screen. */
+  evidenceCoarse?(nodeId: number): CoarseBucket[];
   lastUpdated(): number | null; // epoch ms of the last successful roster refresh
   ready(): boolean; // has the first roster load completed?
   lastError(): string | null;
@@ -373,6 +384,13 @@ export interface DataProvider {
   controlArm?(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
   /** Auto-ping's live runtime state (v0.41), or null when the feature is off. */
   autoPingState?(): AutoPingSnapshot | null;
+  /** Driver-WS lifecycle, one line (v0.43.0). The accessor existed since the
+   *  client shipped and NOTHING read it, so a dormant, wedged or
+   *  schema-mismatched driver socket — the source of bgRSSI, S2 resync
+   *  detection and real lastSeen — was invisible on every surface. */
+  driverWsStatus?(): string;
+  /** The same link as a STATE (v0.43.0) — classify on this, never on the prose. */
+  driverWsState?(): DriverWsState;
   /**
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.

@@ -34,6 +34,8 @@ import type {
   AutoPingSnapshot,
   OpenEpisodeSummary,
 } from '../types';
+import type { CoarseBucket } from '../zwave/evidenceStore';
+import type { DriverWsState } from '../zwave/driverWsClient';
 import { scoreNode, DEFAULT_NOISE_FLOOR, rssiReading } from '../zwave/health';
 
 /**
@@ -70,7 +72,7 @@ export interface ZwaveDataSource {
     probesAsked: number; probesAnswered: number; probesSelfProven: number;
   } | null;
   /** Long-horizon buckets for a node (v0.35). REQUIRED — see ackEvent. */
-  evidenceCoarse(nodeId: number): { t0: number; samples: number; routeChanges?: number }[];
+  evidenceCoarse(nodeId: number): CoarseBucket[];
   /** Ledger tally of `refused-misdiagnosis` closes for a kind (v0.35). REQUIRED — see ackEvent. */
   falsePositives(kind: SymptomKind): number;
   /** Episodes of this kind closed `unverifiable` (v0.36). REQUIRED — see ackEvent. */
@@ -89,6 +91,10 @@ export interface ZwaveDataSource {
   controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
   /** Auto-ping runtime state (v0.41), null when off. REQUIRED — see ackEvent. */
   autoPingState(): AutoPingSnapshot | null;
+  /** Driver-WS lifecycle line (v0.43.0). REQUIRED — see ackEvent. */
+  driverWsStatus(): string;
+  /** Structured link state (v0.43.0). REQUIRED — see ackEvent. */
+  driverWsState(): DriverWsState;
   /** Learned RSSI normal for a node (v0.35). REQUIRED — see ackEvent. */
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** Has the first roster load completed? Falls back to "roster non-empty". */
@@ -204,6 +210,8 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     openEpisodes: () => zd.openEpisodes(),
     controlArm: (k) => zd.controlArm(k),
     autoPingState: () => zd.autoPingState(),
+    driverWsStatus: () => zd.driverWsStatus(),
+    driverWsState: () => zd.driverWsState(),
     rssiNormal: (n) => zd.rssiNormal(n),
   };
 }
@@ -312,6 +320,8 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     openEpisodes: () => zwaveData.openEpisodes(),
     controlArm: (kind) => zwaveData.controlArm(kind),
     autoPingState: () => zwaveData.autoPingState(),
+    driverWsStatus: () => zwaveData.driverWsStatus(),
+    driverWsState: () => zwaveData.driverWsState(),
     rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,

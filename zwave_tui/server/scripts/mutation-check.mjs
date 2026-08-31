@@ -1547,6 +1547,50 @@ const MUTANTS = [
     find: "        if (n.talkingWhileDead) bits.push(c.yellow('reads Dead but TALKING — stale flag'));",
     repl: '        void 0;',
     what: 'ENGINE shows a node whose Dead flag its own traffic contradicts' },
+  /* ── v0.43.0: contracts that lied, and a dead accessor ─────────────────── */
+  { id: 'engine-shows-driver-link', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Back to the dead accessor: the driver socket that feeds bgRSSI, S2
+    // resync detection and the real lastSeen degrades with no surface saying so.
+    find: "    push(c.label('DRIVER LINK') + '  ' + tone(`${st} — ${ws}`));",
+    repl: '    void tone;',
+    what: 'ENGINE renders the driver-WS lifecycle instead of hiding it' },
+  { id: 'driver-link-degraded-stands-out', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: "    const tone = st === 'live' ? c.grey : st === 'connecting' || st === 'handshake' ? c.grey : c.yellow;",
+    repl: '    const tone = c.grey;',
+    what: 'a degraded driver link is coloured apart from a healthy one' },
+  { id: 'driver-link-classifies-on-state', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Back to pattern-matching the human sentence, which renders 'not started'
+    // and every backoff line as healthy.
+    find: "    const st = data.driverWsState?.() ?? 'disabled';",
+    repl: "    const st = data.driverWsState?.() === 'live' ? 'live' : 'live';",
+    what: 'the link is classified on its STATE enum, not on prose' },
+  { id: 'bridge-forwards-driver-state', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    driverWsState: () => zd.driverWsState(),',
+    repl: "    driverWsState: () => 'live',",
+    what: 'the production bridge forwards driverWsState to the data layer' },
+  { id: 'bridge-forwards-driver-status', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    driverWsStatus: () => zd.driverWsStatus(),',
+    repl: "    driverWsStatus: () => '',",
+    what: 'the production bridge forwards driverWsStatus to the data layer' },
+  { id: 'failing-link-survives-a-full-tree', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Back to leftover-only funding: on the reference 39-node mesh the tree
+    // fills the body, the pad is 0, and the ONLY panel that names a suspect
+    // LINK never renders at any terminal size.
+    find: '  const failCap = Math.max(FAIL_GUARANTEE, Math.min(padRows, Math.max(3, Math.floor(padRows / 2))));',
+    repl: '  const failCap = Math.min(padRows, Math.max(3, Math.floor(padRows / 2)));',
+    what: 'a failing link is guaranteed rows even when the tree fills the body' },
+  { id: 'failing-link-renders-when-scrolling', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // The panel was computed and then dropped on the floor in the scrolling
+    // branch — the exact branch a 39-node mesh always takes.
+    find: '    body.push(...failures);\n  }',
+    repl: '  }',
+    what: 'the failure panel is appended in the SCROLLING branch, not only the padded one' },
+  { id: 'healthy-mesh-pays-nothing', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // Makes the guarantee unconditional, so a healthy mesh loses tree rows to
+    // an empty panel — the cost the rarity argument exists to avoid.
+    find: '  if (byPair.size === 0) return [];',
+    repl: '  if (false) return [];',
+    what: 'a healthy mesh pays no rows for the failure guarantee' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.
@@ -1585,17 +1629,19 @@ const MUTANTS = [
     find: '  const ranked = [...byPair.values()].sort((x, y) => y.n - x.n || y.last - x.last);',
     repl: '  const ranked = [...byPair.values()].sort((x, y) => x.n - y.n || x.last - y.last);',
     what: 'the link that failed MOST ranks first' },
-  { id: 'failures-leftover-funded', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
-    // Funds the panel unconditionally: on a frame whose tree is already
-    // scrolling it steals rows the tree needed.
-    find: '  const failures = failCap >= 3 ? routeFailurePanel(view, ctx, endNodes, nameBudget, failCap) : [];',
-    repl: '  const failures = routeFailurePanel(view, ctx, endNodes, nameBudget, Math.max(3, failCap));',
-    what: 'the failure panel is funded ONLY by rows the tree left blank' },
+  /* DELETED v0.43.0: 'failures-leftover-funded' pinned the rule that the
+   * failure panel never costs the tree a row. That rule was a deliberate v0.35
+   * choice with a consequence nobody measured until an audit did: on the
+   * reference 39-node mesh the tree fills the body at every ordinary size, the
+   * pad is 0, and the ONLY panel that names a suspect LINK never rendered. The
+   * new contract is pinned by 'failing-link-survives-a-full-tree' and
+   * 'healthy-mesh-pays-nothing' — an obsolete invariant is deleted, never left
+   * to rot into a MISSING anchor. */
   { id: 'failures-bounded-vs-stability', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
     // Lets failures take the WHOLE pad, starving the stability panel entirely
     // whenever more than a handful of links have ever failed.
-    find: '  const failCap = Math.min(padRows, Math.max(3, Math.floor(padRows / 2)));',
-    repl: '  const failCap = padRows;',
+    find: '  const failCap = Math.max(FAIL_GUARANTEE, Math.min(padRows, Math.max(3, Math.floor(padRows / 2))));',
+    repl: '  const failCap = Math.max(FAIL_GUARANTEE, padRows);',
     what: 'failures claim first but BOUNDED — stability is never evicted' },
   { id: 'bridge-forwards-route-failures', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
     // The v0.33 hole re-opened on the v0.35 member: the panel renders in every

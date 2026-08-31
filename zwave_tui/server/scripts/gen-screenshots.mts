@@ -200,7 +200,15 @@ const DATA: DataProvider = {
     // a bare ratio hides that distinction.
     probesAsked: 84, probesAnswered: 81, probesSelfProven: 22,
   }),
-  evidenceCoarse: () => [{ t0: NOW - 12 * 86_400_000, samples: 96 }],
+  // A REAL CoarseBucket (v0.43.0). The old fixture used a `samples` field the
+  // runtime type never had — the inline provider shape invented it, so this
+  // typechecked while asserting a member that reads `undefined` in production.
+  evidenceCoarse: () => [{
+    t0: NOW - 12 * 86_400_000, n: 96, freshN: 72, invalidW: 0,
+    dTx: 480, dTimeout: 6, dDropTx: 1, dRx: 460, flaps: 0, routeChanges: 2, s2: 0,
+    rssiN: 72, rssiSum: -4464, rssiMin: -70, rssiMax: -55,
+    rttN: 72, rttSum: 2160, rateMin: 100,
+  }],
   rssiNormal: () => ({ median: -62, scale: 3, ready: true, days: 12 }),
   // Keyed to a kind that is actually IN the demo roster — a tally for a symptom
   // no card shows is a tally no screenshot shows.

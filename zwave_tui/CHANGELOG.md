@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.43.0 — 2026-08-30
+
+**Three things the TUI could not show, and one contract that lied.**
+
+First batch against the re-triaged gap list (47 items with implementable specs,
+deduplicated against v0.42.0 HEAD).
+
+**The coarse-tier contract named a field the runtime object does not have.**
+`DataProvider.evidenceCoarse` declared `{ t0, samples, routeChanges? }` while
+the value is a `CoarseBucket` whose count is `n`. Any consumer reading
+`.samples` would have got `undefined` with the compiler asserting it exists,
+and the entire RF content of the persisted multi-day tier — per-bucket RSSI
+min/mean/max, RTT, timeouts, drops, flaps, S2 resyncs, worst negotiated rate —
+was unreachable BY CONTRACT from every screen. Declared as the real type, which
+immediately caught a screenshot fixture built on the invented shape.
+
+**`driverWsStatus()` was a dead accessor** — defined the day the driver-WS
+client shipped, read by nothing, not even declared on the interface. That
+socket is the source of bgRSSI, S2-resync detection and the real `lastSeen`, so
+a dormant or schema-mismatched link degraded three signals with nothing saying
+so. ENGINE now carries a DRIVER LINK line.
+
+Classified on the **state, not the prose**: the first cut of this fix
+pattern-matched the human status sentence and rendered three unhealthy states
+as benign — the initial `not started`, and every backoff line, whose text is
+`${reason} — retry in Ns (attempt N)` and need contain none of the words a
+regex looks for. The client has exposed a proper `DriverWsState` enum since it
+shipped. This is the third time this cycle that classifying on rendered text
+has been wrong (after the burst label and the echo label).
+
+**The route-failure panel had never rendered on this mesh.** It was
+leftover-funded, and on 39 nodes the tree fills the body at every ordinary
+size, so the pad is zero — and worse, it was appended ONLY in the
+non-scrolling branch, which a 39-node mesh never takes. The one panel in the
+TUI that names a suspect LINK rather than a suspect node was, in practice,
+dead. It now has a small guaranteed allocation, which is cheap precisely
+because it is rare: the panel returns empty on a healthy mesh, so a healthy
+mesh renders byte-identically. This replaces a deliberate v0.35 invariant; the
+obsolete mutation entry was DELETED with its reasoning recorded rather than
+left to rot into a MISSING anchor.
+
+That guarantee made the disclosure path reachable far more often, and the
+existing mutant proved its arithmetic unpinned — a "+N more" that
+double-subtracts its own row silently drops a link. Now pinned on the property
+that distinguishes the two: the panel must FILL its allocation.
+
+850 tests. 323 mutation entries: 319 killed, 0 survived, 0 missing, 4 equivalent.
+
 ## 0.42.0 — 2026-08-30
 
 **Traffic outranks the driver's Dead flag.**

@@ -207,3 +207,33 @@ test('ENGINE shows a node whose Dead flag its own traffic contradicts (v0.42.0)'
   })));
   assert.match(joined, /reads Dead but TALKING — stale flag/);
 });
+
+test('ENGINE classifies the driver link on its STATE, never on the prose (v0.43.0)', () => {
+  // driverWsStatus() existed from the day the client shipped and NOTHING read
+  // it — that socket feeds bgRSSI, S2-resync detection and the real lastSeen.
+  // The first cut of this fix pattern-matched the human sentence, which reads
+  // three unhealthy states as benign: the initial 'not started', and every
+  // backoff line (`${reason} — retry in Ns (attempt N)`), whose text need
+  // contain none of the words a regex looks for.
+  const live = plain(renderEngine(ctx(120, 30, {
+    driverWsStatus: () => 'live (schema 41, home 3586281591)', driverWsState: () => 'live',
+  })));
+  assert.match(live, /DRIVER LINK/);
+  assert.match(live, /live — live \(schema 41/);
+
+  // Every non-live state must stand out — including the two the prose hides.
+  for (const [st, line] of [
+    ['dormant', 'schema mismatch (server max 38 < our min 39)'],
+    ['backoff', 'connect failed (ECONNREFUSED) — retry in 8s (attempt 3)'],
+    ['stopped', 'not started'],
+    ['disabled', 'disabled (no driver_ws_url)'],
+  ] as const) {
+    const raw = renderEngine(ctx(120, 30, { driverWsStatus: () => line, driverWsState: () => st }))
+      .find((l) => /DRIVER LINK/.test(l)) ?? '';
+    assert.ok(/\x1b\[93m/.test(raw), `${st} must be highlighted, not rendered as healthy: ${JSON.stringify(raw)}`);
+    assert.ok(raw.includes(st), `and must name the state: ${JSON.stringify(raw)}`);
+  }
+  const rawOk = renderEngine(ctx(120, 30, { driverWsStatus: () => 'live (schema 41)', driverWsState: () => 'live' }))
+    .find((l) => /DRIVER LINK/.test(l)) ?? '';
+  assert.ok(!/\x1b\[93m/.test(rawOk), `a healthy link is not highlighted: ${JSON.stringify(rawOk)}`);
+});

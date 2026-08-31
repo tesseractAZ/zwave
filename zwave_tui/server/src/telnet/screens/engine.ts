@@ -158,6 +158,24 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     }
   }
 
+  /* ── DRIVER LINK ───────────────────────────────────────────────────────── */
+  // The driver-WS socket is where bgRSSI, S2-resync detection and the REAL
+  // lastSeen come from. Its status accessor existed from the day the client
+  // shipped and nothing read it, so a dormant or schema-mismatched socket
+  // degraded three signals silently (v0.43.0).
+  const ws = data.driverWsStatus?.();
+  if (ws) {
+    // Classify on the STATE, never on the sentence (v0.43.0). A first cut
+    // pattern-matched the human line and quietly rendered three unhealthy
+    // states as benign: the initial 'not started', and every backoff line,
+    // whose text is `${reason} — retry in Ns (attempt N)` and need contain
+    // none of the words a regex looks for. 'live' is the only healthy state.
+    const st = data.driverWsState?.() ?? 'disabled';
+    const tone = st === 'live' ? c.grey : st === 'connecting' || st === 'handshake' ? c.grey : c.yellow;
+    push(c.label('DRIVER LINK') + '  ' + tone(`${st} — ${ws}`));
+    push('');
+  }
+
   /* ── LEDGER: LIVE ──────────────────────────────────────────────────────── */
   push('');
   push(c.label('LEDGER — LIVE') + c.grey('  — episodes the engine is measuring right now'));
