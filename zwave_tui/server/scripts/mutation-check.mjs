@@ -1483,6 +1483,34 @@ const MUTANTS = [
     find: "  return nodes > 0 ? `, ${nodes} node${nodes === 1 ? '' : 's'}` : ', sources not recorded';",
     repl: "  return `, ${nodes} node${nodes === 1 ? '' : 's'}`;",
     what: 'an arm with no recorded provenance says so, never "0 nodes"' },
+  /* ── v0.41.2: sampling limits are not brevity ──────────────────────────── */
+  { id: 'undersampled-is-not-transient', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Collapses the split again: an echo-only node's episode is forced to the
+    // transient branch, asserting "it ended quickly" about a symptom whose
+    // duration the engine never measured.
+    find: '          if (openMs >= UNDERSAMPLED_AFTER_MS) {',
+    repl: '          if (openMs >= Number.MAX_SAFE_INTEGER) {',
+    what: 'a long episode with a starved before-window is undersampled, not transient' },
+  { id: 'undersampled-needs-real-duration', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Calls every starved episode undersampled, erasing the genuinely brief
+    // ones the v0.39 taxonomy was built for.
+    find: '          if (openMs >= UNDERSAMPLED_AFTER_MS) {',
+    repl: '          if (openMs >= 0) {',
+    what: 'a genuinely brief episode is still reported as a transient blink' },
+  { id: 'undersampled-tag-renders', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    find: "        ? ' (undersampled — this node reports too rarely to reach the floor, whatever the duration)'",
+    repl: "        ? ''",
+    what: 'an undersampled closure names itself on the closure line' },
+  { id: 'giveup-waits-for-judgment', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores the ordering where the ERROR asking for a human is announced
+    // one tick BEFORE the final probe it rests on can be judged.
+    find: '    if (tries >= config.maxAttempts && (input.state.awaitingAnswer.get(n.nodeId)?.length ?? 0) > 0) continue;',
+    repl: '    void 0;',
+    what: "a give-up waits for its final probe to be judged — the ERROR follows its evidence" },
+  { id: 'bridge-forwards-undersampled', file: 'src/telnet/dataProvider.ts', tests: ['driverWsClient'],
+    find: '    unverifiableUndersampledCount: (k) => zd.unverifiableUndersampledCount(k),',
+    repl: '    unverifiableUndersampledCount: () => 0,',
+    what: 'the production bridge forwards unverifiableUndersampledCount' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.

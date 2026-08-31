@@ -336,6 +336,14 @@ export interface AutoPingDecision {
  * seconds later, and a tight retry loop against a genuinely absent device is
  * just avoidable RF traffic on a mesh that other nodes are trying to use.
  */
+/* These are the waits BETWEEN attempts, indexed by attempts already made — so
+ * at the shipped `max_attempts = 3` only the first two are ever reached: dwell
+ * 10 m, then 10 m, then 30 m, and the give-up lands ~50 minutes after death,
+ * NOT the ~110 minutes "backoff 10/30/60m" implies. The 60 m rung governs the
+ * third wait onward, which an operator can reach by raising max_attempts. Four
+ * operator-facing surfaces stated the ladder as if all three rungs always ran
+ * (v0.41.2 audit): this comment, the startup banner, the add-on config help,
+ * and the DOCS option table. */
 const BACKOFF_MS = [10 * 60_000, 30 * 60_000, 60 * 60_000];
 
 /**
@@ -406,6 +414,18 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
       if (!input.state.launchGaveUpAnnounced.has(n.nodeId)) launchGaveUp.push(n.nodeId);
       continue;
     }
+    // Do not announce the give-up while this node still has a probe awaiting
+    // judgment (v0.41.2). The answer grace (90 s) exceeds the tick (60 s), so
+    // deciding before judging announced "STILL DEAD … needs a human" up to one
+    // tick BEFORE the final attempt's own probe could be judged — an ERROR
+    // asking for a human that preceded the evidence it rests on.
+    //
+    // Gating here rather than hoisting the judgment loop above this decision:
+    // that reordering was tried and rejected because judging first stamps
+    // `lastProbeSeen` before the sweep reads it, so a node's OWN traffic gets
+    // attributed to our probe — trading a broad, permanent accuracy loss on
+    // every echo-only node for a narrow, rare ordering nicety.
+    if (tries >= config.maxAttempts && (input.state.awaitingAnswer.get(n.nodeId)?.length ?? 0) > 0) continue;
     if (tries >= config.maxAttempts) {
       // Budget spent and the node is still down. Say so ONCE — the runner
       // tracks which nodes have already been announced — rather than dropping

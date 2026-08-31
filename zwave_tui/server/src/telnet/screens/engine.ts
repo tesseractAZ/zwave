@@ -194,6 +194,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     const arm = data.controlArm?.(kind) ?? null;
     const unver = data.unverifiableCount?.(kind) ?? 0;
     const transient = data.unverifiableTransientCount?.(kind) ?? 0;
+    const under = data.unverifiableUndersampledCount?.(kind) ?? 0;
     const unprobe = data.unverifiableUnprobeableCount?.(kind) ?? 0;
     const conf = data.confoundedCount?.(kind) ?? 0;
     const fp = data.falsePositives?.(kind) ?? 0;
@@ -201,7 +202,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
       .map((a) => ({ a, e: data.efficacyFor(kind, a) }))
       .filter((x) => x.e != null && x.e.n > 0);
     const nothing = (arm == null || arm.n === 0) && arms.length === 0 &&
-      unver + transient + unprobe + conf + fp === 0;
+      unver + transient + under + unprobe + conf + fp === 0;
     if (nothing) continue;
     anyLearned = true;
     const parts: string[] = [];
@@ -223,6 +224,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     const tallies: string[] = [];
     if (unver > 0) tallies.push(`${unver} unscoreable (thin evidence)`);
     if (transient > 0) tallies.push(`${transient} transient blink${transient === 1 ? '' : 's'}`);
+    if (under > 0) tallies.push(`${under} undersampled (node reports too rarely)`);
     if (unprobe > 0) tallies.push(`${unprobe} unprobeable`);
     if (conf > 0) tallies.push(`${conf} confounded`);
     if (fp > 0) tallies.push(`${fp} refused as misdiagnosis`);

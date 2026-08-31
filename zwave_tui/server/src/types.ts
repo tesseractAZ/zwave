@@ -360,6 +360,8 @@ export interface DataProvider {
   /** Of the unverifiable, transient blinks — the degraded state ended before
    *  its evidence floor could fill (v0.39). Unscoreable by construction. */
   unverifiableTransientCount?(kind: SymptomKind): number;
+  /** Of those, episodes the node reports too rarely to ever score (v0.41.2). */
+  unverifiableUndersampledCount?(kind: SymptomKind): number;
   /** Scoreable no-action closures whose node died or was remediated
    *  mid-episode (v0.40) — credited to neither arm. */
   confoundedCount?(kind: SymptomKind): number;

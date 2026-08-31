@@ -102,6 +102,12 @@ export interface Episode {
    *  degraded state simply ended before it could be measured. A transient
    *  blink, unscoreable by construction; not a fixable evidence gap. */
   transient?: boolean;
+  /** The before-window never reached its floor and the episode stayed open
+   *  LONG ENOUGH that it should have (v0.41.2) — so the limit was this node's
+   *  own sampling rate, not the symptom's brevity. Distinct from `transient`,
+   *  which claims the state ended quickly; an audit showed that claim is
+   *  arithmetically forced for an echo-only node and therefore unearned. */
+  undersampled?: boolean;
   /** The node died, or a successful remediation ran on it unattributed (the
    *  confirmation-window skip), while this episode was open (v0.40). A
    *  no-action closure here is not a spontaneous recovery — an audit caught
@@ -195,6 +201,10 @@ export interface OutcomeStore {
    *  kind's floor while the after-window met its own (v0.39) — the degraded
    *  state ended before it could be measured. Unscoreable by construction. */
   unverifiableTransient(kind: SymptomKind): number;
+  /** Of the unverifiable, episodes that stayed open long enough to be measured
+   *  and still could not be (v0.41.2) — the node reports too rarely to score at
+   *  all, which is a different fact from "it was over quickly". */
+  unverifiableUndersampled(kind: SymptomKind): number;
   /** Scoreable no-action closures whose node died or was remediated
    *  mid-episode (v0.40) — credited to neither arm. */
   confounded(kind: SymptomKind): number;
@@ -425,6 +435,22 @@ function metricOf(kind: SymptomKind): RecoveryMetric {
 // on a shared "fresh sample" count — a fresh sample routinely carries a null
 // rssi/rtt (no-signal sentinels), so freshN over-counts usable readings and a
 // median-of-one could otherwise pass as robust.
+/**
+ * How long an episode must stay open before a starved before-window stops
+ * meaning "it was over quickly" and starts meaning "we cannot sample this node
+ * fast enough" (v0.41.2).
+ *
+ * The verification burst is 5 probes at ~60 s of effective spacing, so an
+ * episode that lives past ~5 minutes has had every opportunity the engine can
+ * create to fill its degraded window. If the floor is STILL unmet after that,
+ * the shortfall is the device's cadence, not the symptom's duration — and an
+ * audit found the difference matters: for a node whose only fresh readings are
+ * its 120-minute sweep replies, `transient` was arithmetically guaranteed, so
+ * the line "degraded state ended before its evidence floor" was asserted on
+ * evidence that could not distinguish it from "we only ever got one look".
+ */
+const UNDERSAMPLED_AFTER_MS = 5 * 60_000;
+
 const MIN_OBS = 3; // minimum non-null rssi/rtt readings behind a trustworthy median
 const MIN_LIVE = 3; // minimum FRESH samples proving the node is alive & communicating (flap after-window)
 const RSSI_MIN_GAIN = 4; // dB — a meaningful signal-strength improvement
@@ -585,6 +611,9 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   // before-window could reach its kind's floor, while the after-window met its
   // own (v0.39) — transient blinks, unscoreable by construction.
   const unverTransient = new Map<SymptomKind, number>();
+  // Episodes that lived long enough to be measured and still could not be —
+  // the node's own reporting cadence is the binding constraint (v0.41.2).
+  const unverUndersampled = new Map<SymptomKind, number>();
   // Scoreable no-action closures whose node died or was remediated
   // mid-episode (v0.40) — credited to neither arm; see Episode.confounded.
   const confoundedTally = new Map<SymptomKind, number>();
@@ -709,11 +738,20 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         // fails the same way: with zero evidence there is no basis to claim
         // the state was brief.
         const m = metricOf(kind);
+        // How long the degraded state actually persisted. A starved before
+        // window on a LONG episode is a sampling limit, not brevity.
+        const openMs = ep.resolvedMs != null ? ep.resolvedMs - ep.onsetMs : 0;
         const laneVisible = ep.before != null
           && (m === 'route' ? ep.before.routeKnown >= 1 : m === 's2' ? ep.before.s2Known >= 1 : true);
         if (laneVisible && !sideFloorMet(m, ep.before, 'before') && sideFloorMet(m, ep.after, 'after')) {
-          ep.transient = true;
-          unverTransient.set(kind, (unverTransient.get(kind) ?? 0) + 1);
+          if (openMs >= UNDERSAMPLED_AFTER_MS) {
+            // It had the time; it never had the readings.
+            ep.undersampled = true;
+            unverUndersampled.set(kind, (unverUndersampled.get(kind) ?? 0) + 1);
+          } else {
+            ep.transient = true;
+            unverTransient.set(kind, (unverTransient.get(kind) ?? 0) + 1);
+          }
         } else {
           unver.set(kind, (unver.get(kind) ?? 0) + 1);
         }
@@ -778,7 +816,9 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
           : `fresh=${w.freshN} rtt=${w.rttN}/${num(w.rttMedian, 'ms')} rssi=${w.rssiN}/${num(w.rssiMedian)} ` +
             `rate=${w.rateKbpsMin != null ? w.rateKbpsMin : 'n'} flaps=${w.flaps} s2=${w.s2}/${w.s2Known} ` +
             `rt=${w.routeChanges}/${w.routeKnown} tx=${w.tx} tmo=${w.rate == null ? '–' : (w.rate * 100).toFixed(1) + '%'}`;
-      const tag = ep.transient
+      const tag = ep.undersampled
+        ? ' (undersampled — this node reports too rarely to reach the floor, whatever the duration)'
+        : ep.transient
         ? ' (transient — degraded state ended before its evidence floor)'
         : ep.confounded && ep.action == null && ep.verdict !== 'unverifiable' && ep.verdict !== 'refused-misdiagnosis'
           ? ' (confounded — the node died or was remediated mid-episode; credited to neither arm)'
@@ -856,6 +896,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       return unverTransient.get(kind) ?? 0;
     },
 
+    unverifiableUndersampled(kind): number {
+      return unverUndersampled.get(kind) ?? 0;
+    },
+
     confounded(kind): number {
       return confoundedTally.get(kind) ?? 0;
     },
@@ -876,7 +920,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     reset(): void {
-      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
+      open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); unverUndersampled.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
     },
 
     load(): void {
@@ -914,6 +958,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         unver: [...unver.entries()],
         unverUnprobe: [...unverUnprobe.entries()],
         unverTransient: [...unverTransient.entries()],
+        unverUndersampled: [...unverUndersampled.entries()],
         confounded: [...confoundedTally.entries()],
         armNodes: [...armNodes.entries()].map(([k, v]) => [k, [...v]] as [string, number[]]),
         controlNodes: [...controlNodes.entries()].map(([k, v]) => [k, [...v]] as [SymptomKind, number[]]),
@@ -924,9 +969,9 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     loadJSON(raw): void {
-      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; unverTransient?: [SymptomKind, number][]; confounded?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
+      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; unverTransient?: [SymptomKind, number][]; unverUndersampled?: [SymptomKind, number][]; confounded?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
       if (!o || o.v !== 1) return;
-      control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
+      control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); unverUndersampled.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
       for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, t);
       for (const [k, t] of o.action ?? []) if (validTally(t)) action.set(k, t);
       for (const [k, v] of o.fp ?? []) if (Number.isFinite(v) && v >= 0) fp.set(k, v);
@@ -934,6 +979,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       for (const [k, v] of o.unver ?? []) if (Number.isFinite(v) && v >= 0) unver.set(k, v);
       for (const [k, v] of o.unverUnprobe ?? []) if (Number.isFinite(v) && v >= 0) unverUnprobe.set(k, v);
       for (const [k, v] of o.unverTransient ?? []) if (Number.isFinite(v) && v >= 0) unverTransient.set(k, v);
+      for (const [k, v] of o.unverUndersampled ?? []) if (Number.isFinite(v) && v >= 0) unverUndersampled.set(k, v);
       for (const [k, v] of o.confounded ?? []) if (Number.isFinite(v) && v >= 0) confoundedTally.set(k, v);
       // Absent in pre-v0.36.5 files: an older ledger simply reports 0 nodes,
       // which the renderer treats as "provenance unknown" rather than as one.

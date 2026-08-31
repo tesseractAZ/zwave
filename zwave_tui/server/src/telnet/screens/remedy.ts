@@ -98,6 +98,8 @@ interface Ledger {
   unverifiableUnprobeable: (kind: SymptomKind) => number;
   /** Of those, transient blinks — over before the evidence floor filled (v0.39). */
   unverifiableTransient: (kind: SymptomKind) => number;
+  /** Of those, undersampled by the node's own cadence (v0.41.2). */
+  unverifiableUndersampled: (kind: SymptomKind) => number;
   /** No-action closures confounded by a mid-episode death/remediation (v0.40). */
   confounded: (kind: SymptomKind) => number;
 }
@@ -170,6 +172,12 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       rows.push(truncate(
         '    ' + c.grey(`○ ${transient} transient blink${transient === 1 ? '' : 's'} — over before the evidence floor filled; ` +
           'unscoreable by design, not a gap'), W));
+    }
+    const under = ledger.unverifiableUndersampled(sym.kind);
+    if (under > 0) {
+      rows.push(truncate(
+        '    ' + c.grey(`○ ${under} could not be scored at this device's reporting rate — ` +
+          'it had the time, never the readings'), W));
     }
     const conf = ledger.confounded(sym.kind);
     if (conf > 0) {
@@ -291,6 +299,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     unverifiable: (kind) => data.unverifiableCount?.(kind) ?? 0,
     unverifiableUnprobeable: (kind) => data.unverifiableUnprobeableCount?.(kind) ?? 0,
     unverifiableTransient: (kind) => data.unverifiableTransientCount?.(kind) ?? 0,
+    unverifiableUndersampled: (kind) => data.unverifiableUndersampledCount?.(kind) ?? 0,
     confounded: (kind) => data.confoundedCount?.(kind) ?? 0,
   };
 

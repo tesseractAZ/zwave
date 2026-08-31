@@ -143,7 +143,7 @@ async function main(): Promise<void> {
     zwaveData.setAutoPingSnapshot(() => autoPing!.snapshot());
     log(
       `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed ` +
-        `(max ${config.autoPing.maxAttempts}/outage, backoff 10/30/60m; suppressed on storm, rebuild and restart)` +
+        `(max ${config.autoPing.maxAttempts}/outage, waits 10/30/60m between attempts — at the default 3 that is 10m dwell + 10m + 30m, so ~50m to "needs a human"; suppressed on storm, rebuild and restart)` +
         (config.autoPing.staleMs > 0
           ? `; liveness probe after ${Math.round(config.autoPing.staleMs / 60_000)}m of silence`
           : '; liveness probe off'),

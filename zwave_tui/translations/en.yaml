@@ -69,7 +69,7 @@ configuration:
   auto_ping_max_attempts:
     name: Safety · Auto-ping attempts per outage
     description: >-
-      Attempts per dead episode, spaced 10/30/60 minutes apart. After this the
+      Attempts per dead episode, spaced 10/30/60 minutes apart (at the default 3, only the 10m and 30m waits are reached — about 50 minutes from death to the notice). After this the
       engine stops and leaves the node to you. A recovery resets the count.
   auto_ping_stale_min:
     name: Safety · Liveness probe after (minutes of silence)

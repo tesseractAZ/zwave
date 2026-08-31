@@ -1382,3 +1382,32 @@ test('the auto-ping snapshot reports the engine\'s REAL state, not defaults (v0.
   assert.ok(snap.deadListening >= 8, `the real dead count reaches the snapshot: ${snap.deadListening}`);
   assert.ok(snap.nodes.some((n) => n.deadSinceMs != null), 'and per-node ladder state is populated');
 });
+
+test('the give-up waits for the final probe to be JUDGED — an ERROR must not precede its evidence (v0.41.2)', async () => {
+  // The answer grace (90s) exceeds the tick (60s), so the decision pass that
+  // exhausts the budget runs one tick before the last probe can be judged.
+  // Announcing "STILL DEAD — needs a human" there puts the ERROR ahead of the
+  // evidence it rests on.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const nodes = [node(1, { isController: true }), dead(7)];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+    log2: Object.assign(() => {}, { debug: () => {} }),
+    config: cfg({ maxAttempts: 1 }), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN; h.tick();        // deadSince
+  clock += 30 * MIN; h.tick();                       // attempt 1/1 fires, probe pends
+  const atLaunch = lines.filter((l) => /STILL DEAD/.test(l)).length;
+  assert.equal(atLaunch, 0, 'no give-up while the probe is still in flight');
+  clock += 30 * MIN; h.tick();                       // probe matures and is judged
+  clock += MIN; h.tick();                            // now the budget is provably spent
+  h.stop();
+  const miss = lines.findIndex((l) => /did NOT answer/.test(l));
+  const gave = lines.findIndex((l) => /STILL DEAD/.test(l));
+  assert.ok(gave >= 0, `the give-up still fires: ${JSON.stringify(lines)}`);
+  assert.ok(miss >= 0 && miss < gave,
+    `the evidence must precede the verdict: miss@${miss} gave@${gave}`);
+});
