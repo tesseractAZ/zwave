@@ -1278,7 +1278,7 @@ test('a failed launch refunds the remediation attempt but is itself BOUNDED (v0.
     assert.ok(launchAt[i] - launchAt[i - 1] >= 10 * MIN,
       `retries must respect the backoff ladder, got ${(launchAt[i] - launchAt[i - 1]) / MIN}m apart`);
   }
-  assert.ok(!lines.some((l) => /STILL DEAD/.test(l)),
+  assert.ok(!lines.some((l) => /did not answer \d+ ping/.test(l)),
     'the NODE must not be blamed for a packet that never left this add-on');
   assert.ok(lines.some((l) => /could not be probed 3× in a row/.test(l)),
     `the add-on-side fault must announce itself: ${JSON.stringify(lines.slice(-3))}`);
@@ -1400,14 +1400,94 @@ test('the give-up waits for the final probe to be JUDGED — an ERROR must not p
   });
   clock = T + BOOT_WINDOW_MS + MIN; h.tick();        // deadSince
   clock += 30 * MIN; h.tick();                       // attempt 1/1 fires, probe pends
-  const atLaunch = lines.filter((l) => /STILL DEAD/.test(l)).length;
+  const atLaunch = lines.filter((l) => /did not answer \d+ ping/.test(l)).length;
   assert.equal(atLaunch, 0, 'no give-up while the probe is still in flight');
   clock += 30 * MIN; h.tick();                       // probe matures and is judged
   clock += MIN; h.tick();                            // now the budget is provably spent
   h.stop();
   const miss = lines.findIndex((l) => /did NOT answer/.test(l));
-  const gave = lines.findIndex((l) => /STILL DEAD/.test(l));
+  const gave = lines.findIndex((l) => /did not answer \d+ ping/.test(l));
   assert.ok(gave >= 0, `the give-up still fires: ${JSON.stringify(lines)}`);
   assert.ok(miss >= 0 && miss < gave,
     `the evidence must precede the verdict: miss@${miss} gave@${gave}`);
+});
+
+/* ── v0.42.0: traffic outranks the driver's Dead flag ─────────────────────── */
+
+test('a node that reads Dead but was HEARD inside the dwell is never probed or given up on (v0.42.0)', () => {
+  // Node 49 ("Garage Workroom") ignored SIX consecutive pings over ~12 hours
+  // and was declared node-down — then answered an ordinary on/off command
+  // immediately and came back grade A with +25 dB of margin. The ping button
+  // issues a NOP; that device does not answer NOPs. `status === Dead` is the
+  // driver's REACTIVE opinion, but traffic is evidence.
+  const s = createAutoPingState();
+  const talking = dead(49, { stats: { lastSeen: T + 55 * MIN } as never });
+  const nodes = mesh(20, [talking]);
+  tick(s, nodes, T);
+  const d = tick(s, nodes, T + 60 * MIN);           // long past the 10m dwell
+  assert.deepEqual(d.ping, [], 'no remediation budget is spent on a node that is talking');
+  assert.deepEqual(d.gaveUp, [], 'and no human is summoned');
+  assert.deepEqual(d.talkingWhileDead, [49], 'the stale flag is reported instead');
+});
+
+test('a node that reads Dead and is genuinely SILENT is still probed (v0.42.0)', () => {
+  // The guard must not swallow the case the ladder exists for.
+  const s = createAutoPingState();
+  const silent = dead(49, { stats: { lastSeen: T - 5 * 60 * MIN } as never });
+  const nodes = mesh(20, [silent]);
+  tick(s, nodes, T);
+  const d = tick(s, nodes, T + 60 * MIN);
+  assert.deepEqual(d.ping, [49], 'a genuinely silent dead node is still remediated');
+  assert.deepEqual(d.talkingWhileDead, []);
+});
+
+test('the stale-flag notice is announced ONCE per outage and cleared on recovery (v0.42.0)', async () => {
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  let nodes = [node(1, { isController: true }), dead(49, { stats: { lastSeen: T } as never })];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+    log2: Object.assign(() => {}, { debug: () => {} }),
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN;
+  nodes = [node(1, { isController: true }), dead(49, { stats: { lastSeen: clock } as never })];
+  h.tick(); h.tick();                                // twice — must announce once
+  const said = lines.filter((l) => /reads Dead but was heard/.test(l));
+  assert.equal(said.length, 1, `announced once per outage: ${JSON.stringify(said)}`);
+  assert.match(said[0], /trusting the traffic over the flag/);
+  // Recovery clears the latch, so a later outage is announced again.
+  nodes = [node(1, { isController: true }), node(49, { stats: { lastSeen: clock } as never })];
+  h.tick();
+  clock += 60 * MIN;
+  nodes = [node(1, { isController: true }), dead(49, { stats: { lastSeen: clock } as never })];
+  h.tick(); h.tick();
+  h.stop();
+  assert.equal(lines.filter((l) => /reads Dead but was heard/.test(l)).length, 2,
+    'a fresh outage is announced again');
+});
+
+test('the give-up says what it MEASURED — unanswered NOPs, not unreachability (v0.42.0)', async () => {
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const nodes = [node(1, { isController: true }), dead(7)];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+    log2: Object.assign(() => {}, { debug: () => {} }),
+    config: cfg({ maxAttempts: 1 }), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN; h.tick();
+  clock += 30 * MIN; h.tick();
+  clock += 30 * MIN; h.tick();
+  clock += MIN; h.tick();
+  h.stop();
+  const gave = lines.find((l) => /giving up/.test(l));
+  assert.ok(gave, `the give-up fires: ${JSON.stringify(lines)}`);
+  assert.match(gave!, /NOT that it is unreachable/, 'it must not overclaim');
+  assert.match(gave!, /try OPERATING the device/, 'and it leads with the step that actually works');
+  assert.ok(!/ 1 pings| 1 NOP frames/.test(gave!), `plural agreement: ${gave}`);
 });

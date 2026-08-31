@@ -154,6 +154,8 @@ export interface AutoPingState {
   launchFailures: Map<number, number>;
   /** Nodes already announced as unlaunchable this outage (v0.40.2). */
   launchGaveUpAnnounced: Set<number>;
+  /** Nodes already announced as Dead-but-talking this outage (v0.42.0). */
+  talkingAnnounced: Set<number>;
 }
 
 /** Which lane issued a probe (v0.40.2). Only the fixed-cadence SWEEP feeds the
@@ -243,7 +245,7 @@ export function unpendProbe(state: AutoPingState, nodeId: number, t: number): vo
 const ANSWER_GRACE_MS = 90_000;
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map(), launchFailures: new Map(), launchGaveUpAnnounced: new Set() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map(), launchFailures: new Map(), launchGaveUpAnnounced: new Set(), talkingAnnounced: new Set() };
 }
 
 export interface AutoPingInput {
@@ -317,6 +319,10 @@ export interface AutoPingDecision {
    *  (v0.40.2) — an add-on-side fault, announced apart from a node that was
    *  genuinely asked and stayed silent. */
   launchGaveUp: number[];
+  /** Nodes the driver still flags Dead that were HEARD FROM inside the dwell
+   *  (v0.42.0) — demonstrably reachable, so no budget is spent and no human is
+   *  summoned. The flag is stale; the traffic is evidence. */
+  talkingWhileDead: number[];
   /** Why nothing was pinged (or 'none' when the gates all passed). */
   suppressed: AutoPingSuppression;
   /** Listening nodes currently Dead — the storm-guard numerator. */
@@ -384,7 +390,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const { now, nodes, controller, config, booting } = input;
   const listeningNodes = nodes.filter(isPingCandidate);
   const dead = listeningNodes.filter((n) => n.status === NodeStatus.Dead);
-  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyOwed: 0, gaveUp: [] as number[], launchGaveUp: [] as number[],
+  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyOwed: 0, gaveUp: [] as number[], launchGaveUp: [] as number[], talkingWhileDead: [] as number[],
     deadListening: dead.length,
     listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
@@ -404,7 +410,31 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const ping: number[] = [];
   const launchGaveUp: number[] = [];
   const gaveUp: number[] = [];
+  const talkingWhileDead: number[] = [];
   for (const n of dead) {
+    // TRAFFIC OUTRANKS THE FLAG (v0.42.0).
+    //
+    // `status === Dead` is the driver's REACTIVE opinion: it is set when a
+    // transmission fails and cleared only when something succeeds. A node that
+    // is heard from — for any reason, including a command an operator ran — is
+    // demonstrably reachable at that instant, whatever the flag still says.
+    //
+    // Learned the hard way on node 49 ("Garage Workroom"): it ignored SIX
+    // consecutive pings over ~12 hours (the ladder's three, a manual one, and
+    // two more after a restart re-armed the ladder) and was declared
+    // node-down — then answered an ordinary on/off command immediately, and
+    // came back reading grade A with +25 dB of margin. The ping button issues a
+    // NOP, and this device does not answer NOPs. Every conclusion downstream
+    // was drawn from the one frame it will not reply to.
+    //
+    // So: never spend remediation budget, and never summon a human, for a node
+    // whose own traffic proves it alive. The dwell is the right window — it is
+    // already the engine's definition of "long enough to mean something".
+    const heard = n.stats?.lastSeen ?? null;
+    if (heard != null && now - heard < config.afterMs) {
+      talkingWhileDead.push(n.nodeId);
+      continue;
+    }
     const started = input.state.deadSince.get(n.nodeId);
     if (started == null || now - started < config.afterMs) continue;
     const tries = input.state.attempts.get(n.nodeId) ?? 0;
@@ -521,7 +551,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const verifySet = new Set(verify);
   const staleDeduped = stale.filter((id) => !verifySet.has(id));
 
-  return { ...base, ping, stale: staleDeduped, verify, verifyFirst, gaveUp, launchGaveUp, suppressed: 'none' };
+  return { ...base, ping, stale: staleDeduped, verify, verifyFirst, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'none' };
 }
 
 /**
@@ -596,6 +626,7 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
       state.gaveUpAnnounced.delete(n.nodeId);
       state.launchFailures.delete(n.nodeId);
       state.launchGaveUpAnnounced.delete(n.nodeId);
+      state.talkingAnnounced.delete(n.nodeId);
     }
   }
   // A node that vanished from the roster (removed/excluded) must not leak its
@@ -616,6 +647,7 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
   for (const id of [...state.gaveUpAnnounced]) if (!seen.has(id)) state.gaveUpAnnounced.delete(id);
   for (const id of [...state.launchFailures.keys()]) if (!seen.has(id)) state.launchFailures.delete(id);
   for (const id of [...state.launchGaveUpAnnounced]) if (!seen.has(id)) state.launchGaveUpAnnounced.delete(id);
+  for (const id of [...state.talkingAnnounced]) if (!seen.has(id)) state.talkingAnnounced.delete(id);
 }
 
 /** Record that a STALE liveness probe was issued. */
@@ -730,6 +762,9 @@ export interface AutoPingNodeState {
   gaveUp: boolean;
   /** The add-on could not send at all, maxAttempts in a row (v0.40.2). */
   launchGaveUp: boolean;
+  /** The driver flags this node Dead, but it was heard from inside the dwell
+   *  (v0.42.0) — the flag is stale and the node is reachable. */
+  talkingWhileDead: boolean;
 }
 
 export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tick: () => void; snapshot: () => AutoPingSnapshot } {
@@ -985,6 +1020,18 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
      * both destinations: this is the one auto-ping message that asks for
      * action rather than reporting activity.
      */
+    // A node the driver still calls Dead that is demonstrably talking. Said
+    // once per outage, like the give-up: it is the difference between "your
+    // device is gone" and "the flag is stale", and an operator chasing the
+    // former when it is the latter wastes a trip to the garage (v0.42.0).
+    for (const nodeId of decision.talkingWhileDead) {
+      if (state.talkingAnnounced.has(nodeId)) continue;
+      state.talkingAnnounced.add(nodeId);
+      const m = `auto-ping: node ${nodeId} reads Dead but was heard from within the dwell — ` +
+        `trusting the traffic over the flag; no probe spent, no human needed`;
+      o.log('info', nodeId, m);
+      o.log2?.(m);
+    }
     for (const nodeId of decision.launchGaveUp) {
       state.launchGaveUpAnnounced.add(nodeId);
       const m = `auto-ping: node ${nodeId} could not be probed ${o.config.maxAttempts}× in a row — ` +
@@ -995,8 +1042,15 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
     }
     for (const nodeId of decision.gaveUp) {
       state.gaveUpAnnounced.add(nodeId);
-      const m = `auto-ping: node ${nodeId} is STILL DEAD after ${o.config.maxAttempts} attempts — ` +
-        `giving up, this one needs a human (try a manual ping first; it often works when the ladder has expired)`;
+      // Say only what was measured: N unanswered PINGS. A ping is a NOP, and a
+      // device can ignore NOPs while honouring ordinary commands — node 49 did
+      // exactly that for 12 hours (v0.42.0). Operating the device is a stronger
+      // reachability test than any number of pings, and it is the step that
+      // actually worked, so it leads.
+      const tries = o.config.maxAttempts;
+      const m = `auto-ping: node ${nodeId} did not answer ${tries} ping${tries === 1 ? '' : 's'} — giving up. ` +
+        `That means it ignored ${tries} NOP frame${tries === 1 ? '' : 's'}, NOT that it is unreachable: ` +
+        `try OPERATING the device (a real command often lands when pings do not), then a manual ping, then check its power.`;
       o.log('error', nodeId, m);
       o.log2?.(m);
     }
@@ -1036,7 +1090,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
     const ids = new Set<number>([
       ...state.deadSince.keys(), ...state.attempts.keys(), ...state.missStreak.keys(),
       ...state.launchFailures.keys(), ...state.awaitingAnswer.keys(), ...state.gaveUpAnnounced,
-      ...state.launchGaveUpAnnounced,
+      ...state.launchGaveUpAnnounced, ...state.talkingAnnounced,
     ]);
     const nodes: AutoPingNodeState[] = [...ids].sort((a, b) => a - b).map((nodeId) => {
       const attempts = state.attempts.get(nodeId) ?? 0;
@@ -1055,6 +1109,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
         pending: state.awaitingAnswer.get(nodeId)?.length ?? 0,
         gaveUp: state.gaveUpAnnounced.has(nodeId),
         launchGaveUp: state.launchGaveUpAnnounced.has(nodeId),
+        talkingWhileDead: state.talkingAnnounced.has(nodeId),
       };
     });
     return {

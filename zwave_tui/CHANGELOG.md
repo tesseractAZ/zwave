@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.42.0 — 2026-08-30
+
+**Traffic outranks the driver's Dead flag.**
+
+Written from a live incident. Node 49 ("Garage Workroom") ignored SIX
+consecutive pings over ~12 hours — the ladder's three, a manual one, and two
+more after a restart re-armed the ladder — and was declared `node-down`. The
+operator then turned it on and off, and it answered immediately, coming back
+grade A with +25 dB of margin and a direct 100 kbps route.
+
+HA's ping button issues a NOP. That device does not answer NOPs. Every
+conclusion the engine drew — Dead status, the remediation ladder, the give-up,
+the `node-down` symptom — was drawn from the one frame it will not reply to.
+`status === Dead` is the driver's REACTIVE opinion (set on a failed
+transmission, cleared on a successful one), and the engine had been treating it
+as a measurement of reachability.
+
+It no longer does. A node **heard from inside the dwell** is demonstrably
+reachable at that instant, so the dead lane skips it: no remediation budget
+spent, no human summoned. A genuinely silent Dead node is still remediated
+exactly as before — the guard must not swallow the case the ladder exists for,
+and a test pins that.
+
+The stale flag is announced once per outage rather than silently skipped:
+
+    auto-ping: node 49 reads Dead but was heard from within the dwell —
+    trusting the traffic over the flag; no probe spent, no human needed
+
+Silently skipping would have been worse than the old behaviour — a Dead node
+the engine never touches and never explains.
+
+**The give-up now says only what it measured.** It used to assert the node
+"needs a human". It now reports unanswered NOPs and explicitly denies the
+stronger claim, leading with the step that actually worked:
+
+    did not answer 3 pings — giving up. That means it ignored 3 NOP frames,
+    NOT that it is unreachable: try OPERATING the device (a real command often
+    lands when pings do not), then a manual ping, then check its power.
+
+ENGINE renders the condition on the node row as `reads Dead but TALKING —
+stale flag`.
+
+847 tests. 316 mutation entries: 312 killed, 0 survived, 0 missing, 4 equivalent.
+
 ## 0.41.2 — 2026-08-30
 
 **"We could not sample it" is not "it was brief" — and three more the audit found.**
