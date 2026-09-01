@@ -1204,12 +1204,6 @@ const MUTANTS = [
     find: '          ep.confounded = true;\n          continue;',
     repl: '          continue;',
     what: 'a confirmation-window action confounds the episode it cannot be credited to' },
-  { id: 'confounded-not-control', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
-    // Lets confounded closures back into the control arm (ep.transient is
-    // never set on a scoreable verdict, so the branch goes dead).
-    find: '        if (ep.confounded) {',
-    repl: '        if (ep.transient) {',
-    what: 'a confounded no-action closure is credited to neither arm' },
   { id: 'markconfounded-sets-flag', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     find: '      const ep = open.get(key(nodeId, kind));\n      if (ep) ep.confounded = true;',
     repl: '      void open.get(key(nodeId, kind));',
@@ -1388,7 +1382,7 @@ const MUTANTS = [
   { id: 'engine-baserate-carries-its-n', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     // The bare rate again — the exact class-D defect the gap analysis raised:
     // a self-heal rate without its n invites overtrust in one episode.
-    find: "        c.grey(` (${weight(arm.n)}${provenance(arm.nodes)})`));",
+    find: "        c.grey(` (${weight(arm.n)}${provenance(arm.nodes)}${armHarm})`));",
     repl: "        '');",
     what: 'the self-heal base rate always renders with its n' },
   { id: 'engine-confound-outranks-action', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
@@ -1621,18 +1615,14 @@ const MUTANTS = [
   { id: 'bound-crosses-boundary', file: 'src/zwave/outcomes.ts', tests: ['outcomes', 'remedyScreen'],
     // The bound reverts to being computed and thrown away at the return — the
     // exact pre-v0.43.1 defect: the number that decided the claim is private.
-    find: 'nodes, ready: true, lowerBound: lower, bar };',
-    repl: 'nodes, ready: true, lowerBound: null, bar };',
+    find: 'ready: true, lowerBound: lower, bar, minN, baseN, baseNodes, harmed, baseHarmed };',
+    repl: 'ready: true, lowerBound: null, bar, minN, baseN, baseNodes, harmed, baseHarmed };',
     what: 'the bound that DECIDED the claim reaches the screen, not just the gate' },
   { id: 'bound-is-the-real-one', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     // Reports a bound that is not the one the gate used.
     find: '      const lower = wilsonLower(ok, n);',
     repl: '      const lower = ok / Math.max(1, n);',
     what: 'the disclosed bound is the WILSON bound, not the point estimate' },
-  { id: 'withheld-claim-explains-itself', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
-    find: "        ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, short of the ` +\n          `${Math.round(e.bar * 100)}% bar (${selfHeal} + margin)`",
-    repl: "        ? ''",
-    what: '"not distinguishable" says HOW FAR short the evidence fell' },
   { id: 'no-fabricated-bar', file: 'src/zwave/outcomes.ts', tests: ['outcomes', 'remedyScreen'],
     // Invents a bar from an unmeasured base rate, so the screen reports a
     // threshold the evidence never established — and, downstream, prints a
@@ -1721,7 +1711,7 @@ const MUTANTS = [
     repl: '      const bar = base == null ? null : base;',
     what: 'the reported bar is the one the gate applied — base PLUS the effect size' },
   { id: 'withheld-claim-names-the-bar', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
-    find: "        ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, short of the ` +",
+    find: "      ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, short of the ` +",
     repl: "        ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}% vs ` +",
     what: 'the withheld claim names the BAR it fell short of, not a bare base-rate comparison' },
   { id: 'empty-roster-is-not-all-clear', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
@@ -1749,26 +1739,182 @@ const MUTANTS = [
     find: '    const band = bandOf(now);',
     repl: '    const band = 0;',
     what: 'the band NAMED is the band the counts were measured in' },
-  { id: 'refusal-family-covers-phrasings', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
-    find: "    /not in the .{0,24}failed nodes? list/i, // \"not in the controller's failed nodes list\"",
-    repl: '    /\\u0000never\\u0000/,',
-    what: 'the refusal family covers the plausible driver phrasings, not one invented string' },
-  { id: 'refusal-family-excludes-plain-failure', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
-    // An ordinary failure to act says NOTHING about whether the diagnosis was
-    // right — reading it as a refusal fabricates the accusation.
-    find: '    /(has|it) responded/i,                // "could not be removed because it has responded"',
-    repl: '    /could not|responded/i,',
-    what: 'a plain "could not be removed" is NOT read as the driver refusing the premise' },
   { id: 'unmatched-refusal-is-captured', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
     // The self-capturing half: without it the real production wording is lost
     // to a bare `false`, exactly as it was for four releases.
-    find: "      if (kind === 'removeFailed' && refusal === 'transport') {",
+    find: "      if (kind === 'removeFailed' && refusal === 'transport' && zwaveErrorCode(msg) === ZW_REMOVE_FAILED) {",
     repl: '      if (false) {',
     what: 'an unmatched remove-failed failure logs its verbatim text for correction' },
   { id: 'legend-only-with-a-weight', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     find: '    body.splice(legendAt, 0, c.grey(visLen(full) <= view.cols ? full : ',
     repl: '    body.splice(legendAt, 0, c.grey(view.cols > 0 ? full : ',
     what: 'the legend keeps its saturation figure at narrow widths instead of truncating it away' },
+  { id: 'refusal-keyed-on-the-code', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // Back to reading the prose. ZWaveErrorCodes exists, in the library's own
+    // words, "to identify errors WITHOUT RELYING ON THE SPECIFIC WORDING" — and
+    // the first version of this classifier relied on wording it had invented.
+    find: '  if (code === ZW_REMOVE_NODE_OK) return true;',
+    repl: '  if (/has responded/i.test(msg)) return true;',
+    what: 'a refusal is identified by the Z-Wave error CODE, not by the message prose' },
+  { id: 'code-360-is-not-a-blanket-refusal', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // 360 covers SIX outcomes, four of which say nothing about the diagnosis.
+    find: '  if (code !== ZW_REMOVE_FAILED) return false;',
+    repl: '  if (code !== ZW_REMOVE_FAILED) return false;\n  if (code === ZW_REMOVE_FAILED) return true;',
+    what: 'RemoveFailedNode_Failed is not read as a refusal on its own' },
+  { id: 'ping-refusal-is-recognised', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // zwave-js pings the node THREE TIMES before asking the controller, so this
+    // is the most likely refusal in practice — and the first classifier missed it.
+    find: "  return /responded to a ping/i.test(msg);",
+    repl: "  return false;",
+    what: 'the ping-answered refusal — the most likely one — is recognised' },
+  { id: 'error-code-from-either-encoding', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // The chain carries the code twice; losing one carrier must not blind us.
+    find: '  const relayed = /Z-Wave error (\\d+)\\b/.exec(msg);',
+    repl: '  const relayed = null;',
+    what: 'the error code is recovered from the relayed number as well as the ZW suffix' },
+  { id: 'worse-tallied-apart-from-no-change', file: 'src/zwave/outcomes.ts', tests: ['outcomes', 'remedyScreen'],
+    // Restores the collapse: scoreRecovery distinguishes `worse` at eight sites
+    // and the tally threw it away, so an action that HARMS and one that does
+    // nothing rendered with the same words.
+    find: "      bad: cur.bad * keep + (verdict === 'worse' ? 1 : 0),",
+    repl: '      bad: cur.bad * keep,',
+    what: 'a regression is tallied apart from a no-op — harm is not inefficacy' },
+  { id: 'tally-migration-keeps-old-ledgers', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // `bad` is absent pre-v0.44.0; treating absent as invalid would erase
+    // months of control-arm evidence on upgrade.
+    find: '  const badOk = bad === undefined || (Number.isFinite(bad) && bad >= 0 && bad <= t.n + 1e-9);',
+    repl: '  const badOk = bad !== undefined && Number.isFinite(bad) && bad >= 0 && bad <= t.n + 1e-9;',
+    what: 'a pre-v0.44.0 ledger survives the upgrade instead of being discarded' },
+  { id: 'closure-verdict-reaches-the-ring', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: "        this.pushEvent('engine', ep.verdict === 'worse' ? 'warn' : 'info', 'symptom', ep.nodeId,",
+    repl: "        this.pushEvent('engine', 'info', 'symptom', ep.nodeId,",
+    what: 'a `worse` closure lifts to warn — a regression logged at info is one nobody sees' },
+  { id: 'no-ledger-is-not-an-idle-ledger', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn', 'engineScreen'],
+    // The pre-v0.44.0 defect verbatim: an install with no baselines store
+    // renders its DEAD learning loop as "the healthy steady state".
+    find: '    if (!this.outcomes) return null;',
+    repl: '    if (!this.outcomes) return [];',
+    what: 'no outcome ledger is distinguishable from an idle one' },
+  { id: 'discarded-episodes-are-counted', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: '        const lostOpen = this.outcomes?.openEpisodes().length ?? 0;',
+    repl: '        const lostOpen: number = 0;',
+    what: 'in-flight episodes lost to an identity change are counted, not dropped silently' },
+  { id: 'base-rate-carries-its-own-n', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: "  const healProv = e.baseN > 0 ? ` (${weight(e.baseN)}${provenance(e.baseNodes, ' · ')})` : '';",
+    repl: "  const healProv = '';",
+    what: 'the self-heal rate carries its own n and node count, like the arm beside it' },
+  { id: 'no-fabricated-control-weight', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: "  const healProv = e.baseN > 0 ? ` (${weight(e.baseN)}${provenance(e.baseNodes, ' · ')})` : '';",
+    repl: "  const healProv = ` (${weight(e.baseN)}${provenance(e.baseNodes, ' · ')})`;",
+    what: 'an unrecorded control weight omits the parenthetical rather than printing n≈0.0' },
+  { id: 'unready-arm-is-not-a-verdict', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // "not distinguishable" is a LEARNED verdict; it was being applied to arms
+    // nobody had tried often enough to judge.
+    find: '      } else if (!e!.ready) {',
+    repl: '      } else if (e!.n < 0) {',
+    what: 'an arm below readiness says "still learning", never a measured verdict' },
+  { id: 'granted-claim-shows-its-bound', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: '        if (e!.lowerBound != null) bit(c.grey(`${a} ≥${Math.round(e!.lowerBound * 100)}% at 95%`), 3);',
+    repl: '        if (false) bit(c.grey(`${a}`), 3);',
+    what: 'a granted claim shows the bound that EARNED it, not just the point estimate' },
+  { id: 'bound-says-what-it-is', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // A naked second percentage beside a point estimate is a range endpoint of
+    // unknown kind.
+    find: "`${a} ≥${Math.round(e!.lowerBound * 100)}% at 95%`",
+    repl: "`${a} ${Math.round(e!.lowerBound * 100)}%`",
+    what: 'the disclosed bound is qualified as a 95% lower bound' },
+  { id: 'unscoreable-kind-says-so', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // node-down accumulates no efficacy record EVER; silence reads as "still
+    // learning", indefinitely, for a loop that is structurally off.
+    find: '  if (noScore) {',
+    repl: '  if (noScore && W < 0) {',
+    what: 'a structurally unscoreable kind discloses why it has no ledger' },
+  { id: 'unscoreable-copy-tracks-the-metric', file: 'src/telnet/ledgerText.ts', tests: ['outcomes'],
+    find: "    case 'node-down':",
+    repl: "    case 'rtt-degraded':",
+    what: 'the unscoreable sentence names the kinds metricOf actually excludes' },
+  { id: 'confound-covers-the-action-arm', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // Restores the pre-review defect: a node dying mid-episode feeds whatever
+    // action was in flight — and `worse` for the route/s2 metrics is literally
+    // `after.X > before.X`, which a death generates by construction.
+    find: '      } else if (ep.confounded) {',
+    repl: '      } else if (ep.confounded && ep.action == null) {',
+    what: 'a confounded episode feeds NEITHER arm, not just the control arm' },
+  { id: 'reset-is-written-through', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    // save() returns early on a false `dirty`, so reset(); save() was a no-op
+    // and the OLD mesh's ledger stayed on disk across a stick swap.
+    find: '      dirty = true;\n    },\n\n    load(): void {',
+    repl: '    },\n\n    load(): void {',
+    what: 'reset() marks the store dirty so the wipe is actually persisted' },
+  { id: 'tally-joint-invariant', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
+    find: '  const jointOk = t.ok + (bad ?? 0) <= t.n + 1e-9;',
+    repl: '  const jointOk = true;',
+    what: 'ok + bad <= n — a corrupt file cannot seat two contradicting rates' },
+  { id: 'harm-gated-on-the-bound', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // The asymmetry: benefit needed a Wilson bound over the base rate, harm
+    // needed a bare ratio over 0.2 — so ONE regression at n≈4.7 accused a
+    // remedy, and moving it earlier in the sequence made it vanish.
+    find: '    && wilsonLower(e.harmed, e.n) >= baseHarmRate + HARM_MIN_EFFECT;',
+    repl: '    && (e.n > 0 ? e.harmed / e.n : 0) >= 0.2;',
+    what: 'harm is gated on the Wilson bound, exactly as benefit is' },
+  { id: 'harm-compared-to-the-control-harm', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Compares the action's REGRESSION rate against the control's IMPROVEMENT
+    // rate — two different quantities, indicting either way.
+    find: '  const baseHarmRate = e.baseN > 0 ? e.baseHarmed / e.baseN : null;',
+    repl: '  const baseHarmRate = e.baseRate != null ? 0 : null;',
+    what: "the harm bar is the control arm's OWN regression rate" },
+  { id: 'harm-needs-two-nodes', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: '  const isHarm = e.nodes >= 2',
+    repl: '  const isHarm = e.nodes >= 0',
+    what: 'one flapping device cannot author a harm finding on its own' },
+  { id: 'harm-never-suppresses-a-claim', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Returning early on harm hid a granted claim ENGINE rendered in green from
+    // the same ledger row — two screens, one row, opposite conclusions.
+    find: '    const head = blocked ? `⚠ ledger measured ${pct}% here` : `✓ helped ${pct}%`;',
+    repl: '    const head = blocked ? `⚠ ledger measured ${pct}% here` : (harmShort != null ? harmShort : `✓ helped ${pct}%`);',
+    what: 'a harm finding is APPENDED to a granted claim, never substituted for it' },
+  { id: 'never-run-is-not-still-learning', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: '    if (e.n <= 0) {',
+    repl: '    if (e.n < 0) {',
+    what: 'an action nobody ran says so, rather than "still learning (n≈0.0 of 4)"' },
+  { id: 'all-regressions-speaks-below-readiness', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: "      ? ' — ⚠ every attempt so far made it WORSE (too few to be sure)'",
+    repl: "      ? ''",
+    what: 'an arm whose every attempt regressed says so before it reaches readiness' },
+  { id: 'note-degrades-whole-clauses', file: 'src/telnet/screens/remedy.ts', tests: ['renderHonesty'],
+    // Back to concatenate-then-truncate: `· 12 nodes` clipped to `· 1`, a
+    // complete-looking and wrong node count.
+    find: '    for (const f of forms) if (visLen(f) <= width) return f;',
+    repl: '    if (forms.length) return forms[0];',
+    what: 'a narrow terminal drops a whole clause, never half a measurement' },
+  { id: 'engine-harm-outranks-for-space', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // fitBits drops from the right; without the priority the regression count
+    // — the longest bit and the one that argues against acting — went first.
+    find: '      if (e!.harmed >= 0.5) bit(c.yellow(`${a}: ${weight(e!.harmed)} worse`), 0);',
+    repl: '      if (e!.harmed >= 0.5) bit(c.yellow(`${a}: ${weight(e!.harmed)} worse`), 9);',
+    what: 'a measured regression outranks every other bit for the available width' },
+  { id: 'engine-bits-are-independent', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Welding the bound into the arm bit pushed the whole arm past 80 columns,
+    // so the modal terminal lost the efficacy AND the bound together.
+    find: '        if (e!.lowerBound != null) bit(c.grey(`${a} ≥${Math.round(e!.lowerBound * 100)}% at 95%`), 3);',
+    repl: '        if (e!.lowerBound != null) parts[parts.length - 1] += c.grey(` ≥${Math.round(e!.lowerBound * 100)}% at 95%`);',
+    what: 'the bound is its own bit, so it degrades without taking the arm with it' },
+  { id: 'no-control-arm-is-not-level', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: "      } else if (e!.bar == null) {",
+    repl: "      } else if (e!.bar == null && e!.n < 0) {",
+    what: 'an unmeasured comparison is not reported as one that came out level' },
+  { id: 'control-arm-shows-its-own-harm', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: "      const armHarm = arm.bad >= 0.5 ? `, ${weight(arm.bad)} worse` : '';",
+    repl: "      const armHarm = '';",
+    what: "the control arm discloses its OWN regressions, not just the action arm's" },
+  { id: 'unscoreable-reason-is-wrapped', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: "    for (const line of wrap(`○ ${noScore}`, W - 4)) rows.push(truncate('    ' + c.grey(line), W));",
+    repl: "    rows.push(truncate('    ' + c.grey(`○ ${noScore}`), W));",
+    what: 'the disclosure WRAPS instead of being cut mid-word at every real width' },
+  { id: 'capture-needs-a-driver-reason', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    find: "      if (kind === 'removeFailed' && refusal === 'transport' && zwaveErrorCode(msg) === ZW_REMOVE_FAILED) {",
+    repl: "      if (kind === 'removeFailed' && refusal === 'transport') {",
+    what: 'the self-capture fires only where a driver reason string actually exists' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.
@@ -1878,21 +2024,21 @@ const MUTANTS = [
     // Restores the pre-v0.35 gate: route-churn's only executable candidate is
     // permanently blocked, so its MEASURED efficacy can never reach the screen
     // and the learning loop can never overturn the hardcoded lore.
-    find: '        const note = efficacyNote(cand.efficacy, cand.blocked != null);',
+    find: '        const note = efficacyNote(cand.efficacy, cand.blocked != null, W - 8);',
     repl: '        const note = cand.blocked == null ? efficacyNote(cand.efficacy, false) : null;',
     what: 'a blocked candidate still reports what the ledger measured' },
   { id: 'ledger-blocked-never-endorses', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // Drops the blocked framing: a green "✓ helped 80%" now sits directly under
     // advice that says NOT recommended.
-    find: "    return blocked\n      ? c.yellow(`⚠ ledger measured ${pct}% here (${n}${prov})${base} — the block above still applies`)\n      : c.green(`✓ helped ${pct}% (${n}${prov})${base}`);",
-    repl: '    return c.green(`✓ helped ${pct}% (${n}${prov})${base}`);',
+    find: '    return (blocked || harmShort != null) ? c.yellow(pick(forms)) : c.green(pick(forms));',
+    repl: '    return c.green(pick(forms));',
     what: 'a blocked candidate is never endorsed in the voice of a recommendation' },
   { id: 'ledger-never-judges-block', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // Restores the review defect verbatim: `blocked` carries safety and config
     // gates too, and "the block above is lore" told an operator a BATTERY/FLiRS
     // safety gate was unfounded folklore contradicted by measurement.
-    find: '      ? c.yellow(`⚠ ledger measured ${pct}% here (${n}${prov})${base} — the block above still applies`)',
-    repl: '      ? c.yellow(`⚠ ledger measured ${pct}% here (${n}${prov})${base}; the block above is lore`)',
+    find: "    const tailBlocked = blocked ? ' — the block above still applies' : '';",
+    repl: "    const tailBlocked = blocked ? '; the block above is lore' : '';",
     what: 'the note reports measurement without ever characterizing the block' },
   { id: 'false-positives-only-above-zero', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // A clean detector boasts a zero — noise on every card, and it trains the

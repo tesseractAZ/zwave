@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.44.0 — 2026-08-31
+
+**The ledger's voice: every number it acts on, said out loud — and harm made as
+hard to claim as help.**
+
+**A driver refusal is classified on the ERROR CODE, not on prose — and the
+prose I guessed was wrong.** v0.43.1 shipped a family of phrasings invented
+rather than observed. Read against the actual zwave-js source (15.28.0,
+`Controller.removeFailedNode`), it was wrong three ways: it matched strings the
+driver never emits, it missed the single most likely refusal — zwave-js pings
+the node **three times** before asking the controller, then reports "responded
+to a ping" — and it read the driver's own explicitly ambiguous reason ("the
+controller is busy **or** the node has responded") as a definite refusal.
+`ZWaveErrorCodes` exists, in the library's own words, *"to identify errors
+without relying on the specific wording of the error message"*, and the code
+reaches us twice over: `ZWaveError` appends ` (ZW0361)`, `FailedZWaveCommand`
+prefixes `Z-Wave error 361 - `, and Home Assistant forwards both unchanged.
+
+One further correction, from reading the driver's control flow rather than its
+strings: `· Node N is not in the list of failed nodes` reads like a refusal and
+is not one. That branch is reached only after all three pings have **failed**,
+so the device is already proven silent — it is the controller disagreeing with
+the driver, and scoring it as a misdiagnosis would indict the ghost-suspect
+detector for being **right**.
+
+**`worse` is no longer folded into `no-change`.** `scoreRecovery` distinguishes
+a regression at eight separate sites and the tally then discarded all of it, so
+an action that harmed 40% of the time and one that was merely useless rendered
+with identical words. Both arms now carry a decayed regression count, and it is
+disclosed on both screens.
+
+**Harm is gated exactly as hard as help.** The first cut of that warning fired
+on a bare point ratio over 0.2 with no sampling gate and no control comparison,
+while the benefit claim requires a Wilson lower bound to clear the base rate by
+the effect size. One regression on one node at n≈4.7 printed a yellow warning
+against the planner's own recommendation — and moving that same regression
+earlier in the sequence made it vanish, because the decayed `n` differs by
+position alone. It now needs the bound to clear the **control arm's own
+regression rate** (if the symptom self-worsens 35% of the time, an action that
+worsens 21% is better than doing nothing) across at least two distinct nodes.
+It is also **appended** to a granted claim rather than replacing it: returning
+early on harm hid a claim ENGINE was simultaneously rendering in green from the
+same ledger row.
+
+**A confounded episode now feeds neither arm.** The v0.40 rule — a node that
+died or was remediated mid-episode is not a clean observation — was applied to
+the control arm only, while the action arm was still being fed. That matters
+more now `worse` is tracked: a death generates re-routes and S2 resyncs by
+construction, and `worse` for those metrics is literally `after > before`, so a
+death could manufacture a harm verdict against whatever action was in flight.
+
+**A dead learning loop rendered as a clean bill of health.** ENGINE has always
+had two branches — "no outcome ledger, the learning loop is off" and "no open
+episodes, the healthy steady state" — and `openEpisodes()` returned `[]` for
+both, so an install with no baselines store showed the second. The distinction
+survived only in a test mock that omitted the member; making the three ledger
+accessors **required** on `DataProvider` is what exposed it.
+
+**`reset()` never marked the store dirty**, so the mesh-identity write-through
+was a silent no-op and the old network's ledger stayed on disk. The new
+"identity changed" event announced a wipe that had not been persisted.
+
+**Also:** episode closures reach the log ring (`worse` at warn, never error);
+in-flight episodes discarded by an identity change are counted; `node-down`
+discloses why it is structurally unscoreable, wrapped rather than cut mid-word;
+the Wilson bound rides a granted claim as `≥46% at 95%`; arms below readiness
+say "still learning (n≈2.0 of 4)" instead of borrowing a measured verdict's
+words; an arm with no control arm says so rather than "not distinguishable";
+REMEDY's efficacy notes drop whole clauses to fit instead of clipping `· 12
+nodes` to `· 1`; ENGINE emits each fact as its own bit so a regression count
+survives 80 columns; the dead `Episode.band` field is gone; and the
+`as unknown as ZwaveDataSource` cast at the index seam is deleted — it was
+hiding a real divergence.
+
+914 tests, 378 mutants (0 survived, 0 missing, 0 invalid). An adversarial
+review raised 44 findings against the first draft of this release; 35 survived
+refutation and are fixed here.
+
 ## 0.43.1 — 2026-08-30
 
 **Four numbers the engine acted on and never showed, and one accusation it

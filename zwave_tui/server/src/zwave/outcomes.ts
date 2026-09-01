@@ -37,7 +37,6 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import type { ActionKind, Efficacy } from '../types';
 import type { SymptomKind } from './symptoms';
 import type { EvidenceSample } from './evidenceStore';
-import { bandOf } from './baselines';
 
 export type { Efficacy };
 
@@ -87,7 +86,6 @@ export interface OpenEpisodeView {
 export interface Episode {
   kind: SymptomKind;
   nodeId: number | null;
-  band: number; // time-of-day context band (shared with baselines)
   onsetMs: number;
   before: WindowMetrics | null; // degraded window at/around onset
   action: { kind: ActionKind; atMs: number; refused: boolean } | null;
@@ -117,10 +115,22 @@ export interface Episode {
   confounded?: boolean;
 }
 
-/** A decayed tally of episodes and their successes. */
+/** A decayed tally of episodes, their successes, and their REGRESSIONS. */
 interface Tally {
   n: number; // decayed episode count
   ok: number; // decayed count that resolved `improved`
+  /**
+   * Decayed count that resolved `worse` (v0.44.0).
+   *
+   * `scoreRecovery` distinguishes `worse` from `no-change` at eight separate
+   * sites — a rising timeout rate, new flaps, fresh S2 resyncs, more route
+   * changes, lost margin, slower RTT, a dropped negotiated rate — and the
+   * tally then threw that distinction away: `bump(t, verdict === 'improved')`
+   * folded "made it worse" and "did nothing" into the same miss. An action
+   * that harms 40% of the time and one that is merely useless both read as
+   * "not distinguishable from self-healing".
+   */
+  bad: number;
 }
 
 export interface OutcomeStoreOptions {
@@ -185,7 +195,7 @@ export interface OutcomeStore {
    *  returns the ratio and nothing else; `controlNodes` was tracked, persisted
    *  and restored but had NO getter, so the one number that makes every
    *  efficacy claim meaningful could not be shown with its n or its sources. */
-  controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
+  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number } | null;
   /** Spontaneous-recovery base rate for a kind (control arm), or null if n too low. */
   baseRate(kind: SymptomKind): number | null;
   /** Learned efficacy of an action against a kind, for the planner. */
@@ -391,7 +401,7 @@ function comparable(a: WindowMetrics, b: WindowMetrics): boolean {
 // is mapped to the signal its recovery actually moves.
 export type RecoveryMetric = 'timeout' | 'flap' | 'rssi' | 'rtt' | 'rate' | 's2' | 'route' | 'none';
 
-function metricOf(kind: SymptomKind): RecoveryMetric {
+export function metricOf(kind: SymptomKind): RecoveryMetric {
   switch (kind) {
     case 'return-path-degraded':
     case 'chronic-return-path':
@@ -655,16 +665,22 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     const set = m.get(k) ?? new Set<number>();
     set.add(nodeId); m.set(k, set);
   };
-  // Per (kind ▸ action ▸ band) action arm.
+  // Per (kind ▸ action) action arm — deliberately NOT banded; see the note in resolve().
   const action = new Map<string, Tally>();
 
   const key = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
   const aKey = (kind: SymptomKind, act: ActionKind): string => `${kind}|${act}`;
 
-  const bump = (t: Tally | undefined, improved: boolean): Tally => {
-    const cur = t ?? { n: 0, ok: 0 };
+  // Takes the VERDICT, not a boolean (v0.44.0): a boolean cannot carry the
+  // difference between "did nothing" and "made it worse".
+  const bump = (t: Tally | undefined, verdict: Verdict): Tally => {
+    const cur = t ?? { n: 0, ok: 0, bad: 0 };
     const keep = 1 - cfg.decay;
-    return { n: cur.n * keep + 1, ok: cur.ok * keep + (improved ? 1 : 0) };
+    return {
+      n: cur.n * keep + 1,
+      ok: cur.ok * keep + (verdict === 'improved' ? 1 : 0),
+      bad: cur.bad * keep + (verdict === 'worse' ? 1 : 0),
+    };
   };
 
   const computeVerdict = (ep: Episode): Verdict => {
@@ -678,7 +694,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     open(nodeId, kind, onsetMs, before): void {
       const k = key(nodeId, kind);
       if (open.has(k)) return; // one open episode per key (matches the detector lifecycle)
-      open.set(k, { kind, nodeId, band: bandOf(onsetMs), onsetMs, before, action: null, resolvedMs: null, after: null, verdict: null });
+      open.set(k, { kind, nodeId, onsetMs, before, action: null, resolvedMs: null, after: null, verdict: null });
     },
 
     recordAction(nodeId, actionKind, refused, atMs, skip, onlyKinds): void {
@@ -778,21 +794,28 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
           unver.set(kind, (unver.get(kind) ?? 0) + 1);
         }
         dirty = true;
+      } else if (ep.confounded) {
+        // NOT an observation of EITHER arm (v0.40, widened v0.44.0): the node
+        // died or an unattributed remediation ran on it while the episode was
+        // open, so neither "recovered with no action" nor "the action did it"
+        // is a claim the evidence supports. In the audited exemplar the clean
+        // after-window existed only because a dead-remediation ping revived the
+        // node.
+        //
+        // The v0.40 rationale — "a confounded non-improvement would bias the
+        // arm exactly as dishonestly in the other direction" — was written for
+        // the control arm and applies verbatim to the action arm, which was
+        // still being fed. It applies DOUBLY now that `bad` exists: a node
+        // dying mid-episode generates re-routes and S2 resyncs by
+        // construction, and `worse` for the route and s2 metrics is literally
+        // `after.X > before.X` — so a death could manufacture a harm verdict
+        // against whatever action happened to be in flight.
+        confoundedTally.set(kind, (confoundedTally.get(kind) ?? 0) + 1);
+        dirty = true;
       } else if (ep.action == null) {
-        if (ep.confounded) {
-          // NOT a control observation (v0.40): the node died or a remediation
-          // ran on it while the episode was open, so "recovered with no
-          // action" is a claim the evidence cannot support — in the audited
-          // exemplar the clean after-window existed only because the
-          // dead-remediation ping revived the node. Excluded from the n as
-          // well as the ok: a confounded non-improvement would bias the base
-          // rate exactly as dishonestly in the other direction.
-          confoundedTally.set(kind, (confoundedTally.get(kind) ?? 0) + 1);
-        } else {
-          // Control arm: a symptom that resolved with no action taken.
-          control.set(kind, bump(control.get(kind), ep.verdict === 'improved'));
-          noteNode(controlNodes as unknown as Map<string, Set<number>>, kind, ep.nodeId);
-        }
+        // Control arm: a symptom that resolved with no action taken.
+        control.set(kind, bump(control.get(kind), ep.verdict));
+        noteNode(controlNodes as unknown as Map<string, Set<number>>, kind, ep.nodeId);
         dirty = true;
       } else {
         // Action arm — keyed by (kind, action) to match the un-banded control
@@ -802,7 +825,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         // confound. Both arms stay marginal (a documented diurnal-confound
         // limitation — see baseRate/efficacyFor).
         const ak = aKey(kind, ep.action.kind);
-        action.set(ak, bump(action.get(ak), ep.verdict === 'improved'));
+        action.set(ak, bump(action.get(ak), ep.verdict));
         noteNode(armNodes, ak, ep.nodeId);
         dirty = true;
       }
@@ -869,10 +892,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       }));
     },
 
-    controlArm(kind): { n: number; ok: number; nodes: number } | null {
+    controlArm(kind): { n: number; ok: number; bad: number; nodes: number } | null {
       const t = control.get(kind);
       if (!t) return null;
-      return { n: t.n, ok: t.ok, nodes: controlNodes.get(kind)?.size ?? 0 };
+      return { n: t.n, ok: t.ok, bad: t.bad, nodes: controlNodes.get(kind)?.size ?? 0 };
     },
 
     baseRate(kind): number | null {
@@ -884,9 +907,21 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     efficacyFor(kind, act): Efficacy {
       const base = this.baseRate(kind);
       const t = action.get(aKey(kind, act));
-      const n = t?.n ?? 0, ok = t?.ok ?? 0;
+      const n = t?.n ?? 0, ok = t?.ok ?? 0, harmed = t?.bad ?? 0;
       const nodes = armNodes.get(aKey(kind, act))?.size ?? 0;
-      if (n < cfg.minEpisodes) return { expectedEfficacy: null, n, baseRate: base, nodes, ready: false, lowerBound: null, bar: null };
+      // The CONTROL arm's own evidence (v0.44.0). `baseRate` was published as a
+      // bare percentage while the action arm beside it carried n and provenance
+      // — so "vs 80% self-heal" could be four episodes on one node, and the
+      // screen had no way to say so. Same two numbers, same meaning, same
+      // renderer.
+      const ct = control.get(kind);
+      const baseN = ct?.n ?? 0;
+      const baseHarmed = ct?.bad ?? 0;
+      const baseNodes = controlNodes.get(kind)?.size ?? 0;
+      const minN = cfg.minEpisodes;
+      if (n < cfg.minEpisodes) {
+        return { expectedEfficacy: null, n, baseRate: base, nodes, ready: false, lowerBound: null, bar: null, minN, baseN, baseNodes, harmed, baseHarmed };
+      }
       const rate = ok / n;
       // "Beats self-healing" REQUIRES a measured control arm to beat — you cannot
       // out-perform a base rate you have not measured. With no base rate yet the
@@ -906,7 +941,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const lower = wilsonLower(ok, n);
       const bar = base == null ? null : base + cfg.minEffect;
       const beats = bar != null && lower >= bar;
-      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, nodes, ready: true, lowerBound: lower, bar };
+      return { expectedEfficacy: beats ? rate : null, n, baseRate: base, nodes, ready: true, lowerBound: lower, bar, minN, baseN, baseNodes, harmed, baseHarmed };
     },
 
     falsePositives(kind): number {
@@ -950,6 +985,12 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
 
     reset(): void {
       open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); unverUndersampled.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
+      // WITHOUT THIS the caller's `reset(); save();` is a silent no-op (v0.44.0)
+      // — save() returns early on a false `dirty`, so the OLD mesh's ledger
+      // stayed on disk after a stick swap and a restart reloaded it onto the
+      // new network's node ids. The identity-change log event announced a wipe
+      // that had not been persisted.
+      dirty = true;
     },
 
     load(): void {
@@ -1001,8 +1042,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; unverTransient?: [SymptomKind, number][]; unverUndersampled?: [SymptomKind, number][]; confounded?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
       if (!o || o.v !== 1) return;
       control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); unverUndersampled.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
-      for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, t);
-      for (const [k, t] of o.action ?? []) if (validTally(t)) action.set(k, t);
+      for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, normalizeTally(t));
+      for (const [k, t] of o.action ?? []) if (validTally(t)) action.set(k, normalizeTally(t));
       for (const [k, v] of o.fp ?? []) if (Number.isFinite(v) && v >= 0) fp.set(k, v);
       // Absent in pre-v0.36 files — an older ledger simply starts this counter at 0.
       for (const [k, v] of o.unver ?? []) if (Number.isFinite(v) && v >= 0) unver.set(k, v);
@@ -1065,7 +1106,20 @@ export function planEpisodeLifecycle(
 }
 
 function validTally(t: Tally): boolean {
-  return !!t && Number.isFinite(t.n) && Number.isFinite(t.ok) && t.n >= 0 && t.ok >= 0 && t.ok <= t.n + 1e-9;
+  // `bad` is absent in pre-v0.44.0 files, and absent is not invalid — an older
+  // ledger simply has no record of regressions. `normalizeTally` supplies 0.
+  const bad = (t as Partial<Tally> | undefined)?.bad;
+  const badOk = bad === undefined || (Number.isFinite(bad) && bad >= 0 && bad <= t.n + 1e-9);
+  // `ok + bad <= n` is the joint invariant bump() guarantees (a closure scores
+  // improved OR worse, never both); without it a corrupt file can seat two
+  // contradicting rates in the same tally.
+  const jointOk = t.ok + (bad ?? 0) <= t.n + 1e-9;
+  return !!t && Number.isFinite(t.n) && Number.isFinite(t.ok) && t.n >= 0 && t.ok >= 0 && t.ok <= t.n + 1e-9 && badOk && jointOk;
+}
+
+/** Fill in `bad` for tallies restored from a pre-v0.44.0 ledger. */
+function normalizeTally(t: Tally): Tally {
+  return { n: t.n, ok: t.ok, bad: Number.isFinite(t.bad) ? t.bad : 0 };
 }
 
 /** Drop undefined option keys so `{...DEFAULTS, ...opts}` never overwrites a

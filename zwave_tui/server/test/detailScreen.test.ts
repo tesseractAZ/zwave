@@ -60,6 +60,9 @@ function mkData(o: DataOver = {}): { data: DataProvider; nodes: NodeSnapshot[] }
     interference: () => ({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
     entityStates: () => o.entityStates ?? [],
     configParams: () => o.configParams ?? { status: 'ready', params: [] },
+    openEpisodes: () => [],
+    controlArm: () => null,
+    autoPingState: () => null,
     requestConfigParams: (id) => o.onRequestConfig?.(id),
   };
   return { data, nodes };

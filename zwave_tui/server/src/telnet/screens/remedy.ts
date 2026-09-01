@@ -9,10 +9,11 @@
  */
 
 import type { ScreenCtx, Symptom, NodeSnapshot, SymptomKind, ActionKind, Efficacy } from '../../types';
-import { provenance, weight } from '../ledgerText';
+import { provenance, weight, unscoreableReason } from '../ledgerText';
 import { c, truncate, visLen } from '../ansi';
 import { frame, fieldStrip } from '../chrome';
 import { planFor, type PlanCandidate } from '../../zwave/planner';
+import { wilsonLower } from '../../zwave/outcomes';
 
 /** One-line learned-efficacy note for an executable candidate (M5): a green
  *  "beat self-healing" when it clears the control arm, a grey "not
@@ -39,47 +40,161 @@ import { planFor, type PlanCandidate } from '../../zwave/planner';
  * note now states the measurement and that the block still applies, which is
  * true for all three, and endorses nothing.
  */
-function efficacyNote(e: Efficacy | null | undefined, blocked = false): string | null {
-  if (!e || !e.ready) return null; // still learning → say nothing (honest)
+/**
+ * How far an action's regression rate must clear the control arm's own before
+ * the screen will call it harmful (v0.44.0). The same 0.05 the benefit gate
+ * uses (`OutcomeStore` cfg.minEffect), restated here because a screen cannot
+ * read the store's config — and deliberately NOT a different, looser number:
+ * accusing a remedy of harm is at least as consequential as endorsing it.
+ */
+const HARM_MIN_EFFECT = 0.05;
+
+function efficacyNote(e: Efficacy | null | undefined, blocked = false, width = Infinity): string | null {
+  if (!e) return null;
+
+  // WIDTH-AWARE ASSEMBLY (v0.44.0). This note used to be concatenated and then
+  // truncate()d, which clipped a measurement mid-digit at ordinary widths: at
+  // 80 columns `· 12 nodes` became `· 1`, a complete-looking and wrong node
+  // count. chrome.ts states the rule this screen must follow — an undisclosed
+  // drop is a smaller lie than a clipped number that reads as a plausible
+  // measurement — so every optional clause is now dropped WHOLE, in a fixed
+  // priority order, and the richest form that fits is the one rendered.
+  const pick = (forms: string[]): string => {
+    for (const f of forms) if (visLen(f) <= width) return f;
+    return forms[forms.length - 1];
+  };
+
+  const heal = e.baseRate == null ? null : `${Math.round(e.baseRate * 100)}% self-heal`;
+  const healProv = e.baseN > 0 ? ` (${weight(e.baseN)}${provenance(e.baseNodes, ' · ')})` : '';
+
+  if (!e.ready) {
+    // NOT silence (v0.44.0). "Still learning" and "no ledger at all" were
+    // rendered identically — as nothing — while the CONTROL arm for this
+    // symptom may be fully measured. The self-heal rate is the operator's
+    // actual decision input here: if this kind clears itself 80% of the time,
+    // that is worth knowing precisely BECAUSE the action is unproven.
+    if (heal == null) return null;
+    // An arm nobody has ever run is not "still learning" — there is nothing to
+    // learn from. Say what IS known: how the kind behaves untouched.
+    if (e.n <= 0) {
+      return c.grey(pick([
+        `≈ never tried here — this kind self-heals ${Math.round(e.baseRate! * 100)}%${healProv}`,
+        `≈ never tried here — self-heals ${Math.round(e.baseRate! * 100)}%`,
+        '≈ never tried here',
+      ]));
+    }
+    // A below-readiness arm whose attempts have ONLY made things worse is the
+    // arm an operator most needs warned about, and the readiness gate is
+    // exactly what was silencing it. Said, hedged honestly as too few.
+    const early = e.harmed >= 1 && e.harmed >= e.n - 1e-9
+      ? ' — ⚠ every attempt so far made it WORSE (too few to be sure)'
+      : e.harmed >= 0.5 ? ` — ⚠ ${weight(e.harmed)} of those made it worse` : '';
+    const lead = `≈ still learning this action (${weight(e.n)} of ${e.minN})`;
+    // `lead` itself is 38 columns before the 8-column indent, so it does NOT
+    // fit a 40-column terminal — the shortest form must drop the readiness
+    // fraction rather than let it be clipped to "n≈2".
+    return c.grey(pick([
+      `${lead} — ${heal}${healProv}${early}`,
+      `${lead} — ${heal}${early}`,
+      `${lead}${early}`,
+      lead,
+      `≈ still learning${early}`,
+      '≈ still learning',
+    ]));
+  }
+
   // NOT Math.round (v0.43.1). `n` is a decayed weight, not a tally: seven
   // closures on seven distinct nodes give 6.4005, which rounded to `n=6` beside
   // `· 7 nodes` — a visible self-contradiction on an ordinary run.
   const n = weight(e.n);
-  const base = e.baseRate != null ? ` vs ${Math.round(e.baseRate * 100)}% self-heal` : '';
   // PROVENANCE (v0.36.5, shared v0.43.1). The arms are marginal by design, so
-  // `n≈6.4` reads as six nodes agreeing when it may be one node repeating —
-  // exactly what happened live, a single flapping device teaching the
-  // fleet-wide arm past its readiness threshold. This screen used to fall
-  // SILENT when the count was unknown while ENGINE said "sources not recorded"
-  // for the same row; one function now decides for both.
+  // `n≈6.4` reads as six nodes agreeing when it may be one node repeating.
   const prov = provenance(e.nodes, ' · ');
+
+  // HARM, GATED THE SAME WAY BENEFIT IS (v0.44.0, corrected before release).
+  //
+  // The first cut compared a bare point ratio against 0.2 with no sampling gate
+  // and no control comparison, while the BENEFIT claim requires the Wilson
+  // lower bound to clear the base rate by the effect size. That asymmetry made
+  // harm the cheaper accusation: one regression on one node at n≈4.7 printed a
+  // yellow warning against the planner's own recommendation, and moving that
+  // single regression earlier in the sequence made it vanish — the decayed n
+  // differs by position alone.
+  //
+  // Three conditions now, each answering one way it was wrong:
+  //   - the bound, not the ratio, must clear the bar (sampling error);
+  //   - the bar is the CONTROL arm's own regression rate, not its improvement
+  //     rate — if this kind self-worsens 35% of the time, an action that
+  //     worsens 21% is better than doing nothing;
+  //   - at least two distinct nodes, so one flapping device cannot author it.
+  const harmRate = e.n > 0 ? e.harmed / e.n : 0;
+  const baseHarmRate = e.baseN > 0 ? e.baseHarmed / e.baseN : null;
+  const isHarm = e.nodes >= 2
+    && baseHarmRate != null
+    && wilsonLower(e.harmed, e.n) >= baseHarmRate + HARM_MIN_EFFECT;
+  const harmLong = isHarm
+    ? `⚠ made it WORSE in ${Math.round(harmRate * 100)}% of ${weight(e.n)}${prov}` +
+      ` — leaving it alone: ${Math.round(baseHarmRate! * 100)}% worse`
+    : null;
+  const harmShort = isHarm ? `⚠ made it WORSE in ${Math.round(harmRate * 100)}%` : null;
+
   if (e.expectedEfficacy != null) {
-    // `n` first (after the headline %) so the trust signal survives truncation.
     const pct = Math.round(e.expectedEfficacy * 100);
-    return blocked
-      ? c.yellow(`⚠ ledger measured ${pct}% here (${n}${prov})${base} — the block above still applies`)
-      : c.green(`✓ helped ${pct}% (${n}${prov})${base}`);
+    // The harm note is APPENDED, never substituted (v0.44.0). Returning early
+    // on harm suppressed a granted claim that ENGINE rendered in green from the
+    // same ledger row — two screens, one row, opposite conclusions. An action
+    // can genuinely help most of the time and hurt some of the time; that is
+    // one finding, not two competing ones.
+    const head = blocked ? `⚠ ledger measured ${pct}% here` : `✓ helped ${pct}%`;
+    const tailBlocked = blocked ? ' — the block above still applies' : '';
+    const vs = heal == null ? '' : ` vs ${heal}`;
+    // Ordered richest-first. The last entry must fit the NARROWEST supported
+    // terminal unaided, because `pick` falls back to it and the caller then
+    // truncates — which is the clipping this whole assembly exists to avoid.
+    // When both a block and a harm finding are present the block REMINDER is
+    // shed first: the block itself is already rendered on the row above, so
+    // that clause is a restatement, while the harm is new information.
+    const forms = harmShort != null
+      ? [
+          `${head} (${n}${prov})${vs}${healProv}${tailBlocked} — ${harmLong}`,
+          `${head} (${n}${prov})${vs}${tailBlocked} — ${harmLong}`,
+          `${head} (${n}${prov})${tailBlocked} — ${harmShort}`,
+          `${head}${tailBlocked} — ${harmShort}`,
+          `${head} — ${harmShort}`,
+          harmLong!,
+          harmShort,
+        ]
+      : [
+          `${head} (${n}${prov})${vs}${healProv}${tailBlocked}`,
+          `${head} (${n}${prov})${vs}${tailBlocked}`,
+          `${head} (${n}${prov})${tailBlocked}`,
+          `${head}${tailBlocked}`,
+          head,
+        ];
+    // Yellow whenever the row carries a caveat — a blocked framing or a harm
+    // finding must never be rendered in the endorsing green.
+    return (blocked || harmShort != null) ? c.yellow(pick(forms)) : c.green(pick(forms));
   }
+
+  if (harmLong != null) {
+    return c.yellow(pick([harmLong, harmShort!]));
+  }
+
   // WHY it is not distinguishable (v0.43.1). "Not distinguishable" was the
-  // engine's most common verdict and its least explicable: an operator looking
-  // at an arm that plainly succeeded most of the time had no way to see that
-  // the WILSON LOWER BOUND — not the point estimate — is what must clear the
-  // base rate, nor how far short it fell. The bound decided the verdict and was
-  // discarded at the ledger boundary; now it says so in its own terms.
-  // Against the BAR, not the bare base rate. The gate is `lower >= base +
-  // minEffect`, so an arm at 63% against a 60% base rate is withheld — and
-  // printing "63% vs 60% self-heal" under "not distinguishable" reads as a win
-  // beneath a verdict that says otherwise. Name the number it had to clear.
-  const selfHeal = e.baseRate != null ? `${Math.round(e.baseRate * 100)}% self-heal` : null;
-  const why = e.lowerBound != null
-    ? (selfHeal != null && e.bar != null
-        ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, short of the ` +
-          `${Math.round(e.bar * 100)}% bar (${selfHeal} + margin)`
-        : ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, and self-heal is not measured yet`)
-    : '';
-  return blocked
-    ? c.grey(`≈ ${n}${prov}: measured — not distinguishable from self-healing${why}`)
-    : c.grey(`≈ ${n}${prov}: not distinguishable from self-healing${why}`);
+  // engine's most common verdict and its least explicable: the WILSON LOWER
+  // BOUND — not the point estimate — is what must clear the base rate, and by
+  // how much. Against the BAR, not the bare base rate: the gate is
+  // `lower >= base + minEffect`, so reporting the bound against `base` alone
+  // reads as a win beneath a verdict that withheld one.
+  const lead = blocked ? `≈ ${n}${prov}: measured — not distinguishable from self-healing`
+                       : `≈ ${n}${prov}: not distinguishable from self-healing`;
+  const leadShort = `≈ ${n}: not distinguishable`;
+  const why = e.lowerBound == null ? ''
+    : heal != null && e.bar != null
+      ? ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, short of the ` +
+        `${Math.round(e.bar * 100)}% bar (${heal} + margin)`
+      : ` — even pessimistically ${Math.round(e.lowerBound * 100)}%, and self-heal is not measured yet`;
+  return c.grey(pick([`${lead}${why}`, lead, leadShort]));
 }
 
 const SEV_TAG: Record<Symptom['severity'], string> = {
@@ -208,6 +323,19 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
           'credited to neither arm'), W));
     }
   }
+  // WHY there are no ledger rows at all, for kinds where that is permanent
+  // (v0.44.0). Silence here is not neutral: every other kind accumulates an
+  // efficacy record, so a kind that never accumulates one reads as "still
+  // learning", indefinitely. For node-down the loop is not slow — it is
+  // structurally off, and will never turn on. UNGATED on the ledger counters,
+  // because the whole point is that they will always be zero.
+  const noScore = unscoreableReason(sym.kind);
+  // WRAPPED, not truncated (v0.44.0). The sentence needs ~185 columns; emitted
+  // as one truncate()'d row it was cut mid-word at every realistic terminal, so
+  // the disclosure disclosed nothing. There is ample vertical room here.
+  if (noScore) {
+    for (const line of wrap(`○ ${noScore}`, W - 4)) rows.push(truncate('    ' + c.grey(line), W));
+  }
   // Narrative — one line of diagnostic context (the plan headline carries the
   // recommendation, so a single line here keeps the block scannable).
   for (const line of wrap(sym.narrative, W - 4).slice(0, 1)) rows.push(truncate('    ' + c.grey(line), W));
@@ -236,7 +364,9 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       // not. efficacyNote() carries the blocked framing so a "NOT recommended"
       // row can report a measurement without ever reading as an endorsement.
       if (cand.action != null) {
-        const note = efficacyNote(cand.efficacy, cand.blocked != null);
+        // The note is assembled to FIT — 8 columns of indent — so a narrow
+        // terminal drops a whole clause instead of half a number.
+        const note = efficacyNote(cand.efficacy, cand.blocked != null, W - 8);
         if (note) rows.push(truncate('        ' + note, W));
       }
     });
@@ -401,7 +531,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       // window has no live symptom by construction — that is what being in the
       // window means — so the ledger could be mid-experiment on three nodes
       // while this printed an unqualified all-clear. Say what is still moving.
-      const openEps = data.openEpisodes?.() ?? [];
+      const openEps = data.openEpisodes() ?? [];
       body.push(c.green(`    ✓ All clear — ${eng.total} nodes learned, no symptoms detected.`));
       body.push('');
       body.push(truncate(c.grey('    Every node has a graduated timeout, rtt and rssi baseline'), W));

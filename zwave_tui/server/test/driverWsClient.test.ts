@@ -493,7 +493,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       unverifiableUndersampledCount: (k: string) => (k === 'rtt-degraded' ? 4 : 0),
       confoundedCount: (k: string) => (k === 'rtt-degraded' ? 2 : 0),
       openEpisodes: () => [{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded', onsetMs: 1, actionKind: null, confounded: false, beforeFreshN: 4, confirming: true }],
-      controlArm: (k: string) => (k === 'rtt-degraded' ? { n: 6, ok: 5, nodes: 3 } : null),
+      controlArm: (k: string) => (k === 'rtt-degraded' ? { n: 6, ok: 5, bad: 0, nodes: 3 } : null),
       driverWsStatus: () => 'live (schema 41)',
       driverWsState: () => 'backoff',
       autoPingState: () => ({ lastTickMs: 42, suppressed: 'storm', listening: 35, deadListening: 1, staleDue: 2, stalestMs: 60, verifyOwed: 3, config: { enabled: true, writeActions: true, afterMs: 1, maxAttempts: 3, staleMs: 1 }, nodes: [] }),
@@ -521,7 +521,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
     // v0.41: the ENGINE screen's three members. A screen reading an optional
     // provider member the production bridge forgot to wire renders a silent
     // blank — the v0.33 dead-M-key class, which this whole release is about.
-    assert.equal(provider.provider.openEpisodes?.().length, 1, 'openEpisodes crosses the bridge');
+    assert.equal(provider.provider.openEpisodes()?.length, 1, 'openEpisodes crosses the bridge');
     assert.equal(provider.provider.controlArm?.('rtt-degraded')?.n, 6, 'controlArm crosses the bridge');
     assert.equal(provider.provider.autoPingState?.()?.suppressed, 'storm', 'autoPingState crosses the bridge');
     assert.equal(provider.provider.driverWsStatus?.(), 'live (schema 41)', 'driverWsStatus crosses the bridge');

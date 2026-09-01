@@ -68,7 +68,11 @@ async function main(): Promise<void> {
 
   // 3) Bridge ZwaveData → ZwaveDataSource. events() serves the live ring that
   //    feeds the Log screen; everything else maps straight through.
-  const source: ZwaveDataSource = buildZwaveDataSource(zwaveData as unknown as ZwaveDataSource);
+  // NO CAST (v0.44.0). `as unknown as` here silenced a real divergence: when
+  // `controlArm` gained `bad`, ZwaveData kept the old shape and the compiler
+  // could not say so — the exact seam that let v0.33 ship a dead feature. A
+  // plain assignment makes every future member a build error instead.
+  const source: ZwaveDataSource = buildZwaveDataSource(zwaveData);
 
 
   // 4) Shared, timer-refreshed render cache both transports read.

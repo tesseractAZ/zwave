@@ -41,3 +41,33 @@ export function provenance(nodes: number, sep = ', '): string {
 export function weight(n: number): string {
   return `n≈${n.toFixed(1)}`;
 }
+
+/**
+ * Why this symptom kind is NOT measured by the outcome ledger (v0.44.0), or
+ * null if it is.
+ *
+ * The ledger's silence is not neutral. Every other kind on REMEDY accumulates
+ * an efficacy record, so a kind that never accumulates one looks like a kind
+ * nobody has tried anything on yet — "still learning", indefinitely. For
+ * `node-down` that is wrong in a way that matters: the loop is not slow, it is
+ * structurally off, and it will never turn on.
+ *
+ * The string lives here rather than in outcomes.ts because both screens must
+ * say the same thing, and because outcomes.ts pulls `node:fs` — a dependency no
+ * screen module should acquire. `metricOf` remains the source of truth for
+ * WHICH kinds are unscoreable; a test binds the two so they cannot drift.
+ *
+ * Note `metricOf` returns 'none' for two different reasons — node-down's
+ * structural exclusion, and the mesh-scoped kinds that have no per-node
+ * recovery metric at all — so the sentence is per-kind and is NOT derived from
+ * the metric.
+ */
+export function unscoreableReason(kind: string): string | null {
+  switch (kind) {
+    case 'node-down':
+      return 'not measured by the ledger: an outage episode ends exactly when the node stops being '
+        + 'Dead, so every closure would score as a recovery — there is no control arm to compare against.';
+    default:
+      return null;
+  }
+}

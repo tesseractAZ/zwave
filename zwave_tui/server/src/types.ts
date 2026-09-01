@@ -251,6 +251,43 @@ export interface Efficacy {
    */
   lowerBound: number | null;
   /**
+   * The readiness threshold this arm's `n` must reach (v0.44.0).
+   *
+   * Carried on the VALUE, not read from a screen-side constant: the store can
+   * be constructed with a non-default cfg, so a constant in a screen would
+   * silently disagree with the ledger that produced the number beside it.
+   */
+  minN: number;
+  /**
+   * Decayed count of episodes this action left MEASURABLY WORSE (v0.44.0).
+   *
+   * `scoreRecovery` distinguishes `worse` from `no-change` at eight sites, and
+   * the tally used to discard that: an action that harms 40% of the time and
+   * one that is merely useless both rendered as "not distinguishable from
+   * self-healing". Advisory-first only means something if the advice can say
+   * "this made it worse", so this is the one number that can argue against an
+   * action the planner is otherwise offering.
+   */
+  harmed: number;
+  /**
+   * Decayed count of NO-ACTION episodes of this kind that got worse on their
+   * own (v0.44.0) — the control arm's regression rate, the only fair
+   * comparison for `harmed`.
+   *
+   * Without it, "this action made it worse 21% of the time" is not a finding:
+   * if the symptom self-worsens 35% of the time, an action that worsens 21% is
+   * BETTER than doing nothing. Comparing `harmed/n` against `baseRate` (the
+   * control's IMPROVEMENT rate) compares two different quantities and reads as
+   * an indictment either way.
+   */
+  baseHarmed: number;
+  /** Decayed episode weight behind `baseRate` (v0.44.0) — the control arm's own
+   *  `n`. A self-heal rate from one episode is not a fact about the kind. */
+  baseN: number;
+  /** DISTINCT nodes behind `baseRate` (v0.44.0). `0` means UNKNOWN, never
+   *  "zero nodes" — the same contract as `nodes`, rendered by the same helper. */
+  baseNodes: number;
+  /**
    * The success rate `lowerBound` had to CLEAR for the claim to be made
    * (v0.43.1): `baseRate + minEffect`, null when no base rate is measured.
    *
@@ -437,12 +474,12 @@ export interface DataProvider {
   confoundedCount?(kind: SymptomKind): number;
   /** The ledger's LIVE workload — open episodes and whether each is in its
    *  confirmation window (v0.41). Absent ⇒ no ledger. */
-  openEpisodes?(): OpenEpisodeSummary[];
+  openEpisodes(): OpenEpisodeSummary[] | null;
   /** The control arm with its provenance (v0.41) — the n and node count behind
    *  `baseRate`, without which an efficacy claim has no context. */
-  controlArm?(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
+  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number } | null;
   /** Auto-ping's live runtime state (v0.41), or null when the feature is off. */
-  autoPingState?(): AutoPingSnapshot | null;
+  autoPingState(): AutoPingSnapshot | null;
   /** Driver-WS lifecycle, one line (v0.43.0). The accessor existed since the
    *  client shipped and NOTHING read it, so a dormant, wedged or
    *  schema-mismatched driver socket — the source of bgRSSI, S2 resync

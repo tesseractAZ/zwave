@@ -90,7 +90,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
 
   /* ── AUTO-PING ─────────────────────────────────────────────────────────── */
   push(c.label('AUTO-PING') + c.grey('  — the engine\'s one autonomous write'));
-  const ap = data.autoPingState?.() ?? null;
+  const ap = data.autoPingState() ?? null;
   if (!ap) {
     push('  ' + c.grey('◷ off — auto-ping is disabled, or write actions are off. Nothing here probes the mesh.'));
   } else if (ap.lastTickMs == null) {
@@ -165,7 +165,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
   /* ── LEDGER: LIVE ──────────────────────────────────────────────────────── */
   push('');
   push(c.label('LEDGER — LIVE') + c.grey('  — episodes the engine is measuring right now'));
-  const open = data.openEpisodes?.() ?? null;
+  const open = data.openEpisodes() ?? null;
   if (open == null) {
     push('  ' + c.grey('◷ no outcome ledger — the learning loop is off.'));
   } else if (open.length === 0) {
@@ -197,7 +197,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
   const legendAt = body.length; // filled in below, only if a weight is printed
   let anyLearned = false;
   for (const kind of SCORED_KINDS) {
-    const arm = data.controlArm?.(kind) ?? null;
+    const arm = data.controlArm(kind) ?? null;
     const unver = data.unverifiableCount?.(kind) ?? 0;
     const transient = data.unverifiableTransientCount?.(kind) ?? 0;
     const under = data.unverifiableUndersampledCount?.(kind) ?? 0;
@@ -215,20 +215,74 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     if (arm != null && arm.n > 0) {
       // The base rate ALWAYS with its n and its provenance: a self-heal rate
       // from one node is not a fact about the kind.
+      // The control arm's OWN regressions too (v0.44.0): a kind that
+      // self-heals 60% and self-worsens 30% is a different animal from one
+      // that self-heals 60% and stalls 40%, and `controlArm().bad` was being
+      // tallied, persisted and plumbed end-to-end while no screen showed it.
+      const armHarm = arm.bad >= 0.5 ? `, ${weight(arm.bad)} worse` : '';
       parts.push(c.white(`self-heal ${Math.round((arm.ok / arm.n) * 100)}%`) +
-        c.grey(` (${weight(arm.n)}${provenance(arm.nodes)})`));
+        c.grey(` (${weight(arm.n)}${provenance(arm.nodes)}${armHarm})`));
     } else {
       parts.push(c.grey('self-heal not yet measured'));
     }
+    // BITS CARRY A PRIORITY (v0.44.0). fitBits drops whole bits from the right,
+    // so at 80 columns the regression count — the longest bit and the one that
+    // argues against acting — was the first thing to disappear, leaving the
+    // benign arms on screen. Sorting the ARMS was not enough: the self-heal bit
+    // and the earlier arms still consumed the width first. AUTO-PING already
+    // orders alarm-first for exactly this reason; this now does too.
+    //
+    //   0 = a measured regression      1 = an arm's own verdict
+    //   2 = the kind's background rate   3 = a bound
+    //
+    // The control arm sits BELOW the action arms deliberately: when a harm
+    // finding and an efficacy both need the line, the kind's background
+    // self-heal rate is the context, not the subject, and 80 columns cannot
+    // hold all three.
+    const pri: number[] = parts.map(() => 2);
+    const bit = (text: string, p: number): void => { parts.push(text); pri.push(p); };
     for (const { a, e } of arms) {
-      parts.push(e!.expectedEfficacy != null
-        ? c.green(`${a} ${Math.round(e!.expectedEfficacy * 100)}%`) + c.grey(` (${weight(e!.n)}${provenance(e!.nodes)})`)
+      // The regression count is its OWN bit, not concatenated into the arm's
+      // (v0.44.0): welded together they pushed the whole arm past 80 columns
+      // and fitBits dropped ALL of it, so the modal terminal lost both the
+      // efficacy and the harm. Separate bits degrade one at a time.
+      if (e!.expectedEfficacy != null) {
+        bit(c.green(`${a} ${Math.round(e!.expectedEfficacy * 100)}%`) +
+          c.grey(` (${weight(e!.n)}${provenance(e!.nodes)})`), 1);
+        // The bound ON A GRANTED CLAIM. The point estimate is the honest best
+        // guess, but it is not what earned the claim — this is. `at 95%` is not
+        // decoration: a naked second percentage beside a point estimate reads
+        // as a range endpoint of unknown kind.
+        if (e!.lowerBound != null) bit(c.grey(`${a} ≥${Math.round(e!.lowerBound * 100)}% at 95%`), 3);
+      } else if (!e!.ready) {
+        // THIRD STATE (v0.44.0). An arm below readiness was rendered with the
+        // same words as one that was measured and found wanting — "not
+        // distinguishable" reads as a learned verdict, and it was being applied
+        // to arms nobody had tried often enough to judge. Its provenance rides
+        // along: a below-readiness arm is exactly where "one node repeated
+        // three times" is most likely.
+        bit(c.grey(`${a} still learning (${weight(e!.n)} of ${e!.minN}${provenance(e!.nodes)})`), 1);
+      } else if (e!.bar == null) {
+        // FOURTH STATE (v0.44.0). "Not distinguishable" asserts a comparison
+        // was made and came out level. With no control arm measured, no
+        // comparison was performed at all — REMEDY has said so since v0.43.1
+        // and this screen was still claiming the verdict.
+        bit(c.grey(`${a} measured, no control arm yet (${weight(e!.n)}${provenance(e!.nodes)})`), 1);
+      } else {
         // Provenance on the withheld arm too (v0.43.1): "one node repeated six
         // times" is exactly the shape that fails to distinguish itself.
-        : c.grey(`${a} not distinguishable (${weight(e!.n)}${provenance(e!.nodes)})`));
+        bit(c.grey(`${a} not distinguishable (${weight(e!.n)}${provenance(e!.nodes)})`), 1);
+      }
+      // Its own bit, and marked as the decayed weight it is — this screen's
+      // legend says bare numbers are cumulative node counts.
+      if (e!.harmed >= 0.5) bit(c.yellow(`${a}: ${weight(e!.harmed)} worse`), 0);
     }
     push('  ' + c.white(kind));
-    push(fitBits('    ', parts, view.cols));
+    // Stable sort by priority: regressions survive a narrow terminal, bounds
+    // are shed first. `map`+`sort` on indices keeps the within-priority order.
+    const laid = parts.map((t, i) => ({ t, p: pri[i], i }))
+      .sort((x, y) => x.p - y.p || x.i - y.i).map((b) => b.t);
+    push(fitBits('    ', laid, view.cols));
     const tallies: string[] = [];
     if (unver > 0) tallies.push(`${unver} unscoreable (thin evidence)`);
     if (transient > 0) tallies.push(`${transient} transient blink${transient === 1 ? '' : 's'}`);

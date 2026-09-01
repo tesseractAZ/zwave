@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createActionRunner, isNotFailedRefusal } from '../src/zwave/zwaveActions';
+import { createActionRunner, isNotFailedRefusal, zwaveErrorCode } from '../src/zwave/zwaveActions';
 import type { HaWsClient } from '../src/ha/haWsClient';
 
 interface MkOpts { reject?: boolean; noDevice?: boolean; noPing?: boolean; entry?: string | null }
@@ -260,7 +260,8 @@ test('removeFailed refused on a live node is classified `refused`; everything el
     enabled: true,
   } as never);
 
-  await build('Node 5 is not a failed node').removeFailed(5);
+  // A VERBATIM zwave-js 15.28.0 message, wrapped as the chain delivers it.
+  await build('HA WS error (zwave_error): Z-Wave error 361 - The node could not be removed because it has responded (ZW0361)').removeFailed(5);
   assert.deepEqual(seen.pop(), { kind: 'removeFailed', ok: false, refusal: 'refused' },
     'the driver rejecting the premise indicts the detector');
 
@@ -275,37 +276,95 @@ test('removeFailed refused on a live node is classified `refused`; everything el
     'only a DIAGNOSIS-VERIFYING action can be refused in a way that indicts a detector');
 });
 
-test('the refusal family covers the plausible phrasings, and nothing else (v0.43.1)', () => {
-  // The exact production string is UNOBSERVED — this add-on reaches the driver
-  // through HA's WS API and no genuine refusal has been captured on this fleet.
-  // A family that under-matches degrades to 'transport' and indicts nothing,
-  // which is safe but is also precisely the silence that made
-  // `refused-misdiagnosis` unreachable for four releases. Cover the readings.
-  for (const yes of [
-    'HA WS error (zwave_error): Node 5 is not a failed node',
-    'HA WS error (zwave_error): The node is not currently failed',
-    "HA WS error (zwave_error): The node is not in the controller's failed nodes list!",
-    'HA WS error (zwave_error): Z-Wave error 1 - the node is still alive',
-    'HA WS error (zwave_error): could not be removed because it has responded',
-  ]) assert.ok(isNotFailedRefusal(yes), `should read as a refusal: ${yes}`);
+test('refusals are classified on the Z-Wave ERROR CODE, against real driver messages (v0.43.2)', () => {
+  // Every string below is the VERBATIM text zwave-js 15.28.0 emits from
+  // Controller.removeFailedNode, wrapped exactly as the chain delivers it:
+  //   ZWaveError appends " (ZW0361)"; FailedZWaveCommand prefixes
+  //   "Z-Wave error 361 - "; HA's async_handle_failed_command forwards
+  //   err.args[0] unchanged; haWsClient prefixes "HA WS error (zwave_error): ".
+  // The enum's own comment says these codes exist so callers need not rely on
+  // the wording — the previous version of this classifier did, and was wrong.
+  const wrap = (code: number, text: string): string =>
+    `HA WS error (zwave_error): Z-Wave error ${code} - ${text} (ZW0${code})`;
 
+  // RemoveFailedNode_NodeOK — unambiguous: the node answered.
+  assert.ok(isNotFailedRefusal(wrap(361, 'The node could not be removed because it has responded')));
+
+  // RemoveFailedNode_Failed, the node-is-fine cases. The ping path is the MOST
+  // LIKELY refusal in practice: zwave-js pings three times before it even asks
+  // the controller, and the old classifier missed it entirely.
+  assert.ok(isNotFailedRefusal(wrap(360, 'The node removal process could not be started because the node responded to a ping.')));
+  // NOT a refusal, despite reading like one: zwave-js pings the node three
+  // times BEFORE it asks the controller, and only reaches the response branch
+  // that can report NodeNotFound after all three failed. The device is proven
+  // silent by then — this is the controller's bookkeeping disagreeing with the
+  // driver, and blaming the ghost detector for it would punish a correct call.
+  assert.ok(!isNotFailedRefusal(wrap(360,
+    'The node removal process could not be started due to the following reasons:\n· Node 5 is not in the list of failed nodes')));
+
+  // RemoveFailedNode_Failed, the cases that say NOTHING about the diagnosis.
+  assert.ok(!isNotFailedRefusal(wrap(360, 'The removal process could not be completed')));
+  assert.ok(!isNotFailedRefusal(wrap(360,
+    'The node removal process could not be started due to the following reasons:\n· This controller is not the primary controller')));
+  assert.ok(!isNotFailedRefusal(wrap(360,
+    'The node removal process could not be started due to the following reasons:\n· The node removal process is currently busy')));
+
+  // The driver's OWN words are ambiguous here — "busy OR responded". If zwave-js
+  // cannot tell which, neither can we, and a detector must not be indicted on it.
+  assert.ok(!isNotFailedRefusal(wrap(360,
+    'The node removal process could not be started due to the following reasons:\n· The controller is busy or the node has responded')));
+
+  // The 360 message is assembled from BITFLAGS: several reasons can co-occur.
+  // A transport reason vetoes — if the controller was not primary, the failed-
+  // nodes list was never meaningfully consulted.
+  assert.ok(!isNotFailedRefusal(wrap(360,
+    'The node removal process could not be started due to the following reasons:'
+    + '\n· This controller is not the primary controller'
+    + '\n· Node 5 is not in the list of failed nodes')));
+
+  // Both flags at once (NodeNotFound | RemoveFailed) — still not a refusal.
+  assert.ok(!isNotFailedRefusal(wrap(360,
+    'The node removal process could not be started due to the following reasons:'
+    + '\n· Node 5 is not in the list of failed nodes'
+    + '\n· The controller is busy or the node has responded')));
+
+  // Non-Z-Wave failures carry no code at all.
   for (const no of [
-    'HA WS error (unknown_error): Failed to remove the node',
     'HA WS error (timeout): Timeout waiting for a response',
     'Connection lost',
     'HA WS error (not_found): Config entry not found',
-    // An ordinary failure to act says NOTHING about whether the diagnosis was
-    // right — reading it as a refusal would fabricate the accusation.
-    'HA WS error (zwave_error): The removal process could not be completed',
   ]) assert.ok(!isNotFailedRefusal(no), `must NOT read as a refusal: ${no}`);
+
+  // And the phrasings the OLD classifier invented match nothing, because the
+  // driver never emits them — proof the family was fiction, not a near-miss.
+  for (const invented of ['Node 5 is not a failed node', 'The node is not currently failed']) {
+    assert.ok(!isNotFailedRefusal(`HA WS error (zwave_error): ${invented}`),
+      `an invented phrasing with no code must not classify: ${invented}`);
+  }
 });
+
+test('the Z-Wave error code is recovered from EITHER encoding the chain provides (v0.43.2)', () => {
+  // Two independent carriers, so losing one does not blind the classifier:
+  // the ZW#### suffix appended by ZWaveError, and the numeric restatement
+  // added by FailedZWaveCommand.
+  assert.equal(zwaveErrorCode('… has responded (ZW0361)'), 361, 'suffix alone');
+  assert.equal(zwaveErrorCode('Z-Wave error 361 - … has responded'), 361, 'relayed number alone');
+  assert.equal(zwaveErrorCode('Z-Wave error 361 - … (ZW0361)'), 361, 'both agree');
+  assert.equal(zwaveErrorCode('Connection lost'), null, 'neither present');
+  // A refusal is still recognised if only the relayed number survives.
+  assert.ok(isNotFailedRefusal('Z-Wave error 361 - The node could not be removed because it has responded'));
+});
+
 
 test('an unmatched remove-failed failure LOGS its wording so the family can be corrected (v0.43.1)', () => {
   // The self-capturing half: the first real refusal on this fleet must leave
   // its verbatim text in the log rather than vanishing into a bare `false`.
   const logs: string[] = [];
   const runner = createActionRunner({
-    client: { send: async () => { throw new Error('HA WS error (zwave_error): some wording nobody predicted'); } } as never,
+    // A real ZW0360 whose REASON is one the families do not yet cover. Gating
+    // on the code is what stops this firing for a dropped socket, where no
+    // driver ever spoke and there is nothing to add.
+    client: { send: async () => { throw new Error('HA WS error (zwave_error): Z-Wave error 360 - The node removal process could not be started due to the following reasons:\n· Some reason nobody predicted (ZW0360)'); } } as never,
     entryId: () => 'entry-1',
     deviceIdOf: (n: number) => `dev-${n}`,
     pingEntityOf: (n: number) => `button.node${n}_ping`,
@@ -313,8 +372,32 @@ test('an unmatched remove-failed failure LOGS its wording so the family can be c
     enabled: true,
   } as never);
   return runner.removeFailed(5).then(() => {
-    const captured = logs.find((l) => /wording to add to isNotFailedRefusal/.test(l));
-    assert.ok(captured, `the unmatched text was not captured: ${JSON.stringify(logs)}`);
-    assert.match(captured, /some wording nobody predicted/, 'and it is the VERBATIM driver text');
+    assert.ok(logs.some((l) => /unclassified ZW0360 reason/.test(l)),
+      `the capture must fire: ${JSON.stringify(logs)}`);
+    // The FLAG is the new information. The driver's verbatim text is already in
+    // the ring via the generic failure line — re-logging it behind a prose
+    // preamble is what truncation then ate.
+    const verbatim = logs.find((l) => /Some reason nobody predicted/.test(l));
+    assert.ok(verbatim, `the verbatim text must be somewhere in the log: ${JSON.stringify(logs)}`);
+    assert.match(verbatim, /\(ZW0360\)/, 'including the code suffix that identifies it');
+  });
+});
+
+test('the self-capture does NOT fire when no driver ever spoke (v0.44.0)', () => {
+  // A dropped socket or a timeout carries no Z-Wave error code, so there is no
+  // reason string to add to any family — logging "here is the wording to add"
+  // for a transport fault is an instruction nobody can act on.
+  const logs: string[] = [];
+  const runner = createActionRunner({
+    client: { send: async () => { throw new Error('HA WS error (timeout): Timeout waiting for a response'); } } as never,
+    entryId: () => 'entry-1',
+    deviceIdOf: (n: number) => `dev-${n}`,
+    pingEntityOf: (n: number) => `button.node${n}_ping`,
+    log: (_s: string, _n: number | null, text: string) => { logs.push(text); },
+    enabled: true,
+  } as never);
+  return runner.removeFailed(5).then(() => {
+    assert.ok(!logs.some((l) => /unclassified ZW0360/.test(l)),
+      `no driver spoke, so nothing to capture: ${JSON.stringify(logs)}`);
   });
 });
