@@ -18,6 +18,7 @@
  * wider than view.cols.
  */
 
+import { firstSentence } from '../ledgerText';
 import {
   c,
   lr,
@@ -623,7 +624,7 @@ function meshSymptomBlock(ctx: ScreenCtx, W: number): string[] {
     const basis = sym.basis === 'measured' ? '' : c.grey(` (${sym.basis})`);
     const room = Math.max(20, W - 26 - visLen(strip(basis)));
     out.push('  ' + sev('● ') + c.white(sym.kind) + basis +
-             c.grey('  ' + truncate(sym.narrative.split('.')[0], room)));
+             c.grey('  ' + truncate(firstSentence(sym.narrative), room)));
   }
   if (mesh.length > 4) out.push('  ' + c.grey(`+${mesh.length - 4} more — [7] REMEDY`));
   return out;

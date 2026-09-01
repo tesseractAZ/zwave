@@ -31,6 +31,7 @@
  */
 
 import type { HaWsClient, HaSubscription } from '../ha/haWsClient';
+import { subsumptionLabel, firstSentence } from '../telnet/ledgerText';
 import {
   NodeStatus,
   NODE_STATUS_LABEL,
@@ -63,7 +64,7 @@ import {
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
-import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { isPingCandidate, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal } from './zwaveActions';
@@ -663,7 +664,10 @@ class ZwaveDataImpl implements ZwaveData {
   private readonly symptomState: SymptomState = new Map();
   private lastSymptoms: Symptom[] = [];
   /** Keys of symptoms already logged, so only NEW ones emit a log line. */
-  private loggedSymptomKeys = new Set<string>();
+  /** What was last LOGGED about each live symptom (v0.45.0) — a Map, not a Set,
+   *  because a Set cannot tell a `watch` that became `crit` from one that never
+   *  moved, and cannot name the node when the symptom later clears. */
+  private loggedSymptomKeys = new Map<string, LoggedSymptom>();
   /** M5 outcome LEDGER (learned efficacy vs the no-action control arm). */
   private readonly outcomes: OutcomeStore | null;
   /** Symptom key → first tick it went absent, for the confirmation-window before
@@ -1084,17 +1088,9 @@ class ZwaveDataImpl implements ZwaveData {
     );
     this.lastSymptoms = symptoms;
     // Log NEW symptoms once (source 'net', kind 'symptom'); prune resolved keys.
-    const live = new Set<string>();
-    for (const sym of symptoms) {
-      const k = `${sym.nodeId ?? 'mesh'}:${sym.kind}`;
-      live.add(k);
-      if (!this.loggedSymptomKeys.has(k)) {
-        this.loggedSymptomKeys.add(k);
-        const sev = sym.severity === 'crit' ? 'error' : sym.severity === 'warn' ? 'warn' : 'info';
-        this.pushEvent('net', sev, 'symptom', sym.nodeId, `${sym.kind}${sym.subsumedBy ? ' (under mesh event)' : ''}: ${sym.narrative.split('.')[0]}`);
-      }
-    }
-    for (const k of [...this.loggedSymptomKeys]) if (!live.has(k)) this.loggedSymptomKeys.delete(k);
+    const { next, events } = diffSymptomLog(this.loggedSymptomKeys, symptoms);
+    this.loggedSymptomKeys = next;
+    for (const e of events) this.pushEvent('net', e.severity, 'symptom', e.nodeId, e.text);
     // M5: advance the outcome ledger's episode lifecycle off the same signal.
     this.updateEpisodes(symptoms, now);
     // Consumed by the confound guard inside updateEpisodes; one pass only.
@@ -1890,6 +1886,9 @@ class ZwaveDataImpl implements ZwaveData {
         this.baselines?.reset();
         this.symptomState.clear();
         this.lastSymptoms = [];
+        // A network change WIPES state; it does not "resolve" symptoms. No
+        // clearance events on this path — the old mesh's symptoms did not end,
+        // they stopped being ours to know about.
         this.loggedSymptomKeys.clear();
         // M5 ledger is per-mesh too — wipe episodes + learned efficacy AND
         // persist the empty state, else a restart would reload the OLD network's
@@ -2827,6 +2826,64 @@ function num(x: unknown): number | null {
  * PROVEN and latches permanently (`latched`). Returns `newlyMismatched` on the
  * transition so the caller purges the acceptance-window data exactly once.
  */
+/** What the log last said about one live symptom (v0.45.0). */
+export interface LoggedSymptom {
+  severity: Severity;
+  nodeId: number | null;
+  kind: SymptomKind;
+}
+
+const SEV_ORDER: Record<Severity, number> = { watch: 0, warn: 1, crit: 2 };
+
+/**
+ * Diff the live symptom set against what the log has already said, and return
+ * the events that close the gap (v0.45.0).
+ *
+ * The Log recorded a symptom's ONSET and nothing else. A symptom that appeared,
+ * escalated `watch → crit`, and cleared produced exactly ONE line — the least
+ * severe thing that ever happened — and an operator reading the log had no way
+ * to know it had ended. The onset line was, in effect, permanent.
+ *
+ * Extracted as a pure function because the tick that owned this loop is
+ * unreachable from tests; every other diffing rule in this file (`mapStateChanged`,
+ * `driverHomeGuard`, `statsCounters`) is exported for the same reason.
+ *
+ * Three transitions, and one deliberate silence:
+ *   - ONSET      — unchanged; severity maps crit→error, warn→warn, watch→info.
+ *   - ESCALATION — only UPWARD. A de-escalation updates the stored severity
+ *     silently: "it got less bad" is not news worth a line, and logging it
+ *     would double the volume on a flapping node.
+ *   - CLEARANCE  — always `info`, never carrying the original severity: a
+ *     symptom ENDING is good news, and a red line saying so reads as a fault.
+ */
+export function diffSymptomLog(
+  prev: ReadonlyMap<string, LoggedSymptom>,
+  live: readonly Symptom[],
+): { next: Map<string, LoggedSymptom>; events: { severity: LogEvent['severity']; nodeId: number | null; text: string }[] } {
+  const sevOf = (s: Severity): LogEvent['severity'] => (s === 'crit' ? 'error' : s === 'warn' ? 'warn' : 'info');
+  const next = new Map<string, LoggedSymptom>();
+  const events: { severity: LogEvent['severity']; nodeId: number | null; text: string }[] = [];
+
+  for (const sym of live) {
+    const k = `${sym.nodeId ?? 'mesh'}:${sym.kind}`;
+    if (next.has(k)) continue; // one entry per key, matching the detector lifecycle
+    const was = prev.get(k);
+    next.set(k, { severity: sym.severity, nodeId: sym.nodeId, kind: sym.kind });
+    if (!was) {
+      events.push({ severity: sevOf(sym.severity), nodeId: sym.nodeId,
+        text: `${sym.kind}${subsumptionLabel(sym.subsumedBy, ' ')}: ${firstSentence(sym.narrative)}` });
+    } else if (SEV_ORDER[sym.severity] > SEV_ORDER[was.severity]) {
+      events.push({ severity: sevOf(sym.severity), nodeId: sym.nodeId,
+        text: `${sym.kind} escalated ${was.severity} → ${sym.severity}: ${firstSentence(sym.narrative)}` });
+    }
+  }
+  for (const [k, was] of prev) {
+    if (next.has(k)) continue;
+    events.push({ severity: 'info', nodeId: was.nodeId, text: `${was.kind} cleared` });
+  }
+  return { next, events };
+}
+
 export function driverHomeGuard(
   driverHomeId: number | null,
   haHomeId: number | null,

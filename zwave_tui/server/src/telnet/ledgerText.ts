@@ -71,3 +71,35 @@ export function unscoreableReason(kind: string): string | null {
       return null;
   }
 }
+
+/**
+ * How a subsumed symptom is described (v0.45.0).
+ *
+ * REMEDY and the Log both say a symptom is "under" something else, and they
+ * said different things: REMEDY distinguished an edge cluster from a mesh
+ * event, while the log line called every subsumption "(under mesh event)" —
+ * so a node folded into an edge cluster was logged as belonging to an event
+ * that did not exist. One function, one answer.
+ */
+export function subsumptionLabel(subsumedBy: string | undefined, sep: string): string {
+  if (!subsumedBy) return '';
+  return `${sep}${subsumedBy.endsWith(':edge-cluster') ? 'under edge cluster' : 'under mesh event'}`;
+}
+
+/**
+ * The first SENTENCE of a narrative — not the text before the first dot
+ * (v0.45.0).
+ *
+ * `narrative.split('.')[0]` was used at two sites, and several narratives
+ * interpolate a one-decimal number: `quiet-node` renders "…has not been heard
+ * from in 7.2 h", which that split cut to "…has not been heard from in 7" — a
+ * truncated, wrong number with its unit stripped, which is precisely the
+ * mid-digit clip the house rules forbid.
+ *
+ * A sentence boundary is a period followed by whitespace or end-of-string, so
+ * a decimal point (always followed by a digit) can never be one.
+ */
+export function firstSentence(text: string): string {
+  const m = /^(.*?[.!?])(\s|$)/s.exec(text);
+  return (m ? m[1] : text).trim();
+}

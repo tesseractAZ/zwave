@@ -411,7 +411,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
         out.push({
           kind: 'node-down', nodeId: id, severity: 'crit', sinceMs: since, basis: 'measured',
           evidence: [{ label: 'driver status', value: `Dead for ${downFor}m` }],
-          narrative: `${node.name} is marked Dead by the driver — a transmission to it failed and has not since succeeded. Silence alone would not prove this; the status is a measured verdict. A ping often revives a node whose radio is still there, which is what auto-ping attempts before handing it to you.`,
+          narrative: `${node.name} is marked Dead by the driver — a transmission to it failed and has not since succeeded. Silence alone would not prove this; the status is a measured verdict. A ping often revives a node whose radio is still there.`,
         });
       }
     }
@@ -746,7 +746,12 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       kind: 'edge-cluster', nodeId: rep, members, severity: 'warn', sinceMs: since, basis: 'measured',
       evidence: [
         { label: 'shared repeater', value: `#${rep} ${repName}` },
-        { label: 'degraded downstream', value: `${members.length} node(s): ${members.map((m) => `#${m}`).join(', ')}` },
+        // COUNT ONLY (v0.45.0). The id list lived here too and was the copy
+        // that lied: this string rides the evidence line, which `truncate`
+        // cuts mid-list, so a clipped `#23` rendered as `#2` — an innocent
+        // node named as degraded. The identities now have their own row on
+        // REMEDY, shed as whole tokens; a count survives truncation intact.
+        { label: 'degraded downstream', value: `${members.length} node(s)` },
       ],
       narrative: `${members.length} nodes that all route through repeater #${rep} (${repName}) are degrading together while the rest of the mesh is healthy, and that repeater itself is not flagged — the shared dependency (its link, power, or placement) is the likely common cause, not each node individually. Check that repeater before touching the downstream devices.`,
     });

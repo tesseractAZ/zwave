@@ -286,6 +286,16 @@ test('EDGE-CLUSTER: ≥2 degrading nodes sharing a HEALTHY repeater ⇒ one clus
   // Members collapse under the cluster (not N independent faults on the screen).
   const members = fired.filter((s) => s.kind === 'return-path-degraded' && [6, 7, 8].includes(s.nodeId as number));
   assert.ok(members.length >= 1 && members.every((s) => s.subsumedBy === '10:edge-cluster'), 'members subsumed under the cluster');
+
+  // The ids live on `members` ONLY (v0.45.0). They were also interpolated into
+  // this evidence string, which rides a truncate()d row — so `#6, #7, #8`
+  // clipped to `#6, #7, #` or worse, `#6, #7, #1`, naming a node that is not
+  // in the cluster. A count survives truncation intact; the identities get
+  // their own shed row on REMEDY.
+  const ev = cluster!.evidence.find((e) => e.label === 'degraded downstream');
+  assert.ok(ev, 'the downstream evidence row exists');
+  assert.equal(ev.value, '3 node(s)', `count only, no id list: "${ev.value}"`);
+  assert.doesNotMatch(ev.value, /#\d/, 'an id in a truncated string is an id that can clip');
 });
 
 test('EDGE-CLUSTER: a lone degrading dependent under a shared repeater is NOT a cluster (needs ≥2)', () => {

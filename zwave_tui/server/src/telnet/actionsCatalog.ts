@@ -89,7 +89,7 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
     scope: 'device',
     impact: 'caution',
     desc: "Recompute this one node's mesh routes (neighbour re-discovery).",
-    impactNote: 'Mutating: this node re-discovers neighbours. Brief disruption to THIS node only.',
+    impactNote: 'Mutating: this node re-discovers neighbours. Brief disruption to THIS node only. It also DISCARDS any manually-set priority route for this node — you must set it again afterwards.',
     needsNode: true,
   },
   {
@@ -107,7 +107,7 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
     scope: 'system',
     impact: 'destructive',
     desc: 'Rebuild mesh routes for every node in the network.',
-    impactNote: 'DISRUPTIVE: the whole mesh recomputes routes and is degraded for many minutes. Battery nodes update on their next wake.',
+    impactNote: 'DISRUPTIVE: the whole mesh recomputes routes and is degraded for many minutes. Battery nodes update on their next wake. It also DISCARDS every manually-set priority route in the mesh.',
     needsNode: false,
   },
   {

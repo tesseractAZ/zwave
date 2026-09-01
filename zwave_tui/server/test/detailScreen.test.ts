@@ -442,3 +442,33 @@ test('self-proven is omitted when there is none, not printed as zero', () => {
   assert.match(row, /10\/10 answered/);
   assert.ok(!/self-proven/.test(row));
 });
+
+test('the lifetime-tally caveat follows the RATIO it qualifies, not the self-proven count (v0.45.0)', () => {
+  // The pre-v0.40.2 blend inflated probesAsked/probesAnswered for exactly the
+  // nodes under investigation — an effect entirely independent of whether any
+  // self-proven credit ever landed. So a node with a fully blended history and
+  // ZERO self-proven credits was the worst case, and the one case that got no
+  // caveat at all.
+  const out = evidenceLines(withProbes({ probesAsked: 40, probesAnswered: 31, probesSelfProven: 0 }));
+  assert.ok(out.some((l) => /lifetime tally/.test(l)),
+    `a blended history with no self-proven credit is the WORST case: ${JSON.stringify(out.filter((l) => /Probe/i.test(l)))}`);
+});
+
+test('the caveat is never cut mid-claim — a short form exists for narrow terminals (v0.45.0)', () => {
+  const d = withProbes({ probesAsked: 40, probesAnswered: 31, probesSelfProven: 0 });
+  for (const cols of [80, 100, 120, 160, 200]) {
+    const lines = renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip);
+    const row = lines.find((l) => /lifetime tally/.test(l));
+    assert.ok(row, `${cols} cols: the caveat must render`);
+    // It ends on a complete claim, never mid-word.
+    assert.ok(/boot credits\s*$|pre-v0\.40\.2\s*$/.test(row),
+      `${cols} cols: the caveat is cut mid-claim — "${row.trim()}"`);
+    assert.ok(visLen(row) <= cols, `${cols} cols: overflow`);
+  }
+});
+
+test('a node with NO probes carries no caveat at all (v0.45.0)', () => {
+  const out = evidenceLines(withProbes({ probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 }));
+  assert.ok(!out.some((l) => /lifetime tally/.test(l)), 'nothing to qualify');
+});
+

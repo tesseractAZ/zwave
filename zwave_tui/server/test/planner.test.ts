@@ -225,3 +225,26 @@ test('REFUSAL_INDICTS matches what planFor actually offers, for every symptom ki
   assert.ok(refusalScope('removeFailed').size < ALL_KINDS.length,
     'a refusal must not reach every detector on the node');
 });
+
+test('every blocked reason fits the chip budget — the renderer cannot fix a reason that is too long', () => {
+  // The ⊘ chip rides the end of a candidate row whose head (marker, title, cost
+  // and basis tags) already runs 60-80 columns at the 80-col default. shedLine
+  // carries an over-long chip to a continuation row rather than clipping it,
+  // but a reason that needs two continuation rows costs the card its budget —
+  // so the bound belongs upstream, here, where the strings are authored.
+  //
+  // CODE POINTS, not .length: these contain em-dashes and typographic
+  // apostrophes, which UTF-16 counts as one unit but a terminal renders as one
+  // column — the two agree here only because none are astral, and counting
+  // code points is the measure that stays correct if one ever is.
+  for (const kind of ALL_KINDS) {
+    const nodeId = kind === 'controller-degraded' || kind === 'mesh-interference' ? null : 7;
+    for (const ctx of [ON, OFF]) {
+      for (const cand of planFor(sym(kind, { nodeId }), node(7), ctx).candidates) {
+        if (cand.blocked == null) continue;
+        assert.ok([...cand.blocked].length <= 40,
+          `${kind}: "${cand.blocked}" is ${[...cand.blocked].length} code points, over the 40 budget`);
+      }
+    }
+  }
+});

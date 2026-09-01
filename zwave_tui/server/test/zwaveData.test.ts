@@ -1,6 +1,7 @@
 import { test } from 'node:test';
+import type { Symptom } from '../src/zwave/symptoms';
 import assert from 'node:assert/strict';
-import { statsNodeId, mapRouteRaw, statsCounters, isFreshSample, pickDisplayAttrs, mapConfigParams, mapControllerStats } from '../src/zwave/zwaveData';
+import { diffSymptomLog, statsNodeId, mapRouteRaw, statsCounters, isFreshSample, pickDisplayAttrs, mapConfigParams, mapControllerStats } from '../src/zwave/zwaveData';
 
 // ── statsNodeId: the casing bug that froze all live stats ──────────────────
 // HA delivers the INITIAL on-subscribe event with `nodeId` (camelCase) but every
@@ -228,4 +229,82 @@ test('controller stats: optional timeout_callback null-safe; counters truncated 
   assert.equal(noCb?.timeoutCallback, null, 'absent optional counter maps to null, not rejection');
   assert.equal(noCb?.messagesTX, 100, 'fractional counter truncated');
   assert.equal(mapControllerStats({ ...base, timeout_callback: 8.7 })?.timeoutCallback, 8);
+});
+
+/* ── v0.45.0: a symptom's whole life reaches the Log ──────────────────────── */
+
+const symFix = (over: Partial<Symptom> = {}): Symptom => ({
+  kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: 1000, basis: 'measured',
+  evidence: [], narrative: 'Node 7 round-trip time is above its own normal. More detail here.', ...over,
+});
+
+test('an ONSET is logged once, not on every tick (v0.45.0)', () => {
+  const a = diffSymptomLog(new Map(), [symFix()]);
+  assert.equal(a.events.length, 1);
+  assert.equal(a.events[0].severity, 'warn');
+  assert.match(a.events[0].text, /^rtt-degraded: Node 7 round-trip time is above its own normal\.$/,
+    'the FIRST SENTENCE, whole');
+  const b = diffSymptomLog(a.next, [symFix()]);
+  assert.deepEqual(b.events, [], 'an unchanged symptom says nothing further');
+});
+
+test('an ESCALATION is logged; a de-escalation is silent (v0.45.0)', () => {
+  // A symptom that appeared, escalated watch → crit and cleared produced ONE
+  // line — the least severe thing that ever happened — and the operator had no
+  // way to know it had ended. Escalation is news; "it got less bad" is not, and
+  // logging it would double the volume on a flapping node.
+  const a = diffSymptomLog(new Map(), [symFix({ severity: 'watch' })]);
+  const b = diffSymptomLog(a.next, [symFix({ severity: 'crit' })]);
+  assert.equal(b.events.length, 1);
+  assert.equal(b.events[0].severity, 'error', 'crit maps to error');
+  assert.match(b.events[0].text, /escalated watch → crit/);
+  const c2 = diffSymptomLog(b.next, [symFix({ severity: 'watch' })]);
+  assert.deepEqual(c2.events, [], 'a de-escalation updates state silently');
+  // ...and having gone back down, a re-escalation is news again.
+  const d = diffSymptomLog(c2.next, [symFix({ severity: 'crit' })]);
+  assert.equal(d.events.length, 1, 'the stored severity really was lowered');
+});
+
+test('a CLEARED symptom is logged at info, never at its old severity (v0.45.0)', () => {
+  // A symptom ENDING is good news. A red line saying so reads as a fault.
+  const a = diffSymptomLog(new Map(), [symFix({ severity: 'crit' })]);
+  assert.equal(a.events[0].severity, 'error');
+  const b = diffSymptomLog(a.next, []);
+  assert.equal(b.events.length, 1);
+  assert.equal(b.events[0].severity, 'info', 'a clearance is not a fault');
+  assert.equal(b.events[0].nodeId, 7, 'and it names the node, which a Set could not');
+  assert.match(b.events[0].text, /rtt-degraded cleared/);
+  assert.equal(b.next.size, 0, 'the key is pruned');
+});
+
+test('the log line names the RIGHT subsumption, and never cuts a decimal (v0.45.0)', () => {
+  // Two defects on one string. It called EVERY subsumption "(under mesh event)"
+  // while REMEDY distinguished an edge cluster — so a node folded into a
+  // cluster was logged as belonging to an event that did not exist. And
+  // `narrative.split('.')[0]` cut a one-decimal number in half: a node silent
+  // 7.2 h logged "…has not been heard from in 7".
+  const cluster = diffSymptomLog(new Map(), [symFix({ subsumedBy: '9:edge-cluster' })]);
+  assert.match(cluster.events[0].text, /under edge cluster/);
+  const mesh = diffSymptomLog(new Map(), [symFix({ subsumedBy: 'mesh:mesh-interference' })]);
+  assert.match(mesh.events[0].text, /under mesh event/);
+
+  const quiet = diffSymptomLog(new Map(), [symFix({
+    kind: 'quiet-node',
+    narrative: 'Node 7 has not been heard from in 7.2 h, well past its own cadence. It may be asleep.',
+  })]);
+  assert.match(quiet.events[0].text, /in 7\.2 h/, `the decimal must survive: ${quiet.events[0].text}`);
+  assert.doesNotMatch(quiet.events[0].text, /in 7,|in 7 /, 'never cut mid-number');
+});
+
+test('two symptoms sharing a node are tracked apart, and mesh-scoped ones get their own key (v0.45.0)', () => {
+  const a = diffSymptomLog(new Map(), [
+    symFix({ kind: 'rtt-degraded' }),
+    symFix({ kind: 'route-churn' }),
+    symFix({ kind: 'mesh-interference', nodeId: null }),
+  ]);
+  assert.equal(a.events.length, 3);
+  assert.equal(a.next.size, 3);
+  const b = diffSymptomLog(a.next, [symFix({ kind: 'rtt-degraded' })]);
+  assert.equal(b.events.length, 2, 'the other two cleared');
+  assert.ok(b.events.every((e) => /cleared/.test(e.text)));
 });
