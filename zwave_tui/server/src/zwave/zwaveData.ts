@@ -390,8 +390,8 @@ export interface ZwaveData {
   confoundedCount(kind: SymptomKind): number;
   driverWsStatus(): string;
   driverWsState(): DriverWsState;
-  openEpisodes(): OpenEpisodeSummary[];
-  controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null;
+  openEpisodes(): OpenEpisodeSummary[] | null;
+  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number } | null;
   autoPingState(): AutoPingSnapshot | null;
   setAutoPingSnapshot(fn: (() => AutoPingSnapshot) | null): void;
   /** Drain the nodes owed a verification probe this tick (v0.36). Each entry
@@ -1207,7 +1207,19 @@ class ZwaveDataImpl implements ZwaveData {
       // starvation. Counted apart so the fixable signal keeps its meaning.
       const n = r.nodeId == null ? undefined : this.snapshot().find((x) => x.nodeId === r.nodeId);
       const unprobeable = r.nodeId != null && !(n != null && isPingCandidate(n));
-      oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now), { unprobeable });
+      // The verdict reaches the RING, not just stdout (v0.44.0). Every episode
+      // the engine ever scored — including `worse` — had exactly one sink:
+      // container stdout, which the TUI cannot read and which no operator sees.
+      // The onset of a symptom was already a Log event (kind 'symptom'); its
+      // closure is the other half of that sentence.
+      const ep = oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now), { unprobeable });
+      if (ep) {
+        // `worse` lifts to warn. A regression logged at info is a regression
+        // nobody sees. Deliberately NOT 'error': the errorsOnly filter is for
+        // things that FAILED, and a closure verdict is a measurement.
+        this.pushEvent('engine', ep.verdict === 'worse' ? 'warn' : 'info', 'symptom', ep.nodeId,
+          `${ep.kind} closed ${ep.verdict}${ep.action ? ` after ${ep.action.kind}` : ' (no action)'}`);
+      }
     }
     // The AFTER-window burst, timed to land inside the window it fills (v0.36.3).
     //
@@ -1361,15 +1373,22 @@ class ZwaveDataImpl implements ZwaveData {
    *  the ledger, so the confirmation-window flag is joined on at this layer —
    *  without it a screen cannot tell "degraded right now" from "recovering,
    *  being scored". */
-  openEpisodes(): OpenEpisodeSummary[] {
-    if (!this.outcomes) return [];
+  openEpisodes(): OpenEpisodeSummary[] | null {
+    // NULL, not [] (v0.44.0). ENGINE has always had two distinct branches —
+    // "no outcome ledger, the learning loop is off" and "no open episodes,
+    // the healthy steady state" — and the first was UNREACHABLE in production:
+    // this returned an empty array for both, so an install with no baselines
+    // store rendered its dead learning loop as a clean bill of health. The
+    // distinction only survived in a mock that omitted the member entirely,
+    // which is exactly the kind of optionality that hides a dead feature.
+    if (!this.outcomes) return null;
     return this.outcomes.openEpisodeDetails().map((ep) => ({
       ...ep,
       confirming: this.pendingResolve.has(ep.key),
     }));
   }
 
-  controlArm(kind: SymptomKind): { n: number; ok: number; nodes: number } | null {
+  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number } | null {
     return this.outcomes ? this.outcomes.controlArm(kind) : null;
   }
 
@@ -1875,9 +1894,18 @@ class ZwaveDataImpl implements ZwaveData {
         // M5 ledger is per-mesh too — wipe episodes + learned efficacy AND
         // persist the empty state, else a restart would reload the OLD network's
         // learning from /data (the reset must write THROUGH to disk).
+        // Count what is being thrown away BEFORE reset() clears the map
+        // (v0.44.0). In-flight episodes died silently here: an operator could
+        // watch three experiments vanish with nothing on any screen or in the
+        // log saying they had ever existed, let alone why.
+        const lostOpen = this.outcomes?.openEpisodes().length ?? 0;
         this.outcomes?.reset();
         this.outcomes?.save();
         this.pendingResolve.clear();
+        if (lostOpen > 0) {
+          this.pushEvent('engine', 'info', 'system', null,
+            `${lostOpen} in-flight episode${lostOpen === 1 ? '' : 's'} discarded — the mesh identity changed`);
+        }
         // M6 interference view is derived from this network's evidence — drop the
         // memoized snapshot so it recomputes against the new network immediately.
         this.lastInterference = null;

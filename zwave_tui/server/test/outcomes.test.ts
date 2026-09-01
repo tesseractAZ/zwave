@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { wilsonLower, createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
 import type { EvidenceSample } from '../src/zwave/evidenceStore';
 import type { SymptomKind } from '../src/zwave/symptoms';
+import { metricOf } from '../src/zwave/outcomes';
+import { unscoreableReason } from '../src/telnet/ledgerText';
 
 // A window with plenty of traffic; rate = timeouts/tx. Extra recovery signals
 // default to "no data" so the timeout-metric tests are unaffected.
@@ -1238,4 +1240,136 @@ test('no measured base rate ⇒ no bar to fall short of (v0.43.1)', () => {
   assert.equal(e.baseRate, null);
   assert.equal(e.bar, null, 'a bar built on an unmeasured base rate would be fabricated');
   assert.ok(e.lowerBound != null, 'the bound itself is still real and disclosed');
+});
+
+test('`worse` is tallied APART from `no-change` — an action that harms is not merely useless (v0.44.0)', () => {
+  // scoreRecovery distinguishes worse from no-change at eight separate sites,
+  // and the tally then folded both into "not improved". An action that harmed
+  // 40% of the time and one that did nothing rendered with the same words.
+  const o = store();
+  // Four episodes where the timeout rate ROSE sharply after the action.
+  for (let i = 0; i < 4; i++) {
+    o.open(i, 'return-path-degraded', 1000, W(100, 10));
+    o.recordAction(i, 'healNode', false, 1500);
+    const ep = o.resolve(i, 'return-path-degraded', 2000, W(100, 60));
+    assert.equal(ep?.verdict, 'worse', `episode ${i} must score worse`);
+  }
+  const e = o.efficacyFor('return-path-degraded', 'healNode');
+  assert.ok(e.harmed > 3, `regressions are counted, got ${e.harmed}`);
+  assert.ok(Math.abs(e.harmed - e.n) < 1e-6, 'all four episodes were regressions');
+  assert.equal(e.expectedEfficacy, null, 'and it certainly does not claim efficacy');
+});
+
+test('a no-change arm records ZERO harm — the two misses stay distinct (v0.44.0)', () => {
+  const o = store();
+  for (let i = 0; i < 4; i++) {
+    o.open(i, 'return-path-degraded', 1000, W(100, 30));
+    o.recordAction(i, 'healNode', false, 1500);
+    const ep = o.resolve(i, 'return-path-degraded', 2000, W(100, 30));
+    assert.equal(ep?.verdict, 'no-change');
+  }
+  const e = o.efficacyFor('return-path-degraded', 'healNode');
+  assert.equal(e.harmed, 0, 'doing nothing is not the same as doing damage');
+  assert.ok(e.n > 3, 'but the episodes still count toward readiness');
+});
+
+test('a pre-v0.44.0 ledger restores with zero harm rather than being rejected', () => {
+  // `bad` is absent in older files. Absent is not invalid — an older ledger
+  // simply has no record of regressions; dropping the tally would erase months
+  // of control-arm evidence on upgrade.
+  const o = store();
+  o.loadJSON({ v: 1, control: [['rtt-degraded', { n: 8, ok: 6 } as unknown as { n: number; ok: number; bad: number }]] });
+  const arm = o.controlArm('rtt-degraded');
+  assert.ok(arm != null, 'the tally survived the upgrade');
+  assert.equal(arm.n, 8);
+  assert.equal(arm.ok, 6);
+  assert.equal(arm.bad, 0, 'and its unknown regression count reads as zero, not NaN');
+});
+
+test('a tally whose harm exceeds its episode count is rejected as corrupt (v0.44.0)', () => {
+  const o = store();
+  o.loadJSON({ v: 1, control: [['rtt-degraded', { n: 2, ok: 1, bad: 9 }]] });
+  assert.equal(o.controlArm('rtt-degraded'), null, 'impossible tallies are dropped, not loaded');
+});
+
+test('the unscoreable SENTENCE and the recovery METRIC cannot drift apart (v0.44.0)', () => {
+  // The copy lives in ledgerText.ts (screens must share it, and must not
+  // acquire outcomes.ts's node:fs dependency) while metricOf remains the source
+  // of truth for which kinds are scoreable. Bind them rather than duplicating
+  // the judgement. Note metricOf returns 'none' for TWO different reasons, so
+  // the correct invariant is one-directional: anything with a sentence must be
+  // unscoreable, and node-down specifically must have one.
+  const kinds: SymptomKind[] = [
+    'return-path-degraded', 'chronic-return-path', 'dead-flap', 'node-down', 'quiet-node',
+    'rate-fallback', 'route-churn', 'rtt-degraded', 'weak-signal', 'chatty-device',
+    'ghost-suspect', 'controller-degraded', 'edge-cluster', 'mesh-interference', 's2-desync',
+  ];
+  for (const k of kinds) {
+    if (unscoreableReason(k) != null) {
+      assert.equal(metricOf(k), 'none',
+        `${k} carries an "unscoreable" sentence but metricOf says it IS scoreable`);
+    }
+  }
+  assert.ok(unscoreableReason('node-down') != null,
+    'node-down opens no episode at all (zwaveData) — that must be disclosed');
+  assert.equal(unscoreableReason('rtt-degraded'), null, 'a scoreable kind claims nothing');
+});
+
+test('a CONFOUNDED episode feeds neither arm — not even the action arm (v0.44.0)', () => {
+  // The v0.40 rationale ("a confounded non-improvement would bias the arm
+  // exactly as dishonestly in the other direction") was written for the control
+  // arm and applies verbatim to the action arm, which was still being fed. It
+  // applies doubly now `bad` exists: a node dying mid-episode generates
+  // re-routes and S2 resyncs by construction, and `worse` for those metrics is
+  // literally `after.X > before.X` — so a death could manufacture a harm
+  // verdict against whatever action happened to be in flight.
+  const o = store();
+  for (let i = 0; i < 4; i++) {
+    o.open(i, 'return-path-degraded', 1000, W(100, 10));
+    o.recordAction(i, 'ping', false, 1500);
+    o.markConfounded(i, 'return-path-degraded');
+    o.resolve(i, 'return-path-degraded', 2000, W(100, 60));
+  }
+  const e = o.efficacyFor('return-path-degraded', 'ping');
+  assert.equal(e.n, 0, 'a confounded episode is not an observation of the action arm');
+  assert.equal(e.harmed, 0, 'and certainly not a harm verdict against it');
+  assert.equal(o.confounded('return-path-degraded'), 4, 'it is counted as confounded instead');
+});
+
+test('reset() is WRITTEN THROUGH — a mesh-identity wipe survives a restart (v0.44.0)', () => {
+  // save() returns early on a false `dirty`, so the caller's `reset(); save();`
+  // was a silent no-op and the OLD mesh's ledger stayed on disk. A restart then
+  // reloaded another network's learning onto these node ids.
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-reset-'));
+  const path = join(dir, 'outcomes.json');
+  try {
+    const a = createOutcomeStore({ path, log: () => {} });
+    for (let i = 0; i < 4; i++) { a.open(i, 'return-path-degraded', 1000, W(100, 40)); a.resolve(i, 'return-path-degraded', 2000, W(100, 1)); }
+    a.save();
+    const before = createOutcomeStore({ path, log: () => {} });
+    before.load();
+    assert.ok(before.controlArm('return-path-degraded') != null, 'precondition: the ledger persisted');
+
+    a.reset();
+    a.save();
+    const after = createOutcomeStore({ path, log: () => {} });
+    after.load();
+    assert.equal(after.controlArm('return-path-degraded'), null,
+      "the OLD network's ledger must not survive the wipe on disk");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a tally claiming more outcomes than episodes is rejected (v0.44.0)', () => {
+  // `ok + bad <= n` is the joint invariant bump() guarantees — a closure scores
+  // improved OR worse, never both. Without it a corrupt file seats two
+  // contradicting rates in one tally.
+  const o = store();
+  o.loadJSON({ v: 1, control: [['rtt-degraded', { n: 10, ok: 7, bad: 6 }]] });
+  assert.equal(o.controlArm('rtt-degraded'), null, '7 improved + 6 worse out of 10 is impossible');
+  // The same tally with a consistent split loads fine.
+  const ok = store();
+  ok.loadJSON({ v: 1, control: [['rtt-degraded', { n: 10, ok: 7, bad: 3 }]] });
+  assert.ok(ok.controlArm('rtt-degraded') != null);
 });

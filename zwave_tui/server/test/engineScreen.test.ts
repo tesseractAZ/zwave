@@ -45,6 +45,10 @@ function data(over: Partial<DataProvider> = {}): DataProvider {
     engineStatus: () => ({ enabled: true, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 0, bands: 6 }), efficacyFor: () => null,
     interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
     entityStates: () => [], configParams: () => ({ status: 'ready', params: [] }), requestConfigParams: () => {},
+    // Required on DataProvider as of v0.44.0. This literal is `as DataProvider`,
+    // so omitting them COMPILES and fails at runtime — which is precisely the
+    // hole that made these members optional worth closing.
+    openEpisodes: () => [], controlArm: () => null, autoPingState: () => null,
     ...over,
   } as DataProvider;
 }
@@ -58,7 +62,7 @@ test('ENGINE holds EXACTLY view.rows lines within view.cols at every size', () =
   const rich: Partial<DataProvider> = {
     autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 1_800_000, attempts: 2, nextEligibleMs: NOW + 600_000, missStreak: 3, launchFailures: 0, pending: 1, gaveUp: false, launchGaveUp: false, talkingWhileDead: false }] }),
     openEpisodes: () => ([{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded' as SymptomKind, onsetMs: NOW - 300_000, actionKind: null, confounded: false, beforeFreshN: 4, confirming: true }]),
-    controlArm: () => ({ n: 6.2, ok: 5.1, nodes: 3 }),
+    controlArm: () => ({ n: 6.2, ok: 5.1, bad: 0, nodes: 3 }),
   };
   for (const [cols, rows] of [[40, 12], [80, 24], [120, 40], [200, 50]] as const) {
     for (const over of [{}, rich]) {
@@ -75,7 +79,7 @@ test('at the MODAL 80x24 the operator sees auto-ping state, the live ledger, and
   const joined = plain(renderEngine(ctx(80, 24, {
     autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 1_800_000, attempts: 2, nextEligibleMs: NOW + 600_000, missStreak: 0, launchFailures: 0, pending: 0, gaveUp: false, launchGaveUp: false, talkingWhileDead: false }] }),
     openEpisodes: () => ([{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded' as SymptomKind, onsetMs: NOW - 300_000, actionKind: null, confounded: false, beforeFreshN: 4, confirming: false }]),
-    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, nodes: 3 } : null),
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, bad: 0, nodes: 3 } : null),
   })));
   assert.match(joined, /AUTO-PING/);
   assert.match(joined, /running/, 'suppression state is visible');
@@ -98,7 +102,10 @@ test('a suppressed engine says WHY, and a disabled one says it is off — neithe
 test('an idle ledger is distinguished from an absent one', () => {
   const idle = plain(renderEngine(ctx(80, 24, { openEpisodes: () => [] })));
   assert.match(idle, /no open episodes/);
-  const absent = plain(renderEngine(ctx(80, 24, { openEpisodes: undefined })));
+  // NULL is how "there is no ledger" is said now (v0.44.0) — it used to be
+  // said by the member being ABSENT, which production never did: zwaveData
+  // returned [] with no store, so a dead learning loop rendered as healthy.
+  const absent = plain(renderEngine(ctx(80, 24, { openEpisodes: () => null })));
   assert.match(absent, /no outcome ledger/);
 });
 
@@ -151,7 +158,7 @@ test('a bit is rendered WHOLE or not at all — a clipped percentage is a false 
   // fitBits emits whole bits in priority order and discloses the rest as +N.
   for (const cols of [60, 70, 80, 90, 100, 140]) {
     const raw = renderEngine(ctx(cols, 24, {
-      controlArm: () => ({ n: 6.25, ok: 2.5, nodes: 4 }),
+      controlArm: () => ({ n: 6.25, ok: 2.5, bad: 0, nodes: 4 }),
       efficacyFor: () => ({ expectedEfficacy: 0.41, n: 12.5, baseRate: 0.4, nodes: 3, ready: true, blocked: null } as never),
     })).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
     const line = raw.find((l) => l.includes('self-heal')) ?? '';
@@ -194,7 +201,7 @@ test('an arm whose node provenance was never recorded says so — 0 is unknown, 
   // tracked). Beside a positive n, "0 nodes" is a self-contradiction — and this
   // is the number that separates "six nodes agreed" from "one node repeated".
   const joined = plain(renderEngine(ctx(120, 30, {
-    controlArm: (k) => (k === 'route-churn' ? { n: 1.0, ok: 1.0, nodes: 0 } : null),
+    controlArm: (k) => (k === 'route-churn' ? { n: 1.0, ok: 1.0, bad: 0, nodes: 0 } : null),
   })));
   assert.match(joined, /self-heal 100% \(n≈1\.0, sources not recorded\)/,
     `unknown provenance must say so: ${joined}`);
@@ -247,7 +254,7 @@ test('the n≈ legend renders only where a weight is on screen, and fits narrow 
     'no weight on screen ⇒ no legend explaining one');
 
   const learned: Partial<DataProvider> = {
-    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, nodes: 3 } : null),
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, bad: 0, nodes: 3 } : null),
   };
   for (const cols of [40, 60, 80, 100, 140, 200]) {
     const joined = plain(renderEngine(ctx(cols, 30, learned)));
@@ -256,4 +263,99 @@ test('the n≈ legend renders only where a weight is on screen, and fits narrow 
     assert.match(line, /33/, `${cols} cols: the saturation figure was truncated away — "${line.trim()}"`);
     assert.ok(plain([line]).length <= cols, `${cols} cols: legend overflows`);
   }
+});
+
+test('ENGINE distinguishes three arm states, and shows the bound that GRANTED a claim (v0.44.0)', () => {
+  // An arm below readiness was rendered with the same words as one that was
+  // measured and found wanting. "not distinguishable" is a learned verdict; it
+  // was being applied to arms nobody had tried often enough to judge.
+  const arms: Partial<DataProvider> = {
+    efficacyFor: (_k, a) => {
+      if (a === 'ping') return { expectedEfficacy: 0.75, n: 8, baseRate: 0.2, nodes: 5, ready: true, lowerBound: 0.46, bar: 0.25, minN: 4, baseN: 9, baseNodes: 4, harmed: 0, baseHarmed: 0 };
+      if (a === 'refreshValues') return { expectedEfficacy: null, n: 9, baseRate: 0.6, nodes: 3, ready: true, lowerBound: 0.52, bar: 0.65, minN: 4, baseN: 9, baseNodes: 4, harmed: 0, baseHarmed: 0 };
+      if (a === 'healNode') return { expectedEfficacy: null, n: 2, baseRate: 0.6, nodes: 1, ready: false, lowerBound: null, bar: null, minN: 4, baseN: 9, baseNodes: 4, harmed: 0, baseHarmed: 0 };
+      return null;
+    },
+  };
+  const joined = plain(renderEngine(ctx(200, 40, arms)));
+  assert.match(joined, /ping 75% \(n≈8\.0, 5 nodes\)/,
+    `granted claim: ${joined.slice(0, 900)}`);
+  // The bound is its OWN bit (v0.44.0) so fitBits can shed it without taking
+  // the whole arm — and it names its action so it can never be orphaned.
+  assert.match(joined, /ping ≥46% at 95%/, 'the bound that earned the claim');
+  assert.match(joined, /refreshValues not distinguishable \(n≈9\.0, 3 nodes\)/);
+  assert.match(joined, /healNode still learning \(n≈2\.0 of 4, 1 node\)/);
+  // The unjudged arm must not borrow the judged arm's words.
+  assert.doesNotMatch(joined, /healNode not distinguishable/);
+});
+
+test('the granted-claim bound is qualified — a bare second percentage is a range endpoint of unknown kind (v0.44.0)', () => {
+  const arms: Partial<DataProvider> = {
+    efficacyFor: (_k, a) => (a === 'ping'
+      ? { expectedEfficacy: 0.75, n: 8, baseRate: 0.2, nodes: 5, ready: true, lowerBound: 0.46, bar: 0.25, minN: 4, baseN: 9, baseNodes: 4, harmed: 0, baseHarmed: 0 }
+      : null),
+  };
+  const line = plain(renderEngine(ctx(200, 40, arms))).split('\n').find((l) => /ping 75%/.test(l)) ?? '';
+  assert.match(plain(renderEngine(ctx(200, 40, arms))), /ping ≥46% at 95%/,
+    `the bound must say WHAT it is and WHOSE it is: "${line.trim()}"`);
+});
+
+test('at the modal 80x24 a harmful arm keeps BOTH its efficacy and its regression count (v0.44.0)', () => {
+  // Welding the harm count and the bound into the arm bit pushed the whole arm
+  // past 80 columns, and fitBits drops WHOLE bits — so the modal terminal lost
+  // the efficacy AND the harm together, while 24 body rows sat blank.
+  const arms: Partial<DataProvider> = {
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 9, ok: 3, bad: 1, nodes: 4 } : null),
+    efficacyFor: (_k, a) => (a === 'ping'
+      ? { expectedEfficacy: 0.75, n: 8, baseRate: 0.33, nodes: 5, ready: true, lowerBound: 0.46,
+          bar: 0.38, minN: 4, baseN: 9, baseNodes: 4, harmed: 2, baseHarmed: 1 }
+      : null),
+  };
+  const joined = plain(renderEngine(ctx(80, 24, arms)));
+  assert.match(joined, /ping 75%/, `the efficacy must survive 80 cols: ${joined.slice(0, 900)}`);
+  assert.match(joined, /ping: n≈2\.0 worse/,
+    'and so must the regression count — it is the bit that argues against acting');
+});
+
+test('the regression count is marked as the decayed WEIGHT it is (v0.44.0)', () => {
+  // This screen's own legend says bare numbers are cumulative node counts, so
+  // a bare "2.0 worse" beside "5 nodes" reads as a second tally.
+  const arms: Partial<DataProvider> = {
+    efficacyFor: (_k, a) => (a === 'ping'
+      ? { expectedEfficacy: null, n: 8, baseRate: 0.33, nodes: 5, ready: true, lowerBound: 0.2,
+          bar: 0.38, minN: 4, baseN: 9, baseNodes: 4, harmed: 2, baseHarmed: 0 }
+      : null),
+  };
+  const joined = plain(renderEngine(ctx(200, 40, arms)));
+  assert.match(joined, /ping: n≈2\.0 worse/);
+  assert.doesNotMatch(joined, /[^≈]2\.0 worse/, 'never a bare number where the legend says tally');
+});
+
+test('the CONTROL arm discloses its own regressions too (v0.44.0)', () => {
+  // controlArm().bad was tallied, persisted and plumbed end-to-end while no
+  // screen showed it. A kind that self-heals 60% and self-worsens 30% is not
+  // the same animal as one that self-heals 60% and stalls 40%.
+  const arms: Partial<DataProvider> = {
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 10, ok: 6, bad: 3, nodes: 4 } : null),
+  };
+  const joined = plain(renderEngine(ctx(200, 40, arms)));
+  assert.match(joined, /self-heal 60% \(n≈10\.0, 4 nodes, n≈3\.0 worse\)/,
+    `the control arm's own harm: ${joined.slice(0, 900)}`);
+});
+
+test('an arm with no control arm to compare against says THAT, not "not distinguishable" (v0.44.0)', () => {
+  // "Not distinguishable" asserts a comparison was made and came out level.
+  // With no control arm, no comparison was performed at all — REMEDY has said
+  // so since v0.43.1 while this screen still claimed the verdict.
+  const arms: Partial<DataProvider> = {
+    controlArm: () => null,
+    efficacyFor: (_k, a) => (a === 'ping'
+      ? { expectedEfficacy: null, n: 8, baseRate: null, nodes: 5, ready: true, lowerBound: 0.4,
+          bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 }
+      : null),
+  };
+  const joined = plain(renderEngine(ctx(200, 40, arms)));
+  assert.match(joined, /ping measured, no control arm yet \(n≈8\.0, 5 nodes\)/);
+  assert.doesNotMatch(joined, /ping not distinguishable/,
+    'a comparison that was never performed cannot have come out level');
 });

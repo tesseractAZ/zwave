@@ -25,6 +25,9 @@ function data(symptoms: Symptom[], efficacyFor: DataProvider['efficacyFor'] = ()
     noiseFloor: () => -100, hasRealNoise: () => true, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
     lastUpdated: () => now - 1000, ready: () => true, lastError: () => null, symptoms: () => symptoms,
     engineStatus: () => ({ enabled: true, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 0, bands: 6 }), efficacyFor, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
+  openEpisodes: () => [],
+  controlArm: () => null,
+  autoPingState: () => null,
   entityStates: () => [], configParams: () => ({ status: 'ready', params: [] }), requestConfigParams: () => {},
   };
 }
@@ -35,6 +38,9 @@ const ctx = (cols: number, rows: number, symptoms: Symptom[], eff?: DataProvider
 /** Same ctx with the engine's learned-baseline counts overridden (v0.43.1). */
 const engCtx = (cols: number, rows: number, eng: ReturnType<DataProvider['engineStatus']>): ScreenCtx =>
   ({ view: mkView(cols, rows), data: { ...data([]), engineStatus: () => eng }, visibleNodes: nodes, filtering: false, actionsEnabled: true });
+/** ctx with an arbitrary symptom list at an arbitrary size. */
+const engCtx2 = (cols: number, rows: number, syms: Symptom[]): ScreenCtx =>
+  ({ view: mkView(cols, rows), data: data(syms), visibleNodes: nodes, filtering: false, actionsEnabled: true });
 const ENG = { enabled: true as const, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 3, bands: 6 };
 
 const sym = (over: Partial<Symptom> = {}): Symptom => ({
@@ -136,20 +142,20 @@ test('M4: the overflow footer survives even when one oversized block fills a tin
 });
 
 test('M5: a learned "beat self-healing" efficacy renders a green note on the executable candidate', () => {
-  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, nodes: 3, ready: true, lowerBound: null, bar: null };
+  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(/✓ helped 83% \(n≈6\.0 · 3 nodes\) vs 20% self-heal/.test(joined),
     'the note shows the win, the base rate, n, AND how many nodes taught it');
 });
 
 test('M5: a learned-but-not-distinguishable efficacy renders the honest "not distinguishable" note', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 8, baseRate: 0.9, nodes: 3, ready: true, lowerBound: null, bar: null };
+  const eff: Eff = { expectedEfficacy: null, n: 8, baseRate: 0.9, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(/≈ n≈8\.0 · 3 nodes: not distinguishable from self-healing/.test(joined), 'honest null-result note');
 });
 
 test('M5: while still learning (not ready) NO efficacy note is shown', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 1, baseRate: null, nodes: 3, ready: false, lowerBound: null, bar: null };
+  const eff: Eff = { expectedEfficacy: null, n: 1, baseRate: null, nodes: 3, ready: false, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   const joined = renderRemedy(ctx(120, 40, [sym()], () => eff)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(!/helped|not distinguishable/.test(joined), 'says nothing until it has an opinion');
 });
@@ -175,7 +181,7 @@ test('a BLOCKED candidate now reports what was measured — without judging the 
   // must NOT characterize the block (an earlier draft said "the block above is
   // lore", which read as calling a SAFETY gate unfounded folklore whenever the
   // block came from gateExecutable rather than the planner's advisory text).
-  const eff: Eff = { expectedEfficacy: 0.8, n: 10, baseRate: 0.2, nodes: 3, ready: true, lowerBound: null, bar: null };
+  const eff: Eff = { expectedEfficacy: 0.8, n: 10, baseRate: 0.2, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
   assert.match(joined, /⊘ physical-link symptom/, 'the block is still stated');
   assert.match(joined, /ledger measured 80% here \(n≈10\.0 · 3 nodes\) vs 20% self-heal — the block above still applies/,
@@ -189,13 +195,13 @@ test('a BLOCKED candidate now reports what was measured — without judging the 
 });
 
 test('a blocked candidate with a NULL result reports it plainly, endorsing nothing', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 12, baseRate: 0.5, nodes: 3, ready: true, lowerBound: null, bar: null };
+  const eff: Eff = { expectedEfficacy: null, n: 12, baseRate: 0.5, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
   assert.match(joined, /measured — not distinguishable from self-healing/);
 });
 
 test('a blocked candidate with no opinion yet still says NOTHING', () => {
-  const eff: Eff = { expectedEfficacy: null, n: 2, baseRate: null, nodes: 3, ready: false, lowerBound: null, bar: null };
+  const eff: Eff = { expectedEfficacy: null, n: 2, baseRate: null, nodes: 3, ready: false, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   const joined = plain(renderRemedy(ctx(140, 40, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff)));
   assert.ok(!/ledger measured|block above|helped|distinguishable/.test(joined),
     'not-ready is silence, blocked or not');
@@ -206,7 +212,7 @@ test('one plan can carry BOTH voices — green on the runnable, disagreement on 
   // ledger has the same opinion of each. The note must therefore switch VOICE
   // per candidate, not per plan: the reader has to be able to tell which row
   // the measurement is talking about.
-  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, nodes: 3, ready: true, lowerBound: null, bar: null };
+  const eff: Eff = { expectedEfficacy: 0.83, n: 6, baseRate: 0.2, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   const rows = plain(renderRemedy(ctx(140, 40, [sym()], () => eff))).split('\n');
   assert.ok(rows.some((l) => /✓ helped 83% \(n≈6\.0 · 3 nodes\) vs 20% self-heal/.test(l)),
     'the runnable candidate keeps the plain green note');
@@ -298,8 +304,8 @@ test('the note says how many DISTINCT nodes taught the arm', () => {
   // device produced six no-change episodes and pushed the fleet-wide
   // (rtt-degraded, ping) arm past its readiness threshold on its own. The
   // statistics were honest; the provenance was invisible.
-  const solo: Eff = { expectedEfficacy: null, n: 6, baseRate: 0.2, nodes: 1, ready: true, lowerBound: null, bar: null };
-  const broad: Eff = { expectedEfficacy: null, n: 6, baseRate: 0.2, nodes: 6, ready: true, lowerBound: null, bar: null };
+  const solo: Eff = { expectedEfficacy: null, n: 6, baseRate: 0.2, nodes: 1, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
+  const broad: Eff = { expectedEfficacy: null, n: 6, baseRate: 0.2, nodes: 6, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   assert.match(plain(renderRemedy(ctx(140, 40, [sym()], () => solo))), /n≈6\.0 · 1 node:/);
   assert.match(plain(renderRemedy(ctx(140, 40, [sym()], () => broad))), /n≈6\.0 · 6 nodes:/);
 });
@@ -310,7 +316,7 @@ test('a ledger that predates the tracking SAYS SO rather than falling silent (v0
   // either: it is indistinguishable from a screen that simply omits the count,
   // and ENGINE has said "sources not recorded" for the same row since v0.41.1.
   // Two screens, one ledger key, two different stories. Now one function.
-  const old: Eff = { expectedEfficacy: 0.9, n: 8, baseRate: 0.2, nodes: 0, ready: true, lowerBound: null, bar: null };
+  const old: Eff = { expectedEfficacy: 0.9, n: 8, baseRate: 0.2, nodes: 0, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   const joined = plain(renderRemedy(ctx(140, 40, [sym()], () => old)));
   assert.match(joined, /✓ helped 90% \(n≈8\.0 · sources not recorded\) vs 20% self-heal/);
   assert.ok(!/\d+ nodes?/.test(joined.split('\n').find((l) => /helped 90%/.test(l)) ?? ''),
@@ -388,7 +394,7 @@ test('a withheld efficacy claim EXPLAINS itself with the bound that withheld it 
   // explicable: the Wilson LOWER bound decides it, and that number was computed
   // and discarded at the ledger boundary. An operator looking at an arm that
   // plainly succeeded most of the time had no way to see how far short it fell.
-  const eff = (): Eff => ({ expectedEfficacy: null, n: 9, baseRate: 0.6, nodes: 3, ready: true, lowerBound: 0.52, bar: 0.65 });
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 9, baseRate: 0.6, nodes: 3, ready: true, lowerBound: 0.52, bar: 0.65, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 });
   const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
   assert.match(joined, /not distinguishable from self-healing/);
   assert.match(joined, /even pessimistically 52%, short of the 65% bar \(60% self-heal \+ margin\)/,
@@ -401,7 +407,7 @@ test('the explanation reports the BAR, so it never reads as a win under a loss (
   // base rate printed "even pessimistically 63% vs 60% self-heal" directly
   // under "not distinguishable from self-healing": two numbers that say the
   // arm won, beneath a verdict that says it did not.
-  const eff = (): Eff => ({ expectedEfficacy: null, n: 9, baseRate: 0.6, nodes: 3, ready: true, lowerBound: 0.63, bar: 0.65 });
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 9, baseRate: 0.6, nodes: 3, ready: true, lowerBound: 0.63, bar: 0.65, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 });
   const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
   const line = joined.split('\n').find((l) => /not distinguishable/.test(l)) ?? '';
   assert.match(line, /short of the 65% bar/, `the bar must be named: "${line.trim()}"`);
@@ -409,7 +415,7 @@ test('the explanation reports the BAR, so it never reads as a win under a loss (
 });
 
 test('with no measured base rate the withheld claim says THAT, not a false comparison (v0.43.1)', () => {
-  const eff = (): Eff => ({ expectedEfficacy: null, n: 9, baseRate: null, nodes: 2, ready: true, lowerBound: 0.44, bar: null });
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 9, baseRate: null, nodes: 2, ready: true, lowerBound: 0.44, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 });
   const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
   assert.match(joined, /even pessimistically 44%, and self-heal is not measured yet/);
 });
@@ -505,4 +511,199 @@ test('an engine with an EMPTY roster does not render an all-clear (v0.43.1)', ()
     assert.equal(lines.length, rows, `${cols}x${rows}: exact rows`);
     for (const l of lines) assert.ok(plain([l]).length <= cols, `${cols}x${rows}: fits`);
   }
+});
+
+test('the self-heal rate carries its OWN n and node count (v0.44.0)', () => {
+  // "vs 20% self-heal" shipped as a bare percentage beside an action arm that
+  // carried n≈ and provenance. Four episodes on one flapping node and four on
+  // four distinct nodes rendered identically — and the control arm is the
+  // number the operator is being asked to beat.
+  const eff = (): Eff => ({ expectedEfficacy: 0.83, n: 6, baseRate: 0.2, nodes: 3, ready: true,
+    lowerBound: 0.55, bar: 0.25, minN: 4, baseN: 9.4, baseNodes: 5, harmed: 0, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.match(joined, /vs 20% self-heal \(n≈9\.4 · 5 nodes\)/,
+    `the control arm must carry its own evidence: ${joined.slice(0, 700)}`);
+});
+
+test('an unrecorded control weight omits the parenthetical rather than printing n≈0.0 (v0.44.0)', () => {
+  // baseRate() withholds below minEpisodes, so a non-null rate with a zero
+  // weight cannot arise live — it means a ledger written before the weight was
+  // tracked. "n≈0.0" would state a measurement of nothing.
+  const eff = (): Eff => ({ expectedEfficacy: 0.83, n: 6, baseRate: 0.2, nodes: 3, ready: true,
+    lowerBound: 0.55, bar: 0.25, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.match(joined, /vs 20% self-heal/);
+  assert.doesNotMatch(joined, /n≈0\.0/, 'never a measurement of nothing');
+});
+
+test('an action below readiness says SO, and still reports the self-heal rate (v0.44.0)', () => {
+  // "still learning" and "no ledger at all" both rendered as silence, while the
+  // CONTROL arm may be fully measured — and that rate is precisely the decision
+  // input when the action itself is unproven.
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 2, baseRate: 0.8, nodes: 1, ready: false,
+    lowerBound: null, bar: null, minN: 4, baseN: 12.5, baseNodes: 6, harmed: 0, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.match(joined, /still learning this action \(n≈2\.0 of 4\)/);
+  assert.match(joined, /80% self-heal \(n≈12\.5 · 6 nodes\)/);
+  // It must NOT borrow the vocabulary of a measured verdict.
+  assert.doesNotMatch(joined, /not distinguishable/, 'an unjudged arm is not a judged one');
+});
+
+test('no ledger at all is still silence, not a fabricated learning notice (v0.44.0)', () => {
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 0, baseRate: null, nodes: 0, ready: false,
+    lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.doesNotMatch(joined, /still learning this action/,
+    'with no control arm and no attempts there is nothing to report');
+});
+
+test('a structurally unscoreable kind SAYS so, permanently (v0.44.0)', () => {
+  // node-down accumulates no efficacy record ever. Silence there is not
+  // neutral: every other kind does accumulate one, so the absence reads as
+  // "still learning" — indefinitely. The loop is not slow, it is off.
+  const joined = plain(renderRemedy(ctx(200, 40, [sym({ kind: 'node-down', nodeId: 6 })])));
+  assert.match(joined, /not measured by the ledger/,
+    `node-down must disclose why it has no ledger: ${joined.slice(0, 800)}`);
+  assert.match(joined, /no control arm to compare against/);
+  // A scoreable kind must NOT carry the notice.
+  const ok = plain(renderRemedy(ctx(200, 40, [sym({ kind: 'rtt-degraded' })])));
+  assert.doesNotMatch(ok, /not measured by the ledger/);
+});
+
+test('an action measured as HARMFUL says so instead of quoting an efficacy (v0.44.0)', () => {
+  // The one number on the card that can argue against an action the planner is
+  // offering. `worse` used to be folded into `no-change`, so this rendered as
+  // "not distinguishable from self-healing".
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 10, baseRate: 0.3, nodes: 4, ready: true,
+    lowerBound: 0.1, bar: 0.35, minN: 4, baseN: 8, baseNodes: 4, harmed: 4, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.match(joined, /made it WORSE in 40% of n≈10\.0 · 4 nodes/,
+    `the harm rate must lead: ${joined.slice(0, 800)}`);
+  assert.doesNotMatch(joined, /not distinguishable from self-healing/,
+    'harm is not the same finding as inefficacy');
+});
+
+test('an occasional regression does NOT trigger the harm warning (v0.44.0)', () => {
+  const eff = (): Eff => ({ expectedEfficacy: 0.7, n: 10, baseRate: 0.3, nodes: 4, ready: true,
+    lowerBound: 0.45, bar: 0.35, minN: 4, baseN: 8, baseNodes: 4, harmed: 1, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.doesNotMatch(joined, /made it WORSE/, 'one regression in ten is not a harm finding');
+  assert.match(joined, /✓ helped 70%/);
+});
+
+/* ── v0.44.0: harm must be as hard to claim as benefit ─────────────────────── */
+
+test('a SINGLE regression on one node does NOT author a harm warning (v0.44.0)', () => {
+  // The pre-release defect, reproduced exactly: 4 no-change then 1 worse gives
+  // n≈4.709 and harmed 1.0, a bare ratio of 21% — over the old 0.2 threshold.
+  // Moving that same regression earlier in the sequence changed the decayed n
+  // and made the warning vanish, so ORDER ALONE decided whether the screen
+  // accused a remedy. The bound now decides instead.
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 4.709, baseRate: 0.3, nodes: 1, ready: true,
+    lowerBound: 0.1, bar: 0.35, minN: 4, baseN: 9, baseNodes: 4, harmed: 1, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.doesNotMatch(joined, /made it WORSE/,
+    `one regression at n≈4.7 must not accuse: ${joined.slice(0, 700)}`);
+});
+
+test('one flapping node cannot author a harm warning on its own (v0.44.0)', () => {
+  // Plenty of evidence by weight, all of it from a single device — the exact
+  // shape that taught the fleet-wide arm past its threshold in v0.36.5.
+  const solo = (): Eff => ({ expectedEfficacy: null, n: 20, baseRate: 0.3, nodes: 1, ready: true,
+    lowerBound: 0.1, bar: 0.35, minN: 4, baseN: 20, baseNodes: 5, harmed: 12, baseHarmed: 0 });
+  assert.doesNotMatch(plain(renderRemedy(ctx(200, 40, [sym()], solo))), /made it WORSE/);
+  const broad = (): Eff => ({ ...(solo() as NonNullable<Eff>), nodes: 5 });
+  assert.match(plain(renderRemedy(ctx(200, 40, [sym()], broad))), /made it WORSE in 60%/);
+});
+
+test('an action that worsens LESS often than doing nothing is not called harmful (v0.44.0)', () => {
+  // The comparison the first cut got wrong: it measured the action's REGRESSION
+  // rate against the control's IMPROVEMENT rate — two different quantities. If
+  // the symptom self-worsens 40% of the time, an action that worsens 21% is
+  // better than leaving it alone, and saying otherwise steers the operator away
+  // from a remedy that helps.
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 20, baseRate: 0.1, nodes: 6, ready: true,
+    lowerBound: 0.1, bar: 0.15, minN: 4, baseN: 20, baseNodes: 6, harmed: 4.2, baseHarmed: 8 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.doesNotMatch(joined, /made it WORSE/,
+    `21% worse against a 40% self-worsening baseline is an improvement: ${joined.slice(0, 700)}`);
+});
+
+test('a harm finding names what LEAVING IT ALONE does — the same quantity (v0.44.0)', () => {
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 20, baseRate: 0.3, nodes: 6, ready: true,
+    lowerBound: 0.1, bar: 0.35, minN: 4, baseN: 20, baseNodes: 6, harmed: 12, baseHarmed: 1 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.match(joined, /made it WORSE in 60% of n≈20\.0 · 6 nodes — leaving it alone: 5% worse/,
+    `both numbers must be regression rates: ${joined.slice(0, 700)}`);
+});
+
+test('a harm finding never SUPPRESSES a granted efficacy claim (v0.44.0)', () => {
+  // An action can genuinely help most of the time and hurt some of the time.
+  // Returning early on harm hid a claim ENGINE simultaneously rendered in green
+  // from the same ledger row — two screens, one row, opposite conclusions.
+  const eff = (): Eff => ({ expectedEfficacy: 0.7, n: 20, baseRate: 0.3, nodes: 6, ready: true,
+    lowerBound: 0.481, bar: 0.35, minN: 4, baseN: 20, baseNodes: 6, harmed: 8, baseHarmed: 1 });
+  const joined = plain(renderRemedy(ctx(220, 40, [sym()], eff)));
+  assert.match(joined, /helped 70%/, `the earned claim must survive: ${joined.slice(0, 800)}`);
+  assert.match(joined, /made it WORSE in 40%/, 'and the harm must still be said');
+});
+
+test('a below-readiness arm whose every attempt regressed says so, hedged (v0.44.0)', () => {
+  // The readiness gate was silencing precisely the arm an operator most needs
+  // warned about: three attempts, three regressions, and the screen said only
+  // "still learning".
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 3, baseRate: 0.5, nodes: 2, ready: false,
+    lowerBound: null, bar: null, minN: 4, baseN: 9, baseNodes: 4, harmed: 3, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.match(joined, /every attempt so far made it WORSE \(too few to be sure\)/,
+    `an all-regressions arm must speak below readiness: ${joined.slice(0, 700)}`);
+});
+
+test('an action NEVER RUN here says that, not "still learning" (v0.44.0)', () => {
+  const eff = (): Eff => ({ expectedEfficacy: null, n: 0, baseRate: 0.58, nodes: 0, ready: false,
+    lowerBound: null, bar: null, minN: 4, baseN: 4.7, baseNodes: 5, harmed: 0, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], eff)));
+  assert.match(joined, /never tried here — this kind self-heals 58%/);
+  assert.doesNotMatch(joined, /still learning this action \(n≈0\.0/,
+    'an arm nobody ran is not one that is learning');
+});
+
+test('the unscoreable disclosure WRAPS rather than being cut mid-word (v0.44.0)', () => {
+  // The sentence needs ~185 columns. Emitted as one truncate()'d row it was cut
+  // mid-word at every realistic terminal, so the disclosure disclosed nothing.
+  for (const cols of [80, 100, 120]) {
+    const lines = plain(renderRemedy(engCtx2(cols, 40, [sym({ kind: 'node-down', nodeId: 6 })]))).split('\n');
+    // Normalize the wrap indentation before matching — the sentence spans rows.
+    const joined = lines.map((l) => l.trim()).join(' ').replace(/\s+/g, ' ');
+    assert.match(joined, /not measured by the ledger/, `${cols} cols: the lead must render`);
+    assert.match(joined, /no control arm to compare against/,
+      `${cols} cols: the REASON must survive, not just the lead — "${lines.filter((l) => /ledger/.test(l)).join(' | ')}"`);
+    for (const l of lines) assert.ok(l.length <= cols, `${cols} cols: overflow`);
+  }
+});
+
+test('a BLOCKED candidate is never rendered in the endorsing green (v0.44.0)', () => {
+  // Colour is load-bearing here: green is the endorsement, and a candidate the
+  // planner has blocked must never wear it however good the measurement is.
+  // A harm finding disqualifies green for the same reason.
+  const good = (): Eff => ({ expectedEfficacy: 0.83, n: 6, baseRate: 0.2, nodes: 3, ready: true,
+    lowerBound: 0.55, bar: 0.25, minN: 4, baseN: 9, baseNodes: 5, harmed: 0, baseHarmed: 0 });
+  // route-churn's rebuild candidate is BLOCKED — its measurement renders as a
+  // yellow caveat, never as an endorsement.
+  const rawBlocked = renderRemedy(ctx(200, 40, [sym({ kind: 'route-churn' })], good)).join('\n');
+  const blockedLine = rawBlocked.split('\n').find((l) => /ledger measured/.test(l));
+  assert.ok(blockedLine, 'the blocked candidate carries a measurement');
+  assert.ok(!/\x1b\[92m/.test(blockedLine), `a blocked row must not be green: ${blockedLine}`);
+  assert.ok(/\x1b\[93m/.test(blockedLine), 'it is yellow — a measurement under a caveat');
+
+  const raw = renderRemedy(ctx(200, 40, [sym()], good)).join('\n');
+  const plainGood = raw.split('\n').find((l) => /✓ helped 83%/.test(l));
+  assert.ok(plainGood && /\x1b\[92m/.test(plainGood), 'an unblocked, harmless win IS green');
+
+  // And a win that also carries a measured harm rate is not green either.
+  const harmful = (): Eff => ({ ...(good() as NonNullable<Eff>), harmed: 8, n: 20, nodes: 6, baseHarmed: 1, baseN: 20 });
+  const rawHarm = renderRemedy(ctx(220, 40, [sym()], harmful)).join('\n');
+  const harmLine = rawHarm.split('\n').find((l) => /helped 83%/.test(l));
+  assert.ok(harmLine, 'the claim survives');
+  assert.ok(!/\x1b\[92m/.test(harmLine), 'but a measured regression rate disqualifies green');
 });

@@ -30,6 +30,9 @@ async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
 
 const ENTRY = 'entry-1';
 const HOME = 3586281591;
+/** Lets one test simulate a stick swap / NVM restore — the ONLY thing that
+ *  legitimately changes home_id. Reset to null in that test's finally. */
+let homeOverride: number | null = null;
 const DEV_ID = 'dev-7';
 
 function cannedResult(cmd: Record<string, unknown>): unknown {
@@ -48,7 +51,7 @@ function cannedResult(cmd: Record<string, unknown>): unknown {
       return {
         client: { server_version: 't' },
         controller: {
-          home_id: HOME, own_node_id: 1,
+          home_id: homeOverride ?? HOME, own_node_id: 1,
           nodes: [{ node_id: 7, status: 4, ready: true, is_routing: true, is_secure: false }],
         },
       };
@@ -730,11 +733,12 @@ test('a node going DEAD mid-episode is marked confounded by the data layer — t
     // ledger, so the join is this layer's job (v0.41).
     {
       const openNow = zd.openEpisodes();
+      assert.ok(openNow != null, 'a configured ledger returns a list, never null');
       const ep7 = openNow.find((e) => e.nodeId === 7 && e.kind === 'rtt-degraded');
       assert.ok(ep7, `the open episode is visible to a screen: ${JSON.stringify(openNow)}`);
       assert.equal(ep7!.confirming, false, 'symptom still live ⇒ not in its confirmation window');
       shadow.updateEpisodes([], t0 + 70_000);          // symptom goes absent
-      const after = zd.openEpisodes().find((e) => e.nodeId === 7 && e.kind === 'rtt-degraded');
+      const after = zd.openEpisodes()?.find((e) => e.nodeId === 7 && e.kind === 'rtt-degraded');
       assert.equal(after?.confirming, true, 'absent symptom ⇒ confirming, joined from pendingResolve');
       shadow.updateEpisodes([symptom], t0 + 80_000);   // and back, for the checks below
     }
@@ -914,6 +918,170 @@ test('the data layer applies the refusal SCOPE it computes, and only to refusals
     assert.ok(oc.efficacyFor('return-path-degraded', 'ping').n > 0,
       'credited too — a successful action may well have fixed both');
   } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an episode closure reaches the LOG RING, and `worse` lifts to warn (v0.44.0)', async () => {
+  // Every verdict the engine ever scored had exactly one sink: container
+  // stdout — which the TUI cannot read and no operator sees. The onset of a
+  // symptom was already a ring event; its closure is the other half.
+  // Driven through the REAL lifecycle, not by calling pushEvent: the severity
+  // decision lives in the resolve loop, and a stub proves nothing about it.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-closure-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    // Node 7 is non-listening in the fixture and the v0.38.1 gate admits no
+    // episode for an unprobeable node — shadow it listening, as the
+    // capability-flip test above does.
+    const real = zd.snapshot();
+    const asListening = real.map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+    const shadow = zd as unknown as { snapshot: () => NodeSnapshot[]; updateEpisodes: (s: unknown[], now: number) => void };
+    shadow.snapshot = () => asListening;
+    const t0 = 1_800_000_000_000;
+    const symptom = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0 - 600_000,
+      basis: 'measured', evidence: [], narrative: 'n' };
+    shadow.updateEpisodes([symptom], t0);            // opens
+    shadow.updateEpisodes([], t0 + 60_000);          // goes absent → confirmation window
+    shadow.updateEpisodes([], t0 + 12 * 60_000);     // window elapses → resolves
+    const closures = zd.events().filter((e) => /closed/.test(e.text));
+    assert.ok(closures.length > 0,
+      `a closure must reach the ring: ${JSON.stringify(zd.events().slice(0, 6).map((e) => e.text))}`);
+    const c0 = closures[0];
+    assert.equal(c0.kind, 'symptom', 'same kind as the ONSET event, so the Log pairs them');
+    assert.equal(c0.source, 'engine', 'the engine said it — not the network, not the operator');
+    assert.match(c0.text, /rtt-degraded closed /, 'and it names the kind and the verdict');
+    // Never `error`: the errorsOnly filter is for things that FAILED, and a
+    // closure verdict is a measurement.
+    assert.notEqual(c0.severity, 'error');
+    assert.ok(c0.severity === 'info' || c0.severity === 'warn');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a `worse` closure is logged at WARN — a regression at info is one nobody sees (v0.44.0)', async () => {
+  // Driven through the REAL resolve loop by forcing the windows the verdict is
+  // computed from: a timeout rate that rises sharply across the episode scores
+  // `worse`, and that verdict must lift the ring event's severity.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-worse-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const real = zd.snapshot();
+    const asListening = real.map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+    const W = (timeouts: number) => ({ tx: 100, rx: 100, timeouts, rate: timeouts / 100, samples: 6,
+      freshN: 6, flaps: 0, s2: 0, s2Known: 6, routeChanges: 0, routeKnown: 6,
+      rssiMedian: null, rssiN: 0, rttMedian: null, rttN: 0, rateKbpsMin: null });
+    let degraded = false;
+    const shadow = zd as unknown as {
+      snapshot: () => NodeSnapshot[];
+      updateEpisodes: (s: unknown[], now: number) => void;
+      nodeWindow: (id: number | null, now: number) => unknown;
+      degradedWindow: (id: number | null, since: number, now: number) => unknown;
+    };
+    shadow.snapshot = () => asListening;
+    // The BEFORE window comes from degradedWindow (captured at open), the AFTER
+    // window from nodeWindow (computed at resolve) — both must be driven.
+    shadow.degradedWindow = () => W(2);
+    // `return-path-degraded` scores on the TIMEOUT rate — the metric this
+    // window actually carries. (rtt-degraded scores on RTT and would close
+    // `unverifiable` here, which is the ledger correctly refusing to guess.)
+    // BEFORE: a healthy 2% timeout rate. AFTER: 60% — unambiguously worse.
+    shadow.nodeWindow = () => (degraded ? W(60) : W(2));
+
+    const t0 = 1_800_000_000_000;
+    const symptom = { kind: 'return-path-degraded', nodeId: 7, severity: 'warn', sinceMs: t0 - 600_000,
+      basis: 'measured', evidence: [], narrative: 'n' };
+    shadow.updateEpisodes([symptom], t0);
+    degraded = true;
+    shadow.updateEpisodes([], t0 + 60_000);
+    shadow.updateEpisodes([], t0 + 12 * 60_000);
+
+    const worse = zd.events().find((e) => /closed worse/.test(e.text));
+    assert.ok(worse, `a worse closure must reach the ring: ${JSON.stringify(zd.events().map((e) => e.text).slice(0, 6))}`);
+    assert.equal(worse.severity, 'warn',
+      'a regression logged at info is a regression nobody sees');
+    // Still not `error` — the errorsOnly filter is for things that FAILED.
+    assert.notEqual(worse.severity, 'error');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+test('an install with NO outcome ledger reports null, not an empty list (v0.44.0)', async () => {
+  // ENGINE has two branches — "no outcome ledger, the learning loop is off" and
+  // "no open episodes, the healthy steady state" — and the first was
+  // UNREACHABLE: this returned [] for both, so a dead learning loop rendered as
+  // a clean bill of health. The distinction survived only in a test mock that
+  // omitted the member, which is how optionality hides a dead feature.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-noledger-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    assert.ok(zd.openEpisodes() != null, 'a configured ledger returns a list');
+    // Now take the ledger away, exactly as an install with no baselines store has it.
+    (zd as unknown as { outcomes: unknown }).outcomes = null;
+    assert.equal(zd.openEpisodes(), null,
+      'no ledger must be distinguishable from an idle one — they render differently and must');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('in-flight episodes discarded by a mesh-identity change are COUNTED, not dropped silently (v0.44.0)', async () => {
+  // A stick swap or NVM restore changes home_id, and every node-id-keyed cache
+  // — including the outcome ledger — is wiped, because id 7 on the new network
+  // is different hardware. That is correct. What was wrong is that in-flight
+  // experiments vanished with nothing on any screen or in the log saying they
+  // had ever existed.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-identity-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    // Two open episodes, then the identity flips underneath them.
+    const oc = (zd as unknown as { outcomes: OutcomeStore }).outcomes;
+    const W0 = { tx: 100, rx: 100, timeouts: 40, rate: 0.4, samples: 6, freshN: 6, flaps: 0, s2: 0,
+      s2Known: 6, routeChanges: 0, routeKnown: 6, rssiMedian: null, rssiN: 0, rttMedian: null, rttN: 0, rateKbpsMin: null };
+    oc.open(7, 'return-path-degraded', 1000, W0);
+    oc.open(8, 'rtt-degraded', 1000, W0);
+    assert.equal(oc.openEpisodes().length, 2, 'two experiments in flight');
+
+    // Flip the network underneath it, through the real refresh path — the
+    // canned controller now reports a different home_id, exactly as a stick
+    // swap or NVM restore does.
+    homeOverride = HOME + 1;
+    await (zd as unknown as { refresh: () => Promise<void> }).refresh();
+
+    const notice = zd.events().find((e) => /in-flight episode/.test(e.text));
+    assert.ok(notice, `the loss must be on the record: ${JSON.stringify(zd.events().map((e) => e.text).slice(0, 8))}`);
+    assert.match(notice.text, /2 in-flight episodes discarded/, 'and it must say HOW MANY');
+    assert.equal(notice.source, 'engine');
+    assert.equal(notice.kind, 'system', 'a cache reset is a system event, not a symptom');
+  } finally {
+    homeOverride = null;
     zd.stop();
     rmSync(dir, { recursive: true, force: true });
   }

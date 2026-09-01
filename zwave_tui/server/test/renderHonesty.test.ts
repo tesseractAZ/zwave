@@ -1345,7 +1345,7 @@ test('a decayed weight is never printed as an integer count (v0.43.1)', () => {
   // ordinary run: a contradiction with nothing on screen to explain it, since
   // the two numbers were styled identically. The notation itself has to carry
   // the difference, at every width, on every screen that prints them.
-  const eff = { expectedEfficacy: 0.8, n: 6.4005, baseRate: 0.2, nodes: 7, ready: true, lowerBound: 0.55, bar: null };
+  const eff = { expectedEfficacy: 0.8, n: 6.4005, baseRate: 0.2, nodes: 7, ready: true, lowerBound: 0.55, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
   const sym = {
     kind: 'rtt-degraded' as const, nodeId: 6, severity: 'warn' as const, sinceMs: 20 * 60_000,
     basis: 'measured' as const, evidence: [{ label: 'rtt', value: '140 ms' }],
@@ -1365,6 +1365,62 @@ test('a decayed weight is never printed as an integer count (v0.43.1)', () => {
       // decimal, so it cannot be misread as one of the plain episode tallies
       // ("N past episodes") that sit beside it in identical grey.
       if (l.includes('6.4')) assert.ok(l.includes('n≈6.4'), `${cols} cols: weight lost its marker — "${l.trim()}"`);
+    }
+  }
+});
+
+test('no REMEDY efficacy note ever clips a measurement mid-digit (v0.44.0)', () => {
+  // INVARIANT. These notes were concatenated and then truncate()d, so at 80
+  // columns `· 12 nodes` rendered as `· 1` — a complete-looking, wrong node
+  // count. chrome.ts states the rule: an undisclosed drop is a smaller lie than
+  // a clipped number that reads as a plausible measurement. Every clause must
+  // therefore appear WHOLE or not at all, at every width.
+  const shapes = [
+    // granted, with harm appended
+    { expectedEfficacy: 0.7, n: 20, baseRate: 0.3, nodes: 12, ready: true, lowerBound: 0.481,
+      bar: 0.35, minN: 4, baseN: 19.4, baseNodes: 13, harmed: 8, baseHarmed: 1 },
+    // withheld, with the bound and bar
+    { expectedEfficacy: null, n: 12.4, baseRate: 0.6, nodes: 11, ready: true, lowerBound: 0.52,
+      bar: 0.65, minN: 4, baseN: 11.3, baseNodes: 12, harmed: 0, baseHarmed: 0 },
+    // below readiness, with the control arm measured
+    { expectedEfficacy: null, n: 2, baseRate: 0.58, nodes: 1, ready: false, lowerBound: null,
+      bar: null, minN: 4, baseN: 11.3, baseNodes: 12, harmed: 0, baseHarmed: 0 },
+    // never run
+    { expectedEfficacy: null, n: 0, baseRate: 0.58, nodes: 0, ready: false, lowerBound: null,
+      bar: null, minN: 4, baseN: 11.3, baseNodes: 12, harmed: 0, baseHarmed: 0 },
+  ];
+  const sym = {
+    kind: 'route-churn' as const, nodeId: 6, severity: 'warn' as const, sinceMs: 20 * 60_000,
+    basis: 'measured' as const, evidence: [{ label: 'x', value: 'y' }],
+    narrative: 'Node 6 keeps re-routing.',
+  };
+  // Every complete number the notes can carry. If a PREFIX of one appears
+  // without the whole, a measurement was clipped.
+  const wholes = ['n≈20.0', 'n≈12.4', 'n≈19.4', 'n≈11.3', 'n≈2.0', '12 nodes', '11 nodes',
+    '13 nodes', 'node', 'nodes'];
+  for (const eff of shapes) {
+    for (let cols = 40; cols <= 200; cols += 1) {
+      const lines = renderRemedy({
+        view: mkView({ screen: 'remedy', cols, rows: 40 }),
+        data: { ...mockData({ nodes: [mkNode({ nodeId: 6, name: 'Kitchen' })] }),
+          symptoms: () => [sym], efficacyFor: () => eff },
+        visibleNodes: [], filtering: false, actionsEnabled: true,
+      } as ScreenCtx).map(strip);
+      for (const l of lines) {
+        // A `n≈` or `· N node` fragment must always be complete.
+        const frag = /n≈\d+(\.\d)?|· \d+ nodes?/g;
+        for (const m of l.match(frag) ?? []) {
+          assert.ok(/^n≈\d+\.\d$/.test(m) || /^· \d+ nodes?$/.test(m),
+            `${cols} cols: clipped fragment "${m}" in "${l.trim()}"`);
+        }
+        // And no EFFICACY NOTE may end mid-number. (Scoped: the masthead's
+        // clock legitimately ends in a digit.)
+        const isNote = /helped |still learning|never tried|not distinguishable|made it WORSE|ledger measured/.test(l);
+        if (isNote) {
+          assert.ok(!/\d$/.test(l.trimEnd()) || wholes.some((w) => l.trimEnd().endsWith(w)),
+            `${cols} cols: note ends mid-number — "${l.trim()}"`);
+        }
+      }
     }
   }
 });

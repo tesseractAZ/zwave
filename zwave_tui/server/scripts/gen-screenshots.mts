@@ -223,12 +223,12 @@ const DATA: DataProvider = {
   symptoms: () => SYMPTOMS,
   engineStatus: () => ({ enabled: true, ready: 10, total: 11, timeoutReady: 10, rttReady: 10, rssiReady: 10, band: 0, bands: 6 }),
   efficacyFor: (_k, a) =>
-    a === 'ping' ? { expectedEfficacy: 0.71, n: 7, baseRate: 0.22, nodes: 3, ready: true, lowerBound: null, bar: null }
+    a === 'ping' ? { expectedEfficacy: 0.71, n: 7, baseRate: 0.22, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 }
     // healNode is emitted BLOCKED on every arm that mentions it, so this is the
     // ledger contradicting the hardcoded lore — the v0.35 case that could not
     // reach a screen at all before this release, and therefore the one the
     // published screenshot has to show.
-    : a === 'healNode' ? { expectedEfficacy: 0.64, n: 11, baseRate: 0.19, nodes: 3, ready: true, lowerBound: null, bar: null }
+    : a === 'healNode' ? { expectedEfficacy: 0.64, n: 11, baseRate: 0.19, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 }
     : null,
   interference: () => ({
     noise: { channels: [-101, -103, -99, -102], floor: -101, real: true, trend: spark(-101, 40, 2), trendCoarse: spark(-100, 60, 3), trendCoarseDays: 12, band: 'clean' },
@@ -239,6 +239,9 @@ const DATA: DataProvider = {
   }) as never,
   entityStates: () => ENTITIES,
   configParams: () => ({ status: 'ready', params: PARAMS }),
+  openEpisodes: () => [],
+  controlArm: () => null,
+  autoPingState: () => null,
   requestConfigParams: () => {},
 };
 

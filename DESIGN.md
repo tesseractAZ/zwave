@@ -468,13 +468,23 @@ without:
   is **auto-detected as of v0.43.1**. It was deferred for two reasons, both now
   addressed:
   - *The hook could not tell a genuine refusal from a transient WS error.* The
-    classification now happens in the action runner, where the driver's own
-    words are still in hand: a failure is `refused` only if the message says the
-    node is not failed / is responding, and `transport` otherwise. Anything
-    unmatched indicts nothing. The exact production wording is **unverified** —
-    this add-on reaches the driver through Home Assistant's WS API and no
-    genuine refusal has been captured on this fleet — so every unmatched
-    `remove_failed_node` failure logs its verbatim text for the family to be
+    classification happens in the action runner and keys on the **Z-Wave error
+    code**, not on message prose — `ZWaveErrorCodes` exists, in the library's
+    own words, "to identify errors without relying on the specific wording of
+    the error message". The code arrives twice over (`ZWaveError` appends
+    ` (ZW0361)`; `FailedZWaveCommand` prefixes `Z-Wave error 361 - `), and HA's
+    `async_handle_failed_command` forwards both unchanged.
+
+    `RemoveFailedNode_NodeOK` (361) is the unambiguous refusal.
+    `RemoveFailedNode_Failed` (360) covers six outcomes, of which exactly one —
+    the standalone "…could not be started because the node responded to a
+    ping." — means the device answered; zwave-js pings **three times** before
+    asking the controller, so this is the likeliest refusal in practice.
+    `· Node N is not in the list of failed nodes` reads like a refusal and is
+    **not** one: that branch is reached only after all three pings failed, so
+    the device is already proven silent, and scoring it would indict the
+    detector for being right. Anything unmatched is `transport` and indicts
+    nothing; an unrecognised 360 reason is flagged in the log so the rule can be
     corrected on first sighting.
   - *A node-scoped stamp would wrongly mark non-ghost symptoms.* Refusal
     attribution is scoped by `REFUSAL_INDICTS` (planner.ts) to the symptom kinds

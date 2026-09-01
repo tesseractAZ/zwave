@@ -63,30 +63,89 @@ export interface ActionRunnerOptions {
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
+ * Z-Wave error codes for `removeFailedNode`, read from @zwave-js/core 15.28.0
+ * (`ZWaveErrorCodes`). The enum's own doc comment states why these exist:
+ * "Used to identify errors from this library WITHOUT RELYING ON THE SPECIFIC
+ * WORDING of the error message."
+ */
+const ZW_REMOVE_FAILED = 360; // RemoveFailedNode_Failed — FIVE distinct situations
+const ZW_REMOVE_NODE_OK = 361; // RemoveFailedNode_NodeOK — the node answered
+
+/**
+ * Recover the Z-Wave error code from a driver error that reached us through
+ * Home Assistant (v0.43.2).
+ *
+ * The path is `zwave-js` → `zwave-js-server` → `zwave-js-server-python` → HA's
+ * websocket API → this add-on, and it carries the code TWICE, independently:
+ *
+ *  - `ZWaveError`'s constructor appends a stable suffix to every message —
+ *    `appendErrorSuffix()` makes it ` (ZW0361)`, zero-padded to four digits.
+ *  - `FailedZWaveCommand` re-states it: `Z-Wave error 361 - <message>`.
+ *
+ * Either is a machine identifier. Both survive HA's relay verbatim, because
+ * `async_handle_failed_command` forwards `err.args[0]` unchanged.
+ */
+export function zwaveErrorCode(msg: string): number | null {
+  const suffix = /\(ZW(\d{4})\)/.exec(msg);
+  if (suffix) return Number(suffix[1]);
+  const relayed = /Z-Wave error (\d+)\b/.exec(msg);
+  return relayed ? Number(relayed[1]) : null;
+}
+
+/**
  * Does this driver error mean "the node is NOT failed" — i.e. the controller
- * refused the premise rather than failing to act on it? (v0.43.1)
+ * refused the premise rather than failing to act on it? (v0.43.2)
  *
- * UNVERIFIED AGAINST PRODUCTION. The wording below is a family of plausible
- * phrasings, not an observed string: this add-on reaches the driver through
- * Home Assistant's WS API (`HA WS error (<code>): <message>`), and no genuine
- * `removeFailed` refusal has been captured on this fleet. A miss here is safe
- * in the sense that it degrades to 'transport' and indicts no detector — but it
- * is NOT harmless, because that is exactly the silence that made the
- * `refused-misdiagnosis` verdict unreachable before. The caller logs every
- * unmatched failure verbatim so the real text can be added on first sighting.
+ * Rewritten against the ACTUAL zwave-js source (Controller.js `removeFailedNode`,
+ * 15.28.0). The previous version guessed at phrasings and was wrong three ways:
+ * it invented strings the driver never emits ("is not a failed node"), it
+ * missed the single MOST LIKELY refusal (zwave-js pings the node three times
+ * first and reports "responded to a ping"), and it read the driver's own
+ * explicitly AMBIGUOUS reason ("The controller is busy or the node has
+ * responded") as a definite refusal.
  *
- * Deliberately conservative: each pattern must express that the node is fine /
- * responding / not in the failed list. Nothing matches a bare "failed to
- * remove", which is an ordinary failure and says nothing about the diagnosis.
+ * `RemoveFailedNode_NodeOK` (361) is unambiguous: the removal was aborted
+ * because the node answered. `RemoveFailedNode_Failed` (360) is NOT — it covers
+ * five different outcomes, only two of which say anything about the diagnosis:
+ *
+ *   REFUSAL   "…could not be started because the node responded to a ping."
+ *   REFUSAL   "· Node N is not in the list of failed nodes"
+ *   transport "· This controller is not the primary controller"
+ *   transport "· The node removal process is currently busy"
+ *   transport "· The controller is busy or the node has responded"  ← ambiguous
+ *   transport "The removal process could not be completed"
+ *
+ * The 360 message is assembled from BITFLAGS, so several reasons can appear at
+ * once. A refusal is claimed only when a node-is-fine reason is present and no
+ * transport reason is: if the controller was not primary, the failed-nodes list
+ * was never meaningfully consulted, and blaming the detector would be a
+ * fabrication.
  */
 export function isNotFailedRefusal(msg: string): boolean {
-  return [
-    /is not (a |an )?failed/i,            // "Node 5 is not a failed node"
-    /not (currently )?failed/i,           // "the node is not currently failed"
-    /not in the .{0,24}failed nodes? list/i, // "not in the controller's failed nodes list"
-    /node (is |was )?(still )?(alive|responding|responsive)/i,
-    /(has|it) responded/i,                // "could not be removed because it has responded"
-  ].some((re) => re.test(msg));
+  const code = zwaveErrorCode(msg);
+  if (code === ZW_REMOVE_NODE_OK) return true;
+  if (code !== ZW_REMOVE_FAILED) return false;
+  // Ambiguous or unrelated-to-the-diagnosis reasons veto the whole message.
+  // Exactly ONE 360 message means the device answered, and there is no veto to
+  // apply (settled v0.44.0 by reading zwave-js's control flow, not its wording):
+  //
+  //   - `…could not be started because the node responded to a ping.` is a
+  //     STANDALONE message, thrown before the controller is asked anything.
+  //   - every other 360 is the bitflag composite, whose bullet reasons are all
+  //     either transport faults or the controller's own bookkeeping.
+  //
+  // `· Node N is not in the list of failed nodes` reads like a refusal and is
+  // not one: removeFailedNode pings the node up to THREE times first and only
+  // reaches the composite after every ping FAILED, so the device has already
+  // been proven silent. That is the controller disagreeing with the driver —
+  // calling it a refusal would indict the ghost-suspect detector for being
+  // RIGHT.
+  //
+  // Because the one refusal message cannot co-occur with the composite's
+  // bullets, no veto list is needed. An earlier draft carried one; the mutation
+  // harness showed every entry was unreachable, and unreachable defensive code
+  // is a claim the tests cannot check.
+  return /responded to a ping/i.test(msg);
 }
 
 export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
@@ -150,10 +209,18 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
       // NOT classify logs its verbatim text: the first real refusal on this
       // fleet puts the true wording in the log, where it can be read and the
       // family corrected — rather than being lost to a bare `false` again.
-      if (kind === 'removeFailed' && refusal === 'transport') {
-        o.log('warn', nodeId, `remove-failed failed WITHOUT matching a known refusal phrasing. ` +
-          `If the controller was refusing the premise, THIS is the wording to add ` +
-          `to isNotFailedRefusal: ${msg}`, origin);
+      // Only a 360 can carry a REASON STRING the families do not yet cover
+      // (v0.44.0). Gating on the code stops this firing for a dropped socket or
+      // a timeout, where no driver ever spoke and there is nothing to add.
+      if (kind === 'removeFailed' && refusal === 'transport' && zwaveErrorCode(msg) === ZW_REMOVE_FAILED) {
+        // A FLAG, not a copy. The generic failure path below already logs
+        // `remove failed node N → failed: <msg>`, so the driver's verbatim text
+        // is in the ring either way; what was missing is a marker saying this
+        // particular 360 reason is one the classifier does not recognise.
+        // An earlier draft re-logged the message behind a long prose preamble,
+        // which truncation then ate — sinking the very wording it existed to
+        // capture.
+        o.log('warn', nodeId, 'remove-failed: unclassified ZW0360 reason — see the failure line below', origin);
       }
       if (learn) o.onOutcome?.(kind, nodeId, false, refusal);
       return { ok: false, message: msg };
