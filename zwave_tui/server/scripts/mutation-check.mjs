@@ -1915,6 +1915,96 @@ const MUTANTS = [
     find: "      if (kind === 'removeFailed' && refusal === 'transport' && zwaveErrorCode(msg) === ZW_REMOVE_FAILED) {",
     repl: "      if (kind === 'removeFailed' && refusal === 'transport') {",
     what: 'the self-capture fires only where a driver reason string actually exists' },
+  { id: 'shed-drops-whole-tokens', file: 'src/telnet/chrome.ts', tests: ['chrome', 'remedyScreen'],
+    // Character-clips the tail again: a half-shed `#23` renders as `#2`, which
+    // is a DIFFERENT NODE — the composer exists to make that impossible.
+    find: '    const line = headRow + \'  \' + tail.slice(0, keep).join(sep) + (dropped > 0 ? c.grey(` +${dropped}`) : \'\');',
+    repl: '    const line = truncate(headRow + \'  \' + tail.join(sep), cols);',
+    what: 'overflow drops WHOLE tokens, never a character clip' },
+  { id: 'shed-discloses-the-drop', file: 'src/telnet/chrome.ts', tests: ['chrome'],
+    // A row silently missing ids reads as "these are all of them".
+    find: '(dropped > 0 ? c.grey(` +${dropped}`) : \'\')',
+    repl: "''",
+    what: 'what fell off the row is disclosed with +N' },
+  { id: 'shed-protects-the-head', file: 'src/telnet/chrome.ts', tests: ['chrome'],
+    find: '  if (visLen(headRow) > cols) return [truncate(headRow, cols)];',
+    repl: '  if (visLen(headRow) > cols) return [headRow];',
+    what: 'the head row still respects the terminal width' },
+  { id: 'blocked-reason-wraps', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen', 'chrome'],
+    // Drops the blocked chip entirely when it does not fit inline — on the one
+    // row whose whole job is to say why NOT to act.
+    find: '        /* wrapTail */ true,',
+    repl: '        /* wrapTail */ false,',
+    what: 'a blocked reason that will not fit inline moves to a continuation row' },
+  { id: 'caveat-grounded-off-index', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Back to the index gate: a destructive caveat on a second-ranked candidate
+    // renders at NO terminal size, and widening never helps.
+    find: '      if (i === 0 || caveatLine != null) {',
+    repl: '      if (i === 0) {',
+    what: 'a destructive caveat is grounded wherever its candidate ranks' },
+  { id: 'caveat-not-every-candidate', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // The over-broad form the spec warned against: planner blocks EVERY
+    // executable when write actions are off, so this grounds all three
+    // candidates on every card and blows the row budget.
+    find: '      const caveatLine = rl.find((l) => CAVEAT.test(l));',
+    repl: '      const caveatLine = rl[0];',
+    what: 'only a CAVEAT earns a grounding line below the top candidate' },
+  { id: 'members-row-renders', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: '  if (sym.members?.length) {',
+    repl: '  if (sym.members?.length === -1) {',
+    what: 'cluster members reach a screen at all — the field had zero readers' },
+  { id: 'members-not-duplicated-in-evidence', file: 'src/zwave/symptoms.ts', tests: ['remedyScreen', 'symptoms'],
+    // Restores the copy that lied: the evidence line is truncate()d, so the id
+    // list there is the one that clips into an innocent node.
+    find: "        { label: 'degraded downstream', value: `${members.length} node(s)` },",
+    repl: "        { label: 'degraded downstream', value: `${members.length} node(s): ${members.map((m) => `#${m}`).join(', ')}` },",
+    what: 'the ids live on the shed row only — the evidence line carries a count' },
+  { id: 'subsumption-label-is-shared', file: 'src/zwave/zwaveData.ts', tests: ['zwaveData'],
+    // The log called EVERY subsumption "under mesh event" while REMEDY
+    // distinguished an edge cluster — a node folded into a cluster was logged
+    // as belonging to an event that did not exist.
+    find: "        text: `${sym.kind}${subsumptionLabel(sym.subsumedBy, ' ')}: ${firstSentence(sym.narrative)}` });",
+    repl: "        text: `${sym.kind}${sym.subsumedBy ? ' (under mesh event)' : ''}: ${firstSentence(sym.narrative)}` });",
+    what: 'the log names the same subsumption REMEDY does' },
+  { id: 'sentence-split-spares-decimals', file: 'src/telnet/ledgerText.ts', tests: ['zwaveData', 'ledgerText'],
+    // `split('.')[0]` cut a one-decimal number in half: a node silent 7.2 h
+    // logged "…has not been heard from in 7".
+    find: '  const m = /^(.*?[.!?])(\\s|$)/s.exec(text);',
+    repl: '  const m = /^(.*?[.!?])/s.exec(text);',
+    what: 'a sentence boundary is a period plus whitespace — a decimal point is not one' },
+  { id: 'symptom-clearance-is-logged', file: 'src/zwave/zwaveData.ts', tests: ['zwaveData'],
+    find: "    events.push({ severity: 'info', nodeId: was.nodeId, text: `${was.kind} cleared` });",
+    repl: '    void was;',
+    what: 'a symptom that ends says so — an onset line was otherwise permanent' },
+  { id: 'clearance-is-not-a-fault', file: 'src/zwave/zwaveData.ts', tests: ['zwaveData'],
+    // A red line saying a problem ENDED reads as a fault.
+    find: "    events.push({ severity: 'info', nodeId: was.nodeId, text: `${was.kind} cleared` });",
+    repl: "    events.push({ severity: sevOf(was.severity), nodeId: was.nodeId, text: `${was.kind} cleared` });",
+    what: 'a clearance is logged at info, never at the severity it used to be' },
+  { id: 'escalation-only-upward', file: 'src/zwave/zwaveData.ts', tests: ['zwaveData'],
+    // A de-escalation is not news, and logging it doubles the volume on a
+    // flapping node.
+    find: '    } else if (SEV_ORDER[sym.severity] > SEV_ORDER[was.severity]) {',
+    repl: '    } else if (SEV_ORDER[sym.severity] !== SEV_ORDER[was.severity]) {',
+    what: 'only an escalation is logged; a de-escalation updates state silently' },
+  { id: 'escalation-is-logged', file: 'src/zwave/zwaveData.ts', tests: ['zwaveData'],
+    find: '    } else if (SEV_ORDER[sym.severity] > SEV_ORDER[was.severity]) {',
+    repl: '    } else if (SEV_ORDER[sym.severity] > 99) {',
+    what: 'a watch that becomes crit says so — the onset line was the least severe thing that happened' },
+  { id: 'blocked-reasons-fit-the-chip', file: 'src/zwave/planner.ts', tests: ['planner'],
+    find: "blocked: 'RF-link symptom — will not repair it'",
+    repl: "blocked: 'RF-link symptom — re-interviewing will not repair it and it is not the right tool'",
+    what: 'every blocked reason stays inside the chip budget the renderer can carry' },
+  { id: 'rebuild-names-what-it-destroys', file: 'src/telnet/actionsCatalog.ts', tests: ['actionsMenu'],
+    find: 'It also DISCARDS any manually-set priority route for this node — you must set it again afterwards.',
+    repl: '',
+    what: 'the confirm box says a route rebuild deletes manually-set priority routes' },
+  { id: 'probes-caveat-follows-the-ratio', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Gated on the self-proven counter, the worst case — a fully blended
+    // history with zero self-proven credits — was the one case with no caveat.
+    find: '        const caveat = cov.probesAsked > 0',
+    repl: '        const caveat = cov.probesSelfProven > 0',
+    what: 'the lifetime-tally caveat is attached to the ratio it qualifies' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.

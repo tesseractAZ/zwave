@@ -373,8 +373,23 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         // whose ONLY self-proven credit is one such boot wave. The number is
         // still the best evidence there is — but it is a lifetime tally, not a
         // clean measurement, and the screen must not present it as the latter.
-        const caveat = cov.probesSelfProven > 0
-          ? c.grey(' — lifetime tally; pre-v0.40.2 counts blend probe lanes and boot credits')
+        // Gated on the ratio it QUALIFIES (v0.45.0), not on the self-proven
+        // counter. The pre-v0.40.2 blend inflated probesAsked/probesAnswered
+        // for exactly the nodes under investigation — an effect independent of
+        // whether any self-proven credit ever landed — so a node with a fully
+        // blended history and zero self-proven credits was the worst case and
+        // the one case that got no caveat at all. Two forms, because the long
+        // one clips at the modal 80 columns and a caveat cut mid-claim is a
+        // sentence that stops meaning what it says.
+        const caveatLong = ' — lifetime tally; pre-v0.40.2 counts blend probe lanes and boot credits';
+        const caveatShort = ' — lifetime tally; mixed probe lanes pre-v0.40.2';
+        // kv() spends 11 columns on its indent + label cell before the value,
+        // and the caveat row is emitted through it — so the budget is
+        // `inner - 11`, not `inner`. Getting that wrong is what let the long
+        // form be chosen at 80 columns and then clipped by kv itself.
+        const KV_GUTTER = 11;
+        const caveat = cov.probesAsked > 0
+          ? c.grey(inner - KV_GUTTER >= caveatLong.trim().length ? caveatLong : caveatShort)
           : '';
         body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${pct}%)`) + self, inner));
         if (caveat) body.push(kv('', c.grey(caveat.trim()), inner));

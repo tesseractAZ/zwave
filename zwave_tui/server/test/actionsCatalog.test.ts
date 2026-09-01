@@ -157,3 +157,27 @@ test('buildConfigRows: only WRITEABLE params; payload carries the param', () => 
   // the description mentions the current value + the range/enum hint
   assert.match(rows[1].desc.desc, /0…99 ms/);
 });
+
+test('a route rebuild names the priority routes it DESTROYS (v0.45.0)', () => {
+  // The confirm box is the only surface an operator reads before running these,
+  // and neither note said the irreversible part. `grep -rni "priority route"`
+  // hit three lines in the repo, none of them on a surface the operator sees
+  // before acting — so the loss was discoverable only by losing it.
+  const heal = describeAction('healNode');
+  assert.ok(heal, 'healNode is in the catalog');
+  assert.match(heal.impactNote, /DISCARDS any manually-set priority route/,
+    `healNode must name the loss: "${heal.impactNote}"`);
+  assert.match(heal.impactNote, /THIS node/, 'and keep its scope honest — one node, not the mesh');
+
+  const all = describeAction('rebuildAll');
+  assert.ok(all, 'rebuildAll is in the catalog');
+  assert.match(all.impactNote, /DISCARDS every manually-set priority route in the mesh/,
+    `rebuildAll is mesh-scoped: "${all.impactNote}"`);
+
+  // The confirm box wraps at min(64, max(20, cols-8)); a note that cannot wrap
+  // into a sane number of rows pushes the box off the screen.
+  for (const note of [heal.impactNote, all.impactNote]) {
+    const rows = Math.ceil(note.length / 64);
+    assert.ok(rows <= 5, `${rows} wrapped rows is too many for the confirm box: "${note}"`);
+  }
+});

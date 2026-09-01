@@ -9,9 +9,9 @@
  */
 
 import type { ScreenCtx, Symptom, NodeSnapshot, SymptomKind, ActionKind, Efficacy } from '../../types';
-import { provenance, weight, unscoreableReason } from '../ledgerText';
+import { provenance, weight, unscoreableReason, subsumptionLabel } from '../ledgerText';
 import { c, truncate, visLen } from '../ansi';
-import { frame, fieldStrip } from '../chrome';
+import { frame, fieldStrip, shedLine } from '../chrome';
 import { planFor, type PlanCandidate } from '../../zwave/planner';
 import { wilsonLower } from '../../zwave/outcomes';
 
@@ -241,6 +241,18 @@ interface Ledger {
   confounded: (kind: SymptomKind) => number;
 }
 
+/**
+ * Rationale text that must reach the operator wherever its candidate ranks
+ * (v0.45.0) — irreversible side effects and known failure modes.
+ *
+ * The grounding line used to render for `i === 0` only, so a destructive
+ * caveat on a second-ranked candidate was invisible at every terminal size.
+ * Matching on the CAVEAT rather than on the index keeps the row budget while
+ * making sure the sentence an operator cannot afford to miss is the one that
+ * survives.
+ */
+const CAVEAT = /deletes|discards|priority route|half-interviewed|comes back|re-churn/i;
+
 function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, ledger: Ledger, selected = false): string[] {
   const { efficacyFor } = ledger;
   const rows: string[] = [];
@@ -250,7 +262,7 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
   // clipped off the row (v0.14 review). Full word repeated on the evidence line.
   const glyph = sym.basis === 'measured' ? c.green('◆') : c.yellow('◇');
   const subsumed = sym.subsumedBy
-    ? c.grey(sym.subsumedBy.endsWith(':edge-cluster') ? ' · under edge cluster' : ' · under mesh event')
+    ? c.grey(subsumptionLabel(sym.subsumedBy, ' · '))
     : '';
   // Header: cursor · severity · basis-glyph · kind · who · dwell age.
   // The cursor is not decoration — on REMEDY it selects the ACTION TARGET, so
@@ -268,6 +280,14 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     const basisWord = sym.basis === 'measured' ? c.green('measured') : c.yellow('inferred');
     const parts = [basisWord, ...sym.evidence.map((e) => `${c.label(e.label)} ${c.white(e.value)}`)];
     rows.push(truncate('    ' + parts.join(c.grey('  ·  ')), W));
+  }
+  // MEMBERS, as atomic tokens (v0.45.0). `Symptom.members` was populated by the
+  // edge-cluster detector and read by NOTHING; the ids survived only inside an
+  // evidence string that `truncate` cut mid-list — so `#4, #17, #23` became
+  // `#4, #17, #2`, naming an innocent node as degraded. shedLine drops whole
+  // ids with a `+N`, because a half-shed id is a different device.
+  if (sym.members?.length) {
+    rows.push(...shedLine('    ', c.grey('downstream'), sym.members.map((m) => c.white(`#${m}`)), W));
   }
   // The detector's own track record (v0.35). The ledger has counted every
   // episode of this kind an operator closed as `refused-misdiagnosis` since M5,
@@ -352,12 +372,34 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       const runnable = cand.action != null && cand.blocked == null;
       const marker = cand.action != null ? (runnable ? c.green('▸') : c.grey('▸')) : c.grey('·');
       const tags = `${c.grey('[')}${costTag(cand.cost)}${c.grey(' · ')}${c.grey(cand.basis)}${c.grey(']')}`;
-      const block = cand.blocked ? c.grey('  ⊘ ' + cand.blocked) : '';
-      rows.push(truncate(`      ${marker} ${c.white(cand.title)} ${tags}${block}`, W));
-      // Grounding for the primary recommendation only; "…" signals more detail.
-      if (i === 0) {
-        const rl = wrap(cand.rationale, W - 8);
-        if (rl.length) rows.push(truncate('        ' + c.grey(rl[0] + (rl.length > 1 ? ' …' : '')), W));
+      // The BLOCKED CHIP is never clipped (v0.45.0). This row was one
+      // concatenation ending in `truncate`, and the ⊘ reason sits last — so at
+      // the 80-column default the longest blocked candidate came back as
+      // `⊘ RF-link symptom — re-interviewing will not r`: a sentence that stops
+      // making sense on the one row whose entire job is to say why NOT to act.
+      // shedLine carries it to a continuation row instead.
+      rows.push(...shedLine(
+        '      ',
+        `${marker} ${c.white(cand.title)} ${tags}`,
+        cand.blocked ? [c.grey('⊘ ' + cand.blocked)] : [],
+        W,
+        /* wrapTail */ true,
+      ));
+      // GROUNDING is no longer gated on index alone (v0.45.0). `i === 0` meant
+      // a candidate at index >= 1 rendered its rationale at NO terminal size —
+      // so healNode's "DELETES any manually-set priority routes" was
+      // unreachable whenever something else ranked above it, and widening the
+      // terminal never helped. A caveat earns its line wherever it sits.
+      //
+      // Deliberately NOT `i === 0 || cand.blocked != null`: planner.ts blocks
+      // EVERY executable when write actions are off, so on a read-only install
+      // that form would ground all three candidates on every card and blow the
+      // row budget.
+      const rl = wrap(cand.rationale, W - 8);
+      const caveatLine = rl.find((l) => CAVEAT.test(l));
+      if (i === 0 || caveatLine != null) {
+        const pick = i === 0 ? (caveatLine ?? rl[0]) : caveatLine;
+        if (pick != null) rows.push(truncate('        ' + c.grey(pick + (rl.length > 1 ? ' …' : '')), W));
       }
       // M5: the learned efficacy note. Every candidate the ledger can have an
       // opinion about gets one — i.e. every candidate with an action, blocked or

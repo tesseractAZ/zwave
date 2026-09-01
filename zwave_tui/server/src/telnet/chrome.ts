@@ -79,6 +79,79 @@ export function field(label: string, value: string, color: (s: string) => string
  * in half: a clipped `NOISE -9` reads as a plausible, wrong measurement, which
  * is worse than not showing it at all.
  */
+/**
+ * Compose `indent + head + tail…` into as many rows as honesty requires
+ * (v0.45.0).
+ *
+ * `fieldStrip` cannot serve here: it measures against `view.cols` with no
+ * indent budget and no protected head, and it returns ONE row. The rows this
+ * closes carry a head that must never be clipped (a candidate's marker, title
+ * and cost tag) followed by tail tokens that are individually load-bearing —
+ * a blocked-reason chip, or a list of node ids.
+ *
+ * The rule is `detail.ts`'s `pushRoute`, generalised: **overflow drops WHOLE
+ * tokens with a dim `+N`, never a character clip.** A half-shed `#4` is a
+ * different node, and `⊘ RF-link symptom — re-interviewing will not r` reads as
+ * a complete sentence that stops making sense.
+ *
+ * @param wrapTail when a token cannot be shed because it is the whole point of
+ *   the row, emit it on continuation rows at the same indent instead of
+ *   dropping it — used for the blocked-reason chip, which is the one thing on a
+ *   "NOT recommended" row an operator must read.
+ */
+export function shedLine(
+  indent: string,
+  head: string,
+  tail: string[],
+  cols: number,
+  wrapTail = false,
+): string[] {
+  const sep = c.grey(' · ');
+  const headRow = indent + head;
+  // (a) The head is never shed. If it alone overflows there is nothing to
+  //     compose — clip it and say nothing further, rather than emitting a
+  //     continuation row under a title the operator cannot read.
+  if (visLen(headRow) > cols) return [truncate(headRow, cols)];
+  if (tail.length === 0) return [headRow];
+
+  // (b) Shed whole tokens right-to-left, disclosing the count.
+  for (let keep = tail.length; keep >= 1; keep--) {
+    const dropped = tail.length - keep;
+    const line = headRow + '  ' + tail.slice(0, keep).join(sep) + (dropped > 0 ? c.grey(` +${dropped}`) : '');
+    if (visLen(line) <= cols) return [line];
+  }
+  // Nothing fits inline. Disclose the drop on the head row...
+  const bare = headRow + c.grey(` +${tail.length}`);
+  const headOut = visLen(bare) <= cols ? bare : headRow;
+  if (!wrapTail) return [headOut];
+
+  // (c) ...or, when the tail is the point of the row, carry it below. The
+  //     continuation is indented one step further so it reads as belonging to
+  //     the head rather than as a sibling row.
+  const contIndent = indent + '  ';
+  const rows = [headRow];
+  for (const token of tail) {
+    for (const line of wrapWords(token, Math.max(8, cols - visLen(contIndent)))) {
+      rows.push(truncate(contIndent + line, cols));
+    }
+  }
+  return rows;
+}
+
+/** Greedy word wrap. Splits on whitespace; a single over-long word is emitted
+ *  on its own row and clipped by the caller rather than being broken silently. */
+function wrapWords(text: string, width: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  const out: string[] = [];
+  let line = '';
+  for (const w of words) {
+    if (line && visLen(line) + 1 + visLen(w) > width) { out.push(line); line = w; }
+    else line = line ? `${line} ${w}` : w;
+  }
+  if (line) out.push(line);
+  return out.length ? out : [''];
+}
+
 export function fieldStrip(view: ViewState, fields: string[]): string {
   const gutter = c.grey('    ');
   const all = fields.join(gutter);

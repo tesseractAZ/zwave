@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.45.0 — 2026-08-31
+
+**Nothing is clipped into a plausible lie, and a symptom's whole life reaches
+the Log.**
+
+**Cluster member ids were clipping into an INNOCENT node.** The edge-cluster
+detector populates `Symptom.members`, and no screen read it — the ids survived
+only inside an evidence string that `truncate` cuts mid-list, so `#4, #17, #23`
+rendered as `#4, #17, #2`, naming a node that is not degraded. The identities
+now have their own row, shed as **whole tokens** with a disclosed `+N`, and the
+evidence line carries the count alone. Two copies of the same data, one of them
+lying, is the shape of the defect; deleting the lying copy is the fix, not
+shedding it more carefully.
+
+**A shared composer, `shedLine`.** The rule already existed in one place
+(`detail.ts`'s `pushRoute`: *overflow drops WHOLE tokens with a dim `+N`, never
+a character clip*) and was stated in another (`chrome.ts`: *an undisclosed drop
+is a smaller lie than a clipped `NOISE -9`*). Three worklist items collapse into
+applying it. `fieldStrip` could not serve: it measures against `view.cols` with
+no indent budget, no protected head, and returns one row.
+
+**A blocked reason stopped making sense at 80 columns.** The candidate row ended
+in `truncate` with the ⊘ chip last, so the longest blocked candidate came back
+as `⊘ RF-link symptom — re-interviewing will not r` — a sentence that stops
+mid-claim, on the one row whose entire job is to say why NOT to act. It now
+moves to a continuation row whole. The longest reason was also shortened at
+source, with an upstream test bounding every blocked string to the chip budget:
+a renderer cannot fix a reason that is too long to carry.
+
+**A route rebuild deletes manually-set priority routes, and nothing said so.**
+`grep -rni "priority route"` hit three lines in the repo, none of them on a
+surface an operator reads before acting — so the loss was discoverable only by
+losing it. Both `healNode` and `rebuildAll` now name it in the confirm box.
+
+**A destructive caveat only rendered if its candidate ranked first.** The
+grounding line was gated on `i === 0`, so a caveat on a second-ranked candidate
+appeared at NO terminal size and widening never helped. It is now gated on the
+caveat itself — deliberately not on `blocked != null`, because the planner
+blocks every executable when write actions are off, which would ground all three
+candidates on every card of a read-only install.
+
+**The Log recorded a symptom's onset and nothing else.** A symptom that
+appeared, escalated `watch → crit` and cleared produced exactly ONE line — the
+least severe thing that ever happened — and an operator reading the log had no
+way to know it had ended. Onset, escalation and clearance are now all recorded,
+extracted as a pure `diffSymptomLog` because the tick that owned the loop is
+unreachable from tests. A de-escalation stays silent (it is not news, and on a
+flapping node it would double the volume), and a clearance is logged at `info`
+however severe the symptom was — a red line saying a problem ENDED reads as a
+fault.
+
+**Two defects on one log string.** It called every subsumption "(under mesh
+event)" while REMEDY distinguished an edge cluster, so a node folded into a
+cluster was logged as belonging to an event that did not exist. And
+`narrative.split('.')[0]` cut a one-decimal number in half: a node silent 7.2 h
+logged "…has not been heard from in 7". Both fixed by shared helpers, and the
+sentence splitter is now a sentence splitter — a period followed by whitespace,
+which a decimal point never is.
+
+**Also:** the probe lifetime-tally caveat is gated on the ratio it qualifies
+rather than on the self-proven counter, so the worst case — a fully blended
+history with zero self-proven credits — stops being the one case with no
+caveat; it has a short form so it cannot clip; and node-down's narrative no
+longer asserts auto-ping behaviour it cannot check, which the planner already
+states conditionally on the surface that reads the config.
+
+936 tests, 395 mutants (0 survived, 0 missing, 0 invalid).
+
 ## 0.44.0 — 2026-08-31
 
 **The ledger's voice: every number it acts on, said out loud — and harm made as

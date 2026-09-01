@@ -41,6 +41,7 @@ const engCtx = (cols: number, rows: number, eng: ReturnType<DataProvider['engine
 /** ctx with an arbitrary symptom list at an arbitrary size. */
 const engCtx2 = (cols: number, rows: number, syms: Symptom[]): ScreenCtx =>
   ({ view: mkView(cols, rows), data: data(syms), visibleNodes: nodes, filtering: false, actionsEnabled: true });
+const CAVEAT_RE = /deletes|discards|priority route|half-interviewed|comes back|re-churn/i;
 const ENG = { enabled: true as const, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 3, bands: 6 };
 
 const sym = (over: Partial<Symptom> = {}): Symptom => ({
@@ -706,4 +707,115 @@ test('a BLOCKED candidate is never rendered in the endorsing green (v0.44.0)', (
   const harmLine = rawHarm.split('\n').find((l) => /helped 83%/.test(l));
   assert.ok(harmLine, 'the claim survives');
   assert.ok(!/\x1b\[92m/.test(harmLine), 'but a measured regression rate disqualifies green');
+});
+
+/* ── v0.45.0: nothing is clipped into a plausible lie ─────────────────────── */
+
+test('cluster member ids are DROPPED whole, never clipped into an innocent node (v0.45.0)', () => {
+  // `Symptom.members` was populated by the edge-cluster detector and read by
+  // NOTHING; the ids survived only inside an evidence string that truncate()
+  // cut mid-list, so `#4, #17, #23` became `#4, #17, #2` — naming a node that
+  // is not degraded. A half-shed id is a different device.
+  const members = [4, 17, 23, 31, 42, 55, 61];
+  for (let cols = 40; cols <= 200; cols += 1) {
+    const lines = plain(renderRemedy(engCtx2(cols, 40,
+      [sym({ kind: 'edge-cluster', nodeId: 9, members })]))).split('\n');
+    const row = lines.find((l) => /downstream/.test(l));
+    assert.ok(row, `${cols} cols: the members row must render`);
+    // Every id that appears must be one of the real ones, WHOLE.
+    for (const m of row.match(/#\d+/g) ?? []) {
+      assert.ok(members.includes(Number(m.slice(1))),
+        `${cols} cols: "${m}" is not a member — an id was clipped into an innocent node: "${row.trim()}"`);
+    }
+    // And what fell off is disclosed.
+    const shown = (row.match(/#\d+/g) ?? []).length;
+    if (shown < members.length) {
+      assert.ok(row.includes(`+${members.length - shown}`),
+        `${cols} cols: ${members.length - shown} ids dropped without disclosure: "${row.trim()}"`);
+    }
+    assert.ok(row.length <= cols, `${cols} cols: overflow`);
+  }
+});
+
+test('a blocked reason reaches the operator WHOLE, on a continuation row if it must (v0.45.0)', () => {
+  // This row ended in truncate() with the ⊘ reason last, so at 80 columns the
+  // longest blocked candidate came back as a sentence that stops making sense —
+  // on the one row whose entire job is to say why NOT to act.
+  for (const cols of [80, 100, 120, 160]) {
+    const joined = plain(renderRemedy(engCtx2(cols, 40, [sym({ kind: 's2-desync', nodeId: 6 })])));
+    const norm = joined.split('\n').map((l) => l.trim()).join(' ').replace(/\s+/g, ' ');
+    // UNCONDITIONAL: the reason must ARRIVE, inline or on a continuation row.
+    // Skipping when the chip is absent is what let a dropped chip pass.
+    assert.match(norm, /⊘ RF-link symptom — will not repair it/,
+      `${cols} cols: the blocked reason must arrive whole — "${norm.slice(0, 500)}"`);
+  }
+});
+
+test('an over-long head still respects the terminal width (v0.45.0)', () => {
+  // shedLine never sheds the head — but "never shed" is not "never bounded".
+  const long = 'X'.repeat(400);
+  for (const cols of [40, 80, 120]) {
+    const lines = plain(renderRemedy(engCtx2(cols, 40,
+      [sym({ kind: 'edge-cluster', nodeId: 9, members: [4, 17], narrative: long })]))).split('\n');
+    for (const l of lines) assert.ok(l.length <= cols, `${cols} cols: overflow — "${l.slice(0, 90)}"`);
+  }
+});
+
+
+
+test('a caveat below the top candidate is grounded; a plain rationale is not (v0.45.0)', () => {
+  // Two behaviours in one gate. (a) a candidate at index >= 1 gets a line if
+  // its rationale carries a caveat; (b) it does NOT otherwise — planner blocks
+  // every executable when write actions are off, so grounding all three would
+  // blow the row budget on a read-only install.
+  const joined = plain(renderRemedy(engCtx2(160, 40, [sym({ kind: 'route-churn', nodeId: 6 })])));
+  const grounded = joined.split('\n').filter((l) => /^ {8}\S/.test(l) && !/helped|distinguishable|still learning|never tried|WORSE|ledger measured|⊘/.test(l));
+  assert.ok(grounded.length >= 2,
+    `the second candidate's caveat must be grounded too: ${JSON.stringify(grounded)}`);
+  assert.ok(grounded.some((l) => CAVEAT_RE.test(l)),
+    `at least one grounding line is the caveat: ${JSON.stringify(grounded)}`);
+  // And not EVERY candidate gets one.
+  assert.ok(grounded.length <= 3, `grounding must stay bounded: ${JSON.stringify(grounded)}`);
+});
+
+test('a destructive caveat is grounded wherever its candidate ranks (v0.45.0)', () => {
+  // The grounding line was gated on `i === 0`, so a caveat on a second-ranked
+  // candidate rendered at NO terminal size and widening never helped. route-churn
+  // ranks the repeater advice first and the rebuild second.
+  const joined = plain(renderRemedy(engCtx2(160, 40, [sym({ kind: 'route-churn', nodeId: 6 })])));
+  assert.match(joined, /re-churn|priority route|deletes/i,
+    `the rebuild's caveat must render: ${joined.slice(0, 900)}`);
+});
+
+test('EVERY symptom kind holds the width contract at the narrowest terminal (v0.45.0)', () => {
+  // shedLine never sheds the head — but "never shed" is not "never bounded".
+  // chatty-device's longest candidate title is 71 columns before its cost tags,
+  // so at 40 columns the head alone overflows and must still be clipped.
+  const KINDS: SymptomKind[] = [
+    'return-path-degraded', 'chronic-return-path', 'dead-flap', 'node-down', 'quiet-node',
+    'rate-fallback', 'route-churn', 'rtt-degraded', 'weak-signal', 'chatty-device',
+    'ghost-suspect', 'controller-degraded', 'edge-cluster', 'mesh-interference', 's2-desync',
+  ];
+  for (const kind of KINDS) {
+    const nodeId = kind === 'controller-degraded' || kind === 'mesh-interference' ? null : 6;
+    for (const [cols, rows] of [[40, 12], [56, 20], [80, 24], [120, 40]] as const) {
+      const lines = renderRemedy(engCtx2(cols, rows, [sym({ kind, nodeId, members: kind === 'edge-cluster' ? [4, 17, 23] : undefined })]));
+      assert.equal(lines.length, rows, `${kind} ${cols}x${rows}: exactly ${rows} rows`);
+      for (const l of lines) {
+        assert.ok(plain([l]).length <= cols, `${kind} ${cols}x${rows}: width — "${plain([l]).slice(0, 90)}"`);
+      }
+    }
+  }
+});
+
+test('a candidate whose rationale carries NO caveat gets no grounding line (v0.45.0)', () => {
+  // dead-flap has two candidates and no caveat below the top one, so exactly
+  // ONE grounding line may render. The over-broad form the spec warned against
+  // — grounding every candidate — would render two here, and three on any card
+  // where the planner blocks every executable (a read-only install).
+  const lines = plain(renderRemedy(engCtx2(160, 40, [sym({ kind: 'dead-flap', nodeId: 6 })]))).split('\n');
+  const grounded = lines.filter((l) => /^ {8}\S/.test(l)
+    && !/helped|distinguishable|still learning|never tried|WORSE|ledger measured|⊘/.test(l));
+  assert.equal(grounded.length, 1,
+    `only the top candidate is grounded here: ${JSON.stringify(grounded.map((l) => l.trim().slice(0, 60)))}`);
 });
