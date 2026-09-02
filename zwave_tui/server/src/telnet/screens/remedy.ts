@@ -542,51 +542,96 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       body.push(c.grey('    The engine is running but the roster is empty — nothing has been'));
       body.push(c.grey('    measured, so nothing can be diagnosed or cleared. This is normal'));
       body.push(c.grey('    for the first seconds after a restart.'));
-    } else if (eng.timeoutReady < eng.total || eng.rttReady < eng.total || eng.rssiReady < eng.total) {
-      // Per-series, and scoped to the band it was measured in (v0.43.1).
-      // "N/total nodes have a graduated baseline" counted ONE series (timeouts)
-      // in ONE of six time-of-day bands, and said neither. A fleet with a full
-      // timeout baseline and an empty RSSI baseline read "Every node has a
-      // graduated baseline"; the same fleet could read learned at 03:00 and
-      // unlearned at 15:00 with nothing having changed.
-      //
-      // The counts go through fieldStrip: at 40 columns the fixed string clipped
-      // to `rssi 1` where the truth was 12/39 — a plausible, wrong measurement,
-      // which chrome.ts calls a bigger lie than a disclosed drop.
-      const headFull = `    ◷ Learning — graduated for ${bandLabel(eng)}:`;
-      body.push(c.cyan(visLen(headFull) <= W ? headFull
-        : `    ◷ Learning — graduated for ${bandLabel(eng, true)}:`));
-      body.push('');
-      body.push(fieldStrip(view, [
+    } else {
+      // Which series cannot judge every node in THIS band, and on how many.
+      // Coverage is per node, per series, per band — one number cannot carry it.
+      const blind = ([
+        ['timeout', eng.total - eng.timeoutReady],
+        ['rtt', eng.total - eng.rttReady],
+        ['rssi', eng.total - eng.rssiReady],
+      ] as const).filter(([, n]) => n > 0);
+      // Richest headline that FITS. The band qualifier is the part that must
+      // survive — a headline without it is the timeless assertion v0.43.1
+      // removed — so the ladder sheds words, never the band.
+      const pickHead = (forms: string[]): string => {
+        for (const f of forms) if (visLen(f) <= W) return f;
+        return forms[forms.length - 1];
+      };
+      const counts = (): string[] => [
         c.grey(`      timeouts ${eng.timeoutReady}/${eng.total}`),
         c.grey(`rtt ${eng.rttReady}/${eng.total}`),
         c.grey(`rssi ${eng.rssiReady}/${eng.total}`),
-      ]));
-      body.push('');
-      body.push(c.grey('    Each node’s normal is learned per series and per time-of-day band,'));
-      body.push(c.grey('    from the evidence stream across several distinct days, before its'));
-      body.push(c.grey('    detectors may fire. A detector stays silent while ITS series is'));
-      body.push(c.grey('    still learning — by design, not a fault.'));
-    } else {
-      // "All clear" is a claim about the WHOLE engine, and this screen only
-      // knows about live symptoms (v0.43.1). An episode in its confirmation
-      // window has no live symptom by construction — that is what being in the
-      // window means — so the ledger could be mid-experiment on three nodes
-      // while this printed an unqualified all-clear. Say what is still moving.
-      const openEps = data.openEpisodes() ?? [];
-      body.push(c.green(`    ✓ All clear — ${eng.total} nodes learned, no symptoms detected.`));
-      body.push('');
-      body.push(truncate(c.grey('    Every node has a graduated timeout, rtt and rssi baseline'), W));
-      const bandLine = `    for ${bandLabel(eng)}, and none is currently anomalous.`;
-      body.push(c.grey(visLen(bandLine) <= W ? bandLine
-        : `    for ${bandLabel(eng, true)}, none anomalous.`));
-      if (openEps.length > 0) {
+      ];
+      // The ledger's open episodes belong to EVERY no-symptom state, not just
+      // the green one (v0.46.0). An episode in its confirmation window has no
+      // live symptom by construction, so any empty state can be hiding one.
+      // Gating this on FULL coverage put it behind a gate this mesh cannot
+      // pass — see the partial-coverage branch below.
+      const episodeLine = (): string[] => {
+        const openEps = data.openEpisodes() ?? [];
+        if (openEps.length === 0) return [];
         const confirming = openEps.filter((e) => e.confirming).length;
-        body.push(c.grey(`    ◷ The ledger is still scoring ${openEps.length} episode${openEps.length === 1 ? '' : 's'}` +
-          (confirming > 0 ? ` (${confirming} in the confirmation window)` : '') +
-          ' — see ENGINE.'));
+        return [truncate(c.grey(`    ◷ The ledger is still scoring ${openEps.length} episode${openEps.length === 1 ? '' : 's'}` +
+          (confirming > 0 ? ` (${confirming} in the confirmation window)` : '') + ' — see ENGINE.'), W)];
+      };
+
+      if (eng.timeoutReady === 0 && eng.rttReady === 0 && eng.rssiReady === 0) {
+        // NOTHING has graduated. Deliberately silent about symptoms: with no
+        // detector able to fire, "no symptoms" would describe the instrument.
+        body.push(c.cyan(pickHead([
+          `    ◷ Learning — no detector has a yardstick yet for ${bandLabel(eng)}:`,
+          `    ◷ Learning — no yardstick yet for ${bandLabel(eng, true)}:`,
+          `    ◷ Learning — none yet, ${bandLabel(eng, true)}:`,
+        ])));
+        body.push('');
+        body.push(fieldStrip(view, counts()));
+        body.push('');
+        body.push(c.grey('    Each node’s normal is learned per series and per time-of-day band,'));
+        body.push(c.grey('    from the evidence stream across several distinct days, before its'));
+        body.push(c.grey('    detectors may fire. Nothing here is a health claim yet.'));
+      } else if (blind.length > 0) {
+        // PARTIAL COVERAGE (v0.46.0) — the steady state on any mesh with routed
+        // nodes, and the state v0.44.0 rendered as "Learning" forever.
+        //
+        // MEASURED on this fleet 2026-08-31: the ceiling is 23 of 38, the
+        // DIRECT-routed subset, not 38. `baselines.observe()` resets rssi/rtt
+        // across all six bands on any route change (by design — a new route
+        // legitimately shifts both), and those series fold only on FRESH
+        // samples: ~410-922 fresh of 363,586 lifetime ≈ 1.5-3.3 per band per
+        // day against MIN_OBS 20. So a repeater-routed node must hold ONE route
+        // for ~2 weeks to graduate a single band, and the green gate needs all
+        // 15 routed nodes to do it simultaneously — in a mesh whose own
+        // route-churn detector fires. That gate does not close.
+        //
+        // "Learning" implied a convergence that never arrives. This says what
+        // is actually true: no symptoms are firing, AND some detectors cannot
+        // fire at all — which is a statement about COVERAGE, not health.
+        body.push(c.cyan(pickHead([
+          `    ◑ No symptoms — partial detector coverage for ${bandLabel(eng)}:`,
+          `    ◑ No symptoms — partial coverage, ${bandLabel(eng, true)}:`,
+          `    ◑ No symptoms — partial, ${bandLabel(eng, true)}:`,
+        ])));
+        body.push('');
+        body.push(fieldStrip(view, counts()));
+        body.push('');
+        const which = blind.map(([name, n]) => `${name} (${n})`).join(', ');
+        body.push(truncate(c.grey(`    No yardstick in this band: ${which} of ${eng.total} nodes.`), W));
+        body.push(c.grey('    A degradation on those nodes would not be flagged, so this is a'));
+        body.push(c.grey('    statement about COVERAGE, not health. Baselines reset on a route'));
+        body.push(c.grey('    change, so routed nodes may never graduate.'));
+        body.push(...episodeLine());
       } else {
-        body.push(c.grey('    New symptoms will surface here — advisory-first, nothing is acted on.'));
+        // FULL coverage in this band. "All clear" is a claim about the WHOLE
+        // engine, and this screen only knows about live symptoms (v0.43.1).
+        body.push(c.green(`    ✓ All clear — ${eng.total} nodes learned, no symptoms detected.`));
+        body.push('');
+        body.push(truncate(c.grey('    Every node has a graduated timeout, rtt and rssi baseline'), W));
+        const bandLine = `    for ${bandLabel(eng)}, and none is currently anomalous.`;
+        body.push(c.grey(visLen(bandLine) <= W ? bandLine
+          : `    for ${bandLabel(eng, true)}, none anomalous.`));
+        const eps = episodeLine();
+        if (eps.length) body.push(...eps);
+        else body.push(c.grey('    New symptoms will surface here — advisory-first, nothing is acted on.'));
       }
     }
   } else {

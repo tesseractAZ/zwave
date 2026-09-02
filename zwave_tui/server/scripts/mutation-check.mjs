@@ -1605,8 +1605,8 @@ const MUTANTS = [
     // An episode in its confirmation window has NO live symptom by
     // construction, so a symptom-only all-clear reads as "the engine is idle"
     // while the ledger is mid-experiment on several nodes.
-    find: '      if (openEps.length > 0) {',
-    repl: '      if (false) {',
+    find: '        if (openEps.length === 0) return [];',
+    repl: '        if (openEps.length >= 0) return [];',
     what: 'the all-clear discloses episodes the ledger is still scoring' },
   { id: 'all-clear-counts-confirming', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     find: '        const confirming = openEps.filter((e) => e.confirming).length;',
@@ -1642,8 +1642,8 @@ const MUTANTS = [
     what: 'the rtt count is the rtt series, not a copy of the timeout series' },
   { id: 'allclear-needs-every-series', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // The all-clear is gated on ONE series again — the original bug.
-    find: '    } else if (eng.timeoutReady < eng.total || eng.rttReady < eng.total || eng.rssiReady < eng.total) {',
-    repl: '    } else if (eng.timeoutReady < eng.total) {',
+    find: '      } else if (blind.length > 0) {',
+    repl: '      } else if (eng.timeoutReady < eng.total) {',
     what: 'the green all-clear waits for ALL THREE series, not just timeouts' },
   { id: 'baseline-counts-name-their-band', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // Drops the band qualifier: counts true only for the band containing NOW
@@ -1724,15 +1724,9 @@ const MUTANTS = [
     // Back to the fixed-width string: at 40 cols `rssi 12/39` clipped to
     // `rssi 1` — a plausible, wrong measurement, which chrome.ts calls a bigger
     // lie than a disclosed drop.
-    find: '      body.push(fieldStrip(view, [',
-    repl: '      body.push(fieldStrip({ ...view, cols: 1000 }, [',
+    find: "      const counts = (): string[] => [\n        c.grey(`      timeouts ${eng.timeoutReady}/${eng.total}`),\n        c.grey(`rtt ${eng.rttReady}/${eng.total}`),\n        c.grey(`rssi ${eng.rssiReady}/${eng.total}`),\n      ];",
+    repl: "      const counts = (): string[] => [\n        c.grey(`      timeouts ${eng.timeoutReady}/${eng.total}   rtt ${eng.rttReady}/${eng.total}   rssi ${eng.rssiReady}/${eng.total}`),\n      ];",
     what: 'a count that does not fit is DROPPED whole, never clipped mid-number' },
-  { id: 'band-qualifier-survives-narrow', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
-    // Truncation drops the band from the right — the headline reverts to the
-    // timeless assertion this release removes.
-    find: '      body.push(c.cyan(visLen(headFull) <= W ? headFull\n        : `    ◷ Learning — graduated for ${bandLabel(eng, true)}:`));',
-    repl: '      body.push(truncate(c.cyan(headFull), W));',
-    what: 'the band qualifier survives every width, in a compact form if it must' },
   { id: 'engine-band-is-measured-not-assumed', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     // The screen would permanently name the 00:00–04:00 band whatever the
     // clock says — the headline claim of the widening, silently false.
@@ -2005,6 +1999,31 @@ const MUTANTS = [
     find: '        const caveat = cov.probesAsked > 0',
     repl: '        const caveat = cov.probesSelfProven > 0',
     what: 'the lifetime-tally caveat is attached to the ratio it qualifies' },
+  { id: 'remedy-partial-coverage', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Collapses partial coverage back into "Learning" — the v0.44.0 state that
+    // implied a convergence this mesh never reaches (measured ceiling 23 of 38,
+    // the direct-routed subset).
+    find: '      if (eng.timeoutReady === 0 && eng.rttReady === 0 && eng.rssiReady === 0) {',
+    repl: '      if (blind.length > 0) {',
+    what: 'partial baseline coverage renders its own state, not "Learning" forever' },
+  { id: 'remedy-episodes-under-partial', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Puts the open-episode disclosure back behind the green gate — where this
+    // fleet could never reach it.
+    find: '        body.push(...episodeLine());\n      } else {',
+    repl: '      } else {',
+    what: 'the open-episode disclosure renders under partial coverage, not only under the all-clear' },
+  { id: 'blind-detectors-are-named', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // "Some detectors are blind" without saying WHICH is an alarm with no
+    // address — the operator cannot tell which nodes are unwatched.
+    find: "        const which = blind.map(([name, n]) => `${name} (${n})`).join(', ');",
+    repl: "        const which = 'some';",
+    what: 'the blind detectors are named, with the node count each cannot judge' },
+  { id: 'zero-coverage-claims-no-health', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // With nothing graduated, "No symptoms" describes the instrument, not the
+    // mesh.
+    find: "          `    ◷ Learning — no detector has a yardstick yet for ${bandLabel(eng)}:`,",
+    repl: "          `    ◑ No symptoms — no detector has a yardstick yet for ${bandLabel(eng)}:`,",
+    what: 'a fleet with nothing graduated makes NO symptom claim' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.

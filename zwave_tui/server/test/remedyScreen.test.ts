@@ -427,7 +427,11 @@ test('a full TIMEOUT baseline with an empty RSSI baseline is NOT "every node lea
   // has a graduated baseline" — a claim over three series from one series.
   const joined = plain(renderRemedy(engCtx(200, 40, { ...ENG, rssiReady: 0, rttReady: 1 })));
   assert.doesNotMatch(joined, /All clear/, 'the green all-clear is NOT taken while a series is still learning');
-  assert.match(joined, /Learning/);
+  // COPY CHANGE, not a relaxed invariant (v0.46.0): this fixture is PARTIAL
+  // coverage — some series graduated, some did not — which now has its own
+  // state. It used to read "Learning", implying a convergence that on a routed
+  // mesh never arrives. Every load-bearing assertion below is unchanged.
+  assert.match(joined, /partial detector coverage/);
   assert.match(joined, /timeouts 3\/3/);
   assert.match(joined, /rtt 1\/3/);
   assert.match(joined, /rssi 0\/3/);
@@ -482,16 +486,23 @@ test('a narrow terminal DROPS a baseline count rather than clipping it mid-numbe
 test('the LEARNING headline keeps its band qualifier at the narrowest terminal (v0.43.1)', () => {
   // Losing the band turns the headline back into the timeless assertion this
   // release exists to eliminate. 40x12 is the narrowest supported size.
+  // The fixture is PARTIAL coverage, so as of v0.46.0 the headline is the
+  // partial-coverage one. The invariant under test is unchanged: whatever the
+  // headline says, it must never lose its band qualifier to truncation.
+  // Match the headline by its GLYPH, not its words: the ladder sheds words at
+  // narrow widths, and pinning the wording here would make the test fail for a
+  // shorter-but-still-honest headline while missing a dropped band qualifier.
+  const HEAD = /^\s*[◷◑]/;
   const lines = plain(renderRemedy(engCtx(40, 12, { ...ENG, rssiReady: 0, band: 3 }))).split('\n');
-  const head = lines.find((l) => /Learning/.test(l)) ?? '';
+  const head = lines.find((l) => HEAD.test(l)) ?? '';
   assert.match(head, /12–16h/, `band qualifier lost at 40 cols: "${head.trim()}"`);
   // Wide terminals keep the full form.
   const wide = plain(renderRemedy(engCtx(120, 24, { ...ENG, rssiReady: 0, band: 3 }))).split('\n');
-  assert.match(wide.find((l) => /Learning/.test(l)) ?? '', /12:00–16:00/);
+  assert.match(wide.find((l) => HEAD.test(l)) ?? '', /12:00–16:00/);
   // And the qualifier survives EVERY width in between — never silently dropped.
   for (let cols = 40; cols <= 200; cols += 1) {
     const h = plain(renderRemedy(engCtx(cols, 24, { ...ENG, rssiReady: 0, band: 3 }))).split('\n')
-      .find((l) => /Learning/.test(l)) ?? '';
+      .find((l) => HEAD.test(l)) ?? '';
     assert.ok(/12:00–16:00|12–16h/.test(h), `${cols} cols lost the band: "${h.trim()}"`);
   }
 });
@@ -818,4 +829,62 @@ test('a candidate whose rationale carries NO caveat gets no grounding line (v0.4
     && !/helped|distinguishable|still learning|never tried|WORSE|ledger measured|⊘/.test(l));
   assert.equal(grounded.length, 1,
     `only the top candidate is grounded here: ${JSON.stringify(grounded.map((l) => l.trim().slice(0, 60)))}`);
+});
+
+/* ── v0.46.0: coverage is not health ──────────────────────────────────────── */
+
+test('partial baseline coverage is NOT rendered as "Learning" forever (v0.46.0)', () => {
+  // MEASURED on the live mesh 2026-08-31: rssi/rtt converge on the
+  // DIRECT-routed subset (23 of 38), never on `total`, because a route change
+  // resets both across all six bands and they fold only on FRESH samples
+  // (~1.5-3.3 per band per day against MIN_OBS 20). "Learning" implied a
+  // convergence that never arrives; the honest state names the blind detectors.
+  const joined = plain(renderRemedy(engCtx(200, 40, { ...ENG, total: 3, timeoutReady: 3, rttReady: 1, rssiReady: 1 })));
+  assert.doesNotMatch(joined, /All clear/, 'still not the green all-clear');
+  assert.match(joined, /partial detector coverage/);
+  assert.match(joined, /No yardstick in this band: rtt \(2\), rssi \(2\) of 3 nodes/,
+    `the blind detectors must be NAMED with counts: ${joined.slice(0, 900)}`);
+  assert.match(joined, /COVERAGE, not health/, 'it must refuse the health claim outright');
+});
+
+test('zero coverage says LEARNING and makes no symptom claim at all (v0.46.0)', () => {
+  // With no detector able to fire, "no symptoms" would describe the instrument,
+  // not the mesh.
+  const joined = plain(renderRemedy(engCtx(200, 40, { ...ENG, total: 3, timeoutReady: 0, rttReady: 0, rssiReady: 0 })));
+  assert.match(joined, /no detector has a yardstick yet/);
+  assert.doesNotMatch(joined, /No symptoms/, 'nothing detectable ⇒ no symptom claim');
+  assert.doesNotMatch(joined, /All clear/);
+});
+
+test('the open-episode disclosure survives PARTIAL coverage (v0.46.0)', () => {
+  // The v0.43.1 disclosure sat only in the green branch — behind a gate this
+  // mesh cannot pass, so in production it was unreachable. Same shape as the
+  // v0.36 inert learning loop: a feature wired, tested, and structurally dead.
+  const eng = { ...ENG, total: 3, timeoutReady: 3, rttReady: 1, rssiReady: 1 };
+  const ctxP: ScreenCtx = { view: mkView(200, 40),
+    data: { ...data([]), engineStatus: () => eng,
+      openEpisodes: () => ([{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded' as SymptomKind,
+        onsetMs: now - 300_000, actionKind: null, confounded: false, beforeFreshN: 4, confirming: true }]) },
+    visibleNodes: nodes, filtering: false, actionsEnabled: true };
+  const joined = plain(renderRemedy(ctxP));
+  assert.match(joined, /partial detector coverage/, 'precondition: this is the partial branch');
+  assert.match(joined, /still scoring 1 episode/,
+    `partial coverage must still disclose open episodes: ${joined.slice(0, 900)}`);
+  assert.match(joined, /1 in the confirmation window/);
+});
+
+test('every empty state holds the row contract at all sizes (v0.46.0)', () => {
+  const states = [
+    { ...ENG, total: 3, timeoutReady: 0, rttReady: 0, rssiReady: 0 },  // zero coverage
+    { ...ENG, total: 3, timeoutReady: 3, rttReady: 1, rssiReady: 1 },  // partial
+    { ...ENG, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3 },  // full
+    { enabled: true as const, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 2, bands: 6 },
+  ];
+  for (const eng of states) {
+    for (const [cols, rows] of [[40, 12], [56, 20], [80, 24], [120, 40], [200, 50]] as const) {
+      const lines = renderRemedy(engCtx(cols, rows, eng));
+      assert.equal(lines.length, rows, `${cols}x${rows}: exactly ${rows} rows`);
+      for (const l of lines) assert.ok(plain([l]).length <= cols, `${cols}x${rows}: width`);
+    }
+  }
 });
