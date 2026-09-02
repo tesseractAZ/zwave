@@ -298,13 +298,36 @@ export function createBaselineStore(opts: BaselineStoreOptions): BaselineStore {
       }
       // rssi/rtt — FRESH observations only; reset on a route change (a new route
       // legitimately shifts both).
-      if (s.routeKey !== n.routeKey) {
-        n.routeKey = s.routeKey;
-        for (let b = 0; b < N_BANDS; b++) {
-          n.rssi[b] = emptyHist(RSSI_NBINS);
-          n.rtt[b] = emptyHist(RTT_EDGES.length - 1);
+      //
+      // BOTH ENDPOINTS MUST BE KNOWN (v0.47.0). This was a bare `!==`, and the
+      // driver reports statistics with NO `lwr` at all — `routeKeyOfLwr`
+      // returns null for those. So a node routed via `r4` whose next sample
+      // simply omitted the route saw `null !== 'r4'` and had all six bands
+      // wiped; the sample after that flipped it back and wiped them again. Two
+      // full resets for ZERO re-routing.
+      //
+      // This is the identical hazard `isRouteChange` was written and tested to
+      // prevent for the route-churn DETECTOR (see the comment at its call site
+      // in zwaveData: "a route we cannot see has not moved; we have merely
+      // stopped watching it"). That rule was applied to the detector and not
+      // to this, the far more destructive consumer — a miscounted churn event
+      // needs four to fire a symptom, while one spurious wipe here costs the
+      // node every band it had learned.
+      //
+      // An UNKNOWN route leaves the stored key alone: we have stopped watching,
+      // not moved. A first observation adopts the key without wiping, because
+      // there is nothing yet to wipe.
+      if (s.routeKey != null) {
+        if (n.routeKey != null && s.routeKey !== n.routeKey) {
+          for (let b = 0; b < N_BANDS; b++) {
+            n.rssi[b] = emptyHist(RSSI_NBINS);
+            n.rtt[b] = emptyHist(RTT_EDGES.length - 1);
+          }
         }
-        dirty = true;
+        if (n.routeKey !== s.routeKey) {
+          n.routeKey = s.routeKey;
+          dirty = true;
+        }
       }
       if (s.fresh && s.rssi != null) {
         foldHist(n.rssi[band], rssiBin(s.rssi), s.t);

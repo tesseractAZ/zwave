@@ -164,7 +164,16 @@ export interface AutoPingState {
  *  cross-node comparability the v0.37 sweep was rebuilt to provide (a node
  *  under investigation took 22 probes against every peer's 13). Misses in
  *  every lane still log and still move the streak — a miss is a miss. */
-export type ProbeLane = 'sweep' | 'dead' | 'verify';
+/**
+ * Which lane sent a probe. `'manual'` (v0.47.0) is an operator pressing `p`.
+ *
+ * Only `'sweep'` feeds the persisted reply rate — that gate is the whole point
+ * of the type and must not be widened. The manual lane exists so an operator's
+ * ping is JUDGED: before this, the engine owned the exact primitive for
+ * deciding whether a ping was answered and never applied it to the one probe a
+ * human actually asked for, so `p` reported "sent" and then said nothing.
+ */
+export type ProbeLane = 'sweep' | 'dead' | 'verify' | 'manual';
 
 /** 1st, 2nd, 3rd, 4th … for the miss-streak label (v0.36.5). */
 function ordinal(n: number): string {
@@ -767,7 +776,12 @@ export interface AutoPingNodeState {
   talkingWhileDead: boolean;
 }
 
-export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tick: () => void; snapshot: () => AutoPingSnapshot } {
+export function startAutoPing(o: AutoPingRunnerOptions): {
+  stop: () => void;
+  tick: () => void;
+  snapshot: () => AutoPingSnapshot;
+  notePending: (nodeId: number, lane?: ProbeLane) => void;
+} {
   const now = o.now ?? (() => Date.now());
   const startedAt = now();
   const state = createAutoPingState();
@@ -1134,5 +1148,20 @@ export function startAutoPing(o: AutoPingRunnerOptions): { stop: () => void; tic
   // of racing a timer. A first version of the runner test stopped the handle
   // before the interval could fire and then asserted nothing had been pinged —
   // which was true, and proved nothing.
-  return { stop: () => clearInterval(timer), tick, snapshot };
+  /**
+   * Register a probe this module did not send (v0.47.0), so the answer-judging
+   * machinery applies to it.
+   *
+   * Deliberately NOT routed into `onProbeResult`: the `lane === 'sweep'` gates
+   * below are load-bearing. A manual ping already reaches the ledger's ACTION
+   * arm through the runner's `learn: true`, so feeding it here too would
+   * double-attribute it — and it would reintroduce the symptom-correlated skew
+   * v0.40.2 removed, since an operator pings exactly the nodes they suspect.
+   * Its only effects are the answered/unanswered log line and the miss streak.
+   */
+  const notePending = (nodeId: number, lane: ProbeLane = 'manual'): void => {
+    pendProbe(state, nodeId, now(), lane);
+  };
+
+  return { stop: () => clearInterval(timer), tick, snapshot, notePending };
 }

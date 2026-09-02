@@ -1086,3 +1086,40 @@ test('in-flight episodes discarded by a mesh-identity change are COUNTED, not dr
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a MANUAL ping is registered for judging; an engine one is not double-pended (v0.47.0)', async () => {
+  // The engine has owned the primitive for deciding whether a ping was answered
+  // since v0.36 and never applied it to the one probe a human actually asked
+  // for — `p` reported "sent" and then said nothing, which is the weakest claim
+  // on the screen: HA returns before the node answers, so "sent" is not
+  // "answered". An engine ping is already pended by its own lane; pending it
+  // again here would double-attribute it.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-manual-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const pended: number[] = [];
+    zd.setProbeNotePending((n) => pended.push(n));
+
+    zd.recordActionOutcome('ping', 7, true, undefined, 'you');
+    assert.deepEqual(pended, [7], 'an operator ping is owed an answer');
+
+    zd.recordActionOutcome('ping', 8, true, undefined, 'engine');
+    assert.deepEqual(pended, [7], 'an engine ping is pended by its OWN lane, never twice');
+
+    // A ping that never left does not owe an answer.
+    zd.recordActionOutcome('ping', 9, false, 'transport', 'you');
+    assert.deepEqual(pended, [7], 'a failed send is not an outstanding probe');
+
+    // And no other action is a probe.
+    zd.recordActionOutcome('healNode', 10, true, undefined, 'you');
+    assert.deepEqual(pended, [7], 'only a ping is a probe');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

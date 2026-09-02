@@ -67,7 +67,7 @@ import { refusalScope } from './planner';
 import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { isPingCandidate, type AutoPingSnapshot } from './autoPing';
-import type { ActionRefusal } from './zwaveActions';
+import type { ActionRefusal, ActionOrigin } from './zwaveActions';
 import type { DriverWsState } from './driverWsClient';
 import type { OpenEpisodeView } from './outcomes';
 
@@ -378,7 +378,10 @@ export interface ZwaveData {
   /** Engine enabled + graduated-baseline count (M3 Remedy empty state). */
   engineStatus(): EngineStatus;
   /** M5: fold an operator action's outcome into the learning ledger. */
-  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal): void;
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin): void;
+  /** Register the probe-pending hook the auto-ping runner owns (v0.47.0), so a
+   *  MANUAL ping is judged by the same machinery as an engine one. */
+  setProbeNotePending(fn: ((nodeId: number) => void) | null): void;
   /** M5: learned efficacy of an action against a symptom kind (null if off). */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
   falsePositives(kind: SymptomKind): number;
@@ -386,6 +389,21 @@ export interface ZwaveData {
   unverifiableCount(kind: SymptomKind): number;
   /** Of those, on nodes that cannot be probed at all (v0.38). */
   unverifiableUnprobeableCount(kind: SymptomKind): number;
+  /** Can the liveness sweep probe this node AT ALL (v0.47.0)?
+   *
+   *  The counter for unprobeable closures has existed since v0.38 but the
+   *  PREDICATE never reached a screen, so a node whose evidence can never be
+   *  filled looked identical to one that simply has not been probed yet. One
+   *  predicate, published — never a second copy in a screen module. */
+  probeable(nodeId: number): boolean;
+  /** How many verification probes are still owed for THIS node (v0.47.0).
+   *  `verifyOwedCount()` is the fleet total; a per-node debt is what explains
+   *  a specific card's missing score. */
+  verifyOwedFor(nodeId: number): number;
+  /** Why the driver link is degraded, if the cause is ours to name (v0.47.0).
+   *  Kept apart from `driverWsStatus()`, which is documented as prose that is
+   *  consumed verbatim — state, prose and fault stay three distinct channels. */
+  driverLinkFault(): string | null;
   unverifiableTransientCount(kind: SymptomKind): number;
   unverifiableUndersampledCount(kind: SymptomKind): number;
   confoundedCount(kind: SymptomKind): number;
@@ -1283,7 +1301,24 @@ class ZwaveDataImpl implements ZwaveData {
    *  ActionRunner AFTER each action. A driver refusal of a diagnosis-verifying
    *  action (removeFailed on a live node) is `refused` → refused-misdiagnosis;
    *  a plain failed action (couldn't run) is NOT attributed as "taken". */
-  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal): void {
+  private probeNotePending: ((nodeId: number) => void) | null = null;
+
+  setProbeNotePending(fn: ((nodeId: number) => void) | null): void {
+    this.probeNotePending = fn;
+  }
+
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin): void {
+    // A MANUAL ping is now JUDGED (v0.47.0). The engine has owned the exact
+    // primitive for deciding whether a ping was answered since v0.36 and never
+    // applied it to the one probe a human actually asked for — `p` reported
+    // "sent" and then said nothing, which is the weakest claim on the screen
+    // (HA returns before the node answers, so "sent" is not "answered").
+    //
+    // Registered on the SEND succeeding, which is the moment the answer starts
+    // being owed. Only 'you' — an engine ping is already pended by its own lane.
+    if (ok && actionKind === 'ping' && nodeId != null && origin === 'you') {
+      this.probeNotePending?.(nodeId);
+    }
     // Mesh-wide actions (rebuildAll/stopRebuild, nodeId == null) are NOT
     // attributed: they can't be credited to any single node's episode without
     // confounding, so they are deliberately dropped from the ledger.
@@ -1333,6 +1368,24 @@ class ZwaveDataImpl implements ZwaveData {
    *  burst's real spacing can be read off the log rather than inferred. */
   verifyOwedCount(): number {
     return this.verifyOwed.size;
+  }
+
+  verifyOwedFor(nodeId: number): number {
+    return this.verifyOwed.get(nodeId)?.left ?? 0;
+  }
+
+  /** The sweep's OWN candidate predicate, published (v0.47.0) — imported, never
+   *  re-derived, so a screen's notion of "probeable" cannot drift from the
+   *  lane that actually does the probing. */
+  probeable(nodeId: number): boolean {
+    const n = this.snapshot().find((x) => x.nodeId === nodeId);
+    return n != null && isPingCandidate(n);
+  }
+
+  driverLinkFault(): string | null {
+    return this.driverHomeMismatch
+      ? 'homeId mismatch — driver telemetry PURGED (check driver_ws_url)'
+      : null;
   }
 
   /** Record one liveness-probe outcome (v0.37) — the per-node reply rate the

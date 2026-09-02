@@ -239,6 +239,10 @@ interface Ledger {
   unverifiableUndersampled: (kind: SymptomKind) => number;
   /** No-action closures confounded by a mid-episode death/remediation (v0.40). */
   confounded: (kind: SymptomKind) => number;
+  /** Can the liveness sweep probe this node at all (v0.47.0)? */
+  probeable: (nodeId: number) => boolean | null;
+  /** Verification probes still owed for THIS node (v0.47.0). */
+  verifyOwedFor: (nodeId: number) => number;
 }
 
 /**
@@ -349,6 +353,23 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
   // learning", indefinitely. For node-down the loop is not slow — it is
   // structurally off, and will never turn on. UNGATED on the ledger counters,
   // because the whole point is that they will always be zero.
+  // WHY THIS CARD HAS NO SCORE, when the reason is about the NODE rather than
+  // the kind (v0.47.0). A node the sweep can never probe accumulates evidence
+  // that can never be filled, so its episodes close `unverifiable` by
+  // construction — and until now the card said nothing, leaving "no measurement
+  // yet" indistinguishable from "no measurement is possible".
+  if (sym.nodeId != null) {
+    const canProbe = ledger.probeable(sym.nodeId);
+    const owed = ledger.verifyOwedFor(sym.nodeId);
+    if (canProbe === false) {
+      rows.push(truncate('    ' + c.grey(
+        '○ this device cannot be probed (sleeping/FLiRS) — its evidence windows ' +
+        'can never be filled, so outcomes here stay unscoreable'), W));
+    } else if (owed > 0) {
+      rows.push(truncate('    ' + c.grey(
+        `○ ${owed} verification probe${owed === 1 ? '' : 's'} still owed — the score is pending, not absent`), W));
+    }
+  }
   const noScore = unscoreableReason(sym.kind);
   // WRAPPED, not truncated (v0.44.0). The sentence needs ~185 columns; emitted
   // as one truncate()'d row it was cut mid-word at every realistic terminal, so
@@ -518,6 +539,11 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     unverifiableTransient: (kind) => data.unverifiableTransientCount?.(kind) ?? 0,
     unverifiableUndersampled: (kind) => data.unverifiableUndersampledCount?.(kind) ?? 0,
     confounded: (kind) => data.confoundedCount?.(kind) ?? 0,
+    // `null` means the provider predates these (v0.47.0) — NOT "false". A
+    // fabricated "cannot be probed" would explain a missing score with a fact
+    // nobody established.
+    probeable: (nodeId) => data.probeable?.(nodeId) ?? null,
+    verifyOwedFor: (nodeId) => data.verifyOwedFor?.(nodeId) ?? 0,
   };
 
   const body: string[] = [];
@@ -543,13 +569,26 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       body.push(c.grey('    measured, so nothing can be diagnosed or cleared. This is normal'));
       body.push(c.grey('    for the first seconds after a restart.'));
     } else {
-      // Which series cannot judge every node in THIS band, and on how many.
-      // Coverage is per node, per series, per band — one number cannot carry it.
+      // Which DETECTORS cannot judge every node in THIS band, and on how many.
+      //
+      // Only two of the three series arm a detector: `grep -n 'baselines\.'
+      // src/zwave/symptoms.ts` returns exactly `timeoutNormal` and `rttNormal`.
+      // `rssiNormal` has ZERO detector consumers — weak-signal compares against
+      // an absolute 7 dB margin over the measured noise floor, never the
+      // learned baseline — so its only readers are the DETAIL dossier row and
+      // the counter below.
+      //
+      // v0.46.0 got this wrong twice: it gated the green all-clear on rssi
+      // readiness, making a DETECTION claim depend on a series that arms no
+      // detector, and it said of every blind column that "a degradation on
+      // those nodes would not be flagged", which is false for rssi. Coverage is
+      // per node, per series, per band — and only the arming series bear on
+      // whether something can be caught.
       const blind = ([
         ['timeout', eng.total - eng.timeoutReady],
         ['rtt', eng.total - eng.rttReady],
-        ['rssi', eng.total - eng.rssiReady],
       ] as const).filter(([, n]) => n > 0);
+      const rssiShort = eng.total - eng.rssiReady;
       // Richest headline that FITS. The band qualifier is the part that must
       // survive — a headline without it is the timeless assertion v0.43.1
       // removed — so the ladder sheds words, never the band.
@@ -567,6 +606,14 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       // live symptom by construction, so any empty state can be hiding one.
       // Gating this on FULL coverage put it behind a gate this mesh cannot
       // pass — see the partial-coverage branch below.
+      // rssi is reported wherever it is short, but never counted as blindness:
+      // it arms no detector, so an ungraduated rssi baseline costs the DOSSIER a
+      // row and costs detection nothing. It belongs under the all-clear as much
+      // as under partial coverage — "everything is graduated" would otherwise be
+      // read as covering it.
+      const rssiNote = (): string[] => (rssiShort > 0
+        ? [truncate(c.grey(`    (rssi is short on ${rssiShort} — a dossier yardstick only, it arms no detector.)`), W)]
+        : []);
       const episodeLine = (): string[] => {
         const openEps = data.openEpisodes() ?? [];
         if (openEps.length === 0) return [];
@@ -575,7 +622,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
           (confirming > 0 ? ` (${confirming} in the confirmation window)` : '') + ' — see ENGINE.'), W)];
       };
 
-      if (eng.timeoutReady === 0 && eng.rttReady === 0 && eng.rssiReady === 0) {
+      if (eng.timeoutReady === 0 && eng.rttReady === 0) {
         // NOTHING has graduated. Deliberately silent about symptoms: with no
         // detector able to fire, "no symptoms" would describe the instrument.
         body.push(c.cyan(pickHead([
@@ -615,20 +662,23 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         body.push(fieldStrip(view, counts()));
         body.push('');
         const which = blind.map(([name, n]) => `${name} (${n})`).join(', ');
-        body.push(truncate(c.grey(`    No yardstick in this band: ${which} of ${eng.total} nodes.`), W));
+        body.push(truncate(c.grey(`    No detector yardstick in this band: ${which} of ${eng.total} nodes.`), W));
         body.push(c.grey('    A degradation on those nodes would not be flagged, so this is a'));
         body.push(c.grey('    statement about COVERAGE, not health. Baselines reset on a route'));
         body.push(c.grey('    change, so routed nodes may never graduate.'));
+        body.push(...rssiNote());
         body.push(...episodeLine());
       } else {
         // FULL coverage in this band. "All clear" is a claim about the WHOLE
         // engine, and this screen only knows about live symptoms (v0.43.1).
         body.push(c.green(`    ✓ All clear — ${eng.total} nodes learned, no symptoms detected.`));
         body.push('');
-        body.push(truncate(c.grey('    Every node has a graduated timeout, rtt and rssi baseline'), W));
+        body.push(truncate(c.grey('    Every node has a graduated timeout and rtt baseline — the two'), W));
+        body.push(truncate(c.grey('    that arm a detector —'), W));
         const bandLine = `    for ${bandLabel(eng)}, and none is currently anomalous.`;
         body.push(c.grey(visLen(bandLine) <= W ? bandLine
           : `    for ${bandLabel(eng, true)}, none anomalous.`));
+        body.push(...rssiNote());
         const eps = episodeLine();
         if (eps.length) body.push(...eps);
         else body.push(c.grey('    New symptoms will surface here — advisory-first, nothing is acted on.'));

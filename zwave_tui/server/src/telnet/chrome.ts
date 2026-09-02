@@ -39,11 +39,44 @@ function linkTag(link: LinkState): string {
  * Row 0 — the system masthead. Product ident on the left; link state, home id
  * (wide terminals only), and the timestamp on the right.
  */
-export function masthead(view: ViewState, o: { link: LinkState; homeId: number | null; now: number }): string {
-  const parts = [linkTag(o.link)];
-  if (view.cols >= 100 && o.homeId != null) parts.push(c.grey('HOME ') + c.white(String(o.homeId)));
-  parts.push(c.grey(stamp(o.now)));
-  return lr(c.whiteB(PRODUCT), parts.join(c.grey('   ')), view.cols);
+export function masthead(
+  view: ViewState,
+  o: { link: LinkState; homeId: number | null; now: number; apSuppressed?: string | null },
+): string {
+  // A SUPPRESSED SWEEP IS A STANDING CONDITION (v0.47.0), and it was legible
+  // only on the ENGINE screen. An operator on OVERVIEW watching a node go quiet
+  // had no way to know the one autonomous prober had stood down — the mesh
+  // looked the same as one being actively watched. Rendered on EVERY screen,
+  // and NOTHING when the sweep is running: an always-on chip is noise, and a
+  // test that only ever asserts its presence passes for one.
+  const chip = o.apSuppressed && o.apSuppressed !== 'none'
+    ? c.yellow(`⚠ AUTO-PING ${o.apSuppressed.toUpperCase()}`)
+    : null;
+  // WHOLE FIELDS, dropped from the END. `lr` truncates the LEFT first but falls
+  // back to `truncate(right, width)` once the right side alone exceeds the
+  // width — which clips mid-word, and the chip sits at the front of that side.
+  // Shed the timestamp, then HOME, and keep the alarm last, exactly the
+  // fieldStrip discipline documented above.
+  //
+  // FIXED fields are never shed — the link state and the alarm. OPTIONAL ones
+  // (HOME, the timestamp) go from the end. If even the fixed pair will not fit
+  // beside the product name, `lr` shortens the LEFT, which is the right
+  // trade: the product ident is legible from the fact you are looking at it.
+  const fixed: string[] = [linkTag(o.link), ...(chip ? [chip] : [])];
+  // Ordered by what an operator loses least by NOT having: the timestamp shows
+  // the frame is live, so it outranks the home id. The old hardcoded
+  // `cols >= 100` gate on HOME is gone — it duplicated this ladder's job while
+  // making its middle rung unreachable, so the loop below was really a
+  // two-state all-or-nothing.
+  const optional: string[] = [c.grey(stamp(o.now))];
+  if (o.homeId != null) optional.push(c.grey('HOME ') + c.white(String(o.homeId)));
+  const sep = c.grey('   ');
+  const left = c.whiteB(PRODUCT);
+  for (let keep = optional.length; keep >= 0; keep--) {
+    const right = [...fixed, ...optional.slice(0, keep)].join(sep);
+    if (visLen(left) + 1 + visLen(right) <= view.cols) return lr(left, right, view.cols);
+  }
+  return lr(left, fixed.join(sep), view.cols);
 }
 
 /**
@@ -294,7 +327,7 @@ export interface FrameOpts {
  */
 export function frame(view: ViewState, data: DataProvider, o: FrameOpts): string[] {
   const out: string[] = [];
-  out.push(masthead(view, { link: linkState(data), homeId: data.controller()?.homeId ?? null, now: Date.now() }));
+  out.push(masthead(view, { link: linkState(data), homeId: data.controller()?.homeId ?? null, now: Date.now(), apSuppressed: data.autoPingState?.()?.suppressed ?? null }));
   out.push(titleRule(view, o.title, o.rightStatus ?? ''));
   if (o.telemetry != null) out.push(truncate(o.telemetry, view.cols));
   const top = out.length;

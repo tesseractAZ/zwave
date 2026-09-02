@@ -441,17 +441,29 @@ test('every baseline count names the time-of-day band it was measured in (v0.43.
   // bandOf() = hour / (24 / N_BANDS), so band 3 of 6 is 12:00–16:00. The counts
   // are true only for that band; a node can read learned at 03:00 and unlearned
   // at 15:00 with nothing having changed.
-  const learning = plain(renderRemedy(engCtx(200, 40, { ...ENG, rssiReady: 0, band: 3 })));
+  const learning = plain(renderRemedy(engCtx(200, 40, { ...ENG, rttReady: 1, band: 3 })));
   assert.match(learning, /12:00–16:00/, `band named while learning: ${learning.slice(0, 400)}`);
   const clear = plain(renderRemedy(engCtx(200, 40, { ...ENG, band: 5 })));
   assert.match(clear, /All clear/);
   assert.match(clear, /20:00–24:00/, 'and named on the all-clear too');
 });
 
-test('all three series graduated in this band DOES reach the all-clear (v0.43.1)', () => {
+test('both DETECTOR series graduated in this band reaches the all-clear (v0.43.1, narrowed v0.47.0)', () => {
   const joined = plain(renderRemedy(engCtx(200, 40, ENG)));
   assert.match(joined, /✓ All clear/);
-  assert.match(joined, /graduated timeout, rtt and rssi baseline/);
+  assert.match(joined, /graduated timeout and rtt baseline/);
+});
+
+test('an ungraduated RSSI baseline does not block the all-clear — it arms no detector (v0.47.0)', () => {
+  // `grep -n 'baselines\.' src/zwave/symptoms.ts` returns exactly timeoutNormal
+  // and rttNormal. rssiNormal has ZERO detector consumers — weak-signal uses an
+  // absolute 7 dB margin over the measured floor. v0.46.0 gated a DETECTION
+  // claim on it, and told the operator a degradation "would not be flagged" on
+  // nodes where nothing was blind at all.
+  const joined = plain(renderRemedy(engCtx(200, 40, { ...ENG, rssiReady: 0 })));
+  assert.match(joined, /✓ All clear/, `rssi must not gate detection: ${joined.slice(0, 800)}`);
+  assert.match(joined, /rssi is short on 3/, 'but it is still reported...');
+  assert.match(joined, /arms no detector/, '...and described for what it is');
 });
 
 test('the banded empty states hold the exact row contract at every size (v0.43.1)', () => {
@@ -493,15 +505,15 @@ test('the LEARNING headline keeps its band qualifier at the narrowest terminal (
   // narrow widths, and pinning the wording here would make the test fail for a
   // shorter-but-still-honest headline while missing a dropped band qualifier.
   const HEAD = /^\s*[◷◑]/;
-  const lines = plain(renderRemedy(engCtx(40, 12, { ...ENG, rssiReady: 0, band: 3 }))).split('\n');
+  const lines = plain(renderRemedy(engCtx(40, 12, { ...ENG, rttReady: 1, band: 3 }))).split('\n');
   const head = lines.find((l) => HEAD.test(l)) ?? '';
   assert.match(head, /12–16h/, `band qualifier lost at 40 cols: "${head.trim()}"`);
   // Wide terminals keep the full form.
-  const wide = plain(renderRemedy(engCtx(120, 24, { ...ENG, rssiReady: 0, band: 3 }))).split('\n');
+  const wide = plain(renderRemedy(engCtx(120, 24, { ...ENG, rttReady: 1, band: 3 }))).split('\n');
   assert.match(wide.find((l) => HEAD.test(l)) ?? '', /12:00–16:00/);
   // And the qualifier survives EVERY width in between — never silently dropped.
   for (let cols = 40; cols <= 200; cols += 1) {
-    const h = plain(renderRemedy(engCtx(cols, 24, { ...ENG, rssiReady: 0, band: 3 }))).split('\n')
+    const h = plain(renderRemedy(engCtx(cols, 24, { ...ENG, rttReady: 1, band: 3 }))).split('\n')
       .find((l) => HEAD.test(l)) ?? '';
     assert.ok(/12:00–16:00|12–16h/.test(h), `${cols} cols lost the band: "${h.trim()}"`);
   }
@@ -842,8 +854,11 @@ test('partial baseline coverage is NOT rendered as "Learning" forever (v0.46.0)'
   const joined = plain(renderRemedy(engCtx(200, 40, { ...ENG, total: 3, timeoutReady: 3, rttReady: 1, rssiReady: 1 })));
   assert.doesNotMatch(joined, /All clear/, 'still not the green all-clear');
   assert.match(joined, /partial detector coverage/);
-  assert.match(joined, /No yardstick in this band: rtt \(2\), rssi \(2\) of 3 nodes/,
+  // Only the DETECTOR-arming series count as blindness (v0.47.0) — rssi arms
+  // none, so it is reported separately rather than as a missing detector.
+  assert.match(joined, /No detector yardstick in this band: rtt \(2\) of 3 nodes/,
     `the blind detectors must be NAMED with counts: ${joined.slice(0, 900)}`);
+  assert.match(joined, /rssi is short on 2 — a dossier yardstick only/);
   assert.match(joined, /COVERAGE, not health/, 'it must refuse the health claim outright');
 });
 
@@ -887,4 +902,42 @@ test('every empty state holds the row contract at all sizes (v0.46.0)', () => {
       for (const l of lines) assert.ok(plain([l]).length <= cols, `${cols}x${rows}: width`);
     }
   }
+});
+
+/* ── v0.47.0: why a card has no score ─────────────────────────────────────── */
+
+test('an UNPROBEABLE node says its evidence can never be filled (v0.47.0)', () => {
+  // Its episodes close `unverifiable` by construction — the sweep skips
+  // sleeping devices entirely — so "no measurement yet" and "no measurement is
+  // possible" rendered identically. Only the second is permanent.
+  const ctxU: ScreenCtx = { view: mkView(200, 40),
+    data: { ...data([sym({ kind: 'node-down', nodeId: 6 })]), probeable: () => false },
+    visibleNodes: nodes, filtering: false, actionsEnabled: true };
+  const joined = plain(renderRemedy(ctxU));
+  assert.match(joined, /cannot be probed \(sleeping\/FLiRS\)/);
+  assert.match(joined, /can never be filled/, 'permanence is the point');
+});
+
+test('a node with probes OWED says the score is pending, not absent (v0.47.0)', () => {
+  const ctxO: ScreenCtx = { view: mkView(200, 40),
+    data: { ...data([sym()]), probeable: () => true, verifyOwedFor: () => 3 },
+    visibleNodes: nodes, filtering: false, actionsEnabled: true };
+  const joined = plain(renderRemedy(ctxO));
+  assert.match(joined, /3 verification probes still owed — the score is pending, not absent/);
+});
+
+test('a probeable node with nothing owed says NOTHING extra (v0.47.0)', () => {
+  const ctxQ: ScreenCtx = { view: mkView(200, 40),
+    data: { ...data([sym()]), probeable: () => true, verifyOwedFor: () => 0 },
+    visibleNodes: nodes, filtering: false, actionsEnabled: true };
+  const joined = plain(renderRemedy(ctxQ));
+  assert.doesNotMatch(joined, /cannot be probed|still owed/, 'no news is no line');
+});
+
+test('a provider that predates probeability claims nothing about it (v0.47.0)', () => {
+  // `null` is UNKNOWN, not false. Rendering "cannot be probed" for a provider
+  // that simply does not implement the accessor would explain a missing score
+  // with a fact nobody established.
+  const joined = plain(renderRemedy(ctx(200, 40, [sym({ kind: 'node-down', nodeId: 6 })])));
+  assert.doesNotMatch(joined, /cannot be probed/);
 });

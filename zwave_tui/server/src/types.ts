@@ -464,6 +464,14 @@ export interface DataProvider {
    *  sleeping battery/FLiRS device, whose windows can never be filled. A
    *  different fact from thin evidence, and previously indistinguishable. */
   unverifiableUnprobeableCount?(kind: SymptomKind): number;
+  /** Can the liveness sweep probe this node at all (v0.47.0)? */
+  probeable?(nodeId: number): boolean;
+  /** Verification probes still owed for THIS node (v0.47.0). */
+  verifyOwedFor?(nodeId: number): number;
+  /** Verification probes owed across the fleet (v0.47.0). */
+  verifyOwedCount?(): number;
+  /** Why the driver link is degraded, when the cause is ours to name (v0.47.0). */
+  driverLinkFault?(): string | null;
   /** Of the unverifiable, transient blinks — the degraded state ended before
    *  its evidence floor could fill (v0.39). Unscoreable by construction. */
   unverifiableTransientCount?(kind: SymptomKind): number;

@@ -1491,3 +1491,52 @@ test('the give-up says what it MEASURED — unanswered NOPs, not unreachability 
   assert.match(gave!, /try OPERATING the device/, 'and it leads with the step that actually works');
   assert.ok(!/ 1 pings| 1 NOP frames/.test(gave!), `plural agreement: ${gave}`);
 });
+
+test('notePending registers a MANUAL probe that never feeds the persisted reply rate (v0.47.0)', async () => {
+  // The `lane === 'sweep'` gate is the whole point of the lane type. A manual
+  // ping already reaches the ledger's ACTION arm via the runner's `learn: true`,
+  // so routing it into onProbeResult would double-attribute it — and it would
+  // reintroduce the symptom-correlated skew v0.40.2 removed, since an operator
+  // pings exactly the nodes they suspect.
+  //
+  // Driven through the RUNNER's own notePending: the DEFAULT lane is what is
+  // under test, and calling pendProbe directly supplies the lane explicitly and
+  // so proves nothing about it.
+  const { startAutoPing } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const results: { id: number; ok: boolean }[] = [];
+  const nodes = mesh(20, []);
+  const h = startAutoPing({
+    nodes: () => nodes,
+    controller: () => null,
+    ready: () => true,
+    ping: async () => {},
+    log: () => {},
+    config: cfg(),
+    tickMs: 1_000_000,
+    now: () => clock,
+    onProbeResult: (id, ok) => { results.push({ id, ok }); },
+  });
+  try {
+    // Node 100 is in `mesh`'s roster — a node ABSENT from it is refused by the
+    // judge ("a roster gap is not a failed probe"), which would make this pass
+    // for the wrong reason.
+    h.notePending(100);
+    assert.ok(nodes.some((n) => n.nodeId === 100), 'precondition: the node is on the roster');
+    // Let the answer grace elapse so the probe is actually judged.
+    clock = T + 30 * MIN;
+    h.tick();
+    assert.deepEqual(results, [],
+      `a MANUAL probe must never reach onProbeResult: ${JSON.stringify(results)}`);
+  } finally { h.stop(); }
+});
+
+test('the manual lane is labelled as such, so the sweep gate can exclude it (v0.47.0)', () => {
+  const st = createAutoPingState();
+  pendProbe(st, 7, 1000, 'manual');
+  const owed = st.awaitingAnswer.get(7) ?? [];
+  assert.equal(owed.length, 1, 'the probe is owed an answer');
+  assert.equal(owed[0].lane, 'manual');
+  assert.notEqual(owed[0].lane, 'sweep', 'that lane feeds the persisted rate');
+});
+

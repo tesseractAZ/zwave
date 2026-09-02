@@ -1539,7 +1539,7 @@ const MUTANTS = [
   { id: 'engine-shows-driver-link', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     // Back to the dead accessor: the driver socket that feeds bgRSSI, S2
     // resync detection and the real lastSeen degrades with no surface saying so.
-    find: "    push(c.label('DRIVER LINK') + '  ' + tone(`${st} — ${ws}`));",
+    find: "    push(fitBits(c.label('DRIVER LINK') + '  ', [tone(st), c.grey(ws)], view.cols));",
     repl: '    void tone;',
     what: 'ENGINE renders the driver-WS lifecycle instead of hiding it' },
   { id: 'driver-link-degraded-stands-out', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
@@ -1731,7 +1731,7 @@ const MUTANTS = [
     // The screen would permanently name the 00:00–04:00 band whatever the
     // clock says — the headline claim of the widening, silently false.
     find: '    const band = bandOf(now);',
-    repl: '    const band = 0;',
+    repl: '    const band = (bandOf(now) + 1) % N_BANDS;',
     what: 'the band NAMED is the band the counts were measured in' },
   { id: 'unmatched-refusal-is-captured', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
     // The self-capturing half: without it the real production wording is lost
@@ -2003,7 +2003,7 @@ const MUTANTS = [
     // Collapses partial coverage back into "Learning" — the v0.44.0 state that
     // implied a convergence this mesh never reaches (measured ceiling 23 of 38,
     // the direct-routed subset).
-    find: '      if (eng.timeoutReady === 0 && eng.rttReady === 0 && eng.rssiReady === 0) {',
+    find: '      if (eng.timeoutReady === 0 && eng.rttReady === 0) {',
     repl: '      if (blind.length > 0) {',
     what: 'partial baseline coverage renders its own state, not "Learning" forever' },
   { id: 'remedy-episodes-under-partial', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
@@ -2024,6 +2024,116 @@ const MUTANTS = [
     find: "          `    ◷ Learning — no detector has a yardstick yet for ${bandLabel(eng)}:`,",
     repl: "          `    ◑ No symptoms — no detector has a yardstick yet for ${bandLabel(eng)}:`,",
     what: 'a fleet with nothing graduated makes NO symptom claim' },
+  { id: 'probes-zero-states-are-told-apart', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Back to a blank row: "sweep off", "device can never be probed", "sweep
+    // suppressed" and "due but not reached" become indistinguishable. The first
+    // two are permanent and the last two transient — a blank row cannot say
+    // whether waiting helps.
+    find: '        body.push(kv(\'Probes\', c.grey(why), inner));',
+    repl: '        void why;',
+    what: 'a node with no probes says WHICH of the four zero-states it is in' },
+  { id: 'sleeping-outranks-suppressed', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // A sleeping device can NEVER be probed; reporting a transient suppression
+    // for it implies waiting will produce evidence.
+    find: '          : !isPingCandidate(n) ? \'not a sweep candidate — sleeping device, never probed\'',
+    repl: '          : false ? \'not a sweep candidate — sleeping device, never probed\'',
+    what: 'a permanent reason outranks a transient one' },
+  { id: 'probes-candidate-predicate-is-imported', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // A hand-rolled copy of the sweep's own candidate rule drifts from it.
+    find: "          : !isPingCandidate(n) ? 'not a sweep candidate — sleeping device, never probed'",
+    repl: "          : n.isListening !== true ? 'not a sweep candidate — sleeping device, never probed'",
+    what: "the screen's notion of probeable IS the sweep's, imported not re-derived" },
+  { id: 'driver-fault-has-its-own-row', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // As a fitBits BIT the fault was shed at 80 columns — exactly when the line
+    // is busiest and the operator most needs it.
+    find: "    if (fault) push('  ' + c.yellow(`⚠ ${fault}`));",
+    repl: '    if (fault) void fault;',
+    what: 'the driver-link fault renders, and on a row that cannot be shed' },
+  { id: 'manual-ping-is-judged', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // `p` reports "sent" and then says nothing — HA returns before the node
+    // answers, so "sent" is not "answered".
+    find: "    if (ok && actionKind === 'ping' && nodeId != null && origin === 'you') {",
+    repl: "    if (ok && actionKind === 'healNode' && nodeId != null && origin === 'you') {",
+    what: 'an operator ping is registered for the same judging the engine uses' },
+  { id: 'engine-ping-not-double-pended', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // An engine ping is already pended by its own lane; pending it again
+    // double-attributes it.
+    find: "    if (ok && actionKind === 'ping' && nodeId != null && origin === 'you') {",
+    repl: "    if (ok && actionKind === 'ping' && nodeId != null) {",
+    what: 'only a MANUAL ping is pended here — the engine lane owns its own' },
+  { id: 'failed-send-owes-no-answer', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: "    if (ok && actionKind === 'ping' && nodeId != null && origin === 'you') {",
+    repl: "    if (actionKind === 'ping' && nodeId != null && origin === 'you') {",
+    what: 'a ping that never left is not an outstanding probe' },
+  { id: 'manual-lane-is-not-sweep', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Routing the manual lane into the persisted reply rate double-attributes a
+    // ping that already reaches the ledger's ACTION arm, and reintroduces the
+    // symptom-correlated skew v0.40.2 removed.
+    find: "  const notePending = (nodeId: number, lane: ProbeLane = 'manual'): void => {",
+    repl: "  const notePending = (nodeId: number, lane: ProbeLane = 'sweep'): void => {",
+    what: "a manual probe is labelled 'manual', never 'sweep'" },
+  { id: 'unprobeable-card-says-so', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: '    if (canProbe === false) {',
+    repl: '    if (canProbe === null) {',
+    what: 'a node that can NEVER be probed says its evidence can never be filled' },
+  { id: 'unknown-probeability-claims-nothing', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // `null` is UNKNOWN, not false — a provider that predates the accessor must
+    // not have "cannot be probed" asserted on its behalf.
+    find: '    probeable: (nodeId) => data.probeable?.(nodeId) ?? null,',
+    repl: '    probeable: (nodeId) => data.probeable?.(nodeId) ?? false,',
+    what: 'an unknown probeability asserts nothing' },
+  { id: 'owed-probes-mean-pending', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    find: '    } else if (owed > 0) {',
+    repl: '    } else if (owed < 0) {',
+    what: 'probes still owed say the score is PENDING, not absent' },
+  { id: 'suppression-chip-only-when-suppressed', file: 'src/telnet/chrome.ts', tests: ['chrome'],
+    // An always-on chip is noise, and a one-sided test passes for it.
+    find: "  const chip = o.apSuppressed && o.apSuppressed !== 'none'",
+    repl: '  const chip = o.apSuppressed != null',
+    what: 'the chip renders only for a real suppression, never for "none"' },
+  { id: 'suppression-chip-is-never-shed', file: 'src/telnet/chrome.ts', tests: ['chrome'],
+    // `lr` falls back to truncating the RIGHT once it alone exceeds the width,
+    // and the chip sits at the front of that side — so a naive join clips the
+    // alarm mid-word.
+    find: '  const fixed: string[] = [linkTag(o.link), ...(chip ? [chip] : [])];',
+    repl: '  const fixed: string[] = [linkTag(o.link)];',
+    what: 'the suppression alarm survives every width, whole' },
+  { id: 'masthead-fields-stay-whole', file: 'src/telnet/chrome.ts', tests: ['chrome'],
+    find: '    const right = [...fixed, ...optional.slice(0, keep)].join(sep);',
+    repl: '    const right = [...fixed, ...optional].join(sep);',
+    what: 'a masthead field that does not fit is DROPPED, never clipped' },
+  { id: 'unseen-route-has-not-moved', file: 'src/zwave/baselines.ts', tests: ['baselines'],
+    // Restores the bare `!==`: a statistics event with no `lwr` reads as a
+    // route change and wipes ALL SIX rssi/rtt bands, then wipes them again when
+    // the route reappears. Two full resets for zero re-routing — the mechanism
+    // behind the graduation plateau.
+    find: '      if (s.routeKey != null) {',
+    repl: '      if (s.routeKey !== undefined) {',
+    what: 'an UNKNOWN route leaves the baseline alone — we stopped watching, it did not move' },
+  { id: 'real-route-change-still-wipes', file: 'src/zwave/baselines.ts', tests: ['baselines'],
+    // The opposite failure: narrowing the trigger must not DISABLE it. A new
+    // route legitimately shifts rssi and rtt, so the old normal describes a
+    // path that no longer exists.
+    find: '        if (n.routeKey != null && s.routeKey !== n.routeKey) {',
+    repl: '        if (false && n.routeKey != null && s.routeKey !== n.routeKey) {',
+    what: 'a GENUINE re-route still resets both continuous series' },
+  { id: 'route-wipe-covers-every-band', file: 'src/zwave/baselines.ts', tests: ['baselines'],
+    find: '          for (let b = 0; b < N_BANDS; b++) {',
+    repl: '          for (let b = 0; b < 1; b++) {',
+    what: 'a re-route resets every band — the new path shifts them all' },
+  { id: 'gate-tracks-detection-only', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Puts rssi back in the blindness set: a DETECTION claim gated on a series
+    // that arms no detector, and "a degradation would not be flagged" said of
+    // nodes where nothing is blind.
+    find: "        ['rtt', eng.total - eng.rttReady],\n      ] as const).filter(([, n]) => n > 0);",
+    repl: "        ['rtt', eng.total - eng.rttReady],\n        ['rssi', eng.total - eng.rssiReady],\n      ] as const).filter(([, n]) => n > 0);",
+    what: 'only the DETECTOR-arming series count as coverage — rssi arms none' },
+  { id: 'rssi-shortfall-still-reported', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // The opposite failure: dropping rssi from the gate must not drop it from
+    // the SCREEN. It is a real dossier yardstick and its absence is real news.
+    find: '      const rssiNote = (): string[] => (rssiShort > 0',
+    repl: '      const rssiNote = (): string[] => (rssiShort < 0',
+    what: 'a short rssi baseline is still reported, as the dossier yardstick it is' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.
