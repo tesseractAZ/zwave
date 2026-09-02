@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.46.0 — 2026-09-01
+
+**Coverage is not health, and the all-clear stops waiting for a gate that never
+closes.**
+
+v0.44.0 gated REMEDY's green all-clear on all three baseline series having
+graduated in the current time-of-day band. That was the right correction — the
+screen had been counting ONE series in ONE band and rendering it as a universal
+— but it left the fleet in "Learning" permanently, and it is now measured that
+this is not a transient.
+
+**The gate cannot close on this mesh.** Of 38 non-controller nodes, 23 are
+direct-routed and 15 route through a repeater. `baselines.observe()` resets the
+rssi and rtt histograms across **all six bands** on any route change — by
+design, since a new route legitimately shifts both — and those series fold only
+on FRESH samples, of which this fleet produces roughly 410–922 out of 363,586
+lifetime readings (~1.5–3.3 per band per day) against a `MIN_OBS` of 20. So a
+repeater-routed node must hold one route for about two weeks to graduate a
+single band, and the green gate needs all fifteen to do it simultaneously — in a
+mesh whose own `route-churn` detector is firing. The natural experiment, two
+nodes with identical 46-day watch windows: node 61 (`LWR direct`, 922 fresh)
+reads `-39 dBm ±3 dB · 10d`, ring-capped and graduated; node 55 (`LWR r4`, route
+failed, 410 fresh) reads `still learning · 0d so far`. The ceiling is 23 of 38 —
+the direct-routed subset — and readings of 18 → 21 → 22 were converging on that,
+not on 38.
+
+**So the learning branch splits rather than the gate loosening.** There are now
+five empty states: engine disabled, no nodes yet, **zero coverage** (nothing
+graduated — deliberately silent about symptoms, because with no detector able to
+fire "no symptoms" would describe the instrument), **partial coverage** (new),
+and the green all-clear. The partial state names the blind detectors and the
+node count each cannot judge, and says in as many words that this is a statement
+about COVERAGE, not health — it does not claim those nodes are fine.
+
+**The open-episode disclosure was structurally unreachable.** Added in v0.43.1,
+it sat only in the green branch — behind the gate above — so in production it
+could never render. It now belongs to every no-symptom state. Without that move
+the fourth state would merely have relocated the trap. This is the same shape as
+the v0.36 inert learning loop: a feature wired, tested, mutation-proven, and
+dead.
+
+**Two existing tests changed COPY, not invariant.** Both used partial-coverage
+fixtures and asserted the word "Learning"; they now assert the partial-coverage
+headline. Every load-bearing assertion in them — no green all-clear, the three
+per-series counts, the band qualifier surviving every width — is unchanged. The
+band-qualifier test now matches the headline by its GLYPH rather than its
+wording, since the headline sheds words at narrow widths and pinning the wording
+would fail a shorter-but-honest headline while missing a dropped band.
+
+**Not fixed here, and worth naming:** `fresh 410 of 363,586 (0% lifetime)` on a
+46-day-old node means rssi/rtt learning is starved regardless of routing. This
+release makes the screen honest about the consequence; it does not change the
+evidence cadence that causes it.
+
+940 tests, 398 mutants (0 survived, 0 missing, 0 invalid).
+
 ## 0.45.0 — 2026-08-31
 
 **Nothing is clipped into a plausible lie, and a symptom's whole life reaches
