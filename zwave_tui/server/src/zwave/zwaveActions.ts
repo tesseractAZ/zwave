@@ -48,7 +48,10 @@ export interface ActionRunnerOptions {
   log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string, origin?: ActionOrigin) => void;
   /** M5: structured outcome hook — the outcome ledger attributes the action to
    *  its node's open episodes. Fired AFTER the action resolves. */
-  onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal) => void;
+  /** `origin` carries WHO ran it (v0.47.0) — the data layer needs it to route a
+   *  MANUAL ping into the probe-judging machinery, which the engine already
+   *  owns and never applied to the one probe a human actually asked for. */
+  onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin) => void;
   /** v0.23: invalidate a node's cached config parameters after a successful write,
    *  so the DETAIL screen re-fetches and shows the new value. */
   onConfigWritten?: (nodeId: number) => void;
@@ -179,7 +182,7 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     try {
       await fn();
       o.log('info', nodeId, `${verb} → ok`, origin);
-      if (learn) o.onOutcome?.(kind, nodeId, true);
+      if (learn) o.onOutcome?.(kind, nodeId, true, undefined, origin);
       return { ok: true, message: `${verb}: ok` };
     } catch (e) {
       // SANITIZED: this is whatever an HA service call threw, and session.ts
@@ -222,7 +225,7 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
         // capture.
         o.log('warn', nodeId, 'remove-failed: unclassified ZW0360 reason — see the failure line below', origin);
       }
-      if (learn) o.onOutcome?.(kind, nodeId, false, refusal);
+      if (learn) o.onOutcome?.(kind, nodeId, false, refusal, origin);
       return { ok: false, message: msg };
     }
   };

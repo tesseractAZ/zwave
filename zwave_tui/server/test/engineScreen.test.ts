@@ -226,7 +226,7 @@ test('ENGINE classifies the driver link on its STATE, never on the prose (v0.43.
     driverWsStatus: () => 'live (schema 41, home 3586281591)', driverWsState: () => 'live',
   })));
   assert.match(live, /DRIVER LINK/);
-  assert.match(live, /live — live \(schema 41/);
+  assert.match(live, /live · live \(schema 41/);
 
   // Every non-live state must stand out — including the two the prose hides.
   for (const [st, line] of [
@@ -358,4 +358,45 @@ test('an arm with no control arm to compare against says THAT, not "not distingu
   assert.match(joined, /ping measured, no control arm yet \(n≈8\.0, 5 nodes\)/);
   assert.doesNotMatch(joined, /ping not distinguishable/,
     'a comparison that was never performed cannot have come out level');
+});
+
+test('a driver-link FAULT is named ahead of the client prose (v0.47.0)', () => {
+  // A homeId mismatch PURGES driver telemetry, and the operator saw only the
+  // bare word `stopped`. The one fact that explains it — and points at the
+  // misconfiguration behind it — sat in a field no screen read.
+  const joined = plain(renderEngine(ctx(200, 40, {
+    driverWsState: () => 'stopped',
+    driverWsStatus: () => 'stopped (backoff 30s)',
+    driverLinkFault: () => 'homeId mismatch — driver telemetry PURGED (check driver_ws_url)',
+  })));
+  assert.match(joined, /homeId mismatch — driver telemetry PURGED/,
+    `the cause must render: ${joined.slice(0, 700)}`);
+  const line = joined.split('\n').find((l) => /DRIVER LINK/.test(l)) ?? '';
+  void line;
+  // The fault gets its own row: as a BIT it was the thing shed exactly when the
+  // line got busy, which is when an operator most needs it.
+  const faultRow = joined.split('\n').find((l) => /homeId mismatch/.test(l)) ?? '';
+  assert.doesNotMatch(faultRow, /DRIVER LINK/, 'its own row, not competing for the label line');
+  assert.match(faultRow, /⚠/, 'and marked as an alarm');
+});
+
+test('a healthy driver link renders no fault bit at all (v0.47.0)', () => {
+  const joined = plain(renderEngine(ctx(200, 40, {
+    driverWsState: () => 'live', driverWsStatus: () => 'live (schema 41, home 1)',
+    driverLinkFault: () => null,
+  })));
+  assert.match(joined, /DRIVER LINK/);
+  assert.doesNotMatch(joined, /homeId mismatch|PURGED|⚠/, 'no fault ⇒ no alarm row at all');
+});
+
+test('the driver-link fault survives the modal 80 columns (v0.47.0)', () => {
+  // fitBits sheds from the right, and the client's prose is the LAST bit — so
+  // the fault outranks it for space. A purged link that renders as `stopped`
+  // with no cause is the defect this exists to prevent.
+  const joined = plain(renderEngine(ctx(80, 24, {
+    driverWsState: () => 'stopped',
+    driverWsStatus: () => 'stopped (backoff 30s, retry 4/8, last error ECONNREFUSED at 19:04:11)',
+    driverLinkFault: () => 'homeId mismatch — driver telemetry PURGED (check driver_ws_url)',
+  })));
+  assert.match(joined, /homeId mismatch/, `the fault must survive 80 cols: ${joined.slice(0, 700)}`);
 });

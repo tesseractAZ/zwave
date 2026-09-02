@@ -429,11 +429,51 @@ test('a node that mostly MISSES its probes is toned as such', () => {
   assert.ok(!raw(20, 3).includes('\x1b[92m'), 'and not also green');
 });
 
-test('a node never swept shows NO probe row rather than 0/0', () => {
-  // 0 of 0 is not a reliability of zero; it is an absence of evidence, and
-  // rendering it as a rate would be a fabricated reading.
+test('a node never swept renders WHY, and never 0/0 as a rate (v0.47.0)', () => {
+  // The original invariant stands: 0 of 0 is not a reliability of zero, it is
+  // an absence of evidence, and rendering it as a RATE would be a fabricated
+  // reading. What changed (v0.47.0) is that the absence used to render as
+  // NOTHING, which conflated four different statements — see below.
   const out = evidenceLines(withProbes({ probesAsked: 0 }));
-  assert.ok(!out.some((l) => /^\s*Probes/.test(l)));
+  const row = out.find((l) => /^\s*Probes/.test(l));
+  assert.ok(row, 'the row must exist and explain itself');
+  assert.doesNotMatch(row, /0\/0|\(0%\)/, 'never a fabricated rate');
+  assert.match(row, /no probe evidence|not a sweep candidate/);
+});
+
+test('the four zero-probe states are told APART (v0.47.0)', () => {
+  // "Sweep not running", "device can never be probed", "sweep suppressed" and
+  // "due but not yet reached" all rendered as a blank row. The first two are
+  // PERMANENT and the last two are TRANSIENT — an operator staring at a blank
+  // row cannot tell whether waiting will help.
+  const AP = (over: Record<string, unknown> = {}): unknown => ({
+    lastTickMs: Date.now(), suppressed: 'none', listening: 35, deadListening: 0,
+    staleDue: 0, stalestMs: null, verifyOwed: 0,
+    config: { enabled: true, writeActions: true, afterMs: 600_000, maxAttempts: 3, staleMs: 7_200_000 },
+    nodes: [], ...over,
+  });
+  const withAp = (ap: unknown, node?: Partial<NodeSnapshot>) => {
+    const d = withProbes({ probesAsked: 0 });
+    if (node) { const n = d.nodes[0]; Object.assign(n, node); }
+    (d.data as { autoPingState?: () => unknown }).autoPingState = () => ap;
+    return renderDetail(ctx(mkView(120, 60), d.data, d.nodes)).map(strip)
+      .find((l) => /^\s*Probes/.test(l)) ?? '';
+  };
+  assert.match(withAp(null), /sweep is not running/);
+  assert.match(withAp(AP({ config: { enabled: true, writeActions: true, afterMs: 1, maxAttempts: 3, staleMs: 0 } })), /sweep is disabled/);
+  assert.match(withAp(AP({ suppressed: 'storm' })), /sweep suppressed \(storm\)/);
+  assert.match(withAp(AP()), /due, but the sweep has not reached this node/);
+  // A sleeping device is NOT a candidate, and that outranks every transient
+  // reason — waiting will never produce evidence for it.
+  assert.match(withAp(AP({ suppressed: 'storm' }), { isListening: false, isRouting: false }),
+    /not a sweep candidate — sleeping device, never probed/);
+  // THE CONTROLLER is never a sweep candidate either, however listening it is —
+  // `isPingCandidate` is `!isController && isListening === true`, and that
+  // first half is exactly what a hand-rolled copy in this screen would drop.
+  // DETAIL can select it (it renders a `controller` capability tag), so this is
+  // reachable, not hypothetical.
+  assert.match(withAp(AP(), { isController: true, isListening: true }),
+    /not a sweep candidate/, 'the controller is not swept, however listening');
 });
 
 test('self-proven is omitted when there is none, not printed as zero', () => {

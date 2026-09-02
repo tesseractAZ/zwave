@@ -170,7 +170,7 @@ export function renderOverview(ctx: ScreenCtx): string[] {
 
   const out: string[] = [];
   // Chrome: masthead · titled rule · telemetry strip · column header.
-  out.push(masthead(view, { link: linkState(data), homeId: data.controller()?.homeId ?? null, now: Date.now() }));
+  out.push(masthead(view, { link: linkState(data), homeId: data.controller()?.homeId ?? null, now: Date.now(), apSuppressed: data.autoPingState?.()?.suppressed ?? null }));
   out.push(titleRule(view, 'OVERVIEW', rightStatus(ctx)));
   out.push(telemetryStrip(ctx));
   out.push(truncate(headerRow(view, cols), W));

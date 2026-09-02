@@ -97,7 +97,7 @@ async function main(): Promise<void> {
     // including the RED-latching "→ failed" line describing the write itself.
     log: (sev, nodeId, text, origin) => zwaveData.logByOrigin(sev, nodeId, text, origin),
     // M5: feed operator-action outcomes into the learning ledger.
-    onOutcome: (kind, nodeId, ok, refusal) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal),
+    onOutcome: (kind, nodeId, ok, refusal, origin) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin),
     // v0.23: after a config write, drop the stale cache so DETAIL re-fetches.
     onConfigWritten: (nodeId) => zwaveData.invalidateConfigParams(nodeId),
     onNodeRemoved: (nodeId) => zwaveData.forgetNodeBaselines(nodeId),
@@ -112,7 +112,11 @@ async function main(): Promise<void> {
   // 4c) Auto-ping — the ONE thing this engine does without a human pressing a
   //     key. Off unless BOTH its own switch and write_actions_enabled are on;
   //     see autoPing.ts for why ping specifically, and for every suppressor.
-  let autoPing: { stop: () => void; snapshot: () => AutoPingSnapshot } | null = null;
+  // The FULL return type (v0.47.0). A hand-maintained subset of a
+  // single-implementation type buys nothing and is exactly how v0.33 shipped a
+  // dead key: this annotation already omitted `tick`, and would have silently
+  // omitted `notePending` too.
+  let autoPing: ReturnType<typeof startAutoPing> | null = null;
   if (config.autoPing.enabled && config.writeActions) {
     autoPing = startAutoPing({
       nodes: () => provider.nodes(),
@@ -145,6 +149,7 @@ async function main(): Promise<void> {
     // suppression, ladder position and probe debt instead of the operator
     // tailing the container log for them.
     zwaveData.setAutoPingSnapshot(() => autoPing!.snapshot());
+    zwaveData.setProbeNotePending((n) => autoPing?.notePending(n));
     log(
       `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed ` +
         `(max ${config.autoPing.maxAttempts}/outage, waits 10/30/60m between attempts — at the default 3 that is 10m dwell + 10m + 30m, so ~50m to "needs a human"; suppressed on storm, rebuild and restart)` +

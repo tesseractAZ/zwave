@@ -158,7 +158,18 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     // none of the words a regex looks for. 'live' is the only healthy state.
     const st = data.driverWsState?.() ?? 'disabled';
     const tone = st === 'live' ? c.grey : st === 'connecting' || st === 'handshake' ? c.grey : c.yellow;
-    push(c.label('DRIVER LINK') + '  ' + tone(`${st} — ${ws}`));
+    push(fitBits(c.label('DRIVER LINK') + '  ', [tone(st), c.grey(ws)], view.cols));
+    // THE CAUSE, ON ITS OWN ROW (v0.47.0). A homeId mismatch PURGES driver
+    // telemetry, and the operator saw only the bare word `stopped` — the one
+    // fact that explains it, and names the misconfiguration behind it, sat in a
+    // field no screen read.
+    //
+    // Its own row rather than a bit: at 80 columns the label, the state and the
+    // client's prose already fill the line, so as a bit the fault was the thing
+    // shed. An alarm that disappears exactly when the line is busy is not an
+    // alarm. There is ample vertical room here.
+    const fault = data.driverLinkFault?.() ?? null;
+    if (fault) push('  ' + c.yellow(`⚠ ${fault}`));
     push('');
   }
 

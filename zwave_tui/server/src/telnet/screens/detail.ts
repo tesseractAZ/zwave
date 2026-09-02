@@ -40,6 +40,7 @@ import { centeredNotice } from './overview';
 import { downsampleMean } from './interference';
 import { frame, hstack, splitCols, type Keycap, type StackCol } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
+import { isPingCandidate } from '../../zwave/autoPing';
 import { rssiColor, marginColor, rttColor, timeoutPctColor, rssiReading } from '../bands';
 
 
@@ -393,6 +394,24 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           : '';
         body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${pct}%)`) + self, inner));
         if (caveat) body.push(kv('', c.grey(caveat.trim()), inner));
+      } else {
+        // ZERO IS FOUR DIFFERENT STATEMENTS (v0.47.0), and this rendered as
+        // NOTHING at every width — so "the sweep is off", "this device can
+        // never be probed", "the sweep is suppressed" and "it is due but has
+        // not run yet" were indistinguishable. The first two are permanent and
+        // the last two are transient; an operator reading a blank row cannot
+        // tell whether waiting will help.
+        //
+        // `isPingCandidate` is IMPORTED rather than re-derived: the screen's
+        // notion of "candidate" must be the sweep's own, or the two drift.
+        const ap = data.autoPingState?.() ?? null;
+        const why =
+          ap == null ? 'no probe evidence — the liveness sweep is not running'
+          : ap.config.staleMs === 0 ? 'no probe evidence — the liveness sweep is disabled'
+          : !isPingCandidate(n) ? 'not a sweep candidate — sleeping device, never probed'
+          : ap.suppressed !== 'none' ? `no probe evidence yet — sweep suppressed (${ap.suppressed})`
+          : 'no probe evidence yet — due, but the sweep has not reached this node';
+        body.push(kv('Probes', c.grey(why), inner));
       }
       // The engine's LEARNED yardstick for this node. Every per-node signal
       // verdict ("below its own normal") is measured against this and it was

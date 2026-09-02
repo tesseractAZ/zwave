@@ -147,3 +147,57 @@ test('load survives a corrupt file and a wrong-length histogram without throwing
   // Malformed node coerces to an empty (not-ready) baseline, never a crash.
   assert.equal(s.timeoutNormal(6, T0)?.ready, false);
 });
+
+/* ── v0.47.0: an unseen route has not moved ───────────────────────────────── */
+
+test('a sample with NO route does not wipe the learned rssi/rtt bands', () => {
+  // THE PLATEAU'S MECHANISM. This was a bare `!==`, and the driver reports
+  // statistics with no `lwr` at all — routeKeyOfLwr returns null for those. So
+  // a node routed via `r4` whose next sample omitted the route saw
+  // `null !== 'r4'` and lost all six bands; the sample after flipped it back
+  // and wiped them again. Two full resets for ZERO re-routing.
+  //
+  // The identical rule is already encoded and tested as `isRouteChange` for the
+  // route-churn detector. It was applied there and not here — and here is the
+  // far more destructive consumer: a miscounted churn needs four to fire a
+  // symptom, while one spurious wipe costs every band the node had learned.
+  const path = freshPath();
+  const s = mk(path);
+  train(s, 5, 30, 4, { rssi: -50, fresh: true, routeKey: 'r4' });
+  const learned = s.rssiNormal(5, T0);
+  assert.ok(learned?.ready, `precondition: the band graduated — ${JSON.stringify(learned)}`);
+
+  // The driver stops reporting the route for a while.
+  s.observe(5, sample({ t: T0, rssi: -50, fresh: true, routeKey: null }), false);
+  assert.ok(s.rssiNormal(5, T0)?.ready,
+    'an UNSEEN route has not moved — the baseline must survive');
+
+  // ...and comes back on the SAME route.
+  s.observe(5, sample({ t: T0, rssi: -50, fresh: true, routeKey: 'r4' }), false);
+  assert.ok(s.rssiNormal(5, T0)?.ready,
+    'and reappearing on the same route is not a change either');
+});
+
+test('a REAL route change still wipes both continuous series, in every band', () => {
+  // The wipe itself is correct and load-bearing: a new route legitimately
+  // shifts rssi and rtt, so the old normal describes a path that no longer
+  // exists. Narrowing the trigger must not disable it.
+  const path = freshPath();
+  const s = mk(path);
+  train(s, 6, 30, 4, { rssi: -50, fresh: true, routeKey: 'r4' });
+  assert.ok(s.rssiNormal(6, T0)?.ready, 'precondition: graduated');
+  s.observe(6, sample({ t: T0, rssi: -50, fresh: true, routeKey: 'r9' }), false);
+  assert.equal(s.rssiNormal(6, T0)?.ready, false, 'a genuine re-route resets it');
+});
+
+test('the FIRST observation adopts a route without wiping anything', () => {
+  const path = freshPath();
+  const s = mk(path);
+  // Fold one reading, then let the route become known on the next sample.
+  s.observe(7, sample({ t: T0, rssi: -50, fresh: true, routeKey: null }), false);
+  s.observe(7, sample({ t: T0, rssi: -50, fresh: true, routeKey: 'direct' }), false);
+  // Nothing to assert about readiness at n=2; what matters is that adopting a
+  // key for the first time is not treated as a change.
+  train(s, 7, 30, 4, { rssi: -50, fresh: true, routeKey: 'direct' });
+  assert.ok(s.rssiNormal(7, T0)?.ready, 'learning proceeds uninterrupted');
+});

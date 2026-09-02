@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.47.0 — 2026-09-02
+
+**The starvation had a cause, and it was a missing null-guard the codebase had
+already written, tested, and applied everywhere else.**
+
+**An unseen route is not a moved route.** `baselines.observe()` compared route
+keys with a bare `!==` over a NULLABLE value. The driver reports statistics with
+no `lwr` at all, and `routeKeyOfLwr` returns null for those — so a node routed
+via `r4` whose next sample simply omitted the route saw `null !== 'r4'` and had
+**all six rssi and rtt bands wiped**, obs and days rings included; the sample
+after that flipped it back and wiped them again. **Two full resets for zero
+re-routing.**
+
+This is the identical hazard `isRouteChange()` was written and tested to
+prevent — *"a route we cannot see has not moved; we have merely stopped watching
+it"* — and it was applied to the route-churn DETECTOR and not to this, the far
+more destructive consumer. A miscounted churn needs four to fire a symptom; one
+spurious wipe here costs a node every band it had learned.
+
+Measured attribution: in the busy band the wipe explains **13 of 13** blocked
+nodes; in the quiet band **13 of 21**, the remaining 8 being genuine
+fresh-sample starvation. The discriminator is a cross-band fingerprint — a wipe
+victim is blocked in EVERY band at once (a shared per-node day-clock), while a
+starved node has 6–10 distinct days and fails only where traffic is thin.
+
+**The all-clear was gated on a series that arms no detector.** `grep -n
+'baselines\.' src/zwave/symptoms.ts` returns exactly two lines: `timeoutNormal`
+and `rttNormal`. `rssiNormal` has **zero** detector consumers — `weak-signal`
+compares against an absolute 7 dB margin over the measured noise floor, never
+the learned baseline. v0.46.0 got this wrong twice: it made a DETECTION claim
+depend on rssi readiness, and it told the operator that on every blind column
+"a degradation would not be flagged", which is false for a series nothing reads.
+The gate now tracks the two series that arm detectors; the rssi shortfall is
+still reported, in both the partial and the all-clear states, described for what
+it is — a dossier yardstick.
+
+**Five redesigns were evaluated and all five rejected**, each with a concrete
+false-symptom scenario constructed on a live node. Lowering `MIN_OBS` does not
+even close the gate (the wipe zeroes `days[]` too, so `MIN_DAYS` counts from the
+last wipe; even `MIN_DAYS=1` closes it ~6% of the time — a flickering all-clear
+is worse than a stable honest amber). An unbanded fallback is governed by the
+same `routeKey` scalar and is wiped at the same instant. Per-route
+stratification lets `rttNormal` return one route's cell while `latestFresh`
+reads a sample with no route filter at all. Not wiping at all converts a
+coverage gap into a false-symptom generator on exactly the nodes it targets:
+direct nodes read 26–36 ms and routed ones 47–566 ms, and `rtt-degraded` fires
+on the baseline alone with no corroborating conjunct. And there is no sound
+unused RTT source — `NodeStatistics.rtt` is an EMA over a MIX of exchange
+shapes, 119 ms for a NoOperation ping and 712 ms for real S2 traffic on the same
+healthy node.
+
+**Also — the probe subsystem can be interrogated (batch 4 of the worklist).**
+`probeable`, `verifyOwedFor`, `verifyOwedCount` and `driverLinkFault` are
+published as REQUIRED bridge members, so the compiler enforces that they are
+forwarded. A node with no probes now says WHICH of four zero-states it is in —
+sweep not running, sweep disabled, device can never be probed, or due but not
+yet reached — where all four previously rendered as a blank row, and the first
+two are permanent while the last two are transient. REMEDY says whether a
+missing score is impossible or merely pending. A manual `p` ping is finally
+JUDGED by the machinery the engine already owned: `p` reported "sent" and then
+said nothing, which is the weakest claim on the screen, since HA returns before
+the node answers. A driver-link fault names its cause on its own row — as a
+`fitBits` bit it was shed at exactly the width where the line is busiest. And a
+suppressed sweep now shows a standing chip on EVERY screen, never sheddable;
+the masthead's hardcoded `cols >= 100` gate on HOME is gone, since it duplicated
+the shedding ladder while making its middle rung unreachable.
+
+958 tests, 417 mutants (0 survived, 0 missing, 0 invalid).
+
 ## 0.46.0 — 2026-09-01
 
 **Coverage is not health, and the all-clear stops waiting for a gate that never

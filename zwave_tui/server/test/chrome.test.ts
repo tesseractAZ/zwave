@@ -126,3 +126,60 @@ test('shedLine without wrapTail discloses the drop instead of carrying it', () =
 test('shedLine with no tail is just the head', () => {
   assert.deepEqual(shedLine('  ', 'bare', [], 40).map(strip), ['  bare']);
 });
+
+/* ── v0.47.0: the standing auto-ping suppression chip ─────────────────────── */
+
+test('a SUPPRESSED sweep shows a standing chip; a running one shows nothing', () => {
+  // Suppression was legible only on the ENGINE screen. An operator on OVERVIEW
+  // watching a node go quiet had no way to know the one autonomous prober had
+  // stood down — the mesh looked the same as one being actively watched.
+  const v = view(120);
+  const base = { link: 'online' as const, homeId: 1, now: 1_700_000_000_000 };
+  const off = strip(masthead(v, base));
+  assert.doesNotMatch(off, /AUTO-PING/, 'absent value ⇒ no chip');
+  assert.doesNotMatch(strip(masthead(v, { ...base, apSuppressed: 'none' })), /AUTO-PING/,
+    '"none" is not a suppression — an always-on chip is noise');
+  const on = strip(masthead(v, { ...base, apSuppressed: 'storm' }));
+  assert.match(on, /⚠ AUTO-PING STORM/, `the chip must render: "${on}"`);
+});
+
+test('the suppression chip outranks HOME and the timestamp for space', () => {
+  // `lr` truncates the LEFT first but falls back to truncating the RIGHT once
+  // that side alone exceeds the width — and the chip sits at the front of that
+  // side, so a naive join clips the alarm mid-word.
+  const base = { link: 'online' as const, homeId: 3586281591, now: 1_700_000_000_000 };
+  for (const cols of [40, 56, 72, 80, 100, 120, 200]) {
+    const out = strip(masthead(view(cols), { ...base, apSuppressed: 'rebuild' }));
+    assert.ok(out.length <= cols, `${cols}: overflow — "${out}"`);
+    assert.match(out, /⚠ AUTO-PING REBUILD/,
+      `${cols}: the alarm must survive, whole — "${out}"`);
+  }
+});
+
+test('every masthead field is WHOLE or absent — never a clipped home id', () => {
+  const base = { link: 'online' as const, homeId: 3586281591, now: 1_700_000_000_000 };
+  // A wide terminal must actually CARRY the optional fields — otherwise
+  // "whole or absent" is satisfied vacuously by dropping everything.
+  const wide = strip(masthead(view(200), { ...base, apSuppressed: 'storm' }));
+  assert.match(wide, /HOME 3586281591/, `wide terminals keep HOME: "${wide}"`);
+  assert.match(wide, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/, 'and the timestamp');
+  assert.match(wide, /⚠ AUTO-PING STORM/, 'and the alarm');
+  // And the ladder DEGRADES rather than collapsing: at 80 columns the home id
+  // is shed but the timestamp survives, because a live clock is worth more
+  // than an id the operator can read on any other screen. An all-or-nothing
+  // fallback would drop both.
+  const mid = strip(masthead(view(80), { ...base, apSuppressed: 'storm' }));
+  assert.match(mid, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/, `80 cols keeps the clock: "${mid}"`);
+  assert.doesNotMatch(mid, /HOME/, `and sheds the home id: "${mid}"`);
+  for (const cols of [40, 56, 72, 80, 100, 120, 200]) {
+    const out = strip(masthead(view(cols), { ...base, apSuppressed: 'storm' }));
+    if (/HOME/.test(out)) {
+      assert.match(out, /HOME 3586281591/, `${cols}: home id clipped — "${out}"`);
+    }
+    // A timestamp, if present, is complete.
+    const ts = /(\d{4}-\d{2}-\d{2}[^ ]*|\d{2}:\d{2}:\d{2})/.exec(out);
+    if (ts && /\d{4}-\d{2}-\d{2}/.test(ts[0])) {
+      assert.match(out, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/, `${cols}: timestamp clipped — "${out}"`);
+    }
+  }
+});

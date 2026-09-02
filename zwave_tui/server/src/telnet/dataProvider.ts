@@ -80,6 +80,13 @@ export interface ZwaveDataSource {
   unverifiableCount(kind: SymptomKind): number;
   /** Of those, on unprobeable nodes (v0.38). REQUIRED — see ackEvent. */
   unverifiableUnprobeableCount(kind: SymptomKind): number;
+  /** REQUIRED — see ackEvent. Optionality here is what let a wired feature ship
+   *  dead in v0.33; required-ness is the only thing that makes the compiler
+   *  check that `buildZwaveDataSource` actually forwards these. */
+  probeable(nodeId: number): boolean;
+  verifyOwedFor(nodeId: number): number;
+  verifyOwedCount(): number;
+  driverLinkFault(): string | null;
   /** Of those, transient blinks — over before the floor filled (v0.39). REQUIRED — see ackEvent. */
   unverifiableTransientCount(kind: SymptomKind): number;
   /** Of those, undersampled by the node's own cadence (v0.41.2). REQUIRED — see ackEvent. */
@@ -205,6 +212,10 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     falsePositives: (k) => zd.falsePositives(k),
     unverifiableCount: (k) => zd.unverifiableCount(k),
     unverifiableUnprobeableCount: (k) => zd.unverifiableUnprobeableCount(k),
+    probeable: (n) => zd.probeable(n),
+    verifyOwedFor: (n) => zd.verifyOwedFor(n),
+    verifyOwedCount: () => zd.verifyOwedCount(),
+    driverLinkFault: () => zd.driverLinkFault(),
     unverifiableTransientCount: (k) => zd.unverifiableTransientCount(k),
     unverifiableUndersampledCount: (k) => zd.unverifiableUndersampledCount(k),
     confoundedCount: (k) => zd.confoundedCount(k),
@@ -315,6 +326,10 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     falsePositives: (kind) => zwaveData.falsePositives(kind),
     unverifiableCount: (kind) => zwaveData.unverifiableCount(kind),
     unverifiableUnprobeableCount: (kind) => zwaveData.unverifiableUnprobeableCount(kind),
+    probeable: (nodeId) => zwaveData.probeable(nodeId),
+    verifyOwedFor: (nodeId) => zwaveData.verifyOwedFor(nodeId),
+    verifyOwedCount: () => zwaveData.verifyOwedCount(),
+    driverLinkFault: () => zwaveData.driverLinkFault(),
     unverifiableTransientCount: (kind) => zwaveData.unverifiableTransientCount(kind),
     unverifiableUndersampledCount: (kind) => zwaveData.unverifiableUndersampledCount(kind),
     confoundedCount: (kind) => zwaveData.confoundedCount(kind),
