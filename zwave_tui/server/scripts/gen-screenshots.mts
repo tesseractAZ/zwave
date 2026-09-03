@@ -198,7 +198,7 @@ const DATA: DataProvider = {
     // v0.37 — the liveness sweep's own record. A node that mostly answers, with
     // some probes it had already proved itself for: the interesting case, since
     // a bare ratio hides that distinction.
-    probesAsked: 84, probesAnswered: 81, probesSelfProven: 22,
+    probesAsked: 84, probesAnswered: 81, probesSelfProven: 22, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0,
   }),
   // A REAL CoarseBucket (v0.43.0). The old fixture used a `samples` field the
   // runtime type never had — the inline provider shape invented it, so this

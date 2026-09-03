@@ -8,7 +8,7 @@ const now = Date.now();
 const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
 
 const cleanView = (over: Partial<InterferenceView> = {}): InterferenceView => ({
-  noise: { channels: [-101, -103, -103, -95], floor: -102, real: true, trend: [-101, -102, -103, -102, -101], trendCoarse: [-100, -101, -102, -101, -103, -102], trendCoarseDays: 3, band: 'clean' },
+  noise: { channels: [-101, -103, -103, -95], floor: -102, real: true, trend: [-101, -102, -103, -102, -101], trendCoarse: [-100, -101, -102, -101, -103, -102], trendCoarseMax: [-98, -99, -100, -99, -82, -100], trendCoarseDays: 3, band: 'clean' },
   serial: { nakPerH: 0, canPerH: 0, tmoAckPerH: 0, tmoRespPerH: 2, band: 'healthy', spanH: 6.2 },
   diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 200, rate: h === 18 ? 0.031 : 0.008 })),
   coverageDays: 16,
@@ -30,7 +30,7 @@ const ctx = (cols: number, rows: number, iv: InterferenceView): ScreenCtx =>
 test('INTERFERENCE holds EXACTLY view.rows lines within view.cols at every size + state', () => {
   const views = [
     cleanView(),
-    cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' } }), // no driver-WS
+    cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseDays: 0, band: 'unknown' } }), // no driver-WS
     cleanView({ coverageDays: 0.1, diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 0, rate: null })) }), // building
     cleanView({ correlated: { active: true, degradedNodes: 4, narrative: 'Several nodes degraded together (4 of 11 active) — likely an RF-environment event.' } }),
   ];
@@ -56,7 +56,7 @@ test('a clean mesh shows the measured floor, healthy serial, and no correlated d
 });
 
 test('without the driver-WS client the noise floor honestly reads unavailable, not fabricated', () => {
-  const iv = cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' } });
+  const iv = cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseDays: 0, band: 'unknown' } });
   const joined = renderInterference(ctx(100, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(/unavailable/.test(joined), 'says unavailable');
   assert.ok(!/median .* dBm/.test(joined), 'no fabricated floor number');
@@ -248,4 +248,46 @@ test('the companion line singularises, and the exact-rows contract still holds',
     assert.equal(lines.length, rows, `${cols}x${rows}`);
     for (const l of lines) assert.ok(visLen(l) <= cols, `${cols}x${rows}`);
   }
+});
+
+test('the worst hour names its DENOMINATOR, and a thin hour says so (v0.49.0)', () => {
+  // `tx` is computed, carried across the provider boundary and rendered
+  // nowhere, so "worst hour" was picked on rate alone — and at the MIN_HOUR_TX
+  // floor of 20 a SINGLE timeout is a 5% rate, exactly HEAT_MAX. One dropped
+  // frame in a quiet hour therefore beat a genuinely bad hour with thousands of
+  // transmissions behind it.
+  const thin = cleanView({
+    diurnal: Array.from({ length: 24 }, (_, h) => (
+      h === 3 ? { hour: 3, tx: 20, rate: 0.05 }        // one timeout in a dead hour
+      : { hour: h, tx: 4000, rate: h === 18 ? 0.03 : 0.002 })),
+  });
+  const out = renderInterference(ctx(160, 50, thin)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(out, /worst 18:00/, `a solid hour must win over a thin one: ${out.slice(0, 900)}`);
+  assert.match(out, /of 4000 tx/, 'and the denominator must be shown');
+});
+
+test('a genuinely thin winner is FLAGGED rather than hidden (v0.49.0)', () => {
+  // When every rated hour is thin the line must still render — but say so.
+  const allThin = cleanView({
+    diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 25, rate: h === 5 ? 0.04 : 0.004 })),
+  });
+  const out = renderInterference(ctx(160, 50, allThin)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(out, /worst 05:00/);
+  assert.match(out, /thin hour, one timeout moves this a lot/);
+});
+
+test('the coarse noise PEAK is reported when it exceeds the mean (v0.49.0)', () => {
+  // Each bucket's noisiest sample is folded and persisted and was averaged away
+  // before reaching a screen, so a five-minute burst diluted across 30 quiet
+  // minutes drew a flat line — and the burst is the event worth seeing.
+  const bursty = cleanView({
+    noise: { channels: [-101, -103, -103, -95], floor: -102, real: true,
+      trend: [-101, -102, -103, -102, -101],
+      trendCoarse: [-100, -101, -102, -101, -100, -102],
+      trendCoarseMax: [-98, -99, -100, -99, -78, -100],
+      trendCoarseDays: 3, band: 'clean' },
+  });
+  const out = renderInterference(ctx(160, 60, bursty)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(out, /peak -78 dBm/, `the burst must surface: ${out.slice(0, 1200)}`);
+  assert.match(out, /above the mean — a burst the mean hides/);
 });

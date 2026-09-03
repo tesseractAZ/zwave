@@ -658,29 +658,29 @@ test('a probe whose node lastSeen advanced is judged ANSWERED', () => {
   // observable that separates "the probe got through" from "we sent a packet
   // into the dark".
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, [{ at: T, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 5_000 } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: true, misses: 0, self: false, lane: 'sweep' }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: true, misses: 0, cls: 'unheard' as const, lane: 'sweep' }]);
   assert.equal(s.awaitingAnswer.size, 0, 'and the pending entry is cleared');
 });
 
 test('a probe whose node stayed silent is judged UNANSWERED — the signal that never existed', () => {
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, [{ at: T, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T - 60_000 } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, self: false, lane: 'sweep' }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, cls: 'unheard' as const, lane: 'sweep' }]);
 });
 
 test('a node that has NEVER been heard from is unanswered, not silently skipped', () => {
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, [{ at: T, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: null } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, self: false, lane: 'sweep' }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, cls: 'unheard' as const, lane: 'sweep' }]);
 });
 
 test('a probe is NOT judged before its grace period — no verdict on an in-flight round trip', () => {
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, [{ at: T, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   assert.deepEqual(judgeProbeAnswers(s, [node(7)], T + 10_000), []);
   assert.equal(s.awaitingAnswer.size, 1, 'still pending, still judgeable later');
 });
@@ -689,7 +689,7 @@ test('a node that vanished from the roster is judged NEITHER way', () => {
   // A roster gap is not evidence of a failed probe, and calling it one would
   // manufacture exactly the false alarm this signal exists to avoid.
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, [{ at: T, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   const out = judgeProbeAnswers(s, [node(8)], T + 120_000);
   assert.deepEqual(out, []);
   assert.equal(s.awaitingAnswer.size, 0, 'but it is dropped rather than pending forever');
@@ -859,7 +859,7 @@ test('the miss streak counts CONSECUTIVE failures and one answer resets it', () 
   const s = createAutoPingState();
   const silent = (t: number) => [node(7, { stats: { lastSeen: t } as never })];
   const miss = (i: number): number => {
-    s.awaitingAnswer.set(7, [{ at: T + i * 1000, self: false, lane: 'sweep' }]);
+    s.awaitingAnswer.set(7, [{ at: T + i * 1000, cls: 'unheard' as const, lane: 'sweep' }]);
     return judgeProbeAnswers(s, silent(T - 60_000), T + i * 1000 + 120_000)[0].misses;
   };
   assert.equal(miss(1), 1, 'first miss');
@@ -868,7 +868,7 @@ test('the miss streak counts CONSECUTIVE failures and one answer resets it', () 
 
   // One answer wipes the streak — "3rd miss" must always mean three in a row,
   // never three since the beginning of time.
-  s.awaitingAnswer.set(7, [{ at: T + 10_000, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T + 10_000, cls: 'unheard' as const, lane: 'sweep' }]);
   const ok = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 11_000 } as never })], T + 200_000)[0];
   assert.equal(ok.answered, true);
   assert.equal(ok.misses, 0);
@@ -909,7 +909,7 @@ test('ordinals read correctly past the awkward teens', async () => {
   const { judgeProbeAnswers: judge } = await import('../src/zwave/autoPing');
   const s = createAutoPingState();
   s.missStreak.set(7, 10);
-  s.awaitingAnswer.set(7, [{ at: T, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   assert.equal(judge(s, [node(7, { stats: { lastSeen: null } as never })], T + 200_000)[0].misses, 11);
 });
 
@@ -929,7 +929,7 @@ test('every probe outcome is REPORTED for the persisted reply rate', async () =>
   const h = startAutoPing({
     nodes: () => nodes, controller: () => null, ready: () => true,
     ping: async () => {}, log: () => {},
-    onProbeResult: (id, answered, self) => { reported.push({ id, answered, self }); },
+    onProbeResult: (id, answered, cls) => { reported.push({ id, answered, self: cls === 'self-proven' }); },
     config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
   });
   // Sweep both (one per tick), then let the answers mature past the grace.
@@ -1074,22 +1074,22 @@ test('every probe in a burst is judged — a dying node logs five misses, not on
   // and a node dying mid-burst had five consecutive misses recorded as a
   // "1st consecutive miss".
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, [{ at: T, self: false, lane: 'sweep' }, { at: T + 60_000, self: false, lane: 'sweep' }, { at: T + 120_000, self: false, lane: 'sweep' }, { at: T + 180_000, self: false, lane: 'sweep' }, { at: T + 240_000, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }, { at: T + 60_000, cls: 'unheard' as const, lane: 'sweep' }, { at: T + 120_000, cls: 'unheard' as const, lane: 'sweep' }, { at: T + 180_000, cls: 'unheard' as const, lane: 'sweep' }, { at: T + 240_000, cls: 'unheard' as const, lane: 'sweep' }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T - 60_000 } as never })], T + 240_000 + 120_000);
   assert.deepEqual(out.map((o) => o.misses), [1, 2, 3, 4, 5], 'five probes, five judgments, one honest streak');
 });
 
 test('young probes stay pending while matured ones are judged (v0.40)', () => {
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, [{ at: T, self: false, lane: 'sweep' }, { at: T + 60_000, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }, { at: T + 60_000, cls: 'unheard' as const, lane: 'sweep' }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T - 60_000 } as never })], T + 100_000);
   assert.equal(out.length, 1, 'only the matured probe is judged');
-  assert.deepEqual(s.awaitingAnswer.get(7), [{ at: T + 60_000, self: false, lane: 'sweep' }], 'the in-flight probe is still pending');
+  assert.deepEqual(s.awaitingAnswer.get(7), [{ at: T + 60_000, cls: 'unheard' as const, lane: 'sweep' }], 'the in-flight probe is still pending');
 });
 
 test('an answered probe records what OUR probe put on the record (v0.40)', () => {
   const s = createAutoPingState();
-  s.awaitingAnswer.set(7, [{ at: T, self: false, lane: 'sweep' }]);
+  s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 5_000 } as never })], T + 120_000);
   assert.equal(s.lastProbeSeen.get(7), T + 5_000, 'the attributed lastSeen is remembered for the sweep');
 });
@@ -1109,7 +1109,7 @@ test('a node heard ONLY answering our probe is not "on its own" — the echo is 
   const h = startAutoPing({
     nodes: () => nodes, controller: () => null, ready: () => true,
     ping: async () => {}, log: (_s, _n, text) => { lines.push(text); },
-    onProbeResult: (id, ok, self) => { results.push({ id, ok, self }); },
+    onProbeResult: (id, ok, cls) => { results.push({ id, ok, self: cls === 'self-proven' }); },
     config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
   });
   const T0 = T + BOOT_WINDOW_MS + MIN;
@@ -1145,10 +1145,10 @@ test('unpendProbe withdraws exactly ONE entry — the failed probe, not the pend
   // A transport failure on one probe must not discard the judgments owed to
   // the node's other in-flight probes.
   const s = createAutoPingState();
-  pendProbe(s, 9, T, 'sweep', true);
-  pendProbe(s, 9, T + 60_000, 'sweep', false);
+  pendProbe(s, 9, T, 'sweep', 'self-proven');
+  pendProbe(s, 9, T + 60_000, 'sweep', 'unheard');
   unpendProbe(s, 9, T + 60_000);
-  assert.deepEqual(s.awaitingAnswer.get(9), [{ at: T, self: true, lane: 'sweep' }],
+  assert.deepEqual(s.awaitingAnswer.get(9), [{ at: T, cls: 'self-proven' as const, lane: 'sweep' }],
     'only the failed probe was withdrawn; its sibling still awaits judgment');
   unpendProbe(s, 9, T);
   assert.equal(s.awaitingAnswer.has(9), false, 'the emptied list is cleaned up');

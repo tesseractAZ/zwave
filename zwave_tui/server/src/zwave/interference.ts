@@ -54,7 +54,14 @@ export interface InterferenceInput {
 }
 
 const HOURS = 24;
-const MIN_HOUR_TX = 20; // below this, an hour's rate is not meaningful → null
+/** Below this an hour's rate is not meaningful → null.
+ *
+ *  EXPORTED (v0.49.0) so the screen can name the floor it renders against. The
+ *  screen's HEAT_MAX and this were set independently, and their product is the
+ *  one-timeout saturation artefact: at 20 tx a SINGLE timeout is a 5% rate,
+ *  which is exactly HEAT_MAX — so one dropped frame in a quiet hour paints a
+ *  fully-saturated cell that reads like sustained interference. */
+export const MIN_HOUR_TX = 20;
 const MIN_SERIAL_SAMPLES = 2;
 
 /** Classify a background RSSI floor (dBm). Higher (less negative) = noisier. */
@@ -96,11 +103,24 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   // Long-horizon coarse trend = one MEAN floor per 30-min bucket (oldest first),
   // the persisted multi-day tier. `trendCoarseDays` is the honest span it covers.
   const trendCoarse: number[] = [];
+  // THE NOISIEST SAMPLE IN EACH BUCKET (v0.49.0), carried alongside the mean.
+  // `floorMax` is folded and persisted per 30-minute bucket and was averaged
+  // away before any screen saw it — so a five-minute interference burst,
+  // diluted across 30 minutes of quiet, drew a flat line. The burst is the
+  // thing an operator is looking for; the mean is what hides it.
+  //
+  // The fallback is the MEAN, never 0: 0 dBm would paint the top of a
+  // -110..-80 scale as a permanent alarm.
+  const trendCoarseMax: number[] = [];
   let firstBucketT0: number | null = null;
   let lastBucketT0: number | null = null;
   for (const b of input.controllerCoarse) {
     if (b.floorN <= 0) continue;
-    trendCoarse.push(b.floorSum / b.floorN);
+    const mean = b.floorSum / b.floorN;
+    trendCoarse.push(mean);
+    // Index-aligned with trendCoarse by construction — both pushed inside the
+    // same guard, so a consumer can zip them without a length check.
+    trendCoarseMax.push(b.floorMax ?? mean);
     if (firstBucketT0 == null) firstBucketT0 = b.t0;
     lastBucketT0 = b.t0;
   }
@@ -179,7 +199,7 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   };
 
   return {
-    noise: { channels, floor, real, trend, trendCoarse, trendCoarseDays, band },
+    noise: { channels, floor, real, trend, trendCoarse, trendCoarseMax, trendCoarseDays, band },
     serial: { nakPerH, canPerH, tmoAckPerH, tmoRespPerH, band: serialBand, spanH },
     diurnal,
     coverageDays,

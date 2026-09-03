@@ -57,7 +57,7 @@ function mkData(o: DataOver = {}): { data: DataProvider; nodes: NodeSnapshot[] }
     symptoms: () => [],
     engineStatus: () => ({ enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 0, bands: 6 }),
     efficacyFor: () => null,
-    interference: () => ({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
+    interference: () => ({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
     entityStates: () => o.entityStates ?? [],
     configParams: () => o.configParams ?? { status: 'ready', params: [] },
     openEpisodes: () => [],
@@ -397,20 +397,21 @@ test('ZERO samples renders a DASH for the fresh share — never a confident 0%',
 
 /* ── v0.37: the liveness sweep's own record ────────────────────────────────── */
 
-type Cov37 = Cov & { probesAsked: number; probesAnswered: number; probesSelfProven: number };
+type Cov37 = Cov & { probesAsked: number; probesAnswered: number; probesSelfProven: number;
+  probesEchoOnly: number; probesAttribUnknown: number; probesUnheard: number };
 function withProbes(p: Partial<Cov37>): { data: DataProvider; nodes: NodeSnapshot[] } {
   const d = mkData();
   const cov: Cov37 = {
     firstSeenAt: Date.now() - 7 * 86_400_000, samples: 500, freshSamples: 480,
     statusFeedLive: true, statsFeedLive: true,
-    probesAsked: 0, probesAnswered: 0, probesSelfProven: 0, ...p,
+    probesAsked: 0, probesAnswered: 0, probesSelfProven: 0, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0, ...p,
   };
   (d.data as { evidenceCoverage?: (n: number) => Cov37 }).evidenceCoverage = () => cov;
   return d;
 }
 
 test('the probe reply rate reaches the screen — a rate collected and never shown is not a measurement', () => {
-  const out = evidenceLines(withProbes({ probesAsked: 84, probesAnswered: 81, probesSelfProven: 22 }));
+  const out = evidenceLines(withProbes({ probesAsked: 84, probesAnswered: 81, probesSelfProven: 22, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 }));
   const row = out.find((l) => /^\s*Probes/.test(l));
   assert.ok(row, 'the Probes row must render');
   assert.match(row!, /81\/84 answered \(96%\)/);
@@ -477,7 +478,7 @@ test('the four zero-probe states are told APART (v0.47.0)', () => {
 });
 
 test('self-proven is omitted when there is none, not printed as zero', () => {
-  const out = evidenceLines(withProbes({ probesAsked: 10, probesAnswered: 10, probesSelfProven: 0 }));
+  const out = evidenceLines(withProbes({ probesAsked: 10, probesAnswered: 10, probesSelfProven: 0, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 }));
   const row = out.find((l) => /^\s*Probes/.test(l))!;
   assert.match(row, /10\/10 answered/);
   assert.ok(!/self-proven/.test(row));
@@ -489,13 +490,13 @@ test('the lifetime-tally caveat follows the RATIO it qualifies, not the self-pro
   // self-proven credit ever landed. So a node with a fully blended history and
   // ZERO self-proven credits was the worst case, and the one case that got no
   // caveat at all.
-  const out = evidenceLines(withProbes({ probesAsked: 40, probesAnswered: 31, probesSelfProven: 0 }));
+  const out = evidenceLines(withProbes({ probesAsked: 40, probesAnswered: 31, probesSelfProven: 0, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 }));
   assert.ok(out.some((l) => /lifetime tally/.test(l)),
     `a blended history with no self-proven credit is the WORST case: ${JSON.stringify(out.filter((l) => /Probe/i.test(l)))}`);
 });
 
 test('the caveat is never cut mid-claim — a short form exists for narrow terminals (v0.45.0)', () => {
-  const d = withProbes({ probesAsked: 40, probesAnswered: 31, probesSelfProven: 0 });
+  const d = withProbes({ probesAsked: 40, probesAnswered: 31, probesSelfProven: 0, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 });
   for (const cols of [80, 100, 120, 160, 200]) {
     const lines = renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip);
     const row = lines.find((l) => /lifetime tally/.test(l));
@@ -508,7 +509,7 @@ test('the caveat is never cut mid-claim — a short form exists for narrow termi
 });
 
 test('a node with NO probes carries no caveat at all (v0.45.0)', () => {
-  const out = evidenceLines(withProbes({ probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 }));
+  const out = evidenceLines(withProbes({ probesAsked: 0, probesAnswered: 0, probesSelfProven: 0, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 }));
   assert.ok(!out.some((l) => /lifetime tally/.test(l)), 'nothing to qualify');
 });
 
@@ -681,4 +682,94 @@ test('every EVIDENCE label fits the 8-column cell so the values align (v0.48.1)'
     .map((l) => l.indexOf(l.trim().split(/\s{2,}/)[1] ?? ''));
   const starts = new Set(cols.filter((i) => i > 0));
   assert.equal(starts.size, 1, `values must start in ONE column, got ${JSON.stringify([...starts])}`);
+});
+
+/* ── v0.49.0: the coarse tier reaches a screen ────────────────────────────── */
+
+const CB = (over: Record<string, number | null> = {}): Record<string, number | null> => ({
+  t0: 0, n: 10, freshN: 8, invalidW: 0, dTx: 100, dTimeout: 2,
+  rssiN: 10, rssiSum: -650, rssiMin: -70, rssiMax: -60,
+  rttN: 10, rttSum: 400, rttMin: 30, rttMax: 55, rateMin: 100,
+  dFlaps: 0, dS2Resync: 0, dRouteChanges: 0, ...over,
+});
+
+test('the persisted RF ENVELOPE reaches the dossier — not just its mean (v0.49.0)', () => {
+  // 14 of the 18 CoarseBucket fields had zero consumers. The mean is the least
+  // useful of them: a node whose signal collapsed for an hour has the same mean
+  // as one that never moved, and the WORST is the reading being looked for.
+  const d = withProbes({ probesAsked: 5, probesAnswered: 5 });
+  (d.data as unknown as Record<string, unknown>).evidenceCoarse = () => [
+    CB({ rssiMin: -70, rssiMax: -60, rateMin: 100 }),
+    CB({ t0: 1, rssiMin: -91, rssiMax: -62, rateMin: 40 }),
+  ];
+  const out = renderDetail(ctx(mkView(160, 60), d.data, d.nodes)).map(strip);
+  const row = out.find((l) => /Long RF/.test(l)) ?? '';
+  assert.match(row, /-91…-60 dBm/, `the ENVELOPE, not the mean: "${row}"`);
+  assert.match(row, /worst rate 40k/, 'and the worst negotiated rate');
+});
+
+test('evidence quality is reported only when some windows were VOID (v0.49.0)', () => {
+  // `invalidW` counts windows whose counter arithmetic was void — a driver
+  // restart or an over-long gap. Folded, persisted, read by nobody: a node
+  // whose evidence is largely garbage looked identical to one whose is clean.
+  const clean = withProbes({ probesAsked: 5, probesAnswered: 5 });
+  (clean.data as unknown as Record<string, unknown>).evidenceCoarse = () => [CB({ invalidW: 0 })];
+  assert.doesNotMatch(renderDetail(ctx(mkView(160, 60), clean.data, clean.nodes)).map(strip).join('\n'),
+    /invalid/, 'a permanent "0 invalid" trains an operator to stop reading the row');
+
+  const dirty = withProbes({ probesAsked: 5, probesAnswered: 5 });
+  (dirty.data as unknown as Record<string, unknown>).evidenceCoarse = () => [CB({ n: 10, invalidW: 4 })];
+  const row = renderDetail(ctx(mkView(160, 60), dirty.data, dirty.nodes)).map(strip)
+    .find((l) => /Windows/.test(l)) ?? '';
+  assert.match(row, /4 of 10 invalid \(40%\)/, `the share: "${row}"`);
+  assert.match(row, /counter arithmetic void/);
+});
+
+test('the four-way probe judgment reaches the screen, not just its one recorded arm (v0.49.0)', () => {
+  // Only `self-proven` was ever recorded; the other three were computed,
+  // described in a log line, and discarded every tick. They separate "never
+  // speaks except to answer us" from "genuinely silent" — opposite readings of
+  // the SAME answered/asked ratio.
+  const d = withProbes({ probesAsked: 40, probesAnswered: 31, probesSelfProven: 5,
+    probesEchoOnly: 22, probesUnheard: 9, probesAttribUnknown: 4 });
+  const row = renderDetail(ctx(mkView(180, 60), d.data, d.nodes)).map(strip)
+    .find((l) => /Probe cls/.test(l)) ?? '';
+  assert.match(row, /22 echo-only/, `echo-only: "${row}"`);
+  assert.match(row, /9 unheard/);
+  assert.match(row, /4 unattributed/);
+
+  // A node with only self-proven probes says nothing extra.
+  const quiet = withProbes({ probesAsked: 10, probesAnswered: 10, probesSelfProven: 10 });
+  assert.doesNotMatch(renderDetail(ctx(mkView(180, 60), quiet.data, quiet.nodes)).map(strip).join('\n'),
+    /Probe cls/, 'no news is no row');
+});
+
+test('the coarse RTT trend renders beside its RSSI twin (v0.49.0)', () => {
+  // Accumulated, persisted, restored AND bridged — and read by no screen. Its
+  // RSSI twin has rendered since v0.41; this is the same data on the same
+  // horizon for the series that actually arms a detector.
+  const d = mkData();
+  (d.data as unknown as Record<string, unknown>).historyLong = () => ({
+    rssi: [-70, -68, -66, -65, -64],
+    rtt: [40, 55, 48, 120, 61],
+  });
+  const out = renderDetail(ctx(mkView(140, 60), d.data, d.nodes)).map(strip);
+  assert.ok(out.some((l) => /Sig long/.test(l)), 'precondition: the RSSI twin renders');
+  assert.ok(out.some((l) => /RTT long/.test(l)),
+    `the coarse RTT trend must render: ${JSON.stringify(out.filter((l) => /long/.test(l)))}`);
+  const row = out.find((l) => /RTT long/.test(l)) ?? '';
+  assert.match(row, /40…120 ms/, `with its own range: "${row}"`);
+});
+
+test('a DEAD node greys its long RTT trend like every other row (v0.49.0)', () => {
+  // Shipping the raw band colour once already drew health-green sparklines
+  // under a greyed `RSSI —` for a dead node.
+  const d = mkData({ node: node({ status: NodeStatus.Dead, statusLabel: 'dead' }) });
+  (d.data as unknown as Record<string, unknown>).historyLong = () => ({
+    rssi: [-70, -68, -66], rtt: [40, 42, 41],
+  });
+  const raw = renderDetail(ctx(mkView(140, 60), d.data, d.nodes));
+  const row = raw.find((l) => /RTT long/.test(strip(l))) ?? '';
+  assert.ok(row, 'the row renders');
+  assert.doesNotMatch(row, /\x1b\[9[23]m/, `a dead node's trend is not health-coloured: "${strip(row)}"`);
 });

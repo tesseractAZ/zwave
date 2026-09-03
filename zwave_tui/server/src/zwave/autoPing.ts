@@ -107,7 +107,7 @@ export interface AutoPingState {
    * lanes (dead-remediation, verification) carry `self: false`: the flag
    * means "spoke on its own since the last sweep", which only a sweep asks.
    */
-  awaitingAnswer: Map<number, { at: number; self: boolean; lane: ProbeLane }[]>;
+  awaitingAnswer: Map<number, { at: number; cls: ProbeClass; lane: ProbeLane }[]>;
   /** nodeId → the `lastSeen` value most recently ATTRIBUTED to one of our own
    *  probe answers (v0.40). The sweep's self-proven flag compares against it:
    *  a lastSeen that has not advanced past our probe's answer is the app
@@ -175,6 +175,22 @@ export interface AutoPingState {
  */
 export type ProbeLane = 'sweep' | 'dead' | 'verify' | 'manual';
 
+/**
+ * What the sweep concluded about ONE probe's evidence (v0.49.0).
+ *
+ * The judgment has always been four-way and only `self-proven` was recorded;
+ * the other three were computed, described in a log line, and discarded. So
+ * "why is this node's coverage thin" was answerable only by grepping prose out
+ * of a container log the TUI cannot read.
+ *
+ *  - `self-proven`         the node spoke on its own, past our last probe's answer
+ *  - `echo-only`           nothing on record beyond what our own probes produced
+ *  - `attribution-unknown` heard recently, but this process has no probe history
+ *                          to attribute it against (the first sweep after a boot)
+ *  - `unheard`             silent past the threshold, with no probe answer either
+ */
+export type ProbeClass = 'self-proven' | 'echo-only' | 'attribution-unknown' | 'unheard';
+
 /** 1st, 2nd, 3rd, 4th … for the miss-streak label (v0.36.5). */
 function ordinal(n: number): string {
   const rem100 = n % 100;
@@ -189,10 +205,10 @@ function ordinal(n: number): string {
 
 /** Append a probe to the node's pending-judgment list (v0.40) — every probe
  *  gets its own entry, so a burst leaves several in flight at once. */
-export function pendProbe(state: AutoPingState, nodeId: number, t: number, lane: ProbeLane, self = false): void {
+export function pendProbe(state: AutoPingState, nodeId: number, t: number, lane: ProbeLane, cls: ProbeClass = 'unheard'): void {
   const pending = state.awaitingAnswer.get(nodeId);
-  if (pending) pending.push({ at: t, self, lane });
-  else state.awaitingAnswer.set(nodeId, [{ at: t, self, lane }]);
+  if (pending) pending.push({ at: t, cls, lane });
+  else state.awaitingAnswer.set(nodeId, [{ at: t, cls, lane }]);
 }
 
 /**
@@ -577,10 +593,10 @@ export function judgeProbeAnswers(
   nodes: NodeSnapshot[],
   now: number,
   graceMs = ANSWER_GRACE_MS,
-): { nodeId: number; answered: boolean; misses: number; self: boolean; lane: ProbeLane }[] {
+): { nodeId: number; answered: boolean; misses: number; cls: ProbeClass; lane: ProbeLane }[] {
   const seenOf = new Map<number, number | null>();
   for (const n of nodes) seenOf.set(n.nodeId, n.stats?.lastSeen ?? null);
-  const out: { nodeId: number; answered: boolean; misses: number; self: boolean; lane: ProbeLane }[] = [];
+  const out: { nodeId: number; answered: boolean; misses: number; cls: ProbeClass; lane: ProbeLane }[] = [];
   for (const [nodeId, pending] of [...state.awaitingAnswer]) {
     // Judge EVERY matured probe, oldest first (v0.40) — the entries are
     // appended chronologically, and a burst leaves several in flight at once.
@@ -593,7 +609,7 @@ export function judgeProbeAnswers(
     // rather than call a roster gap a failed probe.
     if (!seenOf.has(nodeId)) continue;
     const seen = seenOf.get(nodeId) ?? null;
-    for (const { at, self, lane } of mature) {
+    for (const { at, cls, lane } of mature) {
       const answered = seen != null && seen >= at;
       // The streak is CONSECUTIVE: one answer resets it, so "3rd miss" always
       // means three in a row rather than three since the beginning of time.
@@ -606,7 +622,7 @@ export function judgeProbeAnswers(
       } else {
         state.missStreak.set(nodeId, misses);
       }
-      out.push({ nodeId, answered, misses, self, lane });
+      out.push({ nodeId, answered, misses, cls, lane });
     }
   }
   return out;
@@ -723,7 +739,9 @@ export interface AutoPingRunnerOptions {
   /** One liveness-probe outcome, for the persisted per-node reply rate (v0.37).
    *  `selfProven` = the node had already communicated on its own since the
    *  previous sweep, so the probe was confirming rather than discovering. */
-  onProbeResult?: (nodeId: number, answered: boolean, selfProven: boolean) => void;
+  /** `cls` is the FOUR-way verdict (v0.49.0), not a self-proven boolean — the
+   *  other three arms were computed and discarded on every tick. */
+  onProbeResult?: (nodeId: number, answered: boolean, cls: ProbeClass) => void;
 }
 
 /**
@@ -918,6 +936,17 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // counter, once per boot, fleet-wide. Say what is actually known instead,
       // and credit nothing (v0.40.2).
       const attributionUnknown = attributed == null && heardRecently;
+      // ONE VALUE, in the SAME precedence the label below uses (v0.49.0). The
+      // sweep's judgment is FOUR-way and only the `self-proven` arm was ever
+      // recorded — the other three were computed, described in the log line,
+      // and thrown away every tick. Deriving the string FROM this value is half
+      // the point: a separate boolean and a separate message can disagree, and
+      // for four releases the only way to know which arm fired was to read
+      // prose out of a container log.
+      const cls: ProbeClass = attributionUnknown ? 'attribution-unknown'
+        : selfProven ? 'self-proven'
+        : echoOnly ? 'echo-only'
+        : 'unheard';
       const msg = `auto-ping: node ${nodeId} liveness sweep ` +
         (attributionUnknown
           ? `(heard ${silence} ago, but this run has no probe attribution yet — not credited)`
@@ -940,7 +969,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // `noteStale` above booked the cadence clock; a launch that never left
       // must give it back too, or the node waits a full staleMs having never
       // been asked (v0.40.2).
-      pendProbe(state, nodeId, t, 'sweep', selfProven);
+      pendProbe(state, nodeId, t, 'sweep', cls);
       settleProbe(o, state, nodeId, t, (o.probe ?? o.ping)(nodeId), () => {
         if (priorStale == null) state.lastStaleAt.delete(nodeId);
         else state.lastStaleAt.set(nodeId, priorStale);
@@ -1074,14 +1103,14 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
      * moment we probed it. An unanswered probe is the signal auto-ping exists
      * to produce, and until now it could not be observed at all.
      */
-    for (const { nodeId, answered, misses, self, lane } of judgeProbeAnswers(state, nodes, t)) {
+    for (const { nodeId, answered, misses, cls, lane } of judgeProbeAnswers(state, nodes, t)) {
       // The expected case stays at debug — one line per probe on every healthy
       // node is several hundred a day saying "as designed", which is the noise
       // that trains an operator to stop reading. The UNANSWERED case below is
       // the signal, and it is warn on both destinations.
       if (answered) {
         // Only the fixed-cadence sweep feeds the persisted reply rate (v0.40.2).
-        if (lane === 'sweep') o.onProbeResult?.(nodeId, true, self);
+        if (lane === 'sweep') o.onProbeResult?.(nodeId, true, cls);
         o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`);
         continue;
       }
@@ -1091,7 +1120,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // beside the genuine article and teach an operator to skim past both. The
       // count is in the text either way — this suppresses nothing, it only
       // stops calling a single lost packet a warning.
-      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, self);
+      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, cls);
       const ord = ordinal(misses);
       const m = `auto-ping: node ${nodeId} did NOT answer its probe ` +
         `(${ord} consecutive miss, lastSeen did not advance)`;

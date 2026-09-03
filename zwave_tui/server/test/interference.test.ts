@@ -168,3 +168,36 @@ test('empty input yields sensible defaults (no throw, unknown bands)', () => {
   assert.equal(v.coverageDays, 0);
   assert.equal(v.correlated.active, false);
 });
+
+test('the coarse noise trend carries each bucket\'s PEAK alongside its mean (v0.49.0)', () => {
+  // `floorMax` is folded and persisted per 30-minute bucket and was averaged
+  // away before any screen saw it — so a five-minute interference burst,
+  // diluted across 30 minutes of quiet, drew a flat line. The burst is the
+  // event worth seeing; the mean is what hides it.
+  // `ccb` derives floorMax from the samples, so these are real distributions.
+  const v = computeInterference(inp({
+    controllerCoarse: [
+      ccb(1, [-104, -104, -96, -96]),   // mean -100, peak -96
+      ccb(2, [-105, -105, -105, -78]),  // mean ~-98, peak -78 — the burst
+    ],
+  }));
+  assert.equal(v.noise.trendCoarse.length, 2);
+  assert.deepEqual(v.noise.trendCoarseMax, [-96, -78],
+    'the peaks ride alongside the means, index-aligned');
+  assert.ok(v.noise.trendCoarse[1] < -90,
+    'and the MEAN of the bursty bucket still looks quiet — which is the point');
+});
+
+test('a bucket with no recorded max falls back to its MEAN, never to 0 dBm (v0.49.0)', () => {
+  // 0 dBm would paint the top of a -110..-80 scale as a permanent alarm.
+  const v = computeInterference(inp({
+    controllerCoarse: [
+      { t0: 1, floorN: 4, floorSum: -400, floorMin: -102, floorMax: null } as never,
+      { t0: 2, floorN: 0, floorSum: 0, floorMin: null, floorMax: null } as never,
+    ],
+  }));
+  assert.deepEqual(v.noise.trendCoarseMax, [-100],
+    'the null-max bucket falls back to its mean; a floorN:0 bucket is skipped entirely');
+  assert.equal(v.noise.trendCoarse.length, v.noise.trendCoarseMax.length,
+    'the two arrays stay index-aligned by construction');
+});

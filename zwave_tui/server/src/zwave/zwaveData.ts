@@ -60,6 +60,7 @@ import {
   type RouteFailureEvent,
   type NodeCoverage,
   isRouteChange,
+  type ProbeClassLite,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
@@ -423,7 +424,7 @@ export interface ZwaveData {
   /** How many nodes have an outstanding verification burst (v0.37.1). */
   verifyOwedCount(): number;
   /** Record one liveness-probe outcome for the persisted reply rate (v0.37). */
-  recordProbeResult(nodeId: number, answered: boolean, selfProven: boolean): void;
+  recordProbeResult(nodeId: number, answered: boolean, cls: ProbeClassLite): void;
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** The learned RTT yardstick for this node's CURRENT time-of-day band (v0.48.0). */
   rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
@@ -1409,8 +1410,8 @@ class ZwaveDataImpl implements ZwaveData {
   /** Record one liveness-probe outcome (v0.37) — the per-node reply rate the
    *  driver's reactive Dead flag cannot supply. No-op without an evidence
    *  store, like every other persisted counter here. */
-  recordProbeResult(nodeId: number, answered: boolean, selfProven: boolean): void {
-    this.evidenceStore?.recordProbe(nodeId, answered, selfProven);
+  recordProbeResult(nodeId: number, answered: boolean, cls: ProbeClassLite): void {
+    this.evidenceStore?.recordProbe(nodeId, answered, cls);
   }
 
   /** Episodes of this kind the ledger could not score at all (v0.36). */

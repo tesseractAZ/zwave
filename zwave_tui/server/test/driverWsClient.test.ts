@@ -486,7 +486,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       // came from: a capability the data layer implements and a screen reads.
       routeFailures: (n: number) => [{ t: 1000 + n, between: [n, n + 1] as [number, number] }],
       evidenceCoverage: (n: number) => ({ firstSeenAt: n, samples: n * 2, freshSamples: n, statusFeedLive: true, statsFeedLive: false }),
-      evidenceCoarse: (n: number) => [{ t0: n, samples: n }],
+      evidenceCoarse: (n: number) => [{ t0: n, n: 5, freshN: 4, invalidW: 1, dTx: 90, dTimeout: 3, rssiN: 6, rssiSum: -390, rssiMin: -72, rssiMax: -58, rttN: 6, rttSum: 300, rttMin: 40, rttMax: 70, rateMin: 40, dFlaps: 0, dS2Resync: 0, dRouteChanges: 1 }],
       falsePositives: (k: string) => (k === 'route-churn' ? 4 : 0),
       unverifiableCount: (k: string) => (k === 'rtt-degraded' ? 16 : 0),
       unverifiableTransientCount: (k: string) => (k === 'rtt-degraded' ? 5 : 0),
@@ -509,7 +509,13 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
     assert.deepEqual(provider.provider.routeFailures?.(7), [{ t: 1007, between: [7, 8] }]);
     assert.deepEqual(provider.provider.evidenceCoverage?.(7),
       { firstSeenAt: 7, samples: 14, freshSamples: 7, statusFeedLive: true, statsFeedLive: false });
-    assert.deepEqual(provider.provider.evidenceCoarse?.(7), [{ t0: 7, samples: 7 }]);
+    // Assert a field the OLD shape never had. `t0` alone passes for either,
+    // which is why these tests did not catch the fiction in the first place.
+    const cb = provider.provider.evidenceCoarse?.(7) ?? [];
+    assert.equal(cb.length, 1, 'the coarse tier crosses the bridge');
+    assert.equal(cb[0].t0, 7);
+    assert.equal(cb[0].rssiMin, -72, 'the RF content crosses too — not just the timestamp');
+    assert.equal(cb[0].invalidW, 1);
     assert.equal(provider.provider.falsePositives?.('route-churn'), 4);
     assert.equal(provider.provider.falsePositives?.('dead-flap'), 0, 'and carries a real 0, not a default one');
     assert.equal(provider.provider.unverifiableCount?.('rtt-degraded'), 16);

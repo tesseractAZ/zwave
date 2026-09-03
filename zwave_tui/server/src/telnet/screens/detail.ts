@@ -38,7 +38,7 @@ import {
 } from '../../types';
 import { centeredNotice } from './overview';
 import { downsampleMean } from './interference';
-import { frame, hstack, splitCols, type Keycap, type StackCol } from '../chrome';
+import { frame, hstack, splitCols, type Keycap, type StackCol, shedLine } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
 import { isPingCandidate } from '../../zwave/autoPing';
 import { rssiColor, marginColor, rttColor, timeoutPctColor, rssiReading } from '../bands';
@@ -226,6 +226,14 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     // days on the quiet ones this detector exists for. Label what it is — a
     // long-horizon trend — rather than a duration nothing measures.
     if (longRssi.length >= 3) pushG(trendRow('Sig long', longRssi, 'dBm', trendColor(longRssi, rssiColor), inner));
+    // The coarse RTT trend was accumulated, persisted, restored AND bridged —
+    // and read by no screen (v0.49.0). Its RSSI twin above has rendered since
+    // v0.41; this is the same data on the same horizon for the series that
+    // actually arms a detector. `trendColor`, never the raw band: shipping
+    // lastColor once already drew health-green sparklines under a greyed
+    // `RSSI —` for a dead node.
+    const longRtt = data.historyLong(n.nodeId).rtt.filter((v) => Number.isFinite(v) && v >= 0);
+    if (longRtt.length >= 3) pushG(trendRow('RTT long', longRtt, 'ms', trendColor(longRtt, rttColor), inner));
 
     // Response-timeout % via the SHARED responseTimeoutPct — the same figure the
     // Overview TMO column shows. Numerator is timeoutResponse (ACKed Get whose
@@ -356,6 +364,50 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           ? c.white(fmtAge(Date.now() - coarse[0].t0) + ' span') + c.grey(` · ${coarse.length} bucket(s)`)
           : c.grey('none yet');
       body.push(twoCol('Samples', samples, 'History', span, inner));
+      // THE PERSISTED RF ENVELOPE (v0.49.0). The coarse tier folds and persists
+      // per-bucket rssi/rtt/rate extremes across a multi-day horizon, and every
+      // one of them was averaged away before reaching a screen — 14 of the 18
+      // CoarseBucket fields had zero consumers. The MEAN is the least useful of
+      // them: a node whose signal collapsed for an hour has the same mean as one
+      // that never moved, and the WORST is the reading an operator is looking
+      // for.
+      //
+      // Its own row rather than twoCol: twoCol ends in truncate(), which clips
+      // mid-digit — and a clipped dBm reads as a plausible, wrong measurement.
+      {
+        const rN = coarse.reduce((s, b) => s + b.rssiN, 0);
+        const rSum = coarse.reduce((s, b) => s + b.rssiSum, 0);
+        const mins = coarse.map((b) => b.rssiMin).filter((v): v is number => v != null);
+        const maxs = coarse.map((b) => b.rssiMax).filter((v): v is number => v != null);
+        const rates = coarse.map((b) => b.rateMin).filter((v): v is number => v != null);
+        if (rN > 0 && mins.length > 0) {
+          const mean = Math.round(rSum / rN);
+          const worst = Math.min(...mins);
+          const best = Math.max(...maxs);
+          const bits = [
+            c.white(`${worst}…${best} dBm`),
+            c.grey(`mean ${mean}`),
+            ...(rates.length ? [c.grey(`worst rate ${Math.min(...rates)}k`)] : []),
+          ];
+          body.push(...shedLine('  ' + c.label('Long RF') + ' ', '', bits, inner));
+        }
+      }
+      // EVIDENCE QUALITY (v0.49.0). `invalidW` counts windows whose counter
+      // arithmetic was void — a driver restart or a gap long enough that the
+      // deltas mean nothing. It is folded and persisted and was read by nobody,
+      // so a node whose evidence is largely garbage looked identical to one
+      // whose evidence is clean. Rendered only above zero: a permanent "0
+      // invalid" is noise that trains an operator to stop reading the row.
+      {
+        const invalid = coarse.reduce((s, b) => s + b.invalidW, 0);
+        const nw = coarse.reduce((s, b) => s + b.n, 0);
+        if (invalid > 0 && nw > 0) {
+          const share = invalid / nw;
+          const tone = share <= 0.05 ? c.grey : share <= 0.2 ? c.yellow : c.red;
+          body.push(kv('Windows', tone(`${invalid} of ${nw} invalid (${Math.round(share * 100)}%)`) +
+            c.grey(' — counter arithmetic void; driver restart or an over-long gap'), inner));
+        }
+      }
       // The LIVENESS SWEEP's verdict on this node (v0.37). Every listening node
       // is asked the same question on the same cadence, so this rate is a fact
       // about the device rather than about how talkative it is — which is
@@ -402,6 +454,21 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           : '';
         body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${pct}%)`) + self, inner));
         if (caveat) body.push(kv('', c.grey(caveat.trim()), inner));
+        // THE OTHER THREE ARMS (v0.49.0). The sweep's judgment is four-way and
+        // only `self-proven` was ever recorded; the rest were computed,
+        // described in a log line, and discarded every tick — so the difference
+        // between "this node never speaks except to answer us" and "this node
+        // is genuinely silent" was invisible, and those are opposite readings
+        // of the SAME answered/asked ratio.
+        {
+          const bits: string[] = [];
+          if (cov.probesEchoOnly > 0) bits.push(c.yellow(`${cov.probesEchoOnly} echo-only`));
+          if (cov.probesUnheard > 0) bits.push(c.grey(`${cov.probesUnheard} unheard`));
+          if (cov.probesAttribUnknown > 0) bits.push(c.grey(`${cov.probesAttribUnknown} unattributed`));
+          if (bits.length) {
+            body.push(...shedLine('  ' + c.label('Probe cls') + ' ', '', bits, inner));
+          }
+        }
       } else {
         // ZERO IS FOUR DIFFERENT STATEMENTS (v0.47.0), and this rendered as
         // NOTHING at every width — so "the sweep is off", "this device can

@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.49.0 — 2026-09-02
+
+**Nothing is folded, persisted and then averaged away.**
+
+**14 of the 18 persisted `CoarseBucket` fields had zero consumers.** The coarse
+tier folds per-bucket RSSI, RTT and rate extremes across a multi-day horizon and
+every one of them was averaged out of existence before reaching a screen — and
+the mean is the least useful of them, because a node whose signal collapsed for
+an hour has the same mean as one that never moved. DETAIL now carries the
+ENVELOPE: worst…best dBm, the mean beside it, and the worst negotiated rate.
+
+**Windows whose counter arithmetic was void are counted and were never shown.**
+`invalidW` marks a window spanning a driver restart or a gap long enough that
+the deltas mean nothing. A node whose evidence is largely garbage looked
+identical to one whose evidence is clean. Reported only above zero — a permanent
+"0 invalid" is noise that trains an operator to stop reading the row.
+
+**The sweep's probe judgment is FOUR-way and only one arm was recorded.**
+`self-proven` was persisted; `echo-only`, `attribution-unknown` and `unheard`
+were computed, described in a log line, and discarded on every tick. So the
+difference between "this node never speaks except to answer us" and "this node
+is genuinely silent" — opposite readings of the same answered/asked ratio — was
+recoverable only by grepping prose out of a container log the TUI cannot read.
+All four are now derived as ONE value that also drives the log string, so the
+counter and the prose cannot disagree; all four persist, and a pre-v0.49.0 store
+loads the new counters at zero rather than being rejected.
+
+**A five-minute interference burst drew a flat line.** Each 30-minute bucket's
+noisiest sample is folded and persisted, and the screen averaged it away — so
+the burst, which is the event worth seeing, was diluted into 25 minutes of
+quiet. The peak now rides alongside the mean and is called out when it exceeds
+it by 3 dB. Where a bucket has no recorded max it falls back to that bucket's
+MEAN, never to 0 dBm, which would paint the top of a −110…−80 scale as a
+permanent alarm.
+
+**The diurnal heatmap's denominator decided its own headline and was never
+shown.** "Worst hour" was picked on rate alone, and at the `MIN_HOUR_TX` floor
+of 20 a SINGLE timeout is a 5% rate — exactly the screen's `HEAT_MAX`. One
+dropped frame in a dead hour therefore beat a genuinely bad hour with thousands
+of transmissions behind it. The winner is now chosen from hours with at least
+median traffic, prints its `tx` count, and says so when it is thin. `MIN_HOUR_TX`
+is exported so the screen can see the floor it renders against.
+
+**The coarse RTT trend was accumulated, persisted, restored and bridged — and
+read by no screen.** Its RSSI twin has rendered since v0.41. It uses
+`trendColor`, not the raw band: shipping the raw one once already drew
+health-green sparklines under a greyed `RSSI —` for a dead node.
+
+**Also:** the two `evidenceCoarse` test fixtures asserted a `samples` field the
+runtime object never had — the fiction v0.43.0 corrected in the type but not in
+the tests, and the reason they never caught it was that `t0` alone passes for
+either shape.
+
+982 tests, 443 mutants (0 survived, 0 missing, 0 invalid).
+
 ## 0.48.1 — 2026-09-02
 
 **Two defects live verification caught in v0.48.0, minutes after it shipped.**

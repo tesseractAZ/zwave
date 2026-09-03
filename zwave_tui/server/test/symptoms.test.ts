@@ -152,8 +152,8 @@ test('weak-signal fires for a DIRECT node with thin margin, NOT for a routed one
 
 test('ghost-suspect requires PROVEN coverage (dead + zero comms + ≥3 days observed)', () => {
   const nodes = [node(1), node(6, { status: NodeStatus.Dead })];
-  const young = new Map([[6, { firstSeenAt: T - 60_000, samples: 5, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 }]]);
-  const proven = new Map([[6, { firstSeenAt: T - 5 * 86_400_000, samples: 900, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 }]]);
+  const young = new Map([[6, { firstSeenAt: T - 60_000, samples: 5, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 }]]);
+  const proven = new Map([[6, { firstSeenAt: T - 5 * 86_400_000, samples: 900, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 }]]);
   const inpYoung = (now: number) => input({ nodes, recent: new Map([[6, []]]), cov: young, now });
   const inpProven = (now: number) => input({ nodes, recent: new Map([[6, []]]), cov: proven, now });
   assert.equal(settle(inpYoung, new Map(), T, 8).filter((s) => s.kind === 'ghost-suspect').length, 0, 'young store ⇒ no ghost verdict');

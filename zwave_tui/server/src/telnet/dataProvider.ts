@@ -71,6 +71,7 @@ export interface ZwaveDataSource {
     firstSeenAt: number; samples: number; freshSamples: number;
     statusFeedLive: boolean; statsFeedLive: boolean;
     probesAsked: number; probesAnswered: number; probesSelfProven: number;
+    probesEchoOnly: number; probesAttribUnknown: number; probesUnheard: number;
   } | null;
   /** Long-horizon buckets for a node (v0.35). REQUIRED — see ackEvent. */
   evidenceCoarse(nodeId: number): CoarseBucket[];

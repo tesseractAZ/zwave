@@ -416,6 +416,12 @@ export interface DataProvider {
     /** Of those, how many the node had already answered for itself by
      *  communicating since the previous sweep. */
     probesSelfProven: number;
+    /** The other three arms of the same four-way sweep judgment (v0.49.0).
+     *  They separate "never speaks except to answer us" from "genuinely
+     *  silent" — opposite readings of the same answered/asked ratio. */
+    probesEchoOnly: number;
+    probesAttribUnknown: number;
+    probesUnheard: number;
   } | null;
   /** Persisted long-horizon buckets for a node (v0.35) — the tier that outlives
    *  the fine ring, so the dossier can state the window behind its numbers. */
@@ -552,6 +558,17 @@ export interface InterferenceView {
     /** Long-horizon (multi-day) floor: one point per 30-min coarse bucket, oldest
      *  first — the persisted tier, so the trend survives restarts and spans days. */
     trendCoarse: number[];
+    /**
+     * The NOISIEST single sample inside each 30-minute bucket (v0.49.0),
+     * index-aligned with `trendCoarse`.
+     *
+     * A five-minute interference burst diluted across 30 minutes of quiet
+     * vanishes from the mean — and the burst is the event worth seeing. Where
+     * a bucket has no recorded max, this carries that bucket's MEAN rather
+     * than 0: a 0 dBm entry would paint the top of a -110..-80 scale as a
+     * permanent alarm.
+     */
+    trendCoarseMax: number[];
     /** Days of coarse noise-floor history behind `trendCoarse` (honest "n days" label). */
     trendCoarseDays: number;
     band: 'clean' | 'elevated' | 'noisy' | 'unknown';

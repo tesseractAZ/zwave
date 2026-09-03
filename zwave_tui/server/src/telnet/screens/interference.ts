@@ -20,6 +20,7 @@
  */
 
 import { c, truncate, padStart } from '../ansi';
+import { MIN_HOUR_TX } from '../../zwave/interference';
 import { sparkline, heatCell, chartRows } from '../gauges';
 import { noiseColor, timeoutPctColor } from '../bands';
 import type { ScreenCtx, InterferenceView } from '../../types';
@@ -129,7 +130,22 @@ export function renderInterference(ctx: ScreenCtx): string[] {
         const w = Math.max(24, Math.min(iv.noise.trendCoarse.length, W - 12));
         const cells = downsampleMean(iv.noise.trendCoarse, w);
         const rows = chartRows(cells, w, chartH, { min: -110, max: -80, color: c.cyan });
-        push('  ' + c.grey(`days  ${span} span (persisted 30-min buckets, survives restarts)`));
+        // THE PEAK, ALONGSIDE THE MEAN (v0.49.0). Each bucket's noisiest sample
+        // is folded and persisted and was averaged away before it reached here,
+        // so a five-minute burst diluted across 30 quiet minutes drew a flat
+        // line — and the burst is the event worth seeing. Reported as a number
+        // rather than a second chart: two overlaid series on an 8-level glyph
+        // ramp would imply a resolution the ramp does not have.
+        const maxes = iv.noise.trendCoarseMax;
+        const peak = maxes.length ? Math.max(...maxes) : null;
+        const meanOfMeans = iv.noise.trendCoarse.length
+          ? iv.noise.trendCoarse.reduce((a, b) => a + b, 0) / iv.noise.trendCoarse.length
+          : null;
+        const peakTag = peak != null && meanOfMeans != null && peak - meanOfMeans >= 3
+          ? c.yellow(`  peak ${Math.round(peak)} dBm`) +
+            c.grey(` (${Math.round(peak - meanOfMeans)} dB above the mean — a burst the mean hides)`)
+          : peak != null ? c.grey(`  peak ${Math.round(peak)} dBm`) : '';
+        push('  ' + c.grey(`days  ${span} span (persisted 30-min buckets, survives restarts)`) + peakTag);
         rows.forEach((line, i) => {
           // Label the scale ends only — an axis tick per row would imply a
           // precision the 8-level glyph does not have.
@@ -202,9 +218,28 @@ export function renderInterference(ctx: ScreenCtx): string[] {
       push('  ' + iv.diurnal.map((d) => heatFor(d.rate)).join(''));
     }
     // Worst hour + legend.
-    const worst = [...iv.diurnal].filter((d) => d.rate != null).sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))[0];
+    // THE DENOMINATOR IS THE STORY (v0.49.0). `tx` is computed, carried across
+    // the provider boundary and rendered nowhere, so the "worst hour" was
+    // picked on rate alone — and at the MIN_HOUR_TX floor of 20 a SINGLE
+    // timeout is a 5% rate, which is exactly HEAT_MAX. One dropped frame in a
+    // quiet hour therefore won "worst hour" outright over a genuinely bad hour
+    // with thousands of transmissions behind it.
+    //
+    // Prefer hours with at least median traffic; fall back to the plain max so
+    // the line never disappears, and SAY when the winner is thin.
+    const rated = iv.diurnal.filter((d) => d.rate != null);
+    const medTx = rated.length
+      ? [...rated].map((d) => d.tx).sort((a, b) => a - b)[Math.floor(rated.length / 2)]
+      : 0;
+    const solid = rated.filter((d) => d.tx >= medTx);
+    const pool = solid.length >= 3 ? solid : rated;
+    const worst = [...pool].sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))[0];
+    const thin = worst != null && worst.tx < 4 * MIN_HOUR_TX;
     const worstStr = worst
-      ? c.grey('worst ') + c.white(`${String(worst.hour).padStart(2, '0')}:00 `) + heatColorFor(worst.rate ?? 0)(`${((worst.rate ?? 0) * 100).toFixed(1)}%`)
+      ? c.grey('worst ') + c.white(`${String(worst.hour).padStart(2, '0')}:00 `) +
+        heatColorFor(worst.rate ?? 0)(`${((worst.rate ?? 0) * 100).toFixed(1)}%`) +
+        c.grey(` of ${worst.tx} tx`) +
+        (thin ? c.yellow(' — thin hour, one timeout moves this a lot') : '')
       : c.grey('no rated hours yet');
     push('  ' + worstStr + c.grey(`   ${iv.coverageDays.toFixed(0)} day${iv.coverageDays >= 1.5 ? 's' : ''} · a persistently hot hour = recurring interference`));
   }

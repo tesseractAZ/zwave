@@ -958,7 +958,7 @@ test('the Interference floor number uses the shared dBm band', () => {
   // floor rendered green here and grey on every other screen. The band BADGE
   // keeps its own colour — that is a different claim.
   const iv = {
-    noise: { channels: [-95, -95, null, null], floor: -95, real: true, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'clean' },
+    noise: { channels: [-95, -95, null, null], floor: -95, real: true, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseDays: 0, band: 'clean' },
     serial: { nakPerH: 0, canPerH: 0, tmoAckPerH: 0, tmoRespPerH: 0, band: 'healthy', spanH: 4 },
     diurnal: [], coverageDays: 1,
     correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' },
