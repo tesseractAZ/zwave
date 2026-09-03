@@ -665,7 +665,7 @@ test('controller: spare rows draw REAL unused data, and never on a short frame',
   const data = mockData({ nodes }) as never as Record<string, unknown>;
   data.controller = () => mkCtrl(NO_ERRORS);
   data.interference = () => ({
-    noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseDays: 0, band: 'unknown' },
+    noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseDays: 0, band: 'unknown' },
     serial: { nakPerH: 0.4, canPerH: 3.2, tmoAckPerH: 0.1, tmoRespPerH: 4.8, band: 'healthy', spanH: 36 },
     diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, narrative: '' },
   });

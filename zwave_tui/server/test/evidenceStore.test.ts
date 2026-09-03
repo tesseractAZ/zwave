@@ -634,9 +634,9 @@ test('probe outcomes accumulate per node and survive a save/load', () => {
   try {
     const s = createEvidenceStore({ path, now: () => T });
     s.registerNode(7, T);
-    s.recordProbe(7, true, false, T);
-    s.recordProbe(7, true, true, T);   // answered, and it had proved itself already
-    s.recordProbe(7, false, false, T); // missed
+    s.recordProbe(7, true, 'unheard', T);
+    s.recordProbe(7, true, 'self-proven', T);   // answered, and it had proved itself already
+    s.recordProbe(7, false, 'unheard', T); // missed
     const c = s.coverage(7)!;
     assert.equal(c.probesAsked, 3);
     assert.equal(c.probesAnswered, 2);
@@ -685,7 +685,56 @@ test('recordProbe on an unregistered node does not lose the count', () => {
   // install has before EVIDENCE_PATH is set.
   const dir = mkdtempSync(join(tmpdir(), 'zwev-unreg-'));
   const s = createEvidenceStore({ path: join(dir, 'ev.json'), now: () => T });
-  s.recordProbe(99, false, false, T);
+  s.recordProbe(99, false, 'unheard', T);
   assert.equal(s.coverage(99)?.probesAsked, 1);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('the four probe classes are counted APART, and a pre-v0.49.0 file loads at zero', () => {
+  // Exactly one arm per probe: the four are mutually exclusive upstream, and
+  // counting two would make the shares sum past the asked total.
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-cls-'));
+  const path = join(dir, 'evidence.json');
+  try {
+    const s = createEvidenceStore({ path, now: () => T });
+    s.recordProbe(7, true, 'self-proven', T);
+    s.recordProbe(7, true, 'echo-only', T);
+    s.recordProbe(7, true, 'echo-only', T);
+    s.recordProbe(7, false, 'unheard', T);
+    s.recordProbe(7, true, 'attribution-unknown', T);
+    const c = s.coverage(7)!;
+    assert.equal(c.probesAsked, 5);
+    assert.equal(c.probesSelfProven, 1);
+    assert.equal(c.probesEchoOnly, 2);
+    assert.equal(c.probesUnheard, 1);
+    assert.equal(c.probesAttribUnknown, 1);
+    assert.equal(c.probesSelfProven + c.probesEchoOnly + c.probesUnheard + c.probesAttribUnknown,
+      c.probesAsked, 'the four arms partition the asked total exactly');
+
+    // Round-trip.
+    s.save();
+    const back = createEvidenceStore({ path, now: () => T });
+    back.load();
+    assert.equal(back.coverage(7)?.probesEchoOnly, 2, 'the new counters persist');
+
+    // A pre-v0.49.0 file has none of the new keys. Built by STRIPPING them from
+    // a real save rather than hand-crafting a schema — a hand-written fixture
+    // that the loader rejects for an unrelated reason would pass this test for
+    // the wrong reason.
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as { meta: Record<string, Record<string, unknown>> };
+    for (const m of Object.values(raw.meta)) { delete m.pe; delete m.pu; delete m.pn; }
+    assert.ok(!('pe' in raw.meta['7']), 'precondition: the new keys are gone');
+    writeFileSync(path, JSON.stringify(raw), 'utf8');
+
+    const old = createEvidenceStore({ path, now: () => T });
+    old.load();
+    const oc = old.coverage(7);
+    assert.ok(oc, 'an older store keeps its history rather than being rejected');
+    assert.equal(oc.probesAsked, 5, 'and its existing counters survive');
+    assert.equal(oc.probesSelfProven, 1);
+    assert.equal(oc.probesEchoOnly, 0, 'the unknown ones start at zero, not NaN');
+    assert.equal(oc.probesUnheard, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

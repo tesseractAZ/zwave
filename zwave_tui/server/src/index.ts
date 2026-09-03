@@ -131,7 +131,7 @@ async function main(): Promise<void> {
       // opening a second, less-guarded path to the mesh.
       verifyRequests: (now) => zwaveData.drainVerifyRequests(now),
       verifyOwedCount: () => zwaveData.verifyOwedCount(),
-      onProbeResult: (nodeId, answered, selfProven) => zwaveData.recordProbeResult(nodeId, answered, selfProven),
+      onProbeResult: (nodeId, answered, cls) => zwaveData.recordProbeResult(nodeId, answered, cls),
       // v0.41: the ENGINE's own writes, not the operator's — the Log screen
       // rendered every autonomous probe as "operator" before this.
       log: (sev, nodeId, text) => zwaveData.logEngineAction(sev, nodeId, text),

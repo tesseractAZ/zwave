@@ -972,7 +972,7 @@ const MUTANTS = [
   { id: 'probe-outcome-is-recorded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // The rate never accrues: probes fire, outcomes are judged, and nothing is
     // persisted — leaving the same ephemeral log lines v0.36 had.
-    find: "      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, self);",
+    find: "      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, cls);",
     repl: '      void nodeId;',
     what: 'a missed probe is recorded to the persisted reply rate' },
   { id: 'probe-row-needs-a-sample', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
@@ -990,7 +990,7 @@ const MUTANTS = [
   { id: 'probe-counts-persist', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
     // The counters live only in memory, so every restart wipes the reply rate
     // and it can never describe more than the current uptime.
-    find: 'fresh: m.freshSamples, pa: m.probesAsked, pk: m.probesAnswered, ps: m.probesSelfProven };',
+    find: 'fresh: m.freshSamples, pa: m.probesAsked, pk: m.probesAnswered, ps: m.probesSelfProven, pe: m.probesEchoOnly, pu: m.probesAttribUnknown, pn: m.probesUnheard };',
     repl: 'fresh: m.freshSamples };',
     what: 'the probe reply rate survives a restart' },
   { id: 'verify-probe-reports-spacing', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
@@ -1189,8 +1189,8 @@ const MUTANTS = [
   { id: 'probe-flag-rides-the-probe', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Reports every judgment with a hardcoded flag instead of the probe's own
     // context — the persisted reply-rate dimension goes blind.
-    find: '      out.push({ nodeId, answered, misses, self, lane });',
-    repl: '      out.push({ nodeId, answered, misses, self: false, lane });',
+    find: '      out.push({ nodeId, answered, misses, cls, lane });',
+    repl: "      out.push({ nodeId, answered, misses, cls: 'unheard', lane });",
     what: "each judgment carries ITS probe's self-proven context, not a constant" },
   { id: 'lastprobeseen-recorded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Never records what our probe put on the record — attribution goes blind
@@ -1288,15 +1288,25 @@ const MUTANTS = [
     // Folds symptom-correlated verification/dead probes back into the
     // fixed-cadence denominator, destroying the cross-node comparability the
     // v0.37 sweep was rebuilt to provide.
-    find: "      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, self);",
-    repl: '      o.onProbeResult?.(nodeId, false, self);',
+    find: "      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, cls);",
+    repl: '      o.onProbeResult?.(nodeId, false, cls);',
     what: 'only the fixed-cadence sweep feeds the persisted reply rate' },
   { id: 'boot-attribution-not-credited', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Restores the once-per-boot fabrication: 35 nodes credited "on its own"
     // for the PREVIOUS process's probe echoes, into a persisted counter.
     find: '      const selfProven = heardRecently && spokeOnItsOwn && attributed != null;',
     repl: '      const selfProven = heardRecently && spokeOnItsOwn;',
-    what: 'unknown attribution is never credited as self-proven' },
+    what: 'unknown attribution is never credited as self-proven' ,
+    // EQUIVALENT since v0.49.0, and deliberately kept. `selfProven` now has
+    // exactly two consumers (`cls` and the log line) and BOTH test
+    // `attributionUnknown` first, so this clause can no longer change an
+    // observable outcome. It stays because it keeps the local correct on its
+    // OWN terms — "self-proven" means the node spoke on its own AND we have
+    // attribution to prove it — rather than correct only by the good fortune of
+    // its callers' ordering. Unlike the refusal veto deleted in v0.44.0, this
+    // is one definitional clause on a named value, not a list of dead patterns.
+    equivalent: true,
+  },
   { id: 'boot-attribution-says-so', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     find: '      const attributionUnknown = attributed == null && heardRecently;',
     repl: '      const attributionUnknown = false;',
@@ -1332,8 +1342,8 @@ const MUTANTS = [
   { id: 'answered-path-is-sweep-only', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // The ANSWERED half of the lane split — the release's headline invariant
     // was only mutation-covered on the MISS path.
-    find: "        if (lane === 'sweep') o.onProbeResult?.(nodeId, true, self);",
-    repl: '        o.onProbeResult?.(nodeId, true, self);',
+    find: "        if (lane === 'sweep') o.onProbeResult?.(nodeId, true, cls);",
+    repl: '        o.onProbeResult?.(nodeId, true, cls);',
     what: 'an ANSWERED verification probe does not move the comparable reply rate' },
   { id: 'launch-failures-are-bounded', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Removes the launch budget: a persistent launch failure becomes an
@@ -2211,6 +2221,85 @@ const MUTANTS = [
     find: "        body.push(kv('Norm RTT', rtn.ready",
     repl: "        body.push(kv('Normal RTT', rtn.ready",
     what: 'every EVIDENCE label fits the 8-column cell so the values align' },
+  { id: 'rf-envelope-not-just-mean', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // The mean is the least useful of the persisted extremes: a node whose
+    // signal collapsed for an hour has the same mean as one that never moved.
+    find: '          const worst = Math.min(...mins);',
+    repl: '          const worst = Math.round(rSum / rN);',
+    what: 'the persisted RF envelope shows its WORST reading, not its mean' },
+  { id: 'rf-envelope-renders', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    find: '        if (rN > 0 && mins.length > 0) {',
+    repl: '        if (rN < 0 && mins.length > 0) {',
+    what: '14 persisted CoarseBucket fields reach a screen at all' },
+  { id: 'invalid-windows-reported', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // A node whose evidence is largely garbage looked identical to one whose
+    // evidence is clean.
+    find: '        if (invalid > 0 && nw > 0) {',
+    repl: '        if (invalid < 0 && nw > 0) {',
+    what: 'windows whose counter arithmetic was void are reported' },
+  { id: 'invalid-windows-only-above-zero', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // A permanent "0 invalid" is noise that trains an operator to stop reading.
+    find: '        if (invalid > 0 && nw > 0) {',
+    repl: '        if (invalid >= 0 && nw > 0) {',
+    what: 'a clean node says nothing about invalid windows' },
+  { id: 'coarse-rtt-trend-renders', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen', 'renderHonesty'],
+    find: "    if (longRtt.length >= 3) pushG(trendRow('RTT long', longRtt, 'ms', trendColor(longRtt, rttColor), inner));",
+    repl: '    void longRtt;',
+    what: 'the coarse RTT trend — accumulated, persisted, bridged — reaches a screen' },
+  { id: 'coarse-rtt-uses-trendColor', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Shipping the raw band once already drew health-green sparklines under a
+    // greyed `RSSI —` for a dead node.
+    find: "trendRow('RTT long', longRtt, 'ms', trendColor(longRtt, rttColor), inner)",
+    repl: "trendRow('RTT long', longRtt, 'ms', lastColor(longRtt, rttColor), inner)",
+    what: 'a dead node greys its long RTT trend like every other row' },
+  { id: 'noise-peak-is-the-max', file: 'src/zwave/interference.ts', tests: ['interference', 'interferenceScreen'],
+    // Averaged away, a five-minute burst diluted across 30 quiet minutes draws
+    // a flat line — and the burst is the event worth seeing.
+    find: '    trendCoarseMax.push(b.floorMax ?? mean);',
+    repl: '    trendCoarseMax.push(mean);',
+    what: "each bucket's NOISIEST sample is carried, not its mean" },
+  { id: 'noise-peak-fallback-is-the-mean', file: 'src/zwave/interference.ts', tests: ['interference'],
+    // 0 dBm would paint the top of a -110..-80 scale as a permanent alarm.
+    find: '    trendCoarseMax.push(b.floorMax ?? mean);',
+    repl: '    trendCoarseMax.push(b.floorMax ?? 0);',
+    what: 'a bucket with no recorded max falls back to its mean, never to 0 dBm' },
+  { id: 'worst-hour-names-its-denominator', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
+    find: "        c.grey(` of ${worst.tx} tx`) +",
+    repl: "        '' +",
+    what: 'the worst hour shows how many transmissions are behind its rate' },
+  { id: 'worst-hour-prefers-solid-hours', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
+    // At the MIN_HOUR_TX floor a SINGLE timeout is a 5% rate — exactly HEAT_MAX
+    // — so one dropped frame in a dead hour beat a genuinely bad busy hour.
+    find: '    const pool = solid.length >= 3 ? solid : rated;',
+    repl: '    const pool = rated;',
+    what: 'the worst hour is chosen from hours with real traffic behind them' },
+  { id: 'thin-worst-hour-says-so', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
+    find: '    const thin = worst != null && worst.tx < 4 * MIN_HOUR_TX;',
+    repl: '    const thin = false;',
+    what: 'a winner with thin traffic behind it is flagged, not presented as fact' },
+  { id: 'probe-classes-counted-apart', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    // Counting two arms for one probe makes the shares sum past the asked total.
+    find: "      else if (cls === 'echo-only') m.probesEchoOnly += 1;",
+    repl: "      if (cls === 'echo-only') m.probesEchoOnly += 1;",
+    what: 'exactly ONE arm is counted per probe — the four partition the total' },
+  { id: 'probe-class-migration-keeps-history', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    // Absent counters in a pre-v0.49.0 file must start at 0, not NaN, and must
+    // not cost the node its existing history.
+    find: '              probesEchoOnly: num(fm.pe), probesAttribUnknown: num(fm.pu), probesUnheard: num(fm.pn),',
+    repl: '              probesEchoOnly: fm.pe as number, probesAttribUnknown: fm.pu as number, probesUnheard: fm.pn as number,',
+    what: 'a pre-v0.49.0 store loads its new counters at zero, never NaN' },
+  { id: 'probe-class-breakdown-renders', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // "Never speaks except to answer us" and "genuinely silent" are opposite
+    // readings of the SAME answered/asked ratio.
+    find: '          if (bits.length) {',
+    repl: '          if (bits.length < 0) {',
+    what: 'the three unrecorded arms of the probe judgment reach the screen' },
+  { id: 'probe-class-drives-the-log-line', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // A separate boolean and a separate message can disagree; co-deriving them
+    // is half the value of the change.
+    find: "      const cls: ProbeClass = attributionUnknown ? 'attribution-unknown'",
+    repl: "      const cls: ProbeClass = attributionUnknown ? 'self-proven'",
+    what: 'the recorded class and the logged prose cannot disagree' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.

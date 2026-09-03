@@ -169,6 +169,10 @@ export interface RouteFailureEvent {
 }
 
 /** Per-node coverage metadata — survives ring eviction and restarts. */
+/** The sweep's per-probe verdict, mirrored from autoPing's `ProbeClass` — kept
+ *  structural rather than imported so the store does not depend on the runner. */
+export type ProbeClassLite = 'self-proven' | 'echo-only' | 'attribution-unknown' | 'unheard';
+
 export interface NodeCoverage {
   /** First time this node appeared on the roster (registerNode). */
   firstSeenAt: number;
@@ -200,6 +204,19 @@ export interface NodeCoverage {
    * the two look identical in a bare answered/asked ratio.
    */
   probesSelfProven: number;
+  /**
+   * The other three arms of the SAME four-way judgment (v0.49.0).
+   *
+   * `probesSelfProven` was the only one ever recorded; the rest were computed,
+   * described in a log line, and discarded on every tick — so "why is this
+   * node's evidence thin" was answerable only by grepping prose out of a
+   * container log the TUI cannot read. They are what separates "this node never
+   * speaks except to answer us" from "this node is genuinely silent", and those
+   * are opposite conclusions from the same answered/asked ratio.
+   */
+  probesEchoOnly: number;
+  probesAttribUnknown: number;
+  probesUnheard: number;
 }
 
 export type EvidenceMap = Map<number, EvidenceSample[]>;
@@ -264,7 +281,7 @@ export interface EvidenceStore {
   coverage(nodeId: number): NodeCoverage | null;
   /** Record one liveness-probe outcome for a node (v0.37). `selfProven` means
    *  the node had already communicated on its own since the previous sweep. */
-  recordProbe(nodeId: number, answered: boolean, selfProven: boolean, at?: number): void;
+  recordProbe(nodeId: number, answered: boolean, cls: ProbeClassLite, at?: number): void;
   /** Store-level: when evidence collection first began (survives restarts). */
   recordingSince(): number | null;
   all(): EvidenceMap;
@@ -362,7 +379,7 @@ interface Persisted {
    *  noise-floor tier. Absent in a pre-tier v2 file ⇒ the tier loads empty. */
   controllerCoarse?: CtrlCoarseCols | null;
   routeFails: Record<string, { t: number[]; a: number[]; b: number[] }>;
-  meta: Record<string, { firstSeenAt: number; samples: number; fresh: number; pa?: number; pk?: number; ps?: number }>;
+  meta: Record<string, { firstSeenAt: number; samples: number; fresh: number; pa?: number; pk?: number; ps?: number; pe?: number; pu?: number; pn?: number }>;
 }
 
 const SCHEMA_V = 2;
@@ -466,6 +483,16 @@ function medFloor(chs: (number | null)[]): number | null {
   if (v.length === 0) return null;
   const m = v.length >> 1;
   return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
+/** A zeroed coverage record. One constructor, so a new counter cannot be added
+ *  to the type and forgotten at one of the three construction sites. */
+function emptyMeta(t: number): NodeCoverage {
+  return {
+    firstSeenAt: t, samples: 0, freshSamples: 0,
+    probesAsked: 0, probesAnswered: 0, probesSelfProven: 0,
+    probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0,
+  };
 }
 
 export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
@@ -678,7 +705,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       if (!Number.isInteger(nodeId) || nodeId <= 0) return;
       if (meta.has(nodeId)) return;
       const t = at ?? now();
-      meta.set(nodeId, { firstSeenAt: t, samples: 0, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 });
+      meta.set(nodeId, emptyMeta(t));
       if (since == null) since = t;
       dirty = true;
     },
@@ -730,7 +757,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       if (ring.length > maxSamples) ring.splice(0, ring.length - maxSamples);
       fine.set(nodeId, ring);
       foldCoarse(nodeId, sample, d.invalid);
-      const m = meta.get(nodeId) ?? { firstSeenAt: t, samples: 0, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 };
+      const m = meta.get(nodeId) ?? emptyMeta(t);
       m.samples += 1;
       if (fresh) m.freshSamples += 1;
       meta.set(nodeId, m);
@@ -804,12 +831,18 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     controllerSamples: () => ctrlRing,
     controllerCoarse: () => ctrlCoarse,
     routeFailures: (nodeId) => routeFails.get(nodeId) ?? [],
-    recordProbe(nodeId, answered, selfProven, at): void {
+    recordProbe(nodeId, answered, cls, at): void {
       const t = at ?? now();
-      const m = meta.get(nodeId) ?? { firstSeenAt: t, samples: 0, freshSamples: 0, probesAsked: 0, probesAnswered: 0, probesSelfProven: 0 };
+      const m = meta.get(nodeId) ?? emptyMeta(t);
       m.probesAsked += 1;
       if (answered) m.probesAnswered += 1;
-      if (selfProven) m.probesSelfProven += 1;
+      // Exactly one arm per probe: the four are mutually exclusive by
+      // construction upstream, and counting two would make the shares sum past
+      // the asked total.
+      if (cls === 'self-proven') m.probesSelfProven += 1;
+      else if (cls === 'echo-only') m.probesEchoOnly += 1;
+      else if (cls === 'attribution-unknown') m.probesAttribUnknown += 1;
+      else m.probesUnheard += 1;
       meta.set(nodeId, m);
       dirty = true;
     },
@@ -890,7 +923,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           for (const [k, v] of Object.entries(obj.meta)) {
             const id = Number(k);
             if (!Number.isInteger(id) || id <= 0 || !v || typeof v !== 'object') continue;
-            const fm = v as { firstSeenAt?: unknown; samples?: unknown; fresh?: unknown; pa?: unknown; pk?: unknown; ps?: unknown };
+            const fm = v as { firstSeenAt?: unknown; samples?: unknown; fresh?: unknown; pa?: unknown; pk?: unknown; ps?: unknown; pe?: unknown; pu?: unknown; pn?: unknown };
             if (typeof fm.firstSeenAt !== 'number') continue;
             const num = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0);
             meta.set(id, {
@@ -899,6 +932,9 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
               freshSamples: typeof fm.fresh === 'number' ? fm.fresh : 0,
               // Absent in pre-v0.37 files — an older store simply starts these at 0.
               probesAsked: num(fm.pa), probesAnswered: num(fm.pk), probesSelfProven: num(fm.ps),
+              // Absent in pre-v0.49.0 files — an older store starts these at 0
+              // rather than being rejected, so an upgrade keeps its history.
+              probesEchoOnly: num(fm.pe), probesAttribUnknown: num(fm.pu), probesUnheard: num(fm.pn),
             });
           }
         }
@@ -1139,7 +1175,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         }
         const metaOut: Persisted['meta'] = {};
         for (const [id, m] of meta) {
-          metaOut[String(id)] = { firstSeenAt: m.firstSeenAt, samples: m.samples, fresh: m.freshSamples, pa: m.probesAsked, pk: m.probesAnswered, ps: m.probesSelfProven };
+          metaOut[String(id)] = { firstSeenAt: m.firstSeenAt, samples: m.samples, fresh: m.freshSamples, pa: m.probesAsked, pk: m.probesAnswered, ps: m.probesSelfProven, pe: m.probesEchoOnly, pu: m.probesAttribUnknown, pn: m.probesUnheard };
         }
         const payload: Persisted = {
           v: SCHEMA_V,
