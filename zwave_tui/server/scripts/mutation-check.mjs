@@ -2300,6 +2300,12 @@ const MUTANTS = [
     find: "      const cls: ProbeClass = attributionUnknown ? 'attribution-unknown'",
     repl: "      const cls: ProbeClass = attributionUnknown ? 'self-proven'",
     what: 'the recorded class and the logged prose cannot disagree' },
+  { id: 'invalid-share-never-zero-beside-a-count', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Rendered live as `37 of 32053 invalid (0%)` — a share that is not true,
+    // sitting beside a count that is.
+    find: "          const pct = share >= 0.005 ? `${Math.round(share * 100)}%` : '<1%';",
+    repl: '          const pct = `${Math.round(share * 100)}%`;',
+    what: 'a rounded-to-zero share reads "<1%", never "(0%)" beside a non-zero count' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.

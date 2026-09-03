@@ -773,3 +773,19 @@ test('a DEAD node greys its long RTT trend like every other row (v0.49.0)', () =
   assert.ok(row, 'the row renders');
   assert.doesNotMatch(row, /\x1b\[9[23]m/, `a dead node's trend is not health-coloured: "${strip(row)}"`);
 });
+
+test('a rounded-to-zero invalid share says "<1%", never "(0%)" (v0.49.1)', () => {
+  // It rendered live as `37 of 32053 invalid (0%)` — a share that is not true
+  // sitting beside a count that is.
+  const d = withProbes({ probesAsked: 5, probesAnswered: 5 });
+  (d.data as unknown as Record<string, unknown>).evidenceCoarse = () => [CB({ n: 32053, invalidW: 37 })];
+  const row = renderDetail(ctx(mkView(160, 60), d.data, d.nodes)).map(strip)
+    .find((l) => /Windows/.test(l)) ?? '';
+  assert.match(row, /37 of 32053 invalid \(<1%\)/, `"${row}"`);
+  assert.doesNotMatch(row, /\(0%\)/, 'a non-zero count never carries a zero share');
+
+  // A share that really is a whole percent still prints as one.
+  (d.data as unknown as Record<string, unknown>).evidenceCoarse = () => [CB({ n: 100, invalidW: 40 })];
+  assert.match(renderDetail(ctx(mkView(160, 60), d.data, d.nodes)).map(strip)
+    .find((l) => /Windows/.test(l)) ?? '', /40 of 100 invalid \(40%\)/);
+});
