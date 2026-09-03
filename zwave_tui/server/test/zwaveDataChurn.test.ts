@@ -1123,3 +1123,83 @@ test('a MANUAL ping is registered for judging; an engine one is not double-pende
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('baselineHold reports the quarantine the tick computes, and ranks symptomatic first (v0.48.0)', async () => {
+  // The engine computed these two sets on every detector pass and stored them
+  // NOWHERE, so DETAIL rendered "still learning · 3d so far" for a node whose
+  // learning is FROZEN — the baseline is deliberately not folded while a
+  // symptom is live or arming, so that day count is not advancing.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-hold-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const inner = zd as unknown as {
+      lastQuarantineSym: Set<number>;
+      lastQuarantineArm: Set<number>;
+    };
+    // Nothing held: the screen must render nothing rather than claim learning
+    // is running when it cannot know.
+    inner.lastQuarantineSym = new Set();
+    inner.lastQuarantineArm = new Set();
+    assert.equal(zd.baselineHold(7), null);
+
+    inner.lastQuarantineArm = new Set([7]);
+    assert.equal(zd.baselineHold(7), 'arming');
+
+    inner.lastQuarantineSym = new Set([7]);
+    assert.equal(zd.baselineHold(7), 'symptomatic',
+      'a live symptom outranks an arming one when BOTH apply — it is the stronger statement');
+
+    assert.equal(zd.baselineHold(999), null, 'a node in neither set is not held');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the engine tick RETAINS the quarantine it builds (v0.48.0)', async () => {
+  // Driven through the real detector pass, not by assigning the fields: the
+  // defect was that the tick computed these two sets and threw them away.
+  // A node the driver has marked Dead past its dwell fires `node-down`, which
+  // puts it in the symptomatic set — so a NON-EMPTY result is what proves the
+  // assignment happened, and an `instanceof Set` check would pass vacuously.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-hold2-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const real = zd.snapshot();
+    const deadListening = real.map((n) => (n.nodeId === 7
+      ? { ...n, isListening: true, status: NodeStatus.Dead, statusLabel: 'dead' } : n));
+    const priv = zd as unknown as {
+      runEngine: (now: number) => void;
+      lastNodes: NodeSnapshot[];
+      lastQuarantineSym: Set<number>;
+    };
+    // runEngine reads `lastNodes`, NOT snapshot() — the detector runs on the
+    // roster the last poll produced.
+    priv.lastNodes = deadListening;
+
+    // Two passes: the first arms the dwell, the second is past it.
+    const t0 = Date.now();
+    priv.runEngine(t0);
+    priv.runEngine(t0 + 60 * 60_000);
+
+    const live = zd.symptoms().filter((x) => x.nodeId === 7);
+    assert.ok(live.length > 0, `precondition: a symptom must be live — ${JSON.stringify(zd.symptoms())}`);
+    assert.ok(priv.lastQuarantineSym.has(7),
+      `the computed quarantine must be RETAINED, not discarded — got ${JSON.stringify([...priv.lastQuarantineSym])}`);
+    assert.equal(zd.baselineHold(7), 'symptomatic', 'and it reaches the accessor');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

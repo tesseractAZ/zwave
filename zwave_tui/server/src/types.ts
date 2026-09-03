@@ -510,6 +510,19 @@ export interface DataProvider {
    * screen — the operator could see the verdict but never the baseline.
    */
   rssiNormal?(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  /** The learned RTT yardstick for this node's CURRENT time-of-day band
+   *  (v0.48.0). Same band caveat as `rssiNormal`: the store keeps a separate
+   *  normal per 4-hour band, so the same call at 03:00 and 15:00 legitimately
+   *  differs — any rendering must say which band it is quoting. */
+  rttNormal?(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  /** The learned reply-timeout yardstick for this node's current band
+   *  (v0.48.0). Same band caveat as `rssiNormal`. */
+  timeoutNormal?(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
+  /** Whether baseline learning is PAUSED for this node, and why (v0.48.0) —
+   *  as of the last engine tick, not as of now. */
+  baselineHold?(nodeId: number): 'symptomatic' | 'arming' | null;
+  /** Epoch ms of the last node-or-controller STATISTICS event (v0.48.0). */
+  lastStatsUpdated?(): number | null;
   /** M6 interference view (cached) — the noise floor, its trend, controller
    *  serial-link health, the diurnal timeout-rate heatmap, and the current
    *  correlated-degradation state. Read by the INTERFERENCE screen. */

@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.48.0 — 2026-09-02
+
+**The dossier states what the engine actually knows about this node.**
+
+**Two of the three learned yardsticks had no bridge at all** — and they were the
+two that matter. `grep -n 'baselines\.' src/zwave/symptoms.ts` returns exactly
+`timeoutNormal` and `rttNormal`; `rssiNormal` arms no detector. So the number
+the screen could show decides nothing, and the two numbers every "above its own
+normal" verdict is measured against were the two it could not show. Every such
+verdict was unfalsifiable on screen: the accusation was visible and the baseline
+behind it was not. DETAIL now carries all three, each with the band qualifier
+the store's own semantics require — the same call at 03:00 and 15:00
+legitimately differs.
+
+**A node whose learning is FROZEN said "still learning · 3d so far".** The
+baseline is deliberately not folded while a symptom is live or arming, because
+it must not chase the pathology — so that day count is not advancing, and the
+row implied it was. The engine computed the quarantine set on every detector
+pass and stored it nowhere. It is retained now and named: which hold applies,
+answered as of the last tick rather than as of now, because the tick is the only
+currency the data has.
+
+**A routed node's RSSI normal is the LAST HOP's, not the device's.**
+`stats.rssi` is the signal from whatever repeater relayed the frame, so for a
+routed node that row describes a link the device is not on either end of. It is
+labelled, and rendered without health colouring — a "good" number there says
+nothing about the device's own radio.
+
+**The EVIDENCE verdict is pinned outside the scroll window.** That block is LAST
+in a dossier that does not fit 80×24 for any device shape, so "both feeds are
+down — silence from this node is a monitoring hole, not health" was unreachable
+without scrolling, and an operator who never scrolls never learns the node is
+unmonitored. It now renders in frame's telemetry slot, which scrolling cannot
+move. `frame()` spends an extra row for that slot while `detail.ts` sizes its
+own body, so the body budget shrinks to match — without it the screen would
+disclose a hidden line that is not hidden.
+
+**A subscription is not a feed.** The feed badges prove the add-on is
+subscribed; they say nothing about whether statistics are arriving.
+`lastStatsUpdated` was the only number that could tell those apart and it
+reached `/api/health` and no screen. Fleet-wide silence past a window with
+headroom over the poll cadence is now reported, and pinned — it is exactly the
+condition under which every quiet verdict on the dossier is worthless.
+
+969 tests, 427 mutants (0 survived, 0 missing, 0 invalid).
+
 ## 0.47.0 — 2026-09-02
 
 **The starvation had a cause, and it was a missing null-guard the codebase had

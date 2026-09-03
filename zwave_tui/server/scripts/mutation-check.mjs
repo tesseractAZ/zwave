@@ -2134,6 +2134,70 @@ const MUTANTS = [
     find: '      const rssiNote = (): string[] => (rssiShort > 0',
     repl: '      const rssiNote = (): string[] => (rssiShort < 0',
     what: 'a short rssi baseline is still reported, as the dossier yardstick it is' },
+  { id: 'rtt-yardstick-reaches-the-dossier', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // rtt is one of only TWO baselines any detector reads; without it on screen
+    // an "above its own normal" verdict is unfalsifiable.
+    find: '      const rtn = data.rttNormal?.(n.nodeId) ?? null;',
+    repl: '      const rtn = null as null | { median: number; scale: number; ready: boolean; days: number };',
+    what: 'the learned RTT yardstick renders beside the live RTT it judges' },
+  { id: 'timeout-yardstick-reaches-the-dossier', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    find: '      const tn = data.timeoutNormal?.(n.nodeId) ?? null;',
+    repl: '      const tn = null as null | { rate: number; trials: number; ready: boolean; days: number };',
+    what: 'the learned timeout yardstick renders beside the live rate it judges' },
+  { id: 'ungraduated-yardstick-quotes-nothing', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Quoting a median from an un-graduated band invites acting on a number the
+    // engine itself will not act on.
+    find: "          ? c.white(`${Math.round(rtn.median)} ms`) + c.grey(` ±${Math.round(rtn.scale)} ms`) +",
+    repl: "          ? c.white(`${Math.round(rtn.median)} ms`) + c.grey(` ±${Math.round(rtn.scale)} ms`) + (rtn.ready ? '' : '') +",
+    what: 'an un-graduated band says "still learning", never a median',
+    equivalent: true },
+  { id: 'frozen-learning-says-so', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // A held node's "3d so far" is NOT advancing; without this the row implies
+    // it is. The engine computed this set every tick and stored it nowhere.
+    find: '      const hold = data.baselineHold?.(n.nodeId) ?? null;',
+    repl: '      const hold = null as null | \'symptomatic\' | \'arming\';',
+    what: 'a node whose baseline learning is PAUSED says so' },
+  { id: 'hold-names-which-hold', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn', 'detailScreen'],
+    // "symptomatic" outranks "arming": a node can be both, and the live symptom
+    // is the stronger statement.
+    find: "    if (this.lastQuarantineSym.has(nodeId)) return 'symptomatic';",
+    repl: "    if (this.lastQuarantineArm.has(nodeId)) return 'arming';",
+    what: 'a live symptom outranks an arming one when both apply' },
+  { id: 'quarantine-sets-are-retained', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: '    this.lastQuarantineSym = qSym;',
+    repl: '    this.lastQuarantineSym = new Set();',
+    what: 'the quarantine the tick computes is retained, not discarded' },
+  { id: 'routed-rssi-is-last-hop', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // For a routed node this row describes a link the DEVICE is not on either
+    // end of — a "good" number there says nothing about its radio.
+    find: '      const routedHere = !n.isLongRange && (n.stats?.lwr?.repeaters?.length ?? 0) > 0;',
+    repl: '      const routedHere = false;',
+    what: "a routed node's RSSI normal is labelled last-hop, not the device" },
+  { id: 'verdict-is-pinned-outside-the-scroll', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // The EVIDENCE block is LAST in a dossier that does not fit 80x24 for any
+    // device shape — an operator who never scrolls never learns the node is
+    // unmonitored.
+    find: "    ...(pinned ? { telemetry: pinned } : {}),",
+    repl: '    ...(pinned != null && H < 0 ? { telemetry: pinned } : {}),',
+    what: 'the EVIDENCE verdict is pinned where scrolling cannot move it' },
+  { id: 'pinned-row-is-budgeted', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // frame() spends an extra row for telemetry but detail.ts sizes its OWN
+    // body — without the matching subtraction the screen renders one row too
+    // many and breaks the exactly-view.rows contract.
+    find: '  const bodyCap = Math.max(1, H - 3 - (pinned ? 1 : 0));',
+    repl: '  const bodyCap = Math.max(1, H - 3);',
+    what: 'the pinned row is subtracted from the body budget' },
+  { id: 'silent-stats-feed-is-called-out', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // The feed badges prove a SUBSCRIPTION exists; they say nothing about
+    // whether statistics are arriving.
+    find: '        if (ageMs != null && ageMs > STATS_STALE_MS) {',
+    repl: '        if (ageMs != null && ageMs > Number.MAX_SAFE_INTEGER) {',
+    what: 'a subscribed but silent statistics feed is reported' },
+  { id: 'stats-staleness-has-headroom', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // One missed event at a ~2-minute cadence is not a dead feed.
+    find: 'const STATS_STALE_MS = 10 * 60_000;',
+    repl: 'const STATS_STALE_MS = 60_000;',
+    what: 'the staleness window clears the poll cadence with headroom' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.
