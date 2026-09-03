@@ -2198,6 +2198,19 @@ const MUTANTS = [
     find: 'const STATS_STALE_MS = 10 * 60_000;',
     repl: 'const STATS_STALE_MS = 60_000;',
     what: 'the staleness window clears the poll cadence with headroom' },
+  { id: 'decayed-trials-marked-as-weight', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Rendered live as `4.4% of 184.865275555814 tx` — fifteen decimals of
+    // precision the number does not have. `trials` is decayed
+    // (`r.trials * (1 - DECAY) + trials`), so it is a weight, not a tally.
+    find: '          ? c.white(`${(tn.rate * 100).toFixed(1)}%`) + c.grey(` of ≈${Math.round(tn.trials)} tx`) +',
+    repl: '          ? c.white(`${(tn.rate * 100).toFixed(1)}%`) + c.grey(` of ${tn.trials} tx`) +',
+    what: 'a decayed trials count is rounded and marked ≈, never printed raw' },
+  { id: 'evidence-labels-fit-the-cell', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // kv() pads the label to 8; a longer one overflows and pushes its value out
+    // of the column every other row aligns on.
+    find: "        body.push(kv('Norm RTT', rtn.ready",
+    repl: "        body.push(kv('Normal RTT', rtn.ready",
+    what: 'every EVIDENCE label fits the 8-column cell so the values align' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.
