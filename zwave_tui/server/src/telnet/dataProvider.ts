@@ -105,6 +105,16 @@ export interface ZwaveDataSource {
   driverWsState(): DriverWsState;
   /** Learned RSSI normal for a node (v0.35). REQUIRED — see ackEvent. */
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  /** REQUIRED — see ackEvent. Two of the three learned yardsticks had no bridge
+   *  at all, so the verdicts measured against them were unfalsifiable on screen:
+   *  the accusation was visible and the baseline behind it was not. */
+  rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
+  /** REQUIRED — see ackEvent. Whether learning is PAUSED for this node. */
+  baselineHold(nodeId: number): 'symptomatic' | 'arming' | null;
+  /** REQUIRED — see ackEvent. Epoch ms of the last STATISTICS event. A green
+   *  feed badge proves a subscription exists, not that data is arriving. */
+  lastStatsUpdated(): number | null;
   /** Has the first roster load completed? Falls back to "roster non-empty". */
   ready?(): boolean;
   /** Last fatal error string, if any. */
@@ -225,6 +235,12 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     driverWsStatus: () => zd.driverWsStatus(),
     driverWsState: () => zd.driverWsState(),
     rssiNormal: (n) => zd.rssiNormal(n),
+    rttNormal: (n) => zd.rttNormal(n),
+    timeoutNormal: (n) => zd.timeoutNormal(n),
+    baselineHold: (n) => zd.baselineHold(n),
+    // Read LIVE, never through the refresh cache: a cached value measures the
+    // poller, not the feed, which is the very confusion this exists to end.
+    lastStatsUpdated: () => zd.lastStatsUpdated(),
   };
 }
 
@@ -339,6 +355,10 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     driverWsStatus: () => zwaveData.driverWsStatus(),
     driverWsState: () => zwaveData.driverWsState(),
     rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
+    rttNormal: (nodeId) => zwaveData.rttNormal(nodeId),
+    timeoutNormal: (nodeId) => zwaveData.timeoutNormal(nodeId),
+    baselineHold: (nodeId) => zwaveData.baselineHold(nodeId),
+    lastStatsUpdated: () => zwaveData.lastStatsUpdated(),
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,
     hasRealNoise: () => cachedHasNoise,

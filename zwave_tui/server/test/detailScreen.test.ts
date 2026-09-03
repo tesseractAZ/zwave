@@ -512,3 +512,145 @@ test('a node with NO probes carries no caveat at all (v0.45.0)', () => {
   assert.ok(!out.some((l) => /lifetime tally/.test(l)), 'nothing to qualify');
 });
 
+
+/* ── v0.48.0: the dossier states what the engine actually knows ───────────── */
+
+/** withProbes + arbitrary extra provider members. */
+function withYard(over: Record<string, unknown>, node?: Partial<NodeSnapshot>) {
+  const d = withProbes({ probesAsked: 10, probesAnswered: 10 });
+  if (node) Object.assign(d.nodes[0], node);
+  Object.assign(d.data as unknown as Record<string, unknown>, over);
+  return d;
+}
+const yardLines = (d: { data: DataProvider; nodes: NodeSnapshot[] }, cols = 140): string[] =>
+  renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip);
+
+test('all THREE learned yardsticks reach the dossier, not just the one that arms nothing', () => {
+  // rssi was bridged and rtt/timeout were not — backwards, since
+  // `grep -n 'baselines\.' symptoms.ts` returns exactly timeoutNormal and
+  // rttNormal. The two numbers every "above its own normal" verdict is measured
+  // against were the two the screen could not show.
+  const out = yardLines(withYard({
+    rssiNormal: () => ({ median: -62, scale: 3, ready: true, days: 9 }),
+    rttNormal: () => ({ median: 41, scale: 7, ready: true, days: 9 }),
+    timeoutNormal: () => ({ rate: 0.021, trials: 480, ready: true, days: 9 }),
+  }));
+  const norms = out.filter((l) => /Normal/.test(l));
+  assert.ok(norms.some((l) => /-62 dBm ±3 dB · 9d · this time-of-day band/.test(l)),
+    `rssi: ${JSON.stringify(norms)}`);
+  assert.ok(norms.some((l) => /41 ms ±7 ms · 9d · this time-of-day band/.test(l)),
+    `rtt: ${JSON.stringify(norms)}`);
+  assert.ok(norms.some((l) => /2\.1% of 480 tx · 9d · this time-of-day band/.test(l)),
+    `timeout: ${JSON.stringify(norms)}`);
+});
+
+test('an un-graduated yardstick says so instead of quoting a median', () => {
+  const out = yardLines(withYard({ rttNormal: () => ({ median: 41, scale: 7, ready: false, days: 2 }) }));
+  const row = out.find((l) => /Normal RTT/.test(l)) ?? '';
+  assert.match(row, /still learning · 2d so far — not yet a yardstick/);
+  assert.doesNotMatch(row, /41 ms/, 'a median nobody should act on yet is not quoted');
+});
+
+test('a node whose learning is PAUSED says so — "3d so far" is not advancing', () => {
+  // The baseline is deliberately not folded while a symptom is live or arming
+  // (it must not chase the pathology), so a held node's day count is frozen and
+  // the row implied it was still climbing. The engine computed this set every
+  // tick and stored it nowhere.
+  for (const [hold, want] of [
+    ['symptomatic', /a symptom is live, so the baseline is not folding/],
+    ['arming', /arming a symptom, so the baseline is held/],
+  ] as const) {
+    const out = yardLines(withYard({ baselineHold: () => hold })).join('\n');
+    assert.match(out, /Learning is PAUSED/, `${hold}: the hold must render`);
+    assert.match(out, want, `${hold}: and say WHICH hold`);
+  }
+  assert.doesNotMatch(yardLines(withYard({ baselineHold: () => null })).join('\n'),
+    /Learning is PAUSED/, 'a node that is learning says nothing');
+});
+
+test("a ROUTED node's RSSI normal is labelled last-hop, and loses its health colour", () => {
+  // `stats.rssi` is the signal from whatever repeater relayed the frame, so for
+  // a routed node this row describes a link the device is not on either end of.
+  const lwr = { repeaters: [4], protocolDataRate: 3, rssi: -60, repeaterRSSI: [], routeFailedBetween: null };
+  const rn = { rssiNormal: () => ({ median: -62, scale: 3, ready: true, days: 9 }) };
+  const routed = yardLines(withYard(rn, { stats: { ...node().stats, lwr } as never }), 160)
+    .find((l) => /^\s*Normal\s/.test(l)) ?? '';
+  assert.match(routed, /last-hop, not the device/, `routed: "${routed}"`);
+  const direct = yardLines(withYard(rn), 160).find((l) => /^\s*Normal\s/.test(l)) ?? '';
+  assert.doesNotMatch(direct, /last-hop/, `a direct node's rssi IS the device's: "${direct}"`);
+});
+
+test('the EVIDENCE verdict is PINNED outside the scroll window (v0.48.0)', () => {
+  // The EVIDENCE block is LAST in a dossier that does not fit 80x24 for any
+  // device shape, so its verdict was unreachable without scrolling — and an
+  // operator who never scrolls never learns the node is unmonitored.
+  const d = withProbes({ probesAsked: 5, probesAnswered: 5, statusFeedLive: false, statsFeedLive: false });
+  for (const rows of [24, 30, 46]) {
+    const out = renderDetail(ctx(mkView(100, rows), d.data, d.nodes)).map(strip);
+    assert.equal(out.length, rows, `${rows}: exact rows`);
+    // Row 2 is the telemetry slot, directly under the title rule and OUTSIDE
+    // the scroll window.
+    assert.match(out[2], /BOTH FEEDS DOWN/,
+      `${rows}: the verdict must be pinned, not scrolled — got "${out[2]}"`);
+  }
+  // Scrolled to the bottom, it is STILL there.
+  const scrolled = renderDetail({ ...ctx(mkView(100, 24), d.data, d.nodes),
+    view: { ...mkView(100, 24), detailScroll: 999 } } as never).map(strip);
+  assert.match(scrolled[2], /BOTH FEEDS DOWN/, 'scrolling cannot move it');
+});
+
+test('a healthy node pins NOTHING — the slot is for a verdict, not a heading (v0.48.0)', () => {
+  const d = withProbes({ probesAsked: 5, probesAnswered: 5 });
+  (d.data as unknown as Record<string, unknown>).lastStatsUpdated = () => Date.now();
+  const out = renderDetail(ctx(mkView(100, 24), d.data, d.nodes)).map(strip);
+  assert.doesNotMatch(out[2], /⚠/, `nothing to pin: "${out[2]}"`);
+  assert.equal(out.length, 24);
+});
+
+test('a SUBSCRIBED but silent stats feed is called out (v0.48.0)', () => {
+  // The feed badges prove a subscription exists; they say nothing about whether
+  // statistics are arriving. `lastStatsUpdated` is the only number that can,
+  // and it reached /api/health and no screen.
+  const d = withProbes({ probesAsked: 5, probesAnswered: 5 });
+  (d.data as unknown as Record<string, unknown>).lastStatsUpdated = () => Date.now() - 47 * 60_000;
+  const out = renderDetail(ctx(mkView(120, 40), d.data, d.nodes)).map(strip);
+  assert.match(out[2], /No statistics fleet-wide for 47m/, 'the pin carries it');
+  assert.match(out[2], /subscribed, but nothing is arriving/);
+  // At 40 rows the in-body row is BELOW the window ("1–35/36") — which is the
+  // exact condition the pin exists for. Give it room and it is there too.
+  const tall = renderDetail(ctx(mkView(120, 60), d.data, d.nodes)).map(strip).join('\n');
+  assert.match(tall, /No statistics fleet-wide for 47m — the feed is subscribed but silent/,
+    'and the dossier still reads coherently when scrolled');
+
+  // A single missed event is not a dead feed.
+  (d.data as unknown as Record<string, unknown>).lastStatsUpdated = () => Date.now() - 3 * 60_000;
+  assert.doesNotMatch(renderDetail(ctx(mkView(120, 40), d.data, d.nodes)).map(strip).join('\n'),
+    /subscribed but silent/, 'headroom over the poll cadence');
+});
+
+test('the pinned row is BUDGETED — no spurious "more lines hidden" (v0.48.0)', () => {
+  // frame() spends an extra row for telemetry, but detail.ts sizes its OWN
+  // body. Without the matching subtraction the body is one row too long and
+  // frame discloses a hidden line that is not actually hidden.
+  const d = withProbes({ probesAsked: 5, probesAnswered: 5, statusFeedLive: false, statsFeedLive: false });
+  for (const rows of [24, 30, 46, 60]) {
+    const out = renderDetail(ctx(mkView(120, rows), d.data, d.nodes)).map(strip);
+    assert.equal(out.length, rows, `${rows}: exact rows`);
+    const hidden = out.find((l) => /more line/.test(l));
+    // At 60 rows the dossier fits, so any "hidden" disclosure is spurious.
+    if (rows >= 60) {
+      assert.ok(!hidden, `${rows}: nothing is hidden, so nothing should say so — "${hidden}"`);
+    }
+  }
+});
+
+test('a stale-feed pin does not fire on a single missed statistics event (v0.48.0)', () => {
+  const d = withProbes({ probesAsked: 5, probesAnswered: 5 });
+  (d.data as unknown as Record<string, unknown>).lastStatsUpdated = () => Date.now() - 3 * 60_000;
+  const out = renderDetail(ctx(mkView(120, 40), d.data, d.nodes)).map(strip);
+  assert.doesNotMatch(out[2], /nothing is arriving/,
+    `3 minutes is one missed event at a ~2-minute cadence, not a dead feed — "${out[2]}"`);
+  // ...and it DOES fire once the silence clears the headroom.
+  (d.data as unknown as Record<string, unknown>).lastStatsUpdated = () => Date.now() - 12 * 60_000;
+  assert.match(renderDetail(ctx(mkView(120, 40), d.data, d.nodes)).map(strip)[2], /nothing is arriving/);
+});

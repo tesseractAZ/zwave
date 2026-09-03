@@ -425,6 +425,12 @@ export interface ZwaveData {
   /** Record one liveness-probe outcome for the persisted reply rate (v0.37). */
   recordProbeResult(nodeId: number, answered: boolean, selfProven: boolean): void;
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  /** The learned RTT yardstick for this node's CURRENT time-of-day band (v0.48.0). */
+  rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  /** The learned reply-timeout yardstick for this node's current band (v0.48.0). */
+  timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
+  /** Is this node's baseline learning currently PAUSED, and why (v0.48.0)? */
+  baselineHold(nodeId: number): 'symptomatic' | 'arming' | null;
   forgetNodeBaselines(nodeId: number): void;
   /** M6: interference view (noise floor, serial health, diurnal heatmap). */
   interference(): InterferenceView;
@@ -1116,8 +1122,20 @@ class ZwaveDataImpl implements ZwaveData {
     // Fold the freshest sample per node into the baselines, quarantining nodes
     // that are SYMPTOMATIC OR ARMING (any active dwell) — folding the pre-dwell
     // breach would ratchet the baseline toward the pathology (v0.14 review).
-    const quarantine = symptomaticNodes(symptoms);
-    for (const id of armingNodes(this.symptomState)) quarantine.add(id);
+    // RETAINED, not just used (v0.48.0). The tick computed these two sets every
+    // pass and discarded them, so DETAIL rendered "still learning · 3d so far"
+    // for a node whose learning is FROZEN — the baseline is deliberately not
+    // folded while a symptom is live or arming, so that day count is not
+    // advancing and the row implied it was.
+    //
+    // Kept APART so the screen can say WHICH hold applies; the union below is
+    // built exactly as before, so folding is bit-identical.
+    const qSym = symptomaticNodes(symptoms);
+    const qArm = new Set(armingNodes(this.symptomState));
+    this.lastQuarantineSym = qSym;
+    this.lastQuarantineArm = qArm;
+    const quarantine = new Set(qSym);
+    for (const id of qArm) quarantine.add(id);
     for (const n of this.lastNodes) {
       if (n.isController) continue;
       const ring = ev.forNode(n.nodeId);
@@ -1511,6 +1529,35 @@ class ZwaveDataImpl implements ZwaveData {
 
   /** The engine's LEARNED RSSI normal for a node (v0.35) — the yardstick every
    *  per-node signal verdict is measured against, and until now unreadable. */
+  private lastQuarantineSym = new Set<number>();
+  private lastQuarantineArm = new Set<number>();
+
+  /**
+   * Is this node's baseline learning paused, and why (v0.48.0)?
+   *
+   * ANSWERED AS OF THE LAST ENGINE TICK, not as of now — the sets are recomputed
+   * once per detector pass, and a screen that implied otherwise would state a
+   * currency it cannot have. `symptomatic` outranks `arming`: a node can be both,
+   * and the live symptom is the stronger statement.
+   *
+   * Null when the engine is off, so DETAIL renders nothing at all — matching how
+   * it treats an absent `rssiNormal` rather than claiming learning is running.
+   */
+  baselineHold(nodeId: number): 'symptomatic' | 'arming' | null {
+    if (!this.baselines) return null;
+    if (this.lastQuarantineSym.has(nodeId)) return 'symptomatic';
+    if (this.lastQuarantineArm.has(nodeId)) return 'arming';
+    return null;
+  }
+
+  rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null {
+    return this.baselines ? this.baselines.rttNormal(nodeId, Date.now()) : null;
+  }
+
+  timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null {
+    return this.baselines ? this.baselines.timeoutNormal(nodeId, Date.now()) : null;
+  }
+
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null {
     return this.baselines ? this.baselines.rssiNormal(nodeId, Date.now()) : null;
   }

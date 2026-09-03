@@ -60,7 +60,15 @@ const FLAG_MEANING: Record<string, string> = {
   U: 'firmware update',
 };
 
+/** How long fleet-wide statistics silence must last before the dossier says so
+ *  (v0.48.0). Two poll intervals of headroom over the ~2-minute cadence, so a
+ *  single missed event is not reported as a dead feed. */
+const STATS_STALE_MS = 10 * 60_000;
+
 export function renderDetail(ctx: ScreenCtx): string[] {
+  // Set inside the EVIDENCE block; rendered in frame()'s telemetry slot, which
+  // sits outside the scroll window.
+  let pinned: string | null = null;
   const { view, data, visibleNodes } = ctx;
   const W = view.cols;
   const H = view.rows;
@@ -419,24 +427,79 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       // screen: you could see the accusation but never the baseline. An
       // un-graduated band says so rather than quoting a median nobody should
       // act on yet.
+      // A ROUTED node's RSSI is the LAST HOP's, not the device's (v0.48.0).
+      // `stats.rssi` is the signal from whatever repeater relayed the frame, so
+      // for a routed node this row describes a link the device is not on either
+      // end of. Rendered grey rather than in health colours, because a "good"
+      // number here says nothing about the device's own radio.
+      const routedHere = !n.isLongRange && (n.stats?.lwr?.repeaters?.length ?? 0) > 0;
       const rn = data.rssiNormal?.(n.nodeId) ?? null;
       if (rn) {
+        const normC = routedHere ? c.grey : c.white;
+        const hop = routedHere ? c.grey(' · last-hop, not the device') : '';
         const band = rn.ready
-          ? c.white(`${Math.round(rn.median)} dBm`) + c.grey(` ±${Math.round(rn.scale)} dB`) +
+          ? normC(`${Math.round(rn.median)} dBm`) + c.grey(` ±${Math.round(rn.scale)} dB`) +
             // The store keeps a separate normal per 4-hour time-of-day band and
             // this row answers for the band you are IN — ask at 3am and at 3pm
             // and the yardstick legitimately differs. Unlabelled, that reads as
             // the baseline contradicting itself (v0.35 review).
-            c.grey(` · ${rn.days}d · this time-of-day band`)
-          : c.yellow('still learning') + c.grey(` · ${rn.days}d so far — not yet a yardstick`);
+            c.grey(` · ${rn.days}d · this time-of-day band`) + hop
+          : c.yellow('still learning') + c.grey(` · ${rn.days}d so far — not yet a yardstick`) + hop;
         body.push(kv('Normal', band, inner));
+      }
+      // THE OTHER TWO YARDSTICKS (v0.48.0). rssi was bridged and these were not,
+      // which is backwards: `grep -n 'baselines\.' src/zwave/symptoms.ts` returns
+      // exactly `timeoutNormal` and `rttNormal` — the two that actually ARM a
+      // detector — while `rssiNormal` arms none. So the two numbers every
+      // "above its own normal" verdict is measured against were the two the
+      // screen could not show, and the one it could show decides nothing.
+      const rtn = data.rttNormal?.(n.nodeId) ?? null;
+      if (rtn) {
+        body.push(kv('Normal RTT', rtn.ready
+          ? c.white(`${Math.round(rtn.median)} ms`) + c.grey(` ±${Math.round(rtn.scale)} ms`) +
+            c.grey(` · ${rtn.days}d · this time-of-day band`)
+          : c.yellow('still learning') + c.grey(` · ${rtn.days}d so far — not yet a yardstick`), inner));
+      }
+      const tn = data.timeoutNormal?.(n.nodeId) ?? null;
+      if (tn) {
+        body.push(kv('Normal TMO', tn.ready
+          ? c.white(`${(tn.rate * 100).toFixed(1)}%`) + c.grey(` of ${tn.trials} tx`) +
+            c.grey(` · ${tn.days}d · this time-of-day band`)
+          : c.yellow('still learning') + c.grey(` · ${tn.days}d so far — not yet a yardstick`), inner));
+      }
+      // LEARNING IS PAUSED, and the rows above do not show it (v0.48.0). The
+      // baseline is deliberately not folded while a symptom is live or arming —
+      // it must not chase the pathology — so a held node's "3d so far" is not
+      // advancing, and without this the row implies it is. The engine computed
+      // this set every tick and stored it nowhere.
+      const hold = data.baselineHold?.(n.nodeId) ?? null;
+      if (hold) {
+        body.push(note(hold === 'symptomatic'
+          ? 'Learning is PAUSED — a symptom is live, so the baseline is not folding (it must not chase the fault)'
+          : 'Learning is PAUSED — this node is arming a symptom, so the baseline is held until it settles',
+          inner, c.yellow));
       }
       // A node the engine cannot see must SAY so here, because every quiet
       // verdict elsewhere on this screen silently depends on it.
       if (!cov.statusFeedLive && !cov.statsFeedLive) {
         body.push(note('Both feeds are down — silence from this node is a MONITORING HOLE, not health', inner, c.red));
+        pinned = c.red('  ⚠ BOTH FEEDS DOWN — silence from this node is a monitoring hole, not health');
       } else if (cov.samples === 0) {
         body.push(note('No samples yet — the engine has nothing to judge this node on', inner, c.yellow));
+        pinned = c.yellow('  ⚠ No samples yet — the engine has nothing to judge this node on');
+      } else {
+        // A SUBSCRIPTION IS NOT A FEED (v0.48.0). The badges above prove the
+        // add-on is subscribed; they say nothing about whether statistics are
+        // actually arriving. `lastStatsUpdated` is the only number that can,
+        // and it reached /api/health and no screen. Silence here is exactly the
+        // condition under which every quiet verdict on this dossier is worthless.
+        const lastStats = data.lastStatsUpdated?.() ?? null;
+        const ageMs = lastStats == null ? null : Date.now() - lastStats;
+        if (ageMs != null && ageMs > STATS_STALE_MS) {
+          const mins = Math.round(ageMs / 60_000);
+          body.push(note(`No statistics fleet-wide for ${mins}m — the feed is subscribed but silent`, inner, c.yellow));
+          pinned = c.yellow(`  ⚠ No statistics fleet-wide for ${mins}m — subscribed, but nothing is arriving`);
+        }
       }
     }
   }
@@ -444,7 +507,14 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   /* ── window the body into the scrollable content area ────────────────────── */
   // frame() reserves masthead + rule + command bar (3 rows). We reserve one more
   // for the flag legend pinned at the bottom, and scroll everything else.
-  const bodyCap = Math.max(1, H - 3);
+  // The pinned verdict lives OUTSIDE the scroll window, in frame()'s telemetry
+  // slot (v0.48.0) — the EVIDENCE block is LAST in a dossier that does not fit
+  // 80x24 for any device shape, so its verdict was unreachable without
+  // scrolling, and an operator who never scrolls never learns the node is
+  // unmonitored. frame() spends one more row when telemetry is present, so the
+  // body budget must shrink by one to match — detail.ts sizes its own body and
+  // frame does NOT recompute it for us.
+  const bodyCap = Math.max(1, H - 3 - (pinned ? 1 : 0));
   const contentRows = Math.max(1, bodyCap - 1);
   const rows = body.map((r) => (r === SEP ? c.grey('─'.repeat(W)) : r));
   const total = rows.length;
@@ -477,6 +547,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   return frame(view, data, {
     title: `NODE #${n.nodeId} · ${n.name}`,
     rightStatus: st + c.grey(' · ') + c.grey('SCORE ') + sc + scrollInfo,
+    ...(pinned ? { telemetry: pinned } : {}),
     body: windowRows,
     keys,
   });
