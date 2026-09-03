@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.49.1 — 2026-09-02
+
+**A share that was not true, caught by live verification of v0.49.0.**
+
+The new evidence-quality row rendered `37 of 32053 invalid (0%)` on the live
+mesh — a zero share sitting beside a non-zero count, which is the row
+contradicting itself. A share that rounds to zero now reads `<1%`. Real whole
+percentages are unchanged.
+
+Also cosmetic: `Long RF` and `Probe cls` carried one space too many before their
+values, so they sat a column right of every other EVIDENCE row.
+
+983 tests, 444 mutants (0 survived, 0 missing, 0 invalid).
+
 ## 0.49.0 — 2026-09-02
 
 **Nothing is folded, persisted and then averaged away.**

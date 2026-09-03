@@ -389,7 +389,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
             c.grey(`mean ${mean}`),
             ...(rates.length ? [c.grey(`worst rate ${Math.min(...rates)}k`)] : []),
           ];
-          body.push(...shedLine('  ' + c.label('Long RF') + ' ', '', bits, inner));
+          body.push(...shedLine('  ' + c.label('Long RF'), '', bits, inner));
         }
       }
       // EVIDENCE QUALITY (v0.49.0). `invalidW` counts windows whose counter
@@ -404,7 +404,11 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         if (invalid > 0 && nw > 0) {
           const share = invalid / nw;
           const tone = share <= 0.05 ? c.grey : share <= 0.2 ? c.yellow : c.red;
-          body.push(kv('Windows', tone(`${invalid} of ${nw} invalid (${Math.round(share * 100)}%)`) +
+          // `(0%)` beside a non-zero count is a share that is not true — it
+          // rendered live as `37 of 32053 invalid (0%)`. A rounded-to-zero
+          // share says "<1%", which is the honest reading of 0.1%.
+          const pct = share >= 0.005 ? `${Math.round(share * 100)}%` : '<1%';
+          body.push(kv('Windows', tone(`${invalid} of ${nw} invalid (${pct})`) +
             c.grey(' — counter arithmetic void; driver restart or an over-long gap'), inner));
         }
       }
@@ -466,7 +470,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           if (cov.probesUnheard > 0) bits.push(c.grey(`${cov.probesUnheard} unheard`));
           if (cov.probesAttribUnknown > 0) bits.push(c.grey(`${cov.probesAttribUnknown} unattributed`));
           if (bits.length) {
-            body.push(...shedLine('  ' + c.label('Probe cls') + ' ', '', bits, inner));
+            body.push(...shedLine('  ' + c.label('Probe cls'), '', bits, inner));
           }
         }
       } else {
