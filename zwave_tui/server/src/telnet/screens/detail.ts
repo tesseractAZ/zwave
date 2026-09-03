@@ -455,15 +455,21 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       // screen could not show, and the one it could show decides nothing.
       const rtn = data.rttNormal?.(n.nodeId) ?? null;
       if (rtn) {
-        body.push(kv('Normal RTT', rtn.ready
+        // 8-character labels: kv pads to 8, so a longer one overflows the cell
+        // and pushes its value out of the column every other row lines up on.
+        body.push(kv('Norm RTT', rtn.ready
           ? c.white(`${Math.round(rtn.median)} ms`) + c.grey(` ±${Math.round(rtn.scale)} ms`) +
             c.grey(` · ${rtn.days}d · this time-of-day band`)
           : c.yellow('still learning') + c.grey(` · ${rtn.days}d so far — not yet a yardstick`), inner));
       }
       const tn = data.timeoutNormal?.(n.nodeId) ?? null;
       if (tn) {
-        body.push(kv('Normal TMO', tn.ready
-          ? c.white(`${(tn.rate * 100).toFixed(1)}%`) + c.grey(` of ${tn.trials} tx`) +
+        body.push(kv('Norm TMO', tn.ready
+          // `trials` is DECAYED (`r.trials * (1 - DECAY) + trials`), so it is a
+          // weight and not a tally — it rendered as `184.865275555814 tx`,
+          // fifteen decimals of precision the number does not have. Marked `≈`
+          // and rounded, the same rule v0.43.1 set for the ledger's `n`.
+          ? c.white(`${(tn.rate * 100).toFixed(1)}%`) + c.grey(` of ≈${Math.round(tn.trials)} tx`) +
             c.grey(` · ${tn.days}d · this time-of-day band`)
           : c.yellow('still learning') + c.grey(` · ${tn.days}d so far — not yet a yardstick`), inner));
       }

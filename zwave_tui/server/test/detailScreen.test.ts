@@ -535,18 +535,18 @@ test('all THREE learned yardsticks reach the dossier, not just the one that arms
     rttNormal: () => ({ median: 41, scale: 7, ready: true, days: 9 }),
     timeoutNormal: () => ({ rate: 0.021, trials: 480, ready: true, days: 9 }),
   }));
-  const norms = out.filter((l) => /Normal/.test(l));
+  const norms = out.filter((l) => /Normal|Norm /.test(l));
   assert.ok(norms.some((l) => /-62 dBm ±3 dB · 9d · this time-of-day band/.test(l)),
     `rssi: ${JSON.stringify(norms)}`);
   assert.ok(norms.some((l) => /41 ms ±7 ms · 9d · this time-of-day band/.test(l)),
     `rtt: ${JSON.stringify(norms)}`);
-  assert.ok(norms.some((l) => /2\.1% of 480 tx · 9d · this time-of-day band/.test(l)),
+  assert.ok(norms.some((l) => /2\.1% of ≈480 tx · 9d · this time-of-day band/.test(l)),
     `timeout: ${JSON.stringify(norms)}`);
 });
 
 test('an un-graduated yardstick says so instead of quoting a median', () => {
   const out = yardLines(withYard({ rttNormal: () => ({ median: 41, scale: 7, ready: false, days: 2 }) }));
-  const row = out.find((l) => /Normal RTT/.test(l)) ?? '';
+  const row = out.find((l) => /Norm RTT/.test(l)) ?? '';
   assert.match(row, /still learning · 2d so far — not yet a yardstick/);
   assert.doesNotMatch(row, /41 ms/, 'a median nobody should act on yet is not quoted');
 });
@@ -653,4 +653,32 @@ test('a stale-feed pin does not fire on a single missed statistics event (v0.48.
   // ...and it DOES fire once the silence clears the headroom.
   (d.data as unknown as Record<string, unknown>).lastStatsUpdated = () => Date.now() - 12 * 60_000;
   assert.match(renderDetail(ctx(mkView(120, 40), d.data, d.nodes)).map(strip)[2], /nothing is arriving/);
+});
+
+test('the timeout yardstick marks its DECAYED trials count as a weight (v0.48.1)', () => {
+  // `r.trials = r.trials * (1 - DECAY) + trials` — a weight, not a tally. It
+  // rendered live as `4.4% of 184.865275555814 tx`: fifteen decimals of
+  // precision the number does not have. Same rule v0.43.1 set for the ledger's
+  // `n` — a decayed weight is never printed as an exact count.
+  const out = yardLines(withYard({
+    timeoutNormal: () => ({ rate: 0.044, trials: 184.865275555814, ready: true, days: 10 }),
+  }));
+  const row = out.find((l) => /Norm TMO/.test(l)) ?? '';
+  assert.match(row, /4\.4% of ≈185 tx/, `weight, rounded and marked: "${row}"`);
+  assert.doesNotMatch(row, /184\.86/, 'never the raw float');
+});
+
+test('every EVIDENCE label fits the 8-column cell so the values align (v0.48.1)', () => {
+  // kv() pads the label to 8; a longer one overflows and pushes its value out
+  // of the column every other row lines up on. `Normal RTT` (10) did exactly
+  // that live.
+  const out = yardLines(withYard({
+    rssiNormal: () => ({ median: -62, scale: 3, ready: true, days: 9 }),
+    rttNormal: () => ({ median: 41, scale: 7, ready: true, days: 9 }),
+    timeoutNormal: () => ({ rate: 0.021, trials: 480, ready: true, days: 9 }),
+  }), 160);
+  const cols = out.filter((l) => /^\s{2}(Normal|Norm |Samples|Probes|Feeds)/.test(l))
+    .map((l) => l.indexOf(l.trim().split(/\s{2,}/)[1] ?? ''));
+  const starts = new Set(cols.filter((i) => i > 0));
+  assert.equal(starts.size, 1, `values must start in ONE column, got ${JSON.stringify([...starts])}`);
 });

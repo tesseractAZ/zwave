@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.48.1 — 2026-09-02
+
+**Two defects live verification caught in v0.48.0, minutes after it shipped.**
+
+**A decayed weight printed with fifteen decimals.** The new timeout-yardstick
+row rendered `4.4% of 184.865275555814 tx` on the live mesh. `trials` is decayed
+(`r.trials * (1 - DECAY) + trials`), so it is a weight and not a tally — the
+same class v0.43.1 ruled on for the ledger's `n`, recurring in a row shipped
+hours earlier. It is now rounded and marked `≈`.
+
+**A label that did not fit its cell.** `kv()` pads labels to 8 columns, and
+`Normal RTT` / `Normal TMO` are 10 — so their values were pushed out of the
+column every other EVIDENCE row aligns on. Shortened to `Norm RTT` / `Norm TMO`.
+
+Both are pinned by mutants, and the alignment one by an invariant that checks
+every EVIDENCE value starts in a single column rather than by asserting the
+labels' spelling.
+
+971 tests, 429 mutants (0 survived, 0 missing, 0 invalid).
+
 ## 0.48.0 — 2026-09-02
 
 **The dossier states what the engine actually knows about this node.**
