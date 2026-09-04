@@ -4116,15 +4116,20 @@ radio.
 
 ### 12.9 The container-log contract
 
-`logger.ts` writes to stdout/stderr, which is what `ha addons logs` and
-`journalctl` surface. Every line is `[zwave-tui] ` followed, for `warn` and
-above only, by the uppercase level and a colon:
+`logger.ts` writes to stdout/stderr, which is what `ha apps logs` and
+`journalctl` surface. Every line is `[zwave-tui] ` followed, for severities
+above `info` only, by the uppercase severity and a colon. The severities are
+the seven syslog names — `trace debug info notice warning error fatal` — so
+`log.warn()` emits the token `WARNING:`, not `WARN:`:
 
 ```
-[zwave-tui] auto-ping: node 49 liveness sweep — 35 listening, 1 dead
-[zwave-tui] WARN: auto-ping: storm suppression — 9 of 39 nodes Dead, standing down
+[zwave-tui] write actions disabled (read-only) — set write_actions_enabled to unlock
+[zwave-tui] WARNING: auto-ping is enabled but write_actions_enabled is OFF — it will not act
 [zwave-tui] ERROR: driver-ws: homeId mismatch — purging evidence and stopping
 ```
+
+(The first two lines are the live v0.50.0 output, an `info` and a `warning`
+adjacent, which is the pairing the fix exists to make distinguishable.)
 
 Until v0.50.0 the severity gated the write and was then discarded, so a `warn`,
 an `error` and a routine `info` line were byte-identical on disk: `grep ERROR`
