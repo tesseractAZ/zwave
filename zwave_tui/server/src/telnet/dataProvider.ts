@@ -97,7 +97,7 @@ export interface ZwaveDataSource {
   /** The ledger's live workload (v0.41). REQUIRED — see ackEvent. */
   openEpisodes(): OpenEpisodeSummary[] | null;
   /** Control arm with provenance (v0.41). REQUIRED — see ackEvent. */
-  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number } | null;
+  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   /** Auto-ping runtime state (v0.41), null when off. REQUIRED — see ackEvent. */
   autoPingState(): AutoPingSnapshot | null;
   /** Driver-WS lifecycle line (v0.43.0). REQUIRED — see ackEvent. */

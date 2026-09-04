@@ -493,7 +493,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       unverifiableUndersampledCount: (k: string) => (k === 'rtt-degraded' ? 4 : 0),
       confoundedCount: (k: string) => (k === 'rtt-degraded' ? 2 : 0),
       openEpisodes: () => [{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded', onsetMs: 1, actionKind: null, confounded: false, beforeFreshN: 4, confirming: true }],
-      controlArm: (k: string) => (k === 'rtt-degraded' ? { n: 6, ok: 5, bad: 0, nodes: 3 } : null),
+      controlArm: (k: string) => (k === 'rtt-degraded' ? { n: 6, ok: 5, bad: 0, nodes: 3, minN: 4 } : null),
       driverWsStatus: () => 'live (schema 41)',
       driverWsState: () => 'backoff',
       autoPingState: () => ({ lastTickMs: 42, suppressed: 'storm', listening: 35, deadListening: 1, staleDue: 2, stalestMs: 60, verifyOwed: 3, config: { enabled: true, writeActions: true, afterMs: 1, maxAttempts: 3, staleMs: 1 }, nodes: [] }),

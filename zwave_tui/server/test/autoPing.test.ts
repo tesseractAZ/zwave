@@ -1540,3 +1540,105 @@ test('the manual lane is labelled as such, so the sweep gate can exclude it (v0.
   assert.notEqual(owed[0].lane, 'sweep', 'that lane feeds the persisted rate');
 });
 
+
+test('auto-ping RAISES its leveled messages in the container log, not only the ring (v0.50.0)', async () => {
+  // The log2 TYPE foreclosed severity — `((msg) => void) & { debug? }` has no
+  // warn/error members — so every leveled message was paired with a BARE
+  // `log2?.(m)` and autoPing's two ERROR sites and its WARN site all reached
+  // the container log at info. The ring carried the severity; the surface an
+  // operator greps did not.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  const raised: { level: string; msg: string }[] = [];
+  const log2 = Object.assign((m: string) => raised.push({ level: 'info', msg: m }), {
+    debug: (m: string) => raised.push({ level: 'debug', msg: m }),
+    warn: (m: string) => raised.push({ level: 'warn', msg: m }),
+    error: (m: string) => raised.push({ level: 'error', msg: m }),
+  });
+  // A STORM: enough mains nodes Dead that the sweep stands down. That warning
+  // is the one message this file calls "worth saying out loud", and it was the
+  // ONLY auto-ping message with no log2 companion at all — announced on a
+  // screen behind the login gate and nowhere an operator greps.
+  let clock = T;
+  const nodes = [node(1, { isController: true }), ...Array.from({ length: 12 }, (_, i) => dead(20 + i))];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: () => {}, log2,
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  try {
+    clock = T + BOOT_WINDOW_MS + 30 * MIN;
+    h.tick();
+  } finally { h.stop(); }
+
+  // Match the WARNING's own words — `/suppressed:/` alone also matches the
+  // routine decision trace, which is deliberately debug.
+  const storm = raised.find((r) => /mains nodes are Dead/.test(r.msg));
+  assert.ok(storm, `the storm warning must reach the container log at all: ${JSON.stringify(raised.map((r) => r.msg.slice(0, 40)))}`);
+  assert.equal(storm.level, 'warn', 'and it must arrive AS a warning, not downgraded to info');
+});
+
+test('the LADDER\'s own remediation probe reaches the server log too (v0.50.0)', async () => {
+  // Sibling of the sweep test above — and the site that was actually unprotected.
+  // The mutant guarding this had an anchor matching THREE call sites; `replace`
+  // takes the first, so for its whole life it only ever mutated the routine
+  // sweep. Retargeting it to the engine's own autonomous write showed the write
+  // could be removed from the container log with every test still green.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const ring: string[] = [];
+  const server: string[] = [];
+  const nodes = [node(1, { isController: true }), dead(7)];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => ring.push(text),
+    log2: Object.assign((m: string) => server.push(m), { debug: () => {} }),
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  h.tick();                                   // observe it Dead
+  clock = T + BOOT_WINDOW_MS + 60 * MIN;      // past the boot window AND the dwell
+  h.tick();
+  const probing = /past the dwell — probing \(attempt/;
+  assert.ok(ring.some((m) => probing.test(m)), `must reach the event ring: ${ring.join(' | ')}`);
+  assert.ok(server.some((m) => probing.test(m)),
+    `must ALSO reach the server log — this is the engine's own autonomous write: ${server.join(' | ')}`);
+  h.stop();
+});
+
+test('a node already Dead at first sight is dated from when it was last HEARD (v0.50.0)', () => {
+  // `deadSince` lives only in memory, so every restart re-dated every Dead node
+  // to boot. Measured live: six deploys in one evening each pushed node 49's
+  // "needs a human" summons a fresh dwell into the future, and the screen's
+  // "DEAD 19.2h" was 19.2 hours of UPTIME, not of silence. The driver still
+  // knows when it last heard the node — ask it instead of assuming.
+  const s = createAutoPingState();
+  const heard = T - 90 * MIN;                       // silent an hour and a half
+  const nodes = mesh(20, [dead(7, { stats: { lastSeen: heard } as never })]);
+  const d = tick(s, nodes, T);
+  assert.equal(s.deadSince.get(7), heard,
+    `the outage is dated from the last contact, not from our boot: ${s.deadSince.get(7)} vs ${heard}`);
+  // And the consequence that matters: the dwell is ALREADY satisfied, so a node
+  // that has been down for 90 minutes is remediated now, not in another ten.
+  assert.deepEqual(d.ping, [7], 'a long-dead node is not made to serve its dwell again');
+});
+
+test('a future lastSeen cannot fabricate an outage older than our uptime (v0.50.0)', () => {
+  // Clock skew between the driver host and this process is real (a 7-hour
+  // lastSeen skew already cost a day of misreading). A lastSeen in the future
+  // would date the outage forward, so `now - deadSince` goes NEGATIVE and the
+  // screen would render a nonsense age. Clamp to now: we cannot claim an outage
+  // longer than we have been watching.
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(8, { stats: { lastSeen: T + 60 * MIN } as never })]);
+  trackEpisodes(s, nodes, T);
+  assert.equal(s.deadSince.get(8), T, 'a future contact is clamped to now');
+  assert.ok((s.deadSince.get(8) as number) <= T, 'never dates an outage into the future');
+});
+
+test('a Dead node with NO lastSeen on record is dated from now (v0.50.0)', () => {
+  // The seeding must still work when the driver knows nothing — "never heard"
+  // is not a licence to invent an outage of unbounded length.
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(9)]);                // node() defaults lastSeen: null
+  trackEpisodes(s, nodes, T);
+  assert.equal(s.deadSince.get(9), T);
+});

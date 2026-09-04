@@ -253,8 +253,20 @@ const MUTANTS = [
     repl: '    const floorC = nc;',
     what: 'the noise-floor NUMBER uses the shared dBm band, not the engine band colour' },
   { id: 'login-exact-rows', file: 'src/telnet/screens/login.ts',
-    find: "  while (out.length < o.rows) out.push('');", repl: '',
+    // AMBIGUOUS UNTIL v0.50.0: login.ts pads in TWO places and this hit only the
+    // first. The untested one was the framed path — the site whose own comment
+    // records the defect (stale bytes from the previous frame, on the one screen
+    // that takes a password).
+    find: "  const out = rows.slice(0, o.rows);\n  while (out.length < o.rows) out.push('');",
+    repl: '  const out = rows.slice(0, o.rows);',
     what: 'renderLogin returns EXACTLY view.rows lines like every other path' },
+  { id: 'login-framed-exact-rows', file: 'src/telnet/screens/login.ts',
+    // The site the ambiguous anchor never reached. A short box left the caller
+    // to decide what the remaining rows contain, so bytes from the PREVIOUS
+    // frame could linger on the one screen that takes a password.
+    find: "  // frame could linger is the one that takes a password.\n  while (out.length < o.rows) out.push('');",
+    repl: '  // frame could linger is the one that takes a password.',
+    what: 'the FRAMED login path also returns exactly `rows` lines' },
   { id: 'log-keycap-priority', file: 'src/telnet/screens/log.ts',
     find: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE', 2], ['⏎', 'DEVICE', 1], ['M', 'ACK', 5], ['D', 'DATE', 4],\n      ['O', 'ERRORS', 3], ['1-9', 'SCREENS'], ['Q', 'CLOSE'],",
     repl: "      ['↑↓', 'MOVE'], ['␣/b', 'PAGE'], ['⏎', 'DEVICE'], ['M', 'ACK'], ['D', 'DATE'],\n      ['O', 'ERRORS'], ['1-9', 'SCREENS'], ['Q', 'CLOSE'],",
@@ -383,9 +395,17 @@ const MUTANTS = [
     // Reverts to ring-only logging — the state in which 34 real probes were
     // invisible to anyone reading the add-on log, and the feature was diagnosed
     // as a no-op because the evidence sat behind the login gate.
-    find: '      o.log(\'info\', nodeId, msg);\n      o.log2?.(msg);',
-    repl: '      o.log(\'info\', nodeId, msg);',
-    what: 'an autonomous action reaches the SERVER log, not only the event ring' },
+    // AMBIGUOUS UNTIL v0.50.0: this anchor matched THREE call sites and
+    // `replace` takes the first, so only the routine sweep was ever mutated —
+    // the ladder's own remediation probe and the verification probe went
+    // untested while the run reported a confident kill. One site each now.
+    find: '        `probing (attempt ${attempt}/${o.config.maxAttempts})`;\n      o.log(\'info\', nodeId, msg);\n      o.log2?.(msg);',
+    repl: '        `probing (attempt ${attempt}/${o.config.maxAttempts})`;\n      o.log(\'info\', nodeId, msg);',
+    what: "the ladder's own remediation probe reaches the SERVER log, not only the ring" },
+  { id: 'autoping-verify-visible', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)`;\n      o.log(\'info\', nodeId, msg);\n      o.log2?.(msg);',
+    repl: '      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)`;\n      o.log(\'info\', nodeId, msg);',
+    what: 'the VERIFICATION probe — the evidence a verdict rests on — is on the record too' },
   { id: 'autoping-trace', file: 'src/zwave/autoPing.ts',
     // Reverts to the state the feature was FOUND in: enabled, healthy, and
     // logging nothing — so "nothing to do" and "broken" were byte-identical.
@@ -2306,6 +2326,74 @@ const MUTANTS = [
     find: "          const pct = share >= 0.005 ? `${Math.round(share * 100)}%` : '<1%';",
     repl: '          const pct = `${Math.round(share * 100)}%`;',
     what: 'a rounded-to-zero share reads "<1%", never "(0%)" beside a non-zero count' },
+  { id: 'severity-is-written', file: 'src/logger.ts', tests: ['logger'],
+    // The severity gated the write and was then DISCARDED, so a warn, an error
+    // and an ordinary info line were byte-identical in journald — the one
+    // "needs a human" ERROR in 50 hours sat at the weight of 941 routine lines.
+    find: "    const tag = severity === 'info' ? '' : `${severity.toUpperCase()}: `;",
+    repl: "    const tag = '';",
+    what: 'a leveled line carries its severity, so grep can find it' },
+  { id: 'info-stays-bare', file: 'src/logger.ts', tests: ['logger'],
+    // Tagging info too would rewrite the overwhelming majority of lines and
+    // break every existing grep for no gain.
+    find: "    const tag = severity === 'info' ? '' : `${severity.toUpperCase()}: `;",
+    repl: "    const tag = `${severity.toUpperCase()}: `;",
+    what: 'ordinary info lines stay bare — only claimed severities pay for a token' },
+  { id: 'storm-warning-reaches-the-log', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // The one message this file calls "worth saying out loud" was the ONLY
+    // auto-ping message with no log2 companion at all.
+    find: '      (o.log2?.warn ?? o.log2)?.(stormMsg);',
+    repl: '      void stormMsg;',
+    what: 'a quarter of the mesh going down reaches the log an operator greps' },
+  { id: 'storm-warning-is-raised', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '      (o.log2?.warn ?? o.log2)?.(stormMsg);',
+    repl: '      o.log2?.(stormMsg);',
+    what: 'and arrives AS a warning, not downgraded to info' },
+  { id: 'sweep-stays-visible-in-the-server-log', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Auto-ping ONCE wrote only to the in-memory ring; 34 real probes were
+    // invisible from outside and the feature was diagnosed as a no-op.
+    find: '      // Volume you can filter is not the same problem as signal you cannot see.\n      o.log(\'info\', nodeId, msg);\n      o.log2?.(msg);',
+    repl: '      // Volume you can filter is not the same problem as signal you cannot see.\n      o.log(\'info\', nodeId, msg);\n      o.log2?.debug?.(msg);',
+    what: 'an autonomous probe stays visible in the container log at the DEFAULT level' },
+  { id: 'refused-socket-is-reclaimed', file: 'src/telnet/server.ts', tests: ['ingressTrust'],
+    // `end()` is a HALF-close; the fd stays ours until the PEER closes, and a
+    // refused socket joins no `conns` set so the idle sweep never sees it.
+    find: '  const kill = setTimeout(() => { try { socket.destroy(); } catch { /* already gone */ } }, lingerMs);',
+    repl: '  const kill = setTimeout(() => { /* leaked */ }, lingerMs);',
+    what: 'a refused socket is reclaimed on OUR schedule, not the peer\'s' },
+  { id: 'refuse-stands-down-on-a-clean-close', file: 'src/telnet/server.ts', tests: ['ingressTrust'],
+    // A peer that hangs up on cue costs us nothing; firing destroy anyway would
+    // fire a timer against a freed socket on every well-behaved refusal.
+    find: "  socket.once('close', () => clearTimeout(kill));",
+    repl: '  void kill;',
+    what: 'the reclaim stands down when the peer closes first' },
+  { id: 'teardown-is-logged', file: 'src/telnet/server.ts', tests: ['ingressTrust'],
+    // 165 connect lines and zero teardown lines: a session that ended silently
+    // was indistinguishable from one still open.
+    find: '    log(`telnet: client ${conn.ip} disconnected after ${fmtElapsed(Date.now() - conn.openedAt)} (${conns.size} active)`);',
+    repl: '    void conn;',
+    what: "a session's end, duration and the remaining count are on the record" },
+  { id: 'outage-clock-survives-a-restart', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // In-memory state re-seeded the clock at every boot, so each deploy pushed
+    // the "needs a human" summons further out — measured live on node 49.
+    find: '        state.deadSince.set(n.nodeId, lastHeard != null && lastHeard < now ? lastHeard : now);',
+    repl: '        state.deadSince.set(n.nodeId, now);',
+    what: 'a node already Dead at boot is dated from when it was last HEARD' },
+  { id: 'outage-clock-cannot-exceed-uptime', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // A future or absent lastSeen must not invent an outage.
+    find: '        state.deadSince.set(n.nodeId, lastHeard != null && lastHeard < now ? lastHeard : now);',
+    repl: '        state.deadSince.set(n.nodeId, lastHeard ?? now);',
+    what: 'a future lastSeen cannot fabricate a negative-age outage' },
+  { id: 'control-arm-respects-readiness', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // `outcomes.baseRate()` returns null below minEpisodes; this printed the
+    // rate anyway, so one tally said 100% here and nothing at all to REMEDY.
+    find: '      if (arm.n + 1e-9 < arm.minN) {',
+    repl: '      if (arm.n < 0) {',
+    what: 'ENGINE applies the same readiness rule the store applies' },
+  { id: 'ready-control-arm-still-publishes', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: '      if (arm.n + 1e-9 < arm.minN) {',
+    repl: '      if (arm.n >= 0) {',
+    what: 'the gate does not swallow a legitimately measured base rate' },
   { id: 'unpend-removes-one', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Withdraws the whole pending list on one transport failure — the other
     // probes' owed judgments vanish with it.
@@ -2771,6 +2859,7 @@ let killed = 0;
 const survived = [];
 const equivalent = [];
 const missing = [];
+const ambiguous = [];
 const invalid = [];
 const relabel = [];
 const mappingMisses = []; // kill-fast guessed wrong; only a speed signal, never a verdict
@@ -2837,12 +2926,41 @@ const restore = () => {
   rmSync(SIDECAR, { force: true });
 };
 
+// PRE-FLIGHT. Anchor rot is a property of the FILES, not of any test, so it is
+// knowable before a single test runs. Discovering it mutant-by-mutant meant
+// waiting out the whole suite to be told the run was void.
+{
+  const bad = [];
+  for (const m of run) {
+    const src = readFileSync(join(ROOT, m.file), 'utf8');
+    const n = src.split(m.find).length - 1;
+    if (n !== 1) bad.push(`${n === 0 ? 'MISSING  ' : `AMBIGUOUS(${n})`} ${m.id} — ${m.file}`);
+  }
+  if (bad.length) {
+    console.log(`\nAnchor pre-flight failed for ${bad.length} of ${run.length} mutants:`);
+    for (const b of bad) console.log(`  ${b}`);
+    console.log('\nEvery anchor must match its file EXACTLY once. Fix these before running;');
+    console.log('a run that skips mutants publishes a count it did not earn.\n');
+    process.exit(2);
+  }
+}
+
 for (const m of run) {
   const path = join(ROOT, m.file);
   const original = readFileSync(path, 'utf8');
-  if (!original.includes(m.find)) {
+  const hits = original.split(m.find).length - 1;
+  if (hits === 0) {
     missing.push(m);
     console.log(`MISSING   ${m.id.padEnd(26)} — anchor not found in ${m.file}`);
+    continue;
+  }
+  // `replace` takes the FIRST match only. An anchor that matches several sites
+  // mutates one nobody chose, then reports a confident verdict about it — the
+  // guard (`includes`) was weaker than the operation it guarded. This is the
+  // harness's own version of the bug it exists to catch, so it is a failure.
+  if (hits > 1) {
+    ambiguous.push(m);
+    console.log(`AMBIGUOUS ${m.id.padEnd(26)} — anchor matches ${hits}x in ${m.file}`);
     continue;
   }
   // Sidecar FIRST: if we are killed between here and the restore, the next run
@@ -2897,7 +3015,7 @@ for (const m of run) {
 }
 
 console.log(`\n${killed} killed · ${survived.length} survived · ${equivalent.length} equivalent · ` +
-  `${missing.length} missing · ${invalid.length} invalid · ${relabel.length} relabel`);
+  `${missing.length} missing · ${ambiguous.length} ambiguous · ${invalid.length} invalid · ${relabel.length} relabel`);
 if (mappingMisses.length) {
   // NOT a failure — every verdict above is unchanged. It only means these
   // mutants paid for the full suite because their targeted file did not catch
@@ -2907,7 +3025,7 @@ if (mappingMisses.length) {
     console.log(`  ${x.id.padEnd(26)} tried [${x.tried}] → actually caught by [${x.caughtBy}]`);
   }
 }
-if (survived.length || missing.length || invalid.length || relabel.length) {
+if (survived.length || missing.length || ambiguous.length || invalid.length || relabel.length) {
   console.log('\nA SURVIVED entry is a fix no test protects. A MISSING entry means this');
   console.log('file has drifted from the code. An INVALID entry is a mutant that does not');
   console.log('compile — it would be counted as killed while proving nothing. All three');

@@ -229,7 +229,15 @@ export function pendProbe(state: AutoPingState, nodeId: number, t: number, lane:
 function settleProbe(
   o: {
     log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string) => void;
-    log2?: ((msg: string) => void) & { debug?: (msg: string) => void };
+    log2?: ((msg: string) => void) & {
+    debug?: (msg: string) => void;
+    /** v0.50.0. The TYPE foreclosed severity: every leveled message was paired
+     *  with a BARE `log2?.(m)`, so autoPing's two ERROR sites and its WARN site
+     *  all reached the container log at info. Adding these members is what lets
+     *  a caller actually raise one. */
+    warn?: (msg: string) => void;
+    error?: (msg: string) => void;
+  };
   },
   state: AutoPingState,
   nodeId: number,
@@ -242,7 +250,8 @@ function settleProbe(
     onFailed?.();
     const m = `auto-ping: node ${nodeId} could not be probed (${why}) — not judged`;
     o.log('warn', nodeId, m);
-    o.log2?.(m);
+    // v0.50.0: raise it in the CONTAINER log too, not just the TUI ring.
+    (o.log2?.warn ?? o.log2)?.(m);
   };
   void launched.then(
     (res) => {
@@ -641,7 +650,22 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
     if (!isPingCandidate(n)) continue;
     seen.add(n.nodeId);
     if (n.status === NodeStatus.Dead) {
-      if (!state.deadSince.has(n.nodeId)) state.deadSince.set(n.nodeId, now);
+      if (!state.deadSince.has(n.nodeId)) {
+        // SEED FROM WHAT THE DRIVER STILL KNOWS (v0.50.0), not from `now`.
+        //
+        // This state is in-memory, so every add-on restart re-seeded the outage
+        // clock at boot — and the driver, which survives our restarts, was
+        // holding `lastSeen` two lines from here the whole time. Measured on
+        // the live mesh: node 49's "DEAD 19.2h" was counted from a deploy, not
+        // from when the device actually stopped answering, and three deploys in
+        // 50 minutes each restarted the clock.
+        //
+        // A node already Dead the first time we look has been down at least
+        // since it was last heard. Clamp to `now` so a future or absent
+        // lastSeen can never invent an outage longer than our own uptime.
+        const lastHeard = n.stats?.lastSeen ?? null;
+        state.deadSince.set(n.nodeId, lastHeard != null && lastHeard < now ? lastHeard : now);
+      }
     } else {
       state.deadSince.delete(n.nodeId);
       state.attempts.delete(n.nodeId);
@@ -727,7 +751,15 @@ export interface AutoPingRunnerOptions {
    * the evidence was in a place the diagnosis never looked. An autonomous action
    * must be visible in BOTH.
    */
-  log2?: ((msg: string) => void) & { debug?: (msg: string) => void };
+  log2?: ((msg: string) => void) & {
+    debug?: (msg: string) => void;
+    /** v0.50.0. The TYPE foreclosed severity: every leveled message was paired
+     *  with a BARE `log2?.(m)`, so autoPing's two ERROR sites and its WARN site
+     *  all reached the container log at info. Adding these members is what lets
+     *  a caller actually raise one. */
+    warn?: (msg: string) => void;
+    error?: (msg: string) => void;
+  };
   config: AutoPingConfig;
   tickMs?: number;
   now?: () => number;
@@ -870,9 +902,15 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     // ONCE — it means a quarter of the mesh is down, which the operator wants to
     // know about even though the engine is deliberately doing nothing.
     if (decision.suppressed === 'storm' && lastSuppression !== 'storm') {
-      o.log('warn', null,
+      const stormMsg =
         `auto-ping suppressed: ${decision.deadListening}/${decision.listening} mains nodes are Dead — ` +
-        'that is a controller-level event, not per-device, so probing them would only add traffic');
+        'that is a controller-level event, not per-device, so probing them would only add traffic';
+      o.log('warn', null, stormMsg);
+      // The one message this file calls "worth saying out loud" was the ONLY
+      // auto-ping message with no log2 companion (v0.50.0) — so a quarter of the
+      // mesh going down was announced on a screen behind the login gate and
+      // NOWHERE an operator greps.
+      (o.log2?.warn ?? o.log2)?.(stormMsg);
     }
     lastSuppression = decision.suppressed;
 
@@ -955,6 +993,21 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
             : echoOnly
               ? `(nothing heard past our last probe's answer ${silence} ago — probing for its own voice)`
               : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`);
+      // DELIBERATELY still info on BOTH sinks (re-affirmed v0.50.0).
+      //
+      // 941 of these in 50 hours is 71.6% of the add-on log, and an audit
+      // proposed demoting them to debug. That trade was refused: the test
+      // "an autonomous action is visible in the SERVER log, not only the event
+      // ring" pins this line at info because auto-ping ONCE wrote only to the
+      // ring, 34 real probes were invisible from outside, and the feature was
+      // diagnosed as a no-op — the evidence existed, in a place the diagnosis
+      // never looked. Demoting to debug reinstates exactly that at the DEFAULT
+      // log level.
+      //
+      // The actual harm the audit found was that the one ERROR asking for a
+      // human was BYTE-IDENTICAL to these. That is fixed at the sink instead:
+      // logger.ts now writes the severity, so `grep ERROR` finds it among them.
+      // Volume you can filter is not the same problem as signal you cannot see.
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       // The service call resolving proves only that HA ACCEPTED the request —
@@ -1081,7 +1134,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
         `the probe never left this add-on (no ping entity, or HA unreachable). This is OUR fault, not the node's; ` +
         `the remediation ladder is untouched and will resume when a probe can be sent.`;
       o.log('error', nodeId, m);
-      o.log2?.(m);
+      (o.log2?.error ?? o.log2)?.(m);
     }
     for (const nodeId of decision.gaveUp) {
       state.gaveUpAnnounced.add(nodeId);
@@ -1095,7 +1148,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
         `That means it ignored ${tries} NOP frame${tries === 1 ? '' : 's'}, NOT that it is unreachable: ` +
         `try OPERATING the device (a real command often lands when pings do not), then a manual ping, then check its power.`;
       o.log('error', nodeId, m);
-      o.log2?.(m);
+      (o.log2?.error ?? o.log2)?.(m);
     }
 
     /* ── did the earlier probes actually land? (v0.36) ────────────────────
@@ -1125,7 +1178,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       const m = `auto-ping: node ${nodeId} did NOT answer its probe ` +
         `(${ord} consecutive miss, lastSeen did not advance)`;
       o.log(misses >= 2 ? 'warn' : 'info', nodeId, m);
-      o.log2?.(m);
+      (misses >= 2 ? (o.log2?.warn ?? o.log2) : o.log2)?.(m);
     }
   };
 

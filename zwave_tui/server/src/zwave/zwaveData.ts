@@ -411,7 +411,7 @@ export interface ZwaveData {
   driverWsStatus(): string;
   driverWsState(): DriverWsState;
   openEpisodes(): OpenEpisodeSummary[] | null;
-  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number } | null;
+  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   autoPingState(): AutoPingSnapshot | null;
   setAutoPingSnapshot(fn: (() => AutoPingSnapshot) | null): void;
   /** Drain the nodes owed a verification probe this tick (v0.36). Each entry
@@ -1456,7 +1456,7 @@ class ZwaveDataImpl implements ZwaveData {
     }));
   }
 
-  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number } | null {
+  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null {
     return this.outcomes ? this.outcomes.controlArm(kind) : null;
   }
 

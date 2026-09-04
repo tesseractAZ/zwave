@@ -498,3 +498,83 @@ test('a long run of slashes is refused promptly, never backtracked over', () => 
   const ms = Date.now() - t0;
   assert.ok(ms < 250, `took ${ms}ms — the input is being scanned when it should be rejected`);
 });
+
+test('a REFUSED socket is reclaimed on our schedule, not the peer\'s (v0.50.0)', async () => {
+  // Measured live at v0.49.1: 30 open sockets against 4 accepted sessions.
+  // `end()` only half-closes, and a refused socket joins no `conns` set, so the
+  // active counter and the idle sweep are both blind to it. A peer that never
+  // closes (yanked cable, expired NAT entry) pinned one fd per refusal, without
+  // limit, on the branch whose whole job is to shed load.
+  const { refuseSocket } = await import('../src/telnet/server');
+
+  const calls: string[] = [];
+  let onClose: (() => void) | null = null;
+  const sock = {
+    end: (m: string) => { calls.push(`end:${m}`); },
+    destroy: () => { calls.push('destroy'); },
+    once: (ev: string, fn: () => void) => { if (ev === 'close') onClose = fn; },
+  };
+
+  refuseSocket(sock as never, 'no room\r\n', 5);
+  assert.deepEqual(calls, ['end:no room\r\n'], 'the goodbye goes out first');
+  assert.ok(onClose, 'the reclaim must stand down if the peer closes on cue');
+
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(calls, ['end:no room\r\n', 'destroy'],
+    `a silent peer does not get to keep our fd: ${calls.join(',')}`);
+});
+
+test('a refused peer that closes on cue is not destroyed twice (v0.50.0)', async () => {
+  const { refuseSocket } = await import('../src/telnet/server');
+  const calls: string[] = [];
+  let onClose: (() => void) | null = null;
+  const sock = {
+    end: (m: string) => { calls.push(`end:${m}`); },
+    destroy: () => { calls.push('destroy'); },
+    once: (ev: string, fn: () => void) => { if (ev === 'close') onClose = fn; },
+  };
+  refuseSocket(sock as never, 'no room\r\n', 5);
+  (onClose as unknown as () => void)();          // peer hung up immediately
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(calls, ['end:no room\r\n'], 'no stray destroy after a clean close');
+});
+
+test('a telnet session logs its END, its duration and the remaining count (v0.50.0)', async () => {
+  // 50 hours of production log: 165 "client connected" lines and ZERO teardown
+  // lines. A session that ended was indistinguishable from one still open, so
+  // the "(N active)" counter could only ever be read as a high-water mark.
+  const { startTelnetServer } = await import('../src/telnet/server');
+  const { connect } = await import('node:net');
+
+  // A private port of our own. The first draft guarded its assertions on a
+  // regex that never matched the real connect line, so the whole test passed
+  // by running nothing — a survivor in the harness was the only thing that said so.
+  const port = 24500 + Math.floor(Math.random() * 400);
+  const lines: string[] = [];
+  const srv = startTelnetServer({
+    data: mockData({ nodes: [mkNode()] }),
+    host: '127.0.0.1',
+    port,
+    log: (m: string) => { lines.push(m); },
+    signalDisplay: 'margin',
+  } as never);
+
+  await new Promise<void>((done) => {
+    let over = false;
+    const fin = () => { if (!over) { over = true; done(); } };
+    const s = connect({ host: '127.0.0.1', port });
+    s.on('connect', () => setTimeout(() => s.destroy(), 120));
+    s.on('error', fin);
+    s.on('close', () => setTimeout(fin, 300));
+    setTimeout(fin, 3000);
+  });
+  srv.stop();
+
+  const dump = lines.join(' | ');
+  assert.ok(lines.some((l) => /telnet: client connected from/.test(l)),
+    `the server never accepted the connection, so this test proves nothing: ${dump}`);
+  const bye = lines.filter((l) => /disconnected after/.test(l));
+  assert.ok(bye.length > 0, `a connect with no teardown line: ${dump}`);
+  assert.match(bye[0], /disconnected after \S+ \(\d+ active\)/,
+    `teardown must carry duration AND the remaining count: ${bye[0]}`);
+});

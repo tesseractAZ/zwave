@@ -491,7 +491,7 @@ export interface DataProvider {
   openEpisodes(): OpenEpisodeSummary[] | null;
   /** The control arm with its provenance (v0.41) — the n and node count behind
    *  `baseRate`, without which an efficacy claim has no context. */
-  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number } | null;
+  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   /** Auto-ping's live runtime state (v0.41), or null when the feature is off. */
   autoPingState(): AutoPingSnapshot | null;
   /** Driver-WS lifecycle, one line (v0.43.0). The accessor existed since the
