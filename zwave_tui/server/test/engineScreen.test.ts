@@ -62,7 +62,7 @@ test('ENGINE holds EXACTLY view.rows lines within view.cols at every size', () =
   const rich: Partial<DataProvider> = {
     autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 1_800_000, attempts: 2, nextEligibleMs: NOW + 600_000, missStreak: 3, launchFailures: 0, pending: 1, gaveUp: false, launchGaveUp: false, talkingWhileDead: false }] }),
     openEpisodes: () => ([{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded' as SymptomKind, onsetMs: NOW - 300_000, actionKind: null, confounded: false, beforeFreshN: 4, confirming: true }]),
-    controlArm: () => ({ n: 6.2, ok: 5.1, bad: 0, nodes: 3 }),
+    controlArm: () => ({ n: 6.2, ok: 5.1, bad: 0, nodes: 3, minN: 4 }),
   };
   for (const [cols, rows] of [[40, 12], [80, 24], [120, 40], [200, 50]] as const) {
     for (const over of [{}, rich]) {
@@ -79,7 +79,7 @@ test('at the MODAL 80x24 the operator sees auto-ping state, the live ledger, and
   const joined = plain(renderEngine(ctx(80, 24, {
     autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 1_800_000, attempts: 2, nextEligibleMs: NOW + 600_000, missStreak: 0, launchFailures: 0, pending: 0, gaveUp: false, launchGaveUp: false, talkingWhileDead: false }] }),
     openEpisodes: () => ([{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded' as SymptomKind, onsetMs: NOW - 300_000, actionKind: null, confounded: false, beforeFreshN: 4, confirming: false }]),
-    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, bad: 0, nodes: 3 } : null),
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, bad: 0, nodes: 3, minN: 4 } : null),
   })));
   assert.match(joined, /AUTO-PING/);
   assert.match(joined, /running/, 'suppression state is visible');
@@ -158,7 +158,7 @@ test('a bit is rendered WHOLE or not at all — a clipped percentage is a false 
   // fitBits emits whole bits in priority order and discloses the rest as +N.
   for (const cols of [60, 70, 80, 90, 100, 140]) {
     const raw = renderEngine(ctx(cols, 24, {
-      controlArm: () => ({ n: 6.25, ok: 2.5, bad: 0, nodes: 4 }),
+      controlArm: () => ({ n: 6.25, ok: 2.5, bad: 0, nodes: 4, minN: 4 }),
       efficacyFor: () => ({ expectedEfficacy: 0.41, n: 12.5, baseRate: 0.4, nodes: 3, ready: true, blocked: null } as never),
     })).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
     const line = raw.find((l) => l.includes('self-heal')) ?? '';
@@ -201,10 +201,17 @@ test('an arm whose node provenance was never recorded says so — 0 is unknown, 
   // tracked). Beside a positive n, "0 nodes" is a self-contradiction — and this
   // is the number that separates "six nodes agreed" from "one node repeated".
   const joined = plain(renderEngine(ctx(120, 30, {
-    controlArm: (k) => (k === 'route-churn' ? { n: 1.0, ok: 1.0, bad: 0, nodes: 0 } : null),
+    controlArm: (k) => (k === 'route-churn' ? { n: 1.0, ok: 1.0, bad: 0, nodes: 0, minN: 4 } : null),
   })));
-  assert.match(joined, /self-heal 100% \(n≈1\.0, sources not recorded\)/,
-    `unknown provenance must say so: ${joined}`);
+  // The PROVENANCE invariant is unchanged and is what this test exists for.
+  assert.match(joined, /sources not recorded/, `unknown provenance must say so: ${joined}`);
+  // COPY CHANGE (v0.50.0): this fixture is also BELOW readiness (n≈1.0 of 4),
+  // and `outcomes.baseRate()` refuses to publish a rate there — so quoting
+  // "100%" was this screen disagreeing with the store about the same tally.
+  // Note the fixture is the real live row that motivated the v0.41.1 fix; it
+  // now motivates this one too.
+  assert.doesNotMatch(joined, /self-heal 100%/, 'a rate below readiness is not quoted');
+  assert.match(joined, /self-heal still learning \(n≈1\.0 of 4, sources not recorded\)/);
   assert.ok(!/0 nodes/.test(joined), 'never asserts a measured zero');
 });
 
@@ -254,7 +261,7 @@ test('the n≈ legend renders only where a weight is on screen, and fits narrow 
     'no weight on screen ⇒ no legend explaining one');
 
   const learned: Partial<DataProvider> = {
-    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, bad: 0, nodes: 3 } : null),
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, bad: 0, nodes: 3, minN: 4 } : null),
   };
   for (const cols of [40, 60, 80, 100, 140, 200]) {
     const joined = plain(renderEngine(ctx(cols, 30, learned)));
@@ -305,7 +312,7 @@ test('at the modal 80x24 a harmful arm keeps BOTH its efficacy and its regressio
   // past 80 columns, and fitBits drops WHOLE bits — so the modal terminal lost
   // the efficacy AND the harm together, while 24 body rows sat blank.
   const arms: Partial<DataProvider> = {
-    controlArm: (k) => (k === 'rtt-degraded' ? { n: 9, ok: 3, bad: 1, nodes: 4 } : null),
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 9, ok: 3, bad: 1, nodes: 4, minN: 4 } : null),
     efficacyFor: (_k, a) => (a === 'ping'
       ? { expectedEfficacy: 0.75, n: 8, baseRate: 0.33, nodes: 5, ready: true, lowerBound: 0.46,
           bar: 0.38, minN: 4, baseN: 9, baseNodes: 4, harmed: 2, baseHarmed: 1 }
@@ -336,7 +343,7 @@ test('the CONTROL arm discloses its own regressions too (v0.44.0)', () => {
   // screen showed it. A kind that self-heals 60% and self-worsens 30% is not
   // the same animal as one that self-heals 60% and stalls 40%.
   const arms: Partial<DataProvider> = {
-    controlArm: (k) => (k === 'rtt-degraded' ? { n: 10, ok: 6, bad: 3, nodes: 4 } : null),
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 10, ok: 6, bad: 3, nodes: 4, minN: 4 } : null),
   };
   const joined = plain(renderEngine(ctx(200, 40, arms)));
   assert.match(joined, /self-heal 60% \(n≈10\.0, 4 nodes, n≈3\.0 worse\)/,
@@ -399,4 +406,14 @@ test('the driver-link fault survives the modal 80 columns (v0.47.0)', () => {
     driverLinkFault: () => 'homeId mismatch — driver telemetry PURGED (check driver_ws_url)',
   })));
   assert.match(joined, /homeId mismatch/, `the fault must survive 80 cols: ${joined.slice(0, 700)}`);
+});
+
+test('a control arm AT readiness does quote its rate (v0.50.0)', () => {
+  // The gate must not swallow a legitimately-measured base rate.
+  const joined = plain(renderEngine(ctx(140, 30, {
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 12.9, ok: 11.2, bad: 1, nodes: 13, minN: 4 } : null),
+  })));
+  assert.match(joined, /self-heal 87% \(n≈12\.9, 13 nodes, n≈1\.0 worse\)/,
+    `a ready arm still publishes: ${joined.slice(0, 800)}`);
+  assert.doesNotMatch(joined, /self-heal still learning/);
 });

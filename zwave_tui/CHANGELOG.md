@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.50.0 — 2026-09-03
+
+**A log audit of 50 hours of production output, and what it could not tell us.**
+
+**Every leveled line was byte-identical to an ordinary one.** `logger.ts` gated
+the write on severity and then discarded it, so the one `error` in 50 hours sat
+in the container log at exactly the weight of 941 routine sweep lines. `grep
+ERROR` returned nothing on a log that contained errors. Warnings and errors now
+carry their level; `info` stays bare, so existing greps are unaffected.
+
+**Auto-ping had no way to claim a level.** Its `log2` sink was a bare function,
+so even after the sink learned severities every auto-ping message stayed at
+`info` — including the storm suppression, which is the engine standing down
+because a quarter of the mesh went down at once. That message had no `log2`
+companion at all: the one line the module calls worth saying out loud was the
+one line an operator grepping the container log could not find.
+
+**Refusing a connection leaked the descriptor.** The connection-cap branch said
+goodbye with `end()`, which is a HALF-close: the socket stays ours until the
+peer closes its own side, and a refused socket joins no `conns` set, so neither
+the active counter nor the idle sweep could ever see it. A peer that never
+closes — yanked cable, expired NAT entry — pinned one descriptor per refusal,
+without limit, on the exact branch whose job is to shed load. Measured live at
+v0.49.1: **30 open sockets against 4 accepted sessions.** The refusal now
+reclaims on our schedule.
+
+**A session's end was never written down.** 165 `client connected` lines and
+zero teardown lines, so a session that ended looked exactly like one still open
+and `(N active)` could only be read as a high-water mark. Teardown now logs the
+peer, the duration and the remaining count.
+
+**Every restart re-dated every outage.** `deadSince` lives only in memory and
+was seeded from `now`, so each deploy re-started the dead-node ladder's clock:
+six deploys in one evening each pushed one node's "needs a human" summons a
+fresh dwell into the future, and `DEAD 19.2h` on screen was 19.2 hours of
+*uptime*, not of silence. A node already Dead at first sight is now dated from
+the driver's own `lastSeen`, clamped so a future or absent value cannot invent
+an outage longer than our uptime.
+
+**ENGINE published a rate its own store refuses to publish.** The control-arm
+line was gated on `n > 0` while `outcomes.baseRate()` returns null below
+`minEpisodes`, so one tally read `self-heal 100% (n≈1.0)` on this screen and
+nothing at all for REMEDY and the planner. Below readiness it now reads
+`self-heal still learning (n≈1.0 of 4)`.
+
+### The harness checked its own anchors and found two of its own
+
+The mutation harness located each mutant with `includes()` and applied it with
+`replace()` — "does this text appear anywhere" guarding "act on the first place
+it appears". An anchor matching several sites therefore mutated a site nobody
+chose and reported a confident verdict about it: a verifier failing open, which
+is the failure this harness exists to catch.
+
+Two committed mutants had been doing exactly that. `login-exact-rows` matched
+both of `login.ts`'s padding paths and only ever tested the first — the untested
+one being the framed box whose own comment records the defect (bytes from the
+previous frame lingering on the one screen that takes a password). `autoping-stdout`
+matched three call sites; retargeting it to the one it was written to protect —
+the ladder's own remediation probe, the engine's only autonomous write — showed
+that site **was not covered at all**, and the suite stayed green with the write
+removed from the log.
+
+Ambiguity is now its own verdict, and a pre-flight checks every anchor before
+any test runs, so anchor rot costs a second instead of a full run.
+
+995 tests, 465 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.49.1 — 2026-09-02
 
 **A share that was not true, caught by live verification of v0.49.0.**

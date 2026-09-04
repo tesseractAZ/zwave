@@ -61,7 +61,17 @@ export function createLogger(
   // provider and transports all funnel through the same place.
   const emit = (severity: LogLevel, msg: string): void => {
     if (LOG_LEVELS.indexOf(severity) < threshold) return;
-    write(`[zwave-tui] ${msg}\n`);
+    // THE SEVERITY IS WRITTEN (v0.50.0). It gated the line and was then
+    // discarded, so a warn, an error and an ordinary info line were
+    // BYTE-IDENTICAL in journald — there was nothing to grep on and nothing for
+    // an eye to catch. The one "node 49 needs a human" ERROR in fifty hours sat
+    // at exactly the visual weight of the 941 routine sweep lines around it.
+    //
+    // `info` stays bare so the overwhelming majority of lines are unchanged and
+    // every existing grep still matches; only the lines that CLAIM a severity
+    // pay for one.
+    const tag = severity === 'info' ? '' : `${severity.toUpperCase()}: `;
+    write(`[zwave-tui] ${tag}${msg}\n`);
   };
 
   const log = ((msg: string) => emit('info', msg)) as Logger;

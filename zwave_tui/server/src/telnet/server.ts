@@ -18,6 +18,7 @@
  */
 
 import { createServer } from 'node:net';
+import { fmtElapsed } from './gauges';
 import type { Socket } from 'node:net';
 import type { DataProvider, ActionRunner } from '../types';
 import type { AuthPolicy } from '../auth/loginPolicy';
@@ -51,6 +52,9 @@ interface TelnetConn {
    * reclaim sweep exists to detect.
    */
   lastRxAt: number;
+  /** Epoch ms the connection was accepted — the teardown line's duration
+   *  (v0.50.0), which is what tells a stuck session from a brief one. */
+  openedAt: number;
   session: TuiSession;
   inbuf: Buffer;
   timer: NodeJS.Timeout | null;
@@ -226,6 +230,35 @@ const IDLE_TIMEOUT_MS = 30 * 60_000;
 /** Detect half-open peers (yanked cable, NAT drop) that never send a FIN. */
 const KEEPALIVE_MS = 60_000;
 
+export const REFUSE_LINGER_MS = 1_000;
+
+/**
+ * Say goodbye to a refused socket, then TAKE THE FD BACK.
+ *
+ * `end()` is a HALF-close: it sends our FIN and leaves the descriptor ours
+ * until the peer closes its own side. A refused socket also joins no `conns`
+ * set, so neither the active counter nor the idle sweep can ever see it — the
+ * one branch whose entire job is to SHED load was the one that leaked.
+ *
+ * Module scope, and the socket is a narrow structural type, because the
+ * invariant here has NO observable on the wire: a peer cannot distinguish a
+ * half-closed server from a destroyed one, so the only honest place to assert
+ * it is against the decision itself.
+ */
+export function refuseSocket(
+  socket: Pick<Socket, 'end' | 'destroy' | 'once'>,
+  msg: string,
+  lingerMs: number = REFUSE_LINGER_MS,
+): void {
+  // Bounds a peer that stalls the flush by never reading.
+  const kill = setTimeout(() => { try { socket.destroy(); } catch { /* already gone */ } }, lingerMs);
+  // Do not hold the process open for a socket we are discarding.
+  kill.unref?.();
+  // A peer that closes on cue costs us nothing — do not fire a stray destroy.
+  socket.once('close', () => clearTimeout(kill));
+  try { socket.end(msg); } catch { /* ignore */ }
+}
+
 export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void } {
   const { data, host, port, log, signalDisplay, auth, actions } = opts;
   const idleTimeoutMs = opts.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
@@ -243,6 +276,14 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
   const endConn = (conn: TelnetConn) => {
     if (!conns.has(conn)) return;
     conns.delete(conn);
+    // A SESSION'S END IS ON THE RECORD (v0.50.0). 165 "client connected" lines
+    // in the corpus and ZERO teardown lines: no session's end, duration or
+    // cause of death was recorded anywhere, so "are connections accumulating"
+    // could only be answered by reading a counter on the NEXT connect line —
+    // and a session that ended silently was indistinguishable from one still
+    // open. The remaining count is the number that answers the leak question
+    // directly.
+    log(`telnet: client ${conn.ip} disconnected after ${fmtElapsed(Date.now() - conn.openedAt)} (${conns.size} active)`);
     if (conn.timer) {
       clearInterval(conn.timer);
       conn.timer = null;
@@ -294,6 +335,26 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     }
   };
 
+  /**
+   * Refuse a connection and RECLAIM IT ON OUR SCHEDULE (v0.50.0).
+   *
+   * Both cap branches used to `socket.end(...)` and return. That is a
+   * HALF-close: our write side shuts down, but the readable half and the file
+   * descriptor stay ours until the PEER sends FIN. And because the refusal
+   * returns before `setKeepAlive` and never joins `conns`, the kernel never
+   * probes the peer and the idle sweep — which walks `conns` — can never see
+   * it. A peer that simply never closes (an attacker, or a half-open host whose
+   * NAT entry expired) pinned one fd per refusal, without limit, on the exact
+   * branch whose job is to SHED load. Measured live at v0.49.1: 30 sockets held
+   * against 4 accepted sessions.
+   *
+   * Say goodbye, then take it back.
+   */
+  const refuse = (socket: Socket, why: string, msg: string): void => {
+    log(why);
+    refuseSocket(socket, msg);
+  };
+
   const server = createServer((socket) => {
     socket.setNoDelay(true);
     // Attach an error listener IMMEDIATELY. A socket that errors (e.g. RST) with
@@ -303,8 +364,8 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     socket.on('error', () => { /* connection errors are handled by close/endConn */ });
     // Reject beyond the connection cap before doing any per-session work.
     if (conns.size >= MAX_TELNET_CONNS) {
-      log(`telnet: connection cap (${MAX_TELNET_CONNS}) reached — refusing ${socket.remoteAddress ?? '?'}`);
-      try { socket.end('Too many connections — try again later.\r\n'); } catch { /* ignore */ }
+      refuse(socket, `telnet: connection cap (${MAX_TELNET_CONNS}) reached — refusing ${socket.remoteAddress ?? '?'}`,
+        'Too many connections — try again later.\r\n');
       return;
     }
     // Per-IP cap: the global cap alone let ONE host starve every operator.
@@ -312,8 +373,8 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     let sameIp = 0;
     for (const c of conns) if (c.ip === peerIp) sameIp += 1;
     if (sameIp >= MAX_CONNS_PER_IP) {
-      log(`telnet: per-IP cap (${MAX_CONNS_PER_IP}) reached — refusing ${peerIp}`);
-      try { socket.end('Too many connections from your address — try again later.\r\n'); } catch { /* ignore */ }
+      refuse(socket, `telnet: per-IP cap (${MAX_CONNS_PER_IP}) reached — refusing ${peerIp}`,
+        'Too many connections from your address — try again later.\r\n');
       return;
     }
     // Half-open peers (yanked cable, expired NAT entry) never send a FIN, so
@@ -337,7 +398,7 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
       peer: peerIp,
       onClose: () => { try { socket.end(); } catch { /* already gone */ } },
     });
-    const conn: TelnetConn = { socket, ip: peerIp, session, inbuf: Buffer.alloc(0), timer: null, escTimer: null, lastRxAt: Date.now() };
+    const conn: TelnetConn = { socket, ip: peerIp, session, inbuf: Buffer.alloc(0), timer: null, escTimer: null, lastRxAt: Date.now(), openedAt: Date.now() };
     conns.add(conn);
     log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${conns.size} active)`);
 

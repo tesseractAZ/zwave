@@ -291,7 +291,15 @@ and trust:
   buffer + cursor on exit. It is **unauthenticated** (`trusted: false`) — hence
   only the telnet port is published on the LAN, guarded by the login gate, capped
   at `MAX_TELNET_CONNS = 16`, with a 4096-byte inbound buffer cap to drop runaway
-  garbage. Opt-in via `telnet_enabled` (default on unless the run script exports
+  garbage. Both caps refuse through `refuseSocket()`, which writes the goodbye
+  with `end()` and then **destroys the socket after `REFUSE_LINGER_MS = 1000`**
+  unless the peer closes first. `end()` alone is a half-close: the descriptor
+  stays the server's until the peer closes its own side, and a refused socket
+  joins no `conns` set, so neither the active counter nor the idle sweep can see
+  it — a peer that never closes pinned one descriptor per refusal, without
+  limit, on the branch whose purpose is to shed load (v0.50.0). Accept and
+  teardown are both logged, teardown carrying the session duration and the
+  remaining active count. Opt-in via `telnet_enabled` (default on unless the run script exports
   `0`).
 - **xterm.js `/console`, `:8788` (HA Ingress)** (`telnet/wsConsole.ts`). Registered
   on the Fastify app: `GET /console` serves a self-contained xterm.js page,
@@ -3802,7 +3810,7 @@ advanced ones. Every option below is a **tunable default** unless noted.
 | `auto_ping_stale_min` | `120` | `int(0,1440)` | `AUTO_PING_STALE_MS` (run script ×60000) | `config.autoPing.staleMs` | Liveness probe after this much per-node silence; `0` disables the liveness lane. One probe per tick, stalest first. |
 | `refresh_interval` | `2` | `int(1,30)` | `REFRESH_INTERVAL_MS` | `config.refreshMs` | **seconds → ms**: run script does `* 1000`. Cheap render/roster cadence. |
 | `route_poll_interval` | `10` | `int(5,120)` | `ROUTE_POLL_INTERVAL_MS` | `config.routePollMs` | **seconds → ms**. Expensive route/controller-stats cadence; also the evidence-sample tick. |
-| `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. |
+| `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. Since v0.50.0 lines at `warn` and above are prefixed with their level (see §12.9); `info` stays bare. |
 | `zwave_entry_id` | `""` | `str?` | `ZWAVE_ENTRY_ID` | `config.entryId` (`|| null`) | Empty ⇒ auto-discover via `config_entries/get`. |
 | `ha_ws_url` | `ws://supervisor/core/websocket` | `str?` | `HA_WS_URL` | `config.haWsUrl` | Override to point at a different Core/driver WS. |
 | `driver_ws_url` | `ws://core-zwave-js:3000` | `str?` | `DRIVER_WS_URL` | `config.driverWsUrl` (`|| null`) | **Empty ⇒ disabled.** Strictly read-only telemetry. |
@@ -4105,3 +4113,33 @@ cannot resurrect the old rings).
 surfaces, the action-runner, and the auth paths. Out of scope (report upstream):
 HA Core, the Z-Wave JS integration and driver, the Supervisor, and the physical
 radio.
+
+### 12.9 The container-log contract
+
+`logger.ts` writes to stdout/stderr, which is what `ha addons logs` and
+`journalctl` surface. Every line is `[zwave-tui] ` followed, for `warn` and
+above only, by the uppercase level and a colon:
+
+```
+[zwave-tui] auto-ping: node 49 liveness sweep — 35 listening, 1 dead
+[zwave-tui] WARN: auto-ping: storm suppression — 9 of 39 nodes Dead, standing down
+[zwave-tui] ERROR: driver-ws: homeId mismatch — purging evidence and stopping
+```
+
+Until v0.50.0 the severity gated the write and was then discarded, so a `warn`,
+an `error` and a routine `info` line were byte-identical on disk: `grep ERROR`
+returned nothing on a log that contained errors, and the single error in a
+50-hour sample carried exactly the weight of the 941 routine sweep lines around
+it. `info` deliberately stays bare — it is the overwhelming majority of the
+volume, and tagging it would break existing greps to no benefit.
+
+The levelled sinks are optional members on the log companion (`log2.warn`,
+`log2.debug`), so a caller that supplies a bare function still works and simply
+lands at `info`; call sites choose their level with `(log2?.warn ?? log2)?.(m)`.
+
+Volume and severity are separate problems. A routine line an operator can filter
+is not the same as a line they cannot find, and autonomous writes — the auto-ping
+sweep, the dead-node ladder's remediation probe, the verification probe — stay at
+`info` in the container log for that reason: the feature was once diagnosed as a
+no-op because 34 real probes existed only in the in-memory event ring, behind
+the login gate, where the diagnosis never looked.

@@ -231,8 +231,22 @@ export function renderEngine(ctx: ScreenCtx): string[] {
       // that self-heals 60% and stalls 40%, and `controlArm().bad` was being
       // tallied, persisted and plumbed end-to-end while no screen showed it.
       const armHarm = arm.bad >= 0.5 ? `, ${weight(arm.bad)} worse` : '';
-      parts.push(c.white(`self-heal ${Math.round((arm.ok / arm.n) * 100)}%`) +
-        c.grey(` (${weight(arm.n)}${provenance(arm.nodes)}${armHarm})`));
+      // THE SAME READINESS RULE THE STORE APPLIES (v0.50.0). This printed
+      // `ok / n` gated only on `n > 0`, while `outcomes.baseRate()` returns
+      // NULL below `minEpisodes` — so one tally produced `self-heal 100%
+      // (n≈1.0)` here and nothing at all for REMEDY and the planner. Live on
+      // 2026-09-03: `route-churn self-heal 100% (n≈1.0, sources not recorded)`,
+      // a rate from ONE episode with its provenance unknown.
+      //
+      // Showing `n` beside it was the old defence, and v0.43.1 settled that it
+      // is not enough — which is exactly why the ACTION arm says
+      // "still learning (n≈2.0 of 4)" rather than quoting a percentage.
+      if (arm.n + 1e-9 < arm.minN) {
+        parts.push(c.grey(`self-heal still learning (${weight(arm.n)} of ${arm.minN}${provenance(arm.nodes)})`));
+      } else {
+        parts.push(c.white(`self-heal ${Math.round((arm.ok / arm.n) * 100)}%`) +
+          c.grey(` (${weight(arm.n)}${provenance(arm.nodes)}${armHarm})`));
+      }
     } else {
       parts.push(c.grey('self-heal not yet measured'));
     }

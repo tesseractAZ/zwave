@@ -195,7 +195,7 @@ export interface OutcomeStore {
    *  returns the ratio and nothing else; `controlNodes` was tracked, persisted
    *  and restored but had NO getter, so the one number that makes every
    *  efficacy claim meaningful could not be shown with its n or its sources. */
-  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number } | null;
+  controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   /** Spontaneous-recovery base rate for a kind (control arm), or null if n too low. */
   baseRate(kind: SymptomKind): number | null;
   /** Learned efficacy of an action against a kind, for the planner. */
@@ -892,10 +892,14 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       }));
     },
 
-    controlArm(kind): { n: number; ok: number; bad: number; nodes: number } | null {
+    controlArm(kind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null {
       const t = control.get(kind);
       if (!t) return null;
-      return { n: t.n, ok: t.ok, bad: t.bad, nodes: controlNodes.get(kind)?.size ?? 0 };
+      // `minN` rides along (v0.50.0) so a screen can apply the SAME readiness
+      // rule `baseRate()` applies two functions below. Without it ENGINE
+      // rendered `self-heal 100% (n≈1.0)` for an arm whose rate this store
+      // refuses to publish at all.
+      return { n: t.n, ok: t.ok, bad: t.bad, nodes: controlNodes.get(kind)?.size ?? 0, minN: cfg.minEpisodes };
     },
 
     baseRate(kind): number | null {
