@@ -93,6 +93,22 @@ export function marginColor(db: number): ColorFn {
  * Background noise floor, dBm — quiet is good, so the ramp runs the other way.
  * Grey (not green) is "nominal": a quiet floor is the unremarkable case.
  */
+/**
+ * The dBm value as it is SHOWN. One reading must not be spelt two ways.
+ *
+ * The driver's floor is an EMA, so it arrives fractional (`-95.062` on the live
+ * mesh, `-95.02000000000001` after a step). OVERVIEW and INTERFERENCE rounded
+ * it; HEATMAP and CONTROLLER printed it raw — so the same instant read
+ * `-95 dBm` on one screen and `-95.062dBm` on another, and an operator
+ * comparing them had no way to know it was one number. The rule lived in four
+ * private copies and drifted; it lives here now (v0.54.0).
+ *
+ * Callers keep the RAW value for margin arithmetic — this is a display rule.
+ */
+export function shownDbm(v: number): number {
+  return Number.isFinite(v) ? Math.round(v) : v;
+}
+
 export function noiseColor(dbm: number): ColorFn {
   if (!Number.isFinite(dbm)) return c.grey;
   if (dbm >= -75) return c.red;

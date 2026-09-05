@@ -157,3 +157,25 @@ test('rssiReading is the single definition of "is this a reading"', () => {
     assert.equal(rssiReading(absent as number | null | undefined), null, `${String(absent)} is not a reading`);
   }
 });
+
+test('a thin denominator cannot outrank a large one (v0.54.0)', () => {
+  // The driver's counters RESET on restart, so a 1-6 tx denominator is routine.
+  // Without a floor, ONE timeout out of two sends read 50%, raised F, set state
+  // 'flaky', and outranked a node failing 4% of 30,000 on the worst-first
+  // roster — one packet of evidence beating twelve hundred.
+  const thin = scoreNode(makeNode({ nodeId: 9, stats: emptyStats({ commandsTX: 2, timeoutResponse: 1 }) }), NOISE);
+  // 5,000 of 30,000 = 16.7%, over TX_ERR_THRESHOLD. Floored, the thin node
+  // reads 5% — so the comparison is now between two rates rather than between
+  // a rate and an artefact. (Before the floor the thin node read FIFTY percent.)
+  const busy = scoreNode(makeNode({ nodeId: 10, stats: emptyStats({ commandsTX: 30_000, timeoutResponse: 5_000 }) }), NOISE);
+  assert.ok(!thin.flags.includes('F'),
+    `1 timeout of 2 sends is not decisive evidence: ${JSON.stringify(thin)}`);
+  assert.notEqual(thin.state, 'flaky', 'and must not be branded flaky on it');
+  assert.ok(busy.flags.includes('F'), 'a node failing 16.7% of 30,000 sends IS flaky');
+  assert.ok(thin.score > busy.score,
+    `the busy node with 5000 real failures must rank worse: thin=${thin.score} busy=${busy.score}`);
+  // But decisive thin evidence still counts: 19 of 19 is not silenced.
+  const decisive = scoreNode(makeNode({ nodeId: 11, stats: emptyStats({ commandsTX: 19, timeoutResponse: 19 }) }), NOISE);
+  assert.ok(decisive.flags.includes('F'),
+    `19 timeouts out of 19 sends IS decisive: ${JSON.stringify(decisive)}`);
+});

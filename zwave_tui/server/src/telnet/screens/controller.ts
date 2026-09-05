@@ -35,7 +35,7 @@ import {
 } from '../../types';
 import { centeredNotice } from './overview';
 import { frame } from '../chrome';
-import { noiseColor } from '../bands';
+import { noiseColor, shownDbm } from '../bands';
 
 type ColorFn = (s: string) => string;
 
@@ -335,7 +335,10 @@ function backgroundBlock(
     // Future-proof: if HA ever reports per-channel noise, show each channel as
     // a quiet-is-good gauge (full/green = quiet floor), wrapped to fit W.
     const chBarW = W >= 100 ? 8 : 6;
-    const tokens = ctrl.backgroundRSSI.map(
+    // ROUNDED FOR DISPLAY at the source (v0.54.0), so the per-channel numbers
+    // here spell the same reading OVERVIEW and INTERFERENCE show. The raw
+    // values stay untouched everywhere margins are computed.
+    const tokens = ctrl.backgroundRSSI.map(shownDbm).map(
       (r, i) =>
         c.grey(`ch${i} `) +
         // Fill AND colour from the same reading: gauge()'s default zoneColor
@@ -354,7 +357,7 @@ function backgroundBlock(
   // The representative floor the SNR-margin math actually uses (data.noiseFloor),
   // shown with a quiet-is-good reference meter so the margin baseline is visible
   // even when HA reports no per-channel noise.
-  const noise = data.noiseFloor();
+  const noise = shownDbm(data.noiseFloor());
   const tag = data.hasRealNoise() ? c.grey(' (measured)') : c.grey(' (assumed fallback)');
   const refBarW = Math.max(6, Math.min(14, W - 40));
   lines.push(
