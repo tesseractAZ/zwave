@@ -399,9 +399,19 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       // `⊘ RF-link symptom — re-interviewing will not r`: a sentence that stops
       // making sense on the one row whose entire job is to say why NOT to act.
       // shedLine carries it to a continuation row instead.
+      // THE TAG IS ALL-OR-NOTHING (v0.51.0). shedLine's HEAD has no whole-token
+      // degradation path — `if (visLen(headRow) > cols) return [truncate(...)]`
+      // — so at the modal 80 columns the longest candidate ended `[physical`,
+      // an unbalanced bracket that silently dropped ` · lore]`: the candidate's
+      // provenance, the difference between "we measured this" and "this is
+      // folklore". Shed it whole with `+1` instead, the same convention
+      // detail.ts uses. Measured over a 750-scenario sweep: 474 clipped rows to
+      // 0, with no card lost at 80x24 and none at 40 either.
+      const headBase = `${marker} ${c.white(cand.title)}`;
+      const tagged = `${headBase} ${tags}`;
       rows.push(...shedLine(
         '      ',
-        `${marker} ${c.white(cand.title)} ${tags}`,
+        visLen('      ' + tagged) <= W ? tagged : headBase + c.grey(' +1'),
         cand.blocked ? [c.grey('⊘ ' + cand.blocked)] : [],
         W,
         /* wrapTail */ true,

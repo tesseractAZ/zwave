@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.51.0 — 2026-09-04
+
+**Nothing clips into a lie — the sequel, and this time it was a number.**
+
+A 98-agent sweep of v0.50.0 raised 52 findings; 29 survived adversarial
+refutation. These seven are the ones where the screen was not merely short but
+*wrong*, or where it silently threw away the part the operator needed.
+
+**An Activity Log value change of `812 → 1240` rendered as `812 → 12`.** Not a
+visible truncation — a different, entirely plausible number, and the same
+frame's Detail row showed the true one, so the screen contradicted itself.
+`truncate` cuts mid-character and says nothing; the row now sheds WHOLE WORDS
+and marks the loss, which is `shedLine`'s rule (the one that stopped `#23`
+clipping to the innocent node `#2`) applied to a string with no tokens to shed.
+The marker is separated by a space on purpose: `140…` cannot be read as "140,
+and more" rather than "1400".
+
+**The Detail pane clipped at W−10 while three to five of its nine rows sat
+blank.** It is the last field, so those rows were already its own. The tail of
+an action failure — *"…did not acknowledge the command"* — existed nowhere on
+screen, because the list row above clips harder and no key scrolls either. It
+now wraps into its own slack and discloses any true remainder with `+N`.
+
+**Three opposite driver verdicts rendered as the same sentence.** The action
+RESULT modal handed one long line to a blind truncate at ~71 columns, so
+`ZW0360 — the node was removed`, `— was NOT removed`, and `— may or may not have
+been removed` all came back cut at the same word, with the error code still
+attached to make it look complete. The modal wraps now, and the one failure path
+that never sanitized (a thrown exception) goes through the same cap and scrub as
+every other.
+
+**ENGINE dropped `refused as misdiagnosis` at 80 columns** — the ledger's own
+count of the times it decided a detector was WRONG — along with two other
+tallies, from a row that used a raw join where the row eight lines above it
+already used `fitBits`.
+
+**REMEDY's `[cost · basis]` tag came back as `[physical`.** An unbalanced
+bracket that silently dropped the candidate's provenance: the difference between
+"we measured this" and "this is folklore". `shedLine`'s head has no whole-token
+path, so the tag is now all-or-nothing with `+1`. Measured over a 750-scenario
+sweep: 474 clipped rows to zero, with no card lost at 80x24 or at 40.
+
+**INTERFERENCE cut the hedge off an inferred symptom.** A hard `.slice(0, 2)`
+dropped, at 80 columns, exactly the clause that says this is a guess — *"treat
+as a lead, not a verdict"* — on a symptom whose basis is `inferred` and whose
+basis this screen never renders. The body was using 19 of 21 rows; the third
+line was free.
+
+**The event count had no window.** The ring drops its tail at `LOG_MAX = 2000`
+with no counter and no marker, so `247 EVENTS · LAST 7 DAYS` read as one claim
+when it is two — the label is what was asked for, the count is over whatever the
+ring still holds. The count now carries the span it was actually observed over.
+
+1005 tests, 475 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.50.0 — 2026-09-03
 
 **A log audit of 50 hours of production output, and what it could not tell us.**

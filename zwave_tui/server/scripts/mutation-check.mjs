@@ -2326,6 +2326,65 @@ const MUTANTS = [
     find: "          const pct = share >= 0.005 ? `${Math.round(share * 100)}%` : '<1%';",
     repl: '          const pct = `${Math.round(share * 100)}%`;',
     what: 'a rounded-to-zero share reads "<1%", never "(0%)" beside a non-zero count' },
+  { id: 'log-row-sheds-whole-words', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
+    // `truncate` cut mid-character with no marker, so a value change of
+    // `812 -> 1240` rendered as `812 -> 12` — a DIFFERENT number that reads as
+    // complete — while the same frame's Detail row showed the true one.
+    find: '  const text = sevColor(ev)(clipWords(ev.text, textW));',
+    repl: '  const text = sevColor(ev)(truncate(ev.text, textW));',
+    what: 'an Activity Log row never clips into a plausible, wrong value' },
+  { id: 'clipword-marker-is-separated', file: 'src/telnet/ansi.ts', tests: ['chrome'],
+    // `140…` cannot be read as "140 and more" rather than "1400"; the space is
+    // what makes the marker a marker instead of another digit.
+    find: "  return truncate(out, budget) + ' …';",
+    repl: "  return truncate(out, budget) + '…';",
+    what: 'the clip marker is separated from the text it follows' },
+  { id: 'detail-pane-spends-its-slack', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
+    // Detail is the LAST field; 3-5 of its 9 rows sat blank while the tail of
+    // an action failure was cut at W-10 and reachable from nowhere on screen.
+    find: '    const parts = wrapDetail(ev.text, VALW);',
+    repl: '    const parts = [ev.text];',
+    what: 'the Detail pane wraps into the rows it already owns' },
+  { id: 'detail-overflow-is-disclosed', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
+    find: '    if (parts.length > room) {',
+    repl: '    if (parts.length > room && false) {',
+    what: 'a Detail that still does not fit says "+N" rather than vanishing' },
+  { id: 'event-count-carries-its-window', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
+    // The ring drops its tail at LOG_MAX silently, so the count and the range
+    // label were two claims the operator read as one.
+    find: "    (observedMs != null ? c.grey('/' + fmtElapsed(observedMs)) : '')];",
+    repl: "    ''];",
+    what: 'the event count is never shown without the span it was observed over' },
+  { id: 'engine-tallies-are-whole', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Three tallies vanished at 80 cols — among them `refused as misdiagnosis`,
+    // the ledger's own count of times it decided a detector was WRONG.
+    find: "    if (tallies.length) push(fitBits('    ' + c.grey('○ '), tallies.map((t) => c.grey(t)), view.cols));",
+    repl: "    if (tallies.length) push('    ' + c.grey('○ ' + tallies.join(' · ')));",
+    what: 'the LEARNED tallies row sheds whole tallies with +N' },
+  { id: 'interference-hedge-survives', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
+    // The dropped clause was the entire hedge — "treat as a lead, not a
+    // verdict" — on a symptom whose basis is 'inferred'.
+    find: "    for (const line of wrap(iv.correlated.narrative, W - 4)) push('    ' + c.grey(line));",
+    repl: "    for (const line of wrap(iv.correlated.narrative, W - 4).slice(0, 2)) push('    ' + c.grey(line));",
+    what: "an inferred symptom's hedge survives the modal terminal" },
+  { id: 'remedy-tag-is-all-or-nothing', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // shedLine's HEAD has no whole-token path, so the tag came back `[physical`
+    // — an unbalanced bracket that silently dropped the candidate's provenance.
+    find: "        visLen('      ' + tagged) <= W ? tagged : headBase + c.grey(' +1'),",
+    repl: '        tagged,',
+    what: "a candidate's [cost · basis] tag is whole or shed, never half" },
+  { id: 'result-modal-wraps', file: 'src/telnet/session.ts', tests: ['sessionActions'],
+    // Three semantically OPPOSITE ZW0360 verdicts rendered as the same
+    // sentence, cut at the same word, with the error code still attached.
+    find: '        ...fit(this.actionNotice).map((l) => (ok ? c.green : c.red)(l)),',
+    repl: '        (ok ? c.green : c.red)(this.actionNotice),',
+    what: "the driver's verdict is never tail-clipped into a different verdict" },
+  { id: 'result-modal-sanitizes-throws', file: 'src/telnet/session.ts', tests: ['sessionActions'],
+    // The one failure path that never sanitized — every other outcome goes
+    // through sanitizeEventText, so the row budget assumed a cap this lacked.
+    find: '      res = { ok: false, message: sanitizeEventText(e instanceof Error ? e.message : String(e)) };',
+    repl: '      res = { ok: false, message: e instanceof Error ? e.message : String(e) };',
+    what: 'a thrown action error is capped and scrubbed like every other' },
   { id: 'severity-is-written', file: 'src/logger.ts', tests: ['logger'],
     // The severity gated the write and was then DISCARDED, so a warn, an error
     // and an ordinary info line were byte-identical in journald — the one

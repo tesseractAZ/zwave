@@ -18,11 +18,12 @@
  * two can never disagree.
  */
 
-import { c, center, padEnd, truncate, visLen } from '../ansi';
+import { c, center, clipWords, padEnd, truncate, visLen } from '../ansi';
 import type { DataProvider, LogEvent, ScreenCtx } from '../../types';
 import { LOG_RANGE_LABEL } from '../../types';
-import { filteredEvents, logLayout, syncLogCursor } from '../input';
+import { filteredEvents, logLayout, rangeBounds, syncLogCursor } from '../input';
 import { frame } from '../chrome';
+import { fmtElapsed } from '../gauges';
 import { windowStart } from './overview';
 
 /** Width of the node-reference column ("#7 Garage Sensor"). */
@@ -35,6 +36,15 @@ export function renderLog(ctx: ScreenCtx): string[] {
 
   const events = filteredEvents(data, view);
   syncLogCursor(view, events);
+  // The span the COUNT above was observed over: what the in-memory ring can
+  // still reach, clipped to the selected range. `data.events()` is newest-first.
+  const now = Date.now();
+  const ring = data.events();
+  const ringOldest = ring.length ? ring[ring.length - 1].ts : null;
+  const { lo, hi } = rangeBounds(view.logRange, now);
+  const observedMs = ringOldest == null
+    ? null
+    : Math.max(0, Math.min(now, hi ?? now) - Math.max(ringOldest, lo ?? ringOldest));
   const { listRows, detailRows, showDetail } = logLayout(H);
 
   // ── list body (exactly listRows lines) ──────────────────────────────────
@@ -77,7 +87,7 @@ export function renderLog(ctx: ScreenCtx): string[] {
 
   return frame(view, data, {
     title: 'ACTIVITY LOG',
-    rightStatus: rightStatus(view, events.length),
+    rightStatus: rightStatus(view, events.length, observedMs),
     body,
     keys: [
       ['↑↓', 'MOVE'], ['␣/b', 'PAGE', 2], ['⏎', 'DEVICE', 1], ['M', 'ACK', 5], ['D', 'DATE', 4],
@@ -88,8 +98,16 @@ export function renderLog(ctx: ScreenCtx): string[] {
 
 /* ── title-rule status ─────────────────────────────────────────────────── */
 
-function rightStatus(view: ScreenCtx['view'], total: number): string {
-  const chips: string[] = [c.white(String(total)) + c.grey(total === 1 ? ' EVENT' : ' EVENTS')];
+function rightStatus(view: ScreenCtx['view'], total: number, observedMs: number | null): string {
+  // A COUNT CARRIES ITS WINDOW (v0.51.0). The ring silently drops its tail at
+  // LOG_MAX=2000 with no counter and no marker, so `247 EVENTS · LAST 7 DAYS`
+  // was two independent claims the operator read as one: the label is the
+  // filter asked for, the count is over whatever the ring still holds. On a
+  // busy mesh those differ by days. The window here is ring coverage INTERSECTED
+  // with the selected range, so it reduces to the ring's own span on ALL and
+  // never over-claims reach the ring does not have.
+  const chips: string[] = [c.white(String(total)) + c.grey(total === 1 ? ' EVENT' : ' EVENTS') +
+    (observedMs != null ? c.grey('/' + fmtElapsed(observedMs)) : '')];
   chips.push(c.blue(`◷ ${LOG_RANGE_LABEL[view.logRange].toUpperCase()}`));
   if (view.errorsOnly) chips.push(c.yellowB('▲ ERRORS'));
   chips.push(c.grey(total > 0 ? `${view.logCursor + 1}/${total}` : '0/0'));
@@ -112,7 +130,11 @@ function eventRow(ev: LogEvent, data: DataProvider, W: number, selected: boolean
 
   const prefix = `${cursor} ${time} ${tag} ${node} `;
   const textW = Math.max(0, W - visLen(prefix));
-  const text = sevColor(ev)(truncate(ev.text, textW));
+  // WHOLE WORDS (v0.51.0). `truncate` cut mid-character with no marker, so a
+  // value change of `812 -> 1240` rendered as `812 -> 12` — a different number
+  // that reads as complete — while the SAME frame's Detail row showed the true
+  // one. A row that contradicts its own screen is worse than a short row.
+  const text = sevColor(ev)(clipWords(ev.text, textW));
   return prefix + text;
 }
 
@@ -190,10 +212,54 @@ function detailLines(ev: LogEvent | undefined, data: DataProvider, W: number, ro
     if (ev.oldState != null || ev.newState != null) {
       lines.push(field('Change', `${c.grey(ev.oldState ?? '—')} ${c.cyan('→')} ${c.white(ev.newState ?? '—')}`, W));
     }
-    lines.push(field('Detail', sevColor(ev)(ev.text), W));
+    // Detail is the LAST field, so every row the fixed fields did not use is
+    // ours. This blind-truncated at W-10 while 3-5 of its 9 rows sat blank, and
+    // the list row above clips harder still — so the tail of an action failure
+    // ("...did not acknowledge the command") existed nowhere on screen and no
+    // key could reach it. Wrap into the slack; disclose the rest with `+N`.
+    const VALW = Math.max(8, W - 10);
+    const room = Math.max(1, rows - lines.length);
+    const parts = wrapDetail(ev.text, VALW);
+    const shown = parts.slice(0, room);
+    if (parts.length > room) {
+      const more = ` +${parts.length - room}`;
+      shown[room - 1] = truncate(shown[room - 1], Math.max(1, VALW - more.length)) + c.grey(more);
+    }
+    lines.push(field('Detail', sevColor(ev)(shown[0] ?? ''), W));
+    for (const cont of shown.slice(1)) lines.push(truncate('          ' + sevColor(ev)(cont), W));
   }
   while (lines.length < rows) lines.push('');
   return lines.slice(0, rows);
+}
+
+/**
+ * Greedy word-wrap for the Detail payload. `ev.text` carries no ANSI — the
+ * colour is applied by the caller — so this works on plain characters.
+ *
+ * Unlike `chrome.wrapWords` this HARD-BREAKS an over-long token. That helper
+ * feeds `shedLine`, whose tokens are node ids where a half-shed `#4` names a
+ * different node, so it hands the clip back to its caller. Detail is a
+ * sentence, and its worst case is an integration error carrying a space-free
+ * JSON blob: emitting that as one over-wide row would hand it straight to
+ * `field`'s blind truncate — the unmarked clip this function exists to stop.
+ */
+function wrapDetail(text: string, width: number): string[] {
+  const out: string[] = [];
+  let line = '';
+  for (const word of String(text).split(/\s+/).filter(Boolean)) {
+    let w = word;
+    while (w.length > width) {
+      if (line) { out.push(line); line = ''; }
+      out.push(w.slice(0, width));
+      w = w.slice(width);
+    }
+    if (!line) line = w;
+    else if (line.length + 1 + w.length <= width) line += ' ' + w;
+    else { out.push(line); line = w; }
+  }
+  if (line) out.push(line);
+  // A blank payload is a blank row, never the string "undefined".
+  return out.length ? out : [''];
 }
 
 function field(label: string, value: string, W: number): string {

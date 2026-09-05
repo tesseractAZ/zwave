@@ -417,3 +417,31 @@ test('a control arm AT readiness does quote its rate (v0.50.0)', () => {
     `a ready arm still publishes: ${joined.slice(0, 800)}`);
   assert.doesNotMatch(joined, /self-heal still learning/);
 });
+
+test('the LEARNED tallies row sheds whole tallies with +N, never a mid-word cut (v0.51.0)', () => {
+  // This row used a raw join into `push`, which blind-truncates. At 80 columns
+  // it read "...· 2 undersampled (node r" and THREE tallies vanished — among
+  // them `refused as misdiagnosis`, the ledger's own count of times it decided
+  // a detector was WRONG. The row eight lines above already used fitBits.
+  const k = 'rtt-degraded' as SymptomKind;
+  const all: Partial<DataProvider> = {
+    controlArm: (kind) => (kind === k ? { n: 6.2, ok: 5.1, bad: 0, nodes: 3, minN: 4 } : null),
+    unverifiableCount: (kind) => (kind === k ? 3 : 0),
+    unverifiableTransientCount: (kind) => (kind === k ? 1 : 0),
+    unverifiableUndersampledCount: (kind) => (kind === k ? 2 : 0),
+    unverifiableUnprobeableCount: (kind) => (kind === k ? 1 : 0),
+    confoundedCount: (kind) => (kind === k ? 1 : 0),
+    falsePositives: (kind) => (kind === k ? 4 : 0),
+  };
+  for (const cols of [80, 120, 200]) {
+    const lines = renderEngine(ctx(cols, 40, all));
+    const row = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).find((l) => l.includes('○ 3 unscoreable'));
+    assert.ok(row, `${cols}: the tallies row must render`);
+    if (!row.includes('refused as misdiagnosis')) {
+      // Shed is fine — a SILENT shed is not.
+      assert.match(row, /\+\d+\s*$/, `${cols}: a shortened tallies row must disclose "+N": "${row}"`);
+    }
+    // And never a bare mid-word cut: the row must end on a complete tally or +N.
+    assert.doesNotMatch(row, /\(node r$|misdiagnos$|unscoreabl$/, `${cols}: mid-word cut: "${row}"`);
+  }
+});

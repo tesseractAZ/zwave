@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { masthead, titleRule, commandBar, fieldStrip, field, frame, linkState, shedLine } from '../src/telnet/chrome';
-import { visLen } from '../src/telnet/ansi';
+import { clipWords, visLen } from '../src/telnet/ansi';
 import type { DataProvider, ViewState, ControllerSnapshot } from '../src/types';
 
 const view = (cols: number, rows = 24) => ({ cols, rows }) as ViewState;
@@ -182,4 +182,23 @@ test('every masthead field is WHOLE or absent — never a clipped home id', () =
       assert.match(out, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/, `${cols}: timestamp clipped — "${out}"`);
     }
   }
+});
+
+test('clipWords marks a shortened string, and the marker cannot read as content (v0.51.0)', () => {
+  // The motivating case: a number is the worst thing to clip, because the cut
+  // result is itself a valid number. `140…` would still read as "1400", so the
+  // marker is SEPARATED — that gap is what makes it a marker.
+  const out = clipWords('consumption 812 1240 and climbing', 20);
+  assert.ok(visLen(out) <= 20, `never exceeds the budget: "${out}" (${visLen(out)})`);
+  assert.match(out, / …$/, `a shortened string carries a separated marker: "${out}"`);
+  assert.doesNotMatch(out, /\d…/, 'the marker must never abut a digit — it would read as another digit');
+  // A whole word is never cut in half.
+  assert.doesNotMatch(out.replace(/ …$/, ''), /\b124$|\b12$/, `no half-number: "${out}"`);
+  // Fits already: returned untouched, no marker.
+  assert.equal(clipWords('short', 20), 'short');
+  // A single over-long token cannot be shed whole — clip it, marker flush,
+  // because the cut is already visible INSIDE the word.
+  const one = clipWords('supercalifragilisticexpialidocious', 10);
+  assert.ok(visLen(one) <= 10, `over-long token still respects the budget: "${one}"`);
+  assert.match(one, /…$/, 'an over-long token is still marked');
 });

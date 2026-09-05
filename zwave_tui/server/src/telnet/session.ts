@@ -30,7 +30,9 @@ import { buildMenu, buildEntityRows, buildConfigRows, clampMenuIndex, describeAc
 import type { MenuScope } from './actionsCatalog';
 import type { MenuItem, ActionImpact } from './actionsCatalog';
 import { renderActionsMenu, renderTypeConfirm, renderParamEdit } from './screens/actionsMenu';
-import { c } from './ansi';
+import { c, visLen } from './ansi';
+import { wrapWords } from './chrome';
+import { sanitizeEventText } from '../zwave/zwaveData';
 import type { AuthPolicy } from '../auth/loginPolicy';
 import {
   HIDE_CURSOR, CURSOR_HOME, CLEAR_EOL, CLEAR_BELOW,
@@ -941,7 +943,11 @@ export class TuiSession {
         default: res = { ok: false, message: 'unknown action' };
       }
     } catch (e) {
-      res = { ok: false, message: e instanceof Error ? e.message : String(e) };
+      // The ONE failure path that never sanitized. Every other outcome goes
+      // through `sanitizeEventText` in zwaveActions; a thrown error reached the
+      // modal raw, so the 300-char cap and the control-byte scrub that the row
+      // budget below assumes did not hold here.
+      res = { ok: false, message: sanitizeEventText(e instanceof Error ? e.message : String(e)) };
     }
     this.actionInFlight = false;
     this.actionNotice = res.ok ? `✓  ${action.label}` : `✗  ${res.message}`;
@@ -1004,9 +1010,21 @@ export class TuiSession {
     }
     if (this.actionNotice != null) {
       const ok = this.actionNotice.startsWith('✓');
+      // WRAPPED, not tail-clipped (v0.51.0). `centeredNotice` handed one long
+      // line to `center`, which falls through to a blind `truncate` at ~71
+      // visible chars — so the three semantically OPPOSITE ZW0360 outcomes
+      // ("was removed", "was NOT removed", "may or may not have been removed")
+      // all rendered as the same sentence, cut at the same word. The verdict
+      // the operator needed was always in the part that fell off.
+      const w = Math.max(20, this.view.cols - 10);
+      // wrapWords emits an over-long word on its own row and leaves the clip to
+      // the caller; hard-break it here so an entity id cannot be clipped into a
+      // different, plausible one.
+      const fit = (s: string): string[] =>
+        wrapWords(s, w).flatMap((l) => (visLen(l) <= w ? [l] : (l.match(new RegExp(`.{1,${w}}`, 'g')) ?? [l])));
       return centeredNotice(this.view, 'RESULT', [
-        (ok ? c.green : c.red)(this.actionNotice),
-        ...(this.actionNoticeDetail ? ['', c.grey(this.actionNoticeDetail)] : []),
+        ...fit(this.actionNotice).map((l) => (ok ? c.green : c.red)(l)),
+        ...(this.actionNoticeDetail ? ['', ...fit(this.actionNoticeDetail).map((l) => c.grey(l))] : []),
         '',
         c.grey('press any key to continue'),
       ]);

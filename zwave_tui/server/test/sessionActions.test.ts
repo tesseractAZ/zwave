@@ -707,3 +707,57 @@ test('INVARIANT: every path that sets a notice also settles its detail line', ()
     'a notice is set without settling its detail line — the stale-line guard in ' +
     'resetActionState() is now load-bearing and needs its own test:\n' + orphans.join('\n'));
 });
+
+test('the RESULT modal never collapses two opposite driver verdicts into one line (v0.51.0)', async () => {
+  // The three ZW0360 outcomes are the motivating family. `centeredNotice` fed
+  // one long line to `center`, which falls through to a blind truncate at ~71
+  // visible chars, so all three rendered as the SAME sentence cut at the same
+  // word — and the verdict the operator needed was always in the part that
+  // fell off. The error CODE survived, which made it look complete.
+  const MESSAGES = [
+    'HA WS error (zwave_error): Z-Wave error 360 - The node was removed from the network successfully (ZW0360)',
+    'HA WS error (zwave_error): Z-Wave error 360 - The node was NOT removed and is still part of the network (ZW0360)',
+    'HA WS error (zwave_error): Z-Wave error 360 - The node may or may not have been removed; the controller cannot tell (ZW0360)',
+  ];
+  const seen: string[] = [];
+  for (const message of MESSAGES) {
+    const { runner } = mkActions();
+    runner.ping = async () => ({ ok: false, message });
+    let out = '';
+    // The MODAL terminal, set through the constructor — `view` is private, and
+    // the width is the whole point of this test.
+    const s = new TuiSession({ write: (x) => { out = x; }, data, actions: runner, log: () => {}, width: 80, height: 24 });
+    (s as never as { actionNotice: string | null }).actionNotice = `✗  ${message}`;
+    (s as never as { actionNoticeDetail: string | null }).actionNoticeDetail = null;
+    s.draw();
+    const last = () => out;
+    // Strip the modal's own box rules so a wrapped clause reads as one string.
+    const shown = strip(last()).replace(/[║╔╗╚╝╠╣═─│]/g, ' ').replace(/\s+/g, ' ');
+    seen.push(shown);
+    // The distinguishing clause must be on screen SOMEWHERE in the modal.
+    const tail = message.slice(message.indexOf('360 - ') + 6, message.indexOf(' (ZW0360)'));
+    assert.ok(shown.includes(tail.slice(0, 40)),
+      `the verdict must survive: expected "${tail.slice(0, 40)}" in\n${shown.slice(0, 700)}`);
+  }
+  // And the three frames must not be identical to each other.
+  assert.equal(new Set(seen).size, 3, 'three opposite outcomes must render three different frames');
+});
+
+test('a THROWN action error is capped and scrubbed like every other (v0.51.0)', async () => {
+  // Every other failure goes through sanitizeEventText in zwaveActions; the
+  // catch in runAction did not, so the one path that carries a raw exception
+  // reached the modal uncapped and unscrubbed - and the modal's row budget
+  // assumes the 300-char cap holds.
+  const { runner } = mkActions();
+  const CTL = String.fromCharCode(7, 27, 13);
+  runner.ping = async () => { throw new Error('boom' + CTL + 'x'.repeat(500)); };
+  let out = '';
+  const s = new TuiSession({ write: (x) => { out = x; }, data, actions: runner, log: () => {}, width: 80, height: 24 });
+  s.draw();
+  s.feed([key('p')]);
+  await flush(); await flush();
+  const notice = (s as never as { actionNotice: string | null }).actionNotice ?? '';
+  assert.ok(notice.length <= 320, `the message must be capped: ${notice.length} chars`);
+  assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(notice),
+    'control bytes must be scrubbed before they reach a frame');
+});

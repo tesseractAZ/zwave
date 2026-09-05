@@ -166,3 +166,91 @@ test('an ENGINE-initiated write is attributed to the engine, never to the operat
   assert.match(typeRow, /engine \(auto\)/, `an engine write says so: ${typeRow}`);
   assert.ok(!/operator/.test(typeRow), `and is never labelled operator: ${typeRow}`);
 });
+
+test('a clipped VALUE never reads as a different, complete value (v0.51.0)', () => {
+  // The cardinal case: at the modal 80x24 a value change of `812 → 1240` came
+  // back as `812 → 12`. Not a truncation an operator can SEE — a plausible
+  // number, and the same frame's Detail row showed the true one, so the screen
+  // contradicted itself. This is shedLine's whole-token rule (which stopped
+  // `#23` clipping to the innocent `#2`) applied to a string with no tokens.
+  const ev = mkEvent({
+    ts: 1_000, kind: 'value', nodeId: 7,
+    text: 'Garage Power Meter reported consumption: 812 → 1240 and the meter is still climbing',
+    entityId: 'sensor.garage_power', entityName: 'Garage Power Meter',
+  });
+  const lines = renderLog(ctx({ events: [ev], nodes: [mkNode({ nodeId: 7, name: 'Garage Power Meter' })],
+    view: mkView({ cols: 80, rows: 24 }) }));
+  const joined = lines.map(strip).join('\n');
+  const row = lines.map(strip).find((l) => /Garage Power Meter reported/.test(l)) ?? '';
+  assert.ok(row, `the event row must render: ${joined.slice(0, 400)}`);
+  // The row is short of the full text at 80 cols — that is fine. What is NOT
+  // fine is ending mid-number with nothing saying so.
+  if (!row.includes('1240')) {
+    assert.ok(/…/.test(row), `a shortened row must carry the marker: "${row}"`);
+    assert.ok(!/\b12\s*$/.test(row.replace(/…\s*$/, '')),
+      `must not end on a truncated number that reads as complete: "${row}"`);
+  }
+  assertGeometry(lines, 80, 24, 'value clip');
+});
+
+test('the Detail pane spends its own blank rows before it drops text (v0.51.0)', () => {
+  // Detail is the LAST field, so the rows the fixed fields left unused are its
+  // own — and 3–5 of 9 sat blank while the tail of an action failure was cut at
+  // W−10 with no marker. The list row above clips harder, and no key scrolls
+  // either, so that tail existed NOWHERE on screen.
+  const long = 'Failed to perform the action zwave_js.ping. Node 23 did not acknowledge the command '
+    + 'and the controller reported a transmit failure after three attempts on route 1-14-23.';
+  const lines = renderLog(ctx({
+    events: [mkEvent({ ts: 1_000, kind: 'action', source: 'you', nodeId: 23, severity: 'error', text: long })],
+    nodes: [mkNode({ nodeId: 23, name: 'Back Door' })],
+    view: mkView({ cols: 80, rows: 24 }),
+  }));
+  // Normalise the wrap indent — the point is the text SURVIVES, on whatever row.
+  const joined = lines.map(strip).join(' ').replace(/\s+/g, ' ');
+  assert.match(joined, /did not acknowledge the command/, `the pane must wrap, not clip: ${joined}`);
+  // Anything still dropped must be disclosed, never silently cut.
+  const detailIdx = lines.findIndex((l) => /Detail/.test(strip(l)));
+  assert.ok(detailIdx >= 0, 'a Detail row must exist');
+  const tail = lines.slice(detailIdx).map(strip).join(' ').replace(/\s+/g, ' ');
+  if (!tail.includes('route 1-14-23')) {
+    assert.match(tail, /\+\d+/, `an incomplete Detail must carry "+N": ${tail}`);
+  }
+  assertGeometry(lines, 80, 24, 'detail wrap');
+});
+
+test('the event count carries the window it was observed over (v0.51.0)', () => {
+  // The ring drops its tail at LOG_MAX with no counter and no marker, so
+  // `247 EVENTS · LAST 7 DAYS` read as one claim when it is two: the label is
+  // what was ASKED for, the count is over whatever the ring still holds.
+  const now = Date.now();
+  const lines = renderLog(ctx({
+    events: [mkEvent({ ts: now - 3_600_000, kind: 'system', nodeId: null, text: 'oldest' }),
+             mkEvent({ ts: now - 1_000, kind: 'system', nodeId: null, text: 'newest' })],
+    view: mkView({ cols: 120, rows: 30 }),
+  }));
+  const joined = lines.map(strip).join('\n');
+  assert.match(joined, /2 EVENTS\/\S+/, `the count must carry its observed span: ${joined.slice(0, 300)}`);
+});
+
+test('a Detail too long even for its own slack discloses the remainder (v0.51.0)', () => {
+  // Wrapping into the blank rows buys a lot, but not everything: sanitizeEventText
+  // caps at 300 chars and a narrow pane can still run out. Running out is fine.
+  // Running out SILENTLY is the defect - the same rule shedLine applies.
+  const long = Array.from({ length: 60 }, (_, i) => `clause${i}`).join(' and then ');
+  const lines = renderLog(ctx({
+    events: [mkEvent({ ts: 1_000, kind: 'action', source: 'you', nodeId: 3, severity: 'error', text: long })],
+    nodes: [mkNode({ nodeId: 3, name: 'Kitchen' })],
+    view: mkView({ cols: 60, rows: 24 }),
+  }));
+  const detailIdx = lines.findIndex((l) => /Detail/.test(strip(l)));
+  assert.ok(detailIdx >= 0, 'a Detail row must exist');
+  // EXCLUDE the command bar. It sheds its own keycaps with "+N", so a naive
+  // slice-to-end passes whether or not the Detail pane discloses anything —
+  // the first version of this test did exactly that and a mutant caught it.
+  const pane = lines.slice(detailIdx)
+    .map(strip)
+    .filter((l) => !/\[[^\]]+\]\s/.test(l) && !/SCREENS|CLOSE/.test(l));
+  const tail = pane.join(' ');
+  assert.match(tail, /\+\d+/, `an over-long Detail must disclose "+N" in the PANE: ${tail}`);
+  assertGeometry(lines, 60, 24, 'detail overflow');
+});

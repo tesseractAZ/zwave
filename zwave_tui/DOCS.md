@@ -4148,3 +4148,29 @@ sweep, the dead-node ladder's remediation probe, the verification probe — stay
 `info` in the container log for that reason: the feature was once diagnosed as a
 no-op because 34 real probes existed only in the in-memory event ring, behind
 the login gate, where the diagnosis never looked.
+
+### 12.10 Degradation is disclosed, never silent
+
+Every path that shortens text for the frame must leave evidence that it did.
+The rule exists because a silent cut is not merely a short row — on a value it
+is a *different value that reads as complete*. `chrome.ts` owns the token-level
+forms (`shedLine` drops whole tokens with `+N`, `fieldStrip` drops whole fields,
+`fitBits` drops whole keycaps); `ansi.ts` `clipWords` (v0.51.0) is the
+string-level form for prose that has no tokens to shed, and it reserves TWO
+columns so the `…` marker is separated from the text — `140…` would otherwise
+read as `1400`.
+
+`truncate` remains the last-resort clip and the enforcement of the frame's
+`visLen <= cols` contract, so it still wraps the whole-token helpers at very
+narrow widths. What it must not be is the *only* thing between a payload and
+the screen. The motivating defects, all v0.51.0: an Activity Log value change of
+`812 → 1240` rendered as `812 → 12` while the same frame's Detail row showed
+the true number; three semantically opposite `ZW0360` verdicts rendered as one
+identical sentence; and REMEDY's `[cost · basis]` provenance tag rendered as
+`[physical`, an unbalanced bracket with the basis silently gone.
+
+A panel that runs out of ROWS is governed by the same rule from the other
+direction — `frame()` substitutes its own "N more lines hidden" row, so a
+narrative that does not fit is disclosed as missing rather than dropped. That is
+why capping a narrative with a bare `.slice()` is wrong even when the text is
+long: the cap hides what the frame would have disclosed.

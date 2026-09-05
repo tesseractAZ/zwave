@@ -291,3 +291,24 @@ test('the coarse noise PEAK is reported when it exceeds the mean (v0.49.0)', () 
   assert.match(out, /peak -78 dBm/, `the burst must surface: ${out.slice(0, 1200)}`);
   assert.match(out, /above the mean — a burst the mean hides/);
 });
+
+test('the correlated-degradation narrative keeps its HEDGE at the modal terminal (v0.51.0)', () => {
+  // Verbatim from symptoms.ts — the only narrative for the non-flooding mesh
+  // case, so this is the common path. A bare `.slice(0, 2)` dropped, at 80
+  // columns, exactly the clause that says this is a GUESS — on a symptom whose
+  // basis is 'inferred' and whose basis this screen never renders. A hedge that
+  // disappears at the default width leaves a lead reading as a verdict.
+  const NARRATIVE = 'Many nodes degraded together with no controller-serial or flooding cause — '
+    + 'likely an RF-environment event (interference). No noise-floor measurement is used to '
+    + 'confirm this yet; treat as a lead, not a verdict.';
+  const lines = renderInterference(ctx(80, 24, cleanView({
+    correlated: { active: true, degradedNodes: 4, narrative: NARRATIVE },
+  })));
+  const joined = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join(' ').replace(/\s+/g, ' ');
+  assert.equal(lines.length, 24, 'the frame contract still holds');
+  assert.match(joined, /treat as a lead, not a verdict\./,
+    `the hedge must survive the modal terminal: ${joined.slice(0, 500)}`);
+  // And it fits without frame() having to hide rows — the body had the slack.
+  assert.doesNotMatch(joined, /more lines hidden/,
+    'the third line was free at 80x24; if this fires, some section above grew');
+});

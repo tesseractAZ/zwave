@@ -173,7 +173,7 @@ export function shedLine(
 
 /** Greedy word wrap. Splits on whitespace; a single over-long word is emitted
  *  on its own row and clipped by the caller rather than being broken silently. */
-function wrapWords(text: string, width: number): string[] {
+export function wrapWords(text: string, width: number): string[] {
   const words = text.split(/\s+/).filter(Boolean);
   const out: string[] = [];
   let line = '';

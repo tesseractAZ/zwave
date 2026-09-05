@@ -142,7 +142,7 @@ export function logLayout(rows: number): { listRows: number; detailRows: number;
 }
 
 /** Lower/upper epoch-ms bounds for a date range (local-time day boundaries). */
-function rangeBounds(range: LogRange, now: number): { lo: number | null; hi: number | null } {
+export function rangeBounds(range: LogRange, now: number): { lo: number | null; hi: number | null } {
   const d = new Date(now);
   const startOfDay = (dt: Date) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime();
   const today = startOfDay(d);
