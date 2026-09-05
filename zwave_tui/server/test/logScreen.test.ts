@@ -254,3 +254,30 @@ test('a Detail too long even for its own slack discloses the remainder (v0.51.0)
   assert.match(tail, /\+\d+/, `an over-long Detail must disclose "+N" in the PANE: ${tail}`);
   assertGeometry(lines, 60, 24, 'detail overflow');
 });
+
+test('the log empty-state does not send the operator to a key that NARROWS (v0.55.0)', () => {
+  // `applyLogKey` steps MODULO the range order, and three of the six steps do
+  // not widen: all->hour goes from infinite to 1h, 24h->today goes 24h->12h,
+  // and today->yesterday is DISJOINT. O is a toggle, so from errorsOnly it
+  // narrows too. "press D/O to widen" told the operator to press a key that can
+  // remove the evidence they came looking for.
+  const lines = renderLog(ctx({ events: [], view: mkView({ cols: 80, rows: 24, logRange: '24h' }) }));
+  const joined = lines.map(strip).join(' ').replace(/\s+/g, ' ');
+  assert.match(joined, /No events match/, 'fixture must reach the filtered-empty state');
+  assert.doesNotMatch(joined, /to widen/, `D does not widen: ${joined}`);
+  assert.match(joined, /to change/, `it CYCLES — say so: ${joined}`);
+});
+
+test('the volatile-ring disclosure is not itself cut at the modal terminal (v0.55.0)', () => {
+  // The line is 84 visible columns and `center()` falls through to a blind
+  // truncate at 80, so the disclosure that the ring is VOLATILE — the whole
+  // point of the sentence — came back as "...and is empty after a rest".
+  for (const cols of [60, 72, 80, 100, 140]) {
+    const lines = renderLog(ctx({ events: [], view: mkView({ cols, rows: 24, logRange: '7d' }) }));
+    const row = lines.map(strip).find((l) => /in memory only|In-memory ring/.test(l)) ?? '';
+    assert.ok(row, `${cols}: the disclosure must render`);
+    assert.match(row, /restart/,
+      `${cols}: the fact it survives a restart is the point — it must not be cut: "${row.trim()}"`);
+    assert.ok(visLen(row) <= cols, `${cols}: over width`);
+  }
+});

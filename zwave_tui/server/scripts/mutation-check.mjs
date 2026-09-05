@@ -2326,6 +2326,43 @@ const MUTANTS = [
     find: "          const pct = share >= 0.005 ? `${Math.round(share * 100)}%` : '<1%';",
     repl: '          const pct = `${Math.round(share * 100)}%`;',
     what: 'a rounded-to-zero share reads "<1%", never "(0%)" beside a non-zero count' },
+  { id: 'engine-names-the-unscored-kind', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // SCORED_KINDS omits node-down, so the mesh's most alarming kind was ABSENT
+    // from the screen whose job is "what has it learned?" — and absence reads as
+    // "no episode has closed yet", not "this arm was never fed and never will be".
+    find: "    if (unscoreableReason(kind) == null) continue;   // the oracle is the authority",
+    repl: '    if (true) continue;',
+    what: 'ENGINE names the kind the ledger structurally cannot score' },
+  { id: 'engine-unscored-note-keeps-by-design', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // The narrowest form is where the claim is easiest to lose: "not scored" is
+    // what a STILL-LEARNING arm also is. "by design" is the whole distinction.
+    find: "  '○ not scored by design — see REMEDY.',",
+    repl: "  '○ not scored — see REMEDY (short).',",
+    what: '"by design" survives to the narrowest supported width' },
+  { id: 'log-hint-does-not-say-widen', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
+    // D steps MODULO the range order; three of six steps do not widen and one
+    // is disjoint, so "widen" sent the operator to a key that removes evidence.
+    find: "c.grey(' to change'),",
+    repl: "c.grey(' to widen'),",
+    what: 'the empty-state names what D actually does' },
+  { id: 'ring-disclosure-fits-the-modal-terminal', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
+    // 84 visible columns through center()'s blind truncate at 80: the sentence
+    // saying the ring is VOLATILE was itself cut mid-word.
+    find: '  return forms.find((f) => f.length <= width) ?? forms[forms.length - 1];',
+    repl: '  return forms[0];',
+    what: 'the volatile-ring disclosure is not itself silently cut' },
+  { id: 'blocked-note-keeps-its-qualifier', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Falling through to a bare head rendered a measurement under a SAFETY-gated
+    // action with nothing saying it is blocked — at the supported width FLOOR.
+    find: "          ...(blocked ? [`⚠ ledger measured ${pct}% — still blocked`, `⚠ measured ${pct}% — blocked`] : []),",
+    repl: '          ...[],',
+    what: 'a blocked efficacy measurement never renders without its qualifier' },
+  { id: 'episode-line-sheds-whole-forms', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // Built at 120 columns, never rendered at the modal 80, where it came back
+    // as `— se`: a sentence stopping mid-word with the ENGINE pointer gone.
+    find: '        return [c.grey(clipWords(forms.find((f) => f.length <= W) ?? forms[forms.length - 1], W))];',
+    repl: '        return [truncate(c.grey(forms[0]), W)];',
+    what: 'the open-episode disclosure keeps its pointer at every width' },
   { id: 'store-rejects-positive-rssi', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
     // cleanRssi enumerated the driver's sentinel markers (>= 125) and let
     // everything below through, so 0 dBm — and any positive reading short of

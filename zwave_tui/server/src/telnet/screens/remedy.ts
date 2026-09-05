@@ -10,7 +10,7 @@
 
 import type { ScreenCtx, Symptom, NodeSnapshot, SymptomKind, ActionKind, Efficacy } from '../../types';
 import { provenance, weight, unscoreableReason, subsumptionLabel } from '../ledgerText';
-import { c, truncate, visLen } from '../ansi';
+import { c, clipWords, truncate, visLen } from '../ansi';
 import { frame, fieldStrip, shedLine } from '../chrome';
 import { planFor, type PlanCandidate } from '../../zwave/planner';
 import { wilsonLower } from '../../zwave/outcomes';
@@ -169,7 +169,24 @@ function efficacyNote(e: Efficacy | null | undefined, blocked = false, width = I
           `${head} (${n}${prov})${vs}${tailBlocked}`,
           `${head} (${n}${prov})${tailBlocked}`,
           `${head}${tailBlocked}`,
-          head,
+          // SHORTER RUNGS THAT STILL SAY BLOCKED (v0.55.0). Simply refusing to
+          // shed the long qualifier only moved the defect: the row then
+          // exceeded the width and the CALLER truncated it to "— the block
+          // above still", a clipped clause, which is the same §12.10 violation
+          // one layer down. These forms are whole sentences that fit the floor.
+          ...(blocked ? [`⚠ ledger measured ${pct}% — still blocked`, `⚠ measured ${pct}% — blocked`] : []),
+          // THE QUALIFIER IS NOT AN OPTIONAL RUNG ON THIS LADDER (v0.55.0).
+          // Every other rung sheds something the operator can live without; the
+          // block reminder is not one of them. Falling through to bare `head`
+          // rendered `⚠ ledger measured 100% here` alone under a SAFETY-gated
+          // action — the endorsement-shaped reading this note exists to prevent.
+          // MEASURED band where it mattered: 60-66 columns depending on the
+          // percentage's digit count, which is the supported FLOOR (session.ts
+          // clamps to [60,200]) — a narrow HA ingress sidebar sits exactly there.
+          // Scoped to the no-harm ladder only: the harm ladder above still sheds
+          // this clause first, because a harm finding is NEW information while
+          // the block is already rendered on the row above.
+          ...(blocked ? [] : [head]),
         ];
     // Yellow whenever the row carries a caveat — a blocked framing or a harm
     // finding must never be rendered in the endorsing green.
@@ -658,8 +675,25 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         const openEps = data.openEpisodes() ?? [];
         if (openEps.length === 0) return [];
         const confirming = openEps.filter((e) => e.confirming).length;
-        return [truncate(c.grey(`    ◷ The ledger is still scoring ${openEps.length} episode${openEps.length === 1 ? '' : 's'}` +
-          (confirming > 0 ? ` (${confirming} in the confirmation window)` : '') + ' — see ENGINE.'), W)];
+        const n = openEps.length;
+        const plural = n === 1 ? '' : 's';
+        const long = confirming > 0 ? ` (${confirming} in the confirmation window)` : '';
+        const short = confirming > 0 ? ` (${confirming} confirming)` : '';
+        // SHEDS PROSE, NEVER THE TWO LOAD-BEARING TOKENS (v0.55.0): the
+        // confirming count, and the pointer to the screen that holds the
+        // episodes. Built at 120 columns and never rendered at the modal 80,
+        // the single form came back as `...— se` — a sentence stopping
+        // mid-word with the pointer gone, which is exactly what DOCS §12.10
+        // forbids of a bare truncate(). clipWords is the floor beneath the
+        // ladder so even the shortest form cannot clip mid-token.
+        const forms = [
+          `    ◷ The ledger is still scoring ${n} episode${plural}${long} — see ENGINE.`,
+          `    ◷ The ledger is still scoring ${n} episode${plural}${short} — see ENGINE.`,
+          `    ◷ Ledger scoring ${n} episode${plural}${short} — see ENGINE.`,
+          `    ◷ Scoring ${n} episode${plural}${short} — ENGINE.`,
+          `    ◷ ${n} open, ${confirming} confirming — ENGINE.`,
+        ];
+        return [c.grey(clipWords(forms.find((f) => f.length <= W) ?? forms[forms.length - 1], W))];
       };
 
       if (eng.timeoutReady === 0 && eng.rttReady === 0) {

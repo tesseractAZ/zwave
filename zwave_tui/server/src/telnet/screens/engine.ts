@@ -31,7 +31,7 @@
  */
 
 import { c, truncate, visLen } from '../ansi';
-import { provenance, weight } from '../ledgerText';
+import { provenance, weight, unscoreableReason } from '../ledgerText';
 import { frame } from '../chrome';
 import type { ScreenCtx, SymptomKind, ActionKind } from '../../types';
 
@@ -39,6 +39,46 @@ import type { ScreenCtx, SymptomKind, ActionKind } from '../../types';
 const SCORED_KINDS: SymptomKind[] = [
   'return-path-degraded', 'chronic-return-path', 'quiet-node', 'dead-flap',
   's2-desync', 'weak-signal', 'rtt-degraded', 'rate-fallback', 'route-churn',
+];
+
+/**
+ * Kinds the ledger structurally CANNOT score — LEARNED must SAY so (v0.55.0).
+ *
+ * `SCORED_KINDS` omits these, and omission is a FOURTH way of saying nothing
+ * beside the three empty states this screen already distinguishes. REMEDY has
+ * disclosed the reason per-card since v0.44.0, but the screen whose stated job
+ * is "what has it learned?" did not mention the mesh's most alarming kind at
+ * all — so its absence read as "no episode has closed yet" rather than "this
+ * arm was never fed and never will be".
+ *
+ * `node-down` opens no episode at all, so every counter that could bring a row
+ * into existence is permanently zero: the row must be UNGATED or it does not
+ * exist. Membership is the shared oracle's — a row is emitted only for a kind
+ * `unscoreableReason` has a sentence for, bound in both directions by a test so
+ * a future unscoreable kind cannot be silently omitted here.
+ */
+const UNSCORED_KINDS: SymptomKind[] = ['node-down'];
+
+/**
+ * Roll-up wording, longest first for `pick`.
+ *
+ * Deliberately NOT `unscoreableReason`'s own sentence: that one needs ~185
+ * columns and wraps to three rows, which is right on a REMEDY card devoted to a
+ * single symptom and wrong on a summary that must also carry the arms it CAN
+ * measure. Every form is a whole true sentence, and the pointer to the card
+ * that explains it survives all the way down — the note is useless if the
+ * operator cannot find the long version. `by design` survives too: it is the
+ * word separating "never will be" from "still learning".
+ *
+ * The wording indicts the MEASUREMENT, never the action — planner.ts still
+ * recommends pinging a dead node, and these two lines sit two keypresses apart.
+ */
+const UNSCORED_NOTE_FORMS: string[] = [
+  '○ not scored by design — an outage episode ends when the node returns, so there is no control arm. See its REMEDY card.',
+  '○ not scored by design — no control arm is possible. See its REMEDY card.',
+  '○ not scored by design — see its REMEDY card.',
+  '○ not scored by design — see REMEDY.',
+  '○ not scored — see REMEDY.',
 ];
 
 /** Actions the ledger can carry an arm for. */
@@ -345,6 +385,13 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     // `push` stays: at cols 1-5 fitBits emits prefix + `+N` wider than the
     // frame, and only truncate enforces renderContract's `visLen <= cols`.
     if (tallies.length) push(fitBits('    ' + c.grey('○ '), tallies.map((t) => c.grey(t)), view.cols));
+  }
+  // UNGATED: no counter can ever bring these rows into existence, because the
+  // kind opens no episode. They are the difference between "not yet" and "never".
+  for (const kind of UNSCORED_KINDS) {
+    if (unscoreableReason(kind) == null) continue;   // the oracle is the authority
+    push('  ' + c.white(kind));
+    push('    ' + c.grey(pick(view.cols - 4, UNSCORED_NOTE_FORMS)));
   }
   if (!anyLearned) {
     push('  ' + c.grey('○ nothing learned yet — no episode of any scored kind has closed.'));
