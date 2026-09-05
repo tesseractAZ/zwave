@@ -42,7 +42,7 @@ export interface KeyResult {
 }
 
 /** The sort keys, in the order `s` cycles through them. */
-const SORT_ORDER: ViewState['sortKey'][] = ['health', 'id', 'name', 'rssi', 'seen'];
+const SORT_ORDER: ViewState['sortKey'][] = ['health', 'id', 'name', 'rssi', 'seen', 'symptom'];
 
 
 function effectiveRssi(n: NodeSnapshot): number {
@@ -81,6 +81,25 @@ export function visibleNodes(data: DataProvider, view: ViewState): NodeSnapshot[
         return d !== 0 ? d : byId(a, b);
       });
       break;
+    case 'symptom': {
+      // THE ENGINE'S OWN TRIAGE ORDER (v0.58.0). `health` sorts by the SCORER,
+      // which is a different judgment: a node can score a clean A and still
+      // carry an open crit episode the engine filed. This key answers "what has
+      // the engine actually found?", crit first, then anything lesser, then the
+      // rest by worst score so the tail is still useful.
+      const rank = (id: number): number => {
+        const s = data.symptoms().filter((x) => x.nodeId === id);
+        if (s.some((x) => x.severity === 'crit')) return 0;
+        return s.length > 0 ? 1 : 2;
+      };
+      sorted.sort((a, b) => {
+        const d = rank(a.nodeId) - rank(b.nodeId);
+        if (d !== 0) return d;
+        const h = data.scoreFor(a.nodeId).score - data.scoreFor(b.nodeId).score;
+        return h !== 0 ? h : byId(a, b);
+      });
+      break;
+    }
     case 'id':
       sorted.sort(byId);
       break;

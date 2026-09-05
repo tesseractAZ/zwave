@@ -63,7 +63,11 @@ interface ColSpec {
 /** Extra diagnostic columns unlock as the terminal gets wider. */
 const MID_COLS = 104; // + RTT · TMO · TREND
 const WIDE_COLS = 140; // + ROUTE, wider name + trend
-const NARROW_COLS = 74; // below this, drop rate/seen/batt so FLAGS never clips
+const NARROW_COLS = 75; // below this, drop rate/seen/batt so FLAGS never clips
+// 75, NOT 74 (v0.58.0): MEASURED across every width 40..240. At exactly 74 the
+// narrow tier is off, the fixed columns plus separators come to 61, and the
+// NODE flex FLOOR of 14 overflows the row by one column — so `truncate` ate the
+// tenth FLAGS cell, which is the symptom mark. One width, silently wrong.
 
 /**
  * Build the active columns for this width. The fixed columns are sized to their
@@ -103,7 +107,7 @@ function layout(W: number, mode: ViewState['signalDisplay'], realNoise = true): 
     add('seen', 5, 'r', 'SEEN');
     add('batt', 4, 'r', 'BATT');
   }
-  add('flags', 9, 'l', 'FLAGS'); // FLAG_ORDER length — never clip a flag
+  add('flags', 10, 'l', 'FLAGS'); // FLAG_ORDER length + 1 symptom mark — never clip either
   if (mid) add('trend', wide ? 16 : 8, 'l', 'TREND');
 
   // Flex NODE: give it every column left over after the fixed ones + separators.
@@ -185,12 +189,15 @@ export function renderOverview(ctx: ScreenCtx): string[] {
   view.scroll = start;
   const end = Math.min(visibleNodes.length, start + cap);
   const noise = data.noiseFloor();
+  // ONE walk per frame, not one per row: `symptoms()` returns the whole live
+  // list and the roster can hold 39 rows redrawn at 1 Hz.
+  const symptomMarks = symptomMarksByNode(data);
 
   for (let i = start; i < end; i++) {
     const n = visibleNodes[i];
     out.push(
       truncate(
-        nodeRow(n, data.scoreFor(n.nodeId), i === view.selected, noise, view, data, cols),
+        nodeRow(n, data.scoreFor(n.nodeId), i === view.selected, noise, view, data, cols, symptomMarks.get(n.nodeId) ?? null),
         W,
       ),
     );
@@ -344,6 +351,7 @@ function nodeRow(
   view: ViewState,
   data: DataProvider,
   cols: readonly ColSpec[],
+  symptomMark: 'crit' | 'other' | null,
 ): string {
   const nameW = cols.find((col) => col.key === 'name')?.w ?? 16;
   const trendW = cols.find((col) => col.key === 'trend')?.w ?? 8;
@@ -358,7 +366,10 @@ function nodeRow(
   const rate = rateCell(n);
   const seen = seenCell(n);
   const bat = batteryCell(n);
-  const flags = flagsCell(health.flags);
+  // The ENGINE's verdict for this node, not the scorer's (v0.58.0). Computed
+  // once per frame by the caller — `symptoms()` walks the whole list, and doing
+  // that per row would be 39 walks a second on the home screen.
+  const flags = flagsCell(health.flags, symptomMark);
   const trend = sparkCell(data, n.nodeId, trendW);
 
   // Coloured form (normal rows) and plain form (the inverse-video selected row —
@@ -679,9 +690,41 @@ function batteryCell(n: NodeSnapshot): Cell {
   return isBattery ? { t: 'bat', color: c.grey } : { t: 'AC', color: c.grey };
 }
 
-function flagsCell(flags: string[]): Cell {
-  const t = flags.join('');
+/**
+ * The FLAGS cell, plus the ENGINE'S OWN verdict (v0.58.0).
+ *
+ * The health flags are the SCORER's opinion. The symptom engine is a separate
+ * judgment — it opens episodes, runs the remediation ladder, and files a card
+ * on REMEDY — and none of it reached the home roster: a node the engine held a
+ * CRIT against rendered an empty FLAGS cell on the same frame REMEDY showed its
+ * card, with no column, no glyph and no sort key to surface it. The operator's
+ * first screen disagreed with the engine's own conclusion.
+ *
+ * A single mark, not a column: the roster is already nine columns at 80 and the
+ * measured cost of a tenth was a width where the row silently overflowed.
+ * `!` for a crit, `·` for anything lesser — the mark answers "does the engine
+ * have an open finding here?", and REMEDY answers "which".
+ */
+/** The engine's per-node verdict, collapsed to the one mark the roster shows. */
+export function symptomMarksByNode(data: DataProvider): Map<number, 'crit' | 'other'> {
+  const out = new Map<number, 'crit' | 'other'>();
+  for (const sym of data.symptoms()) {
+    if (sym.nodeId == null) continue;           // mesh-scoped: no row to mark
+    const prev = out.get(sym.nodeId);
+    if (sym.severity === 'crit' || prev == null) {
+      out.set(sym.nodeId, sym.severity === 'crit' ? 'crit' : 'other');
+    }
+  }
+  return out;
+}
+
+function flagsCell(flags: string[], symptom: 'crit' | 'other' | null = null): Cell {
+  const mark = symptom === 'crit' ? '!' : symptom === 'other' ? '·' : '';
+  const t = flags.join('') + mark;
   if (!t) return { t: '', color: c.grey };
+  // A crit symptom outranks every flag colour: it is the engine saying it has
+  // an open finding, not the scorer saying a lane looks thin.
+  if (symptom === 'crit') return { t, color: c.redB };
   const has = (f: string) => flags.includes(f);
   const color =
     has('D') || has('F') || has('R')
