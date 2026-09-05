@@ -201,3 +201,22 @@ test('a bucket with no recorded max falls back to its MEAN, never to 0 dBm (v0.4
   assert.equal(v.noise.trendCoarse.length, v.noise.trendCoarseMax.length,
     'the two arrays stay index-aligned by construction');
 });
+
+test('the QUIETEST bucket reading is folded through, not averaged away (v0.62.0)', () => {
+  // The one member of the v0.49.0 "nothing is folded, persisted and then
+  // averaged away" sweep that was missed. `floorMax` reached the screen as the
+  // peak; `floorMin` had no consumer at all. The peak answers "was there a
+  // burst?"; the floor of the floor answers whether the BACKGROUND itself has
+  // risen — a persistent degradation rather than an event.
+  const DAY = 86_400_000;
+  const coarse = [
+    ccb(now - 2 * DAY, [-100, -110]), // mean -105, quietest -110, noisiest -100
+    ccb(now - 1 * DAY, [-98, -104]),  // mean -101, quietest -104, noisiest -98
+  ];
+  const v = computeInterference(inp({ controllerCoarse: coarse }));
+  assert.deepEqual(v.noise.trendCoarseMin, [-110, -104],
+    'the quietest reading per bucket survives the fold');
+  assert.deepEqual(v.noise.trendCoarseMax, [-100, -98], 'and the noisiest still does too');
+  assert.equal(v.noise.trendCoarseMin.length, v.noise.trendCoarse.length,
+    'index-aligned with the means, so a consumer can zip them without a length check');
+});

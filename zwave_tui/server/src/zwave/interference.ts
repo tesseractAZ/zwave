@@ -112,6 +112,13 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   // The fallback is the MEAN, never 0: 0 dBm would paint the top of a
   // -110..-80 scale as a permanent alarm.
   const trendCoarseMax: number[] = [];
+  // AND THE QUIETEST (v0.62.0) — the one member of the v0.49.0 "nothing is
+  // folded, persisted and then averaged away" sweep that was missed. The peak
+  // answers "was there a burst?"; the FLOOR of the floor answers a different
+  // question the mean cannot: has the background itself risen, so that even the
+  // quiet moments are noisier than they were? That is a persistent degradation
+  // rather than an event, and it is the one an operator cannot see coming.
+  const trendCoarseMin: number[] = [];
   let firstBucketT0: number | null = null;
   let lastBucketT0: number | null = null;
   for (const b of input.controllerCoarse) {
@@ -121,6 +128,7 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
     // Index-aligned with trendCoarse by construction — both pushed inside the
     // same guard, so a consumer can zip them without a length check.
     trendCoarseMax.push(b.floorMax ?? mean);
+    trendCoarseMin.push(b.floorMin ?? mean);
     if (firstBucketT0 == null) firstBucketT0 = b.t0;
     lastBucketT0 = b.t0;
   }
@@ -199,7 +207,8 @@ export function computeInterference(input: InterferenceInput): InterferenceView 
   };
 
   return {
-    noise: { channels, floor, real, trend, trendCoarse, trendCoarseMax, trendCoarseDays, band },
+    noise: { channels, floor, real, trend, trendCoarse, trendCoarseMax,
+    trendCoarseMin, trendCoarseDays, band },
     serial: { nakPerH, canPerH, tmoAckPerH, tmoRespPerH, band: serialBand, spanH },
     diurnal,
     coverageDays,

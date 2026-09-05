@@ -415,6 +415,7 @@ export interface ZwaveData {
   confoundedCount(kind: SymptomKind): number;
   driverWsStatus(): string;
   driverWsState(): DriverWsState;
+  s2LaneFault(): 'refused' | 'storm-stopped' | null;
   openEpisodes(): OpenEpisodeSummary[] | null;
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   autoPingState(): AutoPingSnapshot | null;
@@ -1031,6 +1032,12 @@ class ZwaveDataImpl implements ZwaveData {
    *  enum since it shipped; publish that and let the prose stay prose. */
   driverWsState(): DriverWsState {
     return this.driverWs?.state() ?? 'disabled';
+  }
+
+  /** WHY the S2 log lane is dark (v0.62.0). No driver client — an install that
+   *  opted out — is null, so it is never nagged about a lane it never had. */
+  s2LaneFault(): 'refused' | 'storm-stopped' | null {
+    return this.driverWs?.s2LaneFault() ?? null;
   }
 
   private sampleEvidence(): void {

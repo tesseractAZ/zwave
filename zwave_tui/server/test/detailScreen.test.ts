@@ -57,7 +57,7 @@ function mkData(o: DataOver = {}): { data: DataProvider; nodes: NodeSnapshot[] }
     symptoms: () => [],
     engineStatus: () => ({ enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 0, bands: 6 }),
     efficacyFor: () => null,
-    interference: () => ({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
+    interference: () => ({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
     entityStates: () => o.entityStates ?? [],
     configParams: () => o.configParams ?? { status: 'ready', params: [] },
     openEpisodes: () => [],
@@ -849,4 +849,15 @@ test('the dossier says what fraction of its grade is ASSUMED (v0.61.0)', () => {
   const measured = { score: 92, grade: 'A', state: 'ok', flags: [], assumedPct: 0, assumedLanes: [] };
   const clean = yardLines(withYard({ scoreFor: () => measured as never }), 140).join('\n');
   assert.doesNotMatch(clean, /is assumed/, 'a measured grade carries no caveat');
+});
+
+test('the per-node VERIFICATION DEBT is visible on the dossier (v0.62.0)', () => {
+  // ENGINE carries one fleet number, which cannot answer the question an
+  // operator asks while looking at a dossier: is THIS node's evidence going to
+  // be confirmed, or is it queued behind something? A debt that never drains is
+  // the starvation this lane exists to prevent.
+  const owed = yardLines(withYard({ verifyOwedFor: () => 3 }), 140).join('\n');
+  assert.match(owed, /3 verification probes owed/, `the debt must render: ${owed.slice(0, 400)}`);
+  const none = yardLines(withYard({ verifyOwedFor: () => 0 }), 140).join('\n');
+  assert.doesNotMatch(none, /verification probe/, 'no debt ⇒ no row');
 });

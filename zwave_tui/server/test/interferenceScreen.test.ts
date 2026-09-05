@@ -8,7 +8,7 @@ const now = Date.now();
 const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
 
 const cleanView = (over: Partial<InterferenceView> = {}): InterferenceView => ({
-  noise: { channels: [-101, -103, -103, -95], floor: -102, real: true, trend: [-101, -102, -103, -102, -101], trendCoarse: [-100, -101, -102, -101, -103, -102], trendCoarseMax: [-98, -99, -100, -99, -82, -100], trendCoarseDays: 3, band: 'clean' },
+  noise: { channels: [-101, -103, -103, -95], floor: -102, real: true, trend: [-101, -102, -103, -102, -101], trendCoarse: [-100, -101, -102, -101, -103, -102], trendCoarseMax: [-98, -99, -100, -99, -82, -100], trendCoarseMin: [], trendCoarseDays: 3, band: 'clean' },
   serial: { nakPerH: 0, canPerH: 0, tmoAckPerH: 0, tmoRespPerH: 2, band: 'healthy', spanH: 6.2 },
   diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 200, rate: h === 18 ? 0.031 : 0.008 })),
   coverageDays: 16,
@@ -30,7 +30,7 @@ const ctx = (cols: number, rows: number, iv: InterferenceView): ScreenCtx =>
 test('INTERFERENCE holds EXACTLY view.rows lines within view.cols at every size + state', () => {
   const views = [
     cleanView(),
-    cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseDays: 0, band: 'unknown' } }), // no driver-WS
+    cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' } }), // no driver-WS
     cleanView({ coverageDays: 0.1, diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 0, rate: null })) }), // building
     cleanView({ correlated: { active: true, degradedNodes: 4, narrative: 'Several nodes degraded together (4 of 11 active) — likely an RF-environment event.' } }),
   ];
@@ -56,7 +56,7 @@ test('a clean mesh shows the measured floor, healthy serial, and no correlated d
 });
 
 test('without the driver-WS client the noise floor honestly reads unavailable, not fabricated', () => {
-  const iv = cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseDays: 0, band: 'unknown' } });
+  const iv = cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' } });
   const joined = renderInterference(ctx(100, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
   assert.ok(/unavailable/.test(joined), 'says unavailable');
   assert.ok(!/median .* dBm/.test(joined), 'no fabricated floor number');
@@ -284,7 +284,7 @@ test('the coarse noise PEAK is reported when it exceeds the mean (v0.49.0)', () 
     noise: { channels: [-101, -103, -103, -95], floor: -102, real: true,
       trend: [-101, -102, -103, -102, -101],
       trendCoarse: [-100, -101, -102, -101, -100, -102],
-      trendCoarseMax: [-98, -99, -100, -99, -78, -100],
+      trendCoarseMax: [-98, -99, -100, -99, -78, -100], trendCoarseMin: [],
       trendCoarseDays: 3, band: 'clean' },
   });
   const out = renderInterference(ctx(160, 60, bursty)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
@@ -346,7 +346,7 @@ test('a measured noise BURST is visible at the MODAL terminal, not just in the c
   const iv = (maxes: number[]) => cleanView({
     noise: {
       channels: [-101, -103, -103, -95], floor: -102, real: true,
-      trend: flat.slice(0, 24), trendCoarse: flat, trendCoarseMax: maxes,
+      trend: flat.slice(0, 24), trendCoarse: flat, trendCoarseMax: maxes, trendCoarseMin: [],
       trendCoarseDays: 3, band: 'clean',
     },
   });
@@ -388,7 +388,7 @@ test('the peak EXPLANATION sheds whole, and never costs the correlated hedge a r
     noise: {
       channels: [-101, -103, -103, -95], floor: -102, real: true,
       trend: flat.slice(0, 24), trendCoarse: flat,
-      trendCoarseMax: [...flat.slice(0, 47).map(() => -101), -62],
+      trendCoarseMax: [...flat.slice(0, 47).map(() => -101), -62], trendCoarseMin: [],
       trendCoarseDays: 3, band: 'clean',
     },
     correlated: { active: true, degradedNodes: 4, narrative: NARRATIVE },
@@ -398,4 +398,22 @@ test('the peak EXPLANATION sheds whole, and never costs the correlated hedge a r
   assert.match(joined, /peak -62 dBm/, `the burst is still named: ${joined.slice(0, 400)}`);
   assert.match(joined, /treat as a lead, not a verdict/,
     `and it must not have cost the hedge its row: ${joined.slice(0, 600)}`);
+});
+
+test('the QUIETEST floor is published and rendered, not averaged away (v0.62.0)', () => {
+  // The one member of the v0.49.0 "nothing is folded, persisted and then
+  // averaged away" sweep that was missed. The peak answers "was there a burst?";
+  // the floor of the floor answers whether the BACKGROUND itself has risen.
+  const flat = Array.from({ length: 48 }, () => -102);
+  const lines = renderInterference(ctx(160, 40, cleanView({
+    noise: {
+      channels: [-101, -103, -103, -95], floor: -102, real: true,
+      trend: flat.slice(0, 24), trendCoarse: flat,
+      trendCoarseMax: flat.map(() => -101),
+      trendCoarseMin: [...flat.slice(0, 47).map(() => -108), -112],
+      trendCoarseDays: 3, band: 'clean',
+    },
+  }))).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  const joined = lines.join(' ').replace(/\s+/g, ' ');
+  assert.match(joined, /quietest -112 dBm/, `the quietest reading must render: ${joined.slice(0, 500)}`);
 });

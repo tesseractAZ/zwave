@@ -10,6 +10,7 @@ import {
   DRIVER_SCHEMA_MAX,
   s2ResyncNodeId,
   type DriverWsCallbacks,
+  s2Fault,
 } from '../src/zwave/driverWsClient';
 import { driverHomeGuard, leadingRun } from '../src/zwave/zwaveData';
 
@@ -572,4 +573,21 @@ test('a peer that upgrades and PONGS but never handshakes is torn down (v0.53.0)
   assert.ok(logs.some((l) => /handshake never completed/.test(l)),
     `a wedged handshake must be named as such: ${logs.join(' | ')}`);
   assert.ok(connections >= 2, `and must reconnect, not sit forever: ${connections} connections`);
+});
+
+
+test('the S2 lane names WHY it is dark — and stays quiet while merely pending (v0.62.0)', () => {
+  const F = s2Fault;
+  // Live and acked: nothing to say.
+  assert.equal(F({ logsAcked: true, logsMsgId: 'm1', logStormStopped: false, live: true }), null);
+  // The storm backstop stopped it — s2-desync detection is OFF, and the socket
+  // is still `live`, so every screen went on saying the link was fine.
+  assert.equal(F({ logsAcked: true, logsMsgId: 'm1', logStormStopped: true, live: true }), 'storm-stopped');
+  // The driver refused it (its log level is too low to serve one).
+  assert.equal(F({ logsAcked: false, logsMsgId: null, logStormStopped: false, live: true }), 'refused');
+  // PENDING is not a fault: a normal connect is in flight, and a fault row on
+  // every reconnect is the always-on chip this codebase keeps refusing to add.
+  assert.equal(F({ logsAcked: false, logsMsgId: 'm1', logStormStopped: false, live: true }), null);
+  // Not live at all: the DRIVER LINK row already says so — do not double-report.
+  assert.equal(F({ logsAcked: false, logsMsgId: null, logStormStopped: false, live: false }), null);
 });
