@@ -251,3 +251,21 @@ test('an open CRIT outranks the scorer\'s flag colour, and sorts to the top (v0.
   const byHealth = visibleNodesFor(d, view);
   assert.notEqual(byHealth[0].nodeId, 3, 'and health sort legitimately disagrees — that is the point');
 });
+
+test('an ALIVE but never-measured node does not render a fabricated grade (v0.59.0)', () => {
+  // The suppression keyed on NodeStatus, so a node that is alive and simply has
+  // no evidence yet showed its placeholder score in the same colour band as a
+  // node with weeks of measurement behind it. `state === 'unknown'` is the
+  // scorer's own word for "I have nothing to assess".
+  const d: DataProvider = {
+    ...data,
+    scoreFor: (id) => (id === 3
+      ? { score: 10, grade: 'F', state: 'unknown', flags: [] }
+      : { score: 90, grade: 'A', state: 'ok', flags: [] }),
+  };
+  const row = renderOverview({ view: mkView(140, 30), data: d, visibleNodes: nodes, filtering: false, actionsEnabled: true })
+    .map(strip).find((l) => /Node 3 With/.test(l)) ?? '';
+  assert.ok(row, 'node 3 must render');
+  assert.doesNotMatch(row, /\b10\b/, `a never-measured node must not show a fabricated score: "${row.trim()}"`);
+  assert.match(row, /—/, `it shows the no-measurement dash instead: "${row.trim()}"`);
+});

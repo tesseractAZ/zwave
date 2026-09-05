@@ -343,6 +343,11 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     if (cov) {
       sep();
       body.push(section('EVIDENCE'));
+      // Hoisted (v0.59.0) so BOTH RSSI rows in this dossier can qualify
+      // themselves. `stats.rssi` is the signal from whatever repeater relayed
+      // the frame, so for a routed node every RSSI row here describes a link
+      // the device is not on either end of.
+      const routedHere = !n.isLongRange && (n.stats?.lwr?.repeaters?.length ?? 0) > 0;
       const feeds =
         feedTag('status', cov.statusFeedLive) + c.grey(' · ') + feedTag('stats', cov.statsFeedLive);
       const watched = fmtAge(Date.now() - cov.firstSeenAt);
@@ -384,8 +389,14 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           const mean = Math.round(rSum / rN);
           const worst = Math.min(...mins);
           const best = Math.max(...maxs);
+          // THE ENVELOPE IS LAST-HOP TOO (v0.59.0). This row rendered
+          // BYTE-IDENTICALLY for a routed and a direct node, in the same bright
+          // white the dossier uses for the device's own measurements — while
+          // every other RSSI row on the same screen says whose signal it is.
+          // A multi-day worst…best envelope reads as the device's radio history
+          // and is a repeater's.
           const bits = [
-            c.white(`${worst}…${best} dBm`),
+            (routedHere ? c.grey : c.white)(`${worst}…${best} dBm`) + (routedHere ? c.grey(' last-hop') : ''),
             c.grey(`mean ${mean}`),
             ...(rates.length ? [c.grey(`worst rate ${Math.min(...rates)}k`)] : []),
           ];
@@ -503,7 +514,6 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       // for a routed node this row describes a link the device is not on either
       // end of. Rendered grey rather than in health colours, because a "good"
       // number here says nothing about the device's own radio.
-      const routedHere = !n.isLongRange && (n.stats?.lwr?.repeaters?.length ?? 0) > 0;
       const rn = data.rssiNormal?.(n.nodeId) ?? null;
       if (rn) {
         const normC = routedHere ? c.grey : c.white;

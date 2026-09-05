@@ -483,3 +483,17 @@ test('ENGINE names every kind the shared ORACLE calls unscoreable (v0.55.0)', ()
     }
   }
 });
+
+test('ENGINE tells "auto-ping off" apart from "write actions off" (v0.59.0)', () => {
+  // Two different facts with OPPOSITE remedies — one is a feature toggle, the
+  // other is the master safety gate that also silences every manual action on
+  // every screen — and the screen has both, but printed "one or the other".
+  const off = plain(renderEngine({ ...ctx(120, 30, { autoPingState: () => null }), actionsEnabled: false }));
+  assert.match(off, /WRITE ACTIONS are off/, `the master gate must be named: ${off.slice(0, 400)}`);
+  assert.match(off, /neither can you/, 'and its consequence for the operator stated');
+
+  const apOff = plain(renderEngine({ ...ctx(120, 30, { autoPingState: () => null }), actionsEnabled: true }));
+  assert.match(apOff, /auto-ping is disabled/, `the feature toggle must be named: ${apOff.slice(0, 400)}`);
+  assert.match(apOff, /manual actions still work/, 'and its DIFFERENT consequence stated');
+  assert.notEqual(off, apOff, 'the two states must not render identically');
+});

@@ -815,3 +815,22 @@ test('a rounded-to-zero invalid share says "<1%", never "(0%)" (v0.49.1)', () =>
   assert.match(renderDetail(ctx(mkView(160, 60), d.data, d.nodes)).map(strip)
     .find((l) => /Windows/.test(l)) ?? '', /40 of 100 invalid \(40%\)/);
 });
+
+test("the Long RF ENVELOPE says whose signal it is, like every other RSSI row (v0.59.0)", () => {
+  // A multi-day worst…best envelope reads as the DEVICE's radio history. For a
+  // routed node it is a repeater's, and this row rendered byte-identically for
+  // both — in the same bright white the dossier uses for the device's own
+  // measurements, while every other RSSI row on the same screen qualifies itself.
+  const lwr = { repeaters: [4], protocolDataRate: 3, rssi: -60, repeaterRSSI: [], routeFailedBetween: null };
+  const coarse = [{ t0: 1, n: 96, freshN: 72, invalidW: 0, dTx: 480, dTimeout: 6, dDropTx: 1, dRx: 460,
+    flaps: 0, routeChanges: 2, s2: 0, rssiN: 72, rssiSum: -4464, rssiMin: -70, rssiMax: -55,
+    rttN: 72, rttSum: 2160, rateMin: 100 }];
+  const withCoarse = { evidenceCoarse: () => coarse };
+  const routed = yardLines(withYard(withCoarse, { stats: { ...node().stats, lwr } as never }), 160)
+    .find((l) => /Long RF/.test(l)) ?? '';
+  const direct = yardLines(withYard(withCoarse), 160).find((l) => /Long RF/.test(l)) ?? '';
+  if (!routed || !direct) return;              // the row is size-gated; skip if absent
+  assert.match(routed, /last-hop/, `a routed envelope must say whose signal it is: "${routed.trim()}"`);
+  assert.doesNotMatch(direct, /last-hop/, `a direct node's envelope IS the device's: "${direct.trim()}"`);
+  assert.notEqual(routed, direct, 'and the two must never be byte-identical');
+});
