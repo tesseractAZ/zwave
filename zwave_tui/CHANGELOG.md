@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.58.0 — 2026-09-05
+
+**The home roster now shows what the engine found.**
+
+The FLAGS column is the SCORER's opinion. The symptom engine is a separate
+judgment — it opens episodes, runs the remediation ladder and files a card on
+REMEDY — and none of it reached the roster. A node the engine held an open CRIT
+against rendered an **empty FLAGS cell** on the same frame REMEDY showed its
+card, with no column, no glyph and no sort key to surface it. The operator's
+first screen disagreed with the engine's own conclusion, silently.
+
+One mark, not a column: `!` for an open critical finding, `·` for anything
+lesser. The roster is already nine columns at 80, and the measured cost of a
+tenth was a width where the row silently overflowed — see below. A crit outranks
+every flag colour, because it is the engine saying it has an open finding rather
+than the scorer saying a lane looks thin.
+
+**A new `symptom` sort key** puts the engine's findings first — crit, then
+anything lesser, then the rest by worst score. It legitimately disagrees with
+`health`: a node can score a clean A and still carry an open crit episode.
+
+**The one width that ate the mark.** Widening FLAGS from 9 to 10 cells is not
+free. At exactly **W=74** the narrow tier is off, the fixed columns plus
+separators come to 61, and the NODE flex floor of 14 overflows the row by one
+column — so `truncate` ate the tenth cell, which is the mark. One width, wrong,
+and only a step-1 sweep finds it. `NARROW_COLS` moves 74 → 75 to pay for the
+cell, and the test sweeps every width from 60 to 240 rather than the comfortable
+handful.
+
+1042 tests, 518 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.57.0 — 2026-09-05
 
 **The machine-readable boundary: what the engine concludes, where something

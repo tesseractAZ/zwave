@@ -650,7 +650,7 @@ export interface ViewState {
   selected: number; // index into the sorted node list
   scroll: number;
   filter: string; // substring filter on the overview
-  sortKey: 'health' | 'id' | 'name' | 'rssi' | 'seen';
+  sortKey: 'health' | 'id' | 'name' | 'rssi' | 'seen' | 'symptom';
   signalDisplay: 'margin' | 'dbm';
   errorsOnly: boolean; // log screen
   // ── Detail screen: dossier scroll offset (v0.22) ──

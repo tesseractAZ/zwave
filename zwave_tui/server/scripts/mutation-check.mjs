@@ -2339,6 +2339,33 @@ const MUTANTS = [
     find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),",
     repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
     what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 'roster-marks-the-engines-finding', file: 'src/telnet/screens/overview.ts', tests: ['overviewScreen'],
+    // The health flags are the SCORER's opinion; the symptom engine is a
+    // separate judgment. A node under an open CRIT rendered an EMPTY flags cell
+    // on the same frame REMEDY showed its card.
+    find: "  const mark = symptom === 'crit' ? '!' : symptom === 'other' ? '·' : '';",
+    repl: "  const mark = '';",
+    what: "the engine's own finding is visible on the home roster" },
+  { id: 'flags-column-pays-for-the-mark', file: 'src/telnet/screens/overview.ts', tests: ['overviewScreen'],
+    // MEASURED: at exactly W=74 the NODE flex floor overflows the row by one
+    // column and truncate() eats the tenth FLAGS cell — the mark.
+    find: 'const NARROW_COLS = 75; // below this, drop rate/seen/batt so FLAGS never clips',
+    repl: 'const NARROW_COLS = 74; // below this, drop rate/seen/batt so FLAGS never clips',
+    what: 'the symptom mark survives the one width that used to eat it' },
+  { id: 'flags-cell-has-room-for-the-mark', file: 'src/telnet/screens/overview.ts', tests: ['overviewScreen'],
+    find: "  add('flags', 10, 'l', 'FLAGS'); // FLAG_ORDER length + 1 symptom mark — never clip either",
+    repl: "  add('flags', 9, 'l', 'FLAGS'); // FLAG_ORDER length + 1 symptom mark — never clip either",
+    what: 'the FLAGS column is wide enough for nine flags AND the mark' },
+  { id: 'crit-outranks-a-flag-colour', file: 'src/telnet/screens/overview.ts', tests: ['overviewScreen'],
+    find: "  if (symptom === 'crit') return { t, color: c.redB };",
+    repl: '  if (false) return { t, color: c.redB };',
+    what: 'an open crit episode outranks the scorer\'s flag colouring' },
+  { id: 'symptom-sort-ranks-crit-first', file: 'src/telnet/input.ts', tests: ['overviewScreen'],
+    // `health` sorts by the SCORER — a node can score a clean A and still carry
+    // an open crit the engine filed.
+    find: "        if (s.some((x) => x.severity === 'crit')) return 0;",
+    repl: '        return 2;',
+    what: 'the symptom sort brings the engine\'s crit findings to the top' },
   { id: 'degraded-is-not-any-symptom', file: 'src/haStates.ts', tests: ['haStates'],
     // A warn-level symptom on one node is the resting state of a real 39-node
     // mesh. An alert that is always on is not an alert.

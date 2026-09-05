@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderOverview } from '../src/telnet/screens/overview';
+import { visibleNodes as visibleNodesFor } from '../src/telnet/input';
 import { responseTimeoutPct } from '../src/zwave/health';
 import { visLen } from '../src/telnet/ansi';
 import { NodeStatus } from '../src/types';
@@ -173,4 +174,80 @@ test('a DEAD node is subtracted from the mesh meter once, not twice (v0.52.0)', 
   // 4 of 39 gone => 35/39 = 90%. Double-counting would give 31/39 = 79%.
   assert.match(s5, /MESH .*\b90%/, `a dead node counts once: "${s5}"`);
   assert.doesNotMatch(s5, /FAILING/, `dead is already its own term: "${s5}"`);
+});
+
+test('a node the ENGINE filed a crit against is marked on the home roster (v0.58.0)', () => {
+  // The health flags are the SCORER's opinion. The symptom engine is a separate
+  // judgment — it opens episodes, runs the ladder, files a REMEDY card — and
+  // none of it reached the roster: a node under an open CRIT rendered an empty
+  // FLAGS cell on the same frame REMEDY showed its card.
+  const sym = { kind: 'dead-flap', nodeId: 6, severity: 'crit', since: 1, narrative: 'x', basis: 'measured', members: [] };
+  const d: DataProvider = { ...data, symptoms: () => [sym] as never };
+  const lines = renderOverview({ view: mkView(120, 30), data: d, visibleNodes: nodes, filtering: false, actionsEnabled: true })
+    .map(strip);
+  const row = lines.find((l) => /^\s*▶?\s*6\s/.test(l) || /Node 6 /.test(l)) ?? '';
+  assert.ok(row, `node 6's row must render: ${lines.slice(0, 8).join('|')}`);
+  assert.match(row, /!/, `an open CRIT must be marked on the roster: "${row.trim()}"`);
+  // A node with no finding carries no mark.
+  const clean = lines.find((l) => /Node 7 /.test(l)) ?? '';
+  if (clean) assert.doesNotMatch(clean, /!/, `a clean node is not marked: "${clean.trim()}"`);
+});
+
+test('the symptom mark survives EVERY supported width — including 74 (v0.58.0)', () => {
+  // MEASURED, not derived. At exactly 74 the narrow tier is off, the fixed
+  // columns plus separators come to 61, and the NODE flex floor of 14 overflows
+  // the row by one column — so truncate() ate the tenth FLAGS cell, which is
+  // the mark. One width, silently wrong, and only a step-1 sweep finds it.
+  const sym = { kind: 'dead-flap', nodeId: 6, severity: 'crit', since: 1, narrative: 'x', basis: 'measured', members: [] };
+  const d: DataProvider = {
+    ...data, symptoms: () => [sym] as never,
+    scoreFor: (id) => (id === 6
+      ? { score: 34, grade: 'F', state: 'flaky', flags: ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B', 'U'] }
+      : { score: 90, grade: 'A', state: 'ok', flags: [] }),
+  };
+  const missing: number[] = [];
+  for (let W = 60; W <= 240; W++) {
+    const lines = renderOverview({ view: mkView(W, 30), data: d, visibleNodes: nodes, filtering: false, actionsEnabled: true })
+      .map(strip);
+    const row = lines.find((l) => /Node 6 /.test(l)) ?? lines.find((l) => /DSWFRLIBU/.test(l)) ?? '';
+    if (row && !row.includes('!')) missing.push(W);
+    for (const l of lines) assert.ok(visLen(l) <= W, `${W}: row over width: "${l}"`);
+  }
+  assert.deepEqual(missing, [], `the crit mark was lost at widths: ${missing.join(', ')}`);
+});
+
+test('an open CRIT outranks the scorer\'s flag colour, and sorts to the top (v0.58.0)', () => {
+  // Two judgments, and they can disagree: a node can score a clean A and still
+  // carry an open crit the engine filed. The mark must be coloured by the
+  // ENGINE (bright red), and the `symptom` sort key must bring it up even
+  // though `health` would rank it last.
+  const sym = { kind: 'dead-flap', nodeId: 3, severity: 'crit', since: 1, narrative: 'x', basis: 'measured', members: [] };
+  const d: DataProvider = {
+    ...data, symptoms: () => [sym] as never,
+      // Node 3 scores a CLEAN A — health sort would bury it.
+    scoreFor: (id) => (id === 6
+      ? { score: 34, grade: 'F', state: 'flaky', flags: ['D'] }
+      : { score: 95, grade: 'A', state: 'ok', flags: [] }),
+  };
+  // Colour: the crit mark is bright red, not the flag colour.
+  const coloured = renderOverview({ view: mkView(140, 30), data: d, visibleNodes: nodes, filtering: false, actionsEnabled: true })
+    .find((l) => /Node 3 With/.test(strip(l))) ?? '';
+  assert.ok(coloured, 'node 3 must render');
+  // `redB` is SGR 1;91 and `grey` is 90. Node 3 carries NO health flags, so
+  // without the crit override the cell falls through to grey — the engine's
+  // finding rendered in the colour reserved for "nothing to see".
+  const cell = coloured.slice(coloured.lastIndexOf('\x1b['));
+  assert.match(coloured, /\x1b\[1;91m!/,
+    `an open crit must be coloured by the ENGINE: ${JSON.stringify(coloured.slice(-80))}`);
+  assert.doesNotMatch(cell, /\x1b\[90m!/, `and never in grey: ${JSON.stringify(cell)}`);
+
+  // Sort: `symptom` puts the crit first even though its score is the best.
+  const view = mkView(140, 30);
+  view.sortKey = 'symptom';
+  const ordered = visibleNodesFor(d, view);
+  assert.equal(ordered[0].nodeId, 3,
+    `the engine's crit must sort first, not the worst SCORE: got ${ordered.slice(0, 3).map((n) => n.nodeId).join(',')}`);
+  view.sortKey = 'health';
+  const byHealth = visibleNodesFor(d, view);
+  assert.notEqual(byHealth[0].nodeId, 3, 'and health sort legitimately disagrees — that is the point');
 });
