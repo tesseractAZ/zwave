@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.56.0 — 2026-09-05
+
+**A colour that never closed, a qualifier that was cut first, and a burst the
+modal terminal could not see.**
+
+**`clipWords` could leave a colour span OPEN past the end of a row.** Splitting
+on whitespace can drop the token carrying a span's closing `RESET`, so the
+attribute stayed live and the colour bled into the frame border and every row
+below it until something else happened to reset. Introduced by v0.51.0 and
+latent — both callers pass plain text and colour the result afterwards — but a
+trap for the next caller that does not, and this release adds exactly such a
+caller. `truncate` has always appended a RESET at its own cut; `clipWords` does
+now too.
+
+**A routed node's learned RSSI yardstick lost the two words that say whose
+signal it is.** v0.48.0 added `· last-hop, not the device`, but appended it
+LAST — and `kv()` ends in a bare truncate, so the qualifier was the FIRST thing
+cut. At the modal 80x24 the row printed `· last-hop, not the devi`, cut
+mid-word and unmarked; at ≤55 columns the routed row was BYTE-IDENTICAL to a
+direct node's, the screen silently presenting a repeater's signal as the
+device's own radio. The claim is now welded to the number — the same two words
+the live RSSI row eleven lines above already uses — and only the longer
+explanation sheds.
+
+**A measured noise burst was invisible at the modal terminal.** Each 30-minute
+bucket's noisiest sample is folded and persisted precisely so a five-minute
+burst diluted across 30 quiet minutes is not averaged into a flat line. v0.49.0
+reported it — but only inside the chart branch, which needs `surplus >= 6`. At
+80x24 there is no chart, so a 40 dB burst rendered byte-identical to a flat
+trend: the exact symptom the fold exists to prevent. The callout is now hoisted
+out of the chart gate, and the row sheds by whole tokens rather than through a
+blind truncate that cut `(23 dB above the mean…` to `(2`.
+
+1032 tests, 507 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.55.0 — 2026-09-04
 
 **Disclosure at the narrow end — and a kind the ledger will never score.**

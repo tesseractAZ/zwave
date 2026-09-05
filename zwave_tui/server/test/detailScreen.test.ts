@@ -576,9 +576,35 @@ test("a ROUTED node's RSSI normal is labelled last-hop, and loses its health col
   const rn = { rssiNormal: () => ({ median: -62, scale: 3, ready: true, days: 9 }) };
   const routed = yardLines(withYard(rn, { stats: { ...node().stats, lwr } as never }), 160)
     .find((l) => /^\s*Normal\s/.test(l)) ?? '';
-  assert.match(routed, /last-hop, not the device/, `routed: "${routed}"`);
+  // WORDING SPLIT in v0.56.0: the two-word claim is welded to the number and
+  // the explanation moved to a shedding tail. At 160 columns both render.
+  assert.match(routed, /last-hop/, `routed: "${routed}"`);
+  assert.match(routed, /not the device/, `the explanation still renders when it fits: "${routed}"`);
   const direct = yardLines(withYard(rn), 160).find((l) => /^\s*Normal\s/.test(l)) ?? '';
   assert.doesNotMatch(direct, /last-hop/, `a direct node's rssi IS the device's: "${direct}"`);
+});
+
+test("the last-hop qualifier survives the terminal, not just the wide case (v0.56.0)", () => {
+  // `kv()` ends in a bare truncate and the qualifier used to be appended LAST,
+  // so it was the FIRST thing cut: at the modal 80x24 the row printed
+  // `· last-hop, not the devi` — cut mid-word, unmarked — and at <=55 columns
+  // the routed row was BYTE-IDENTICAL to a direct node's. The screen then
+  // presents a REPEATER's signal as the device's own radio, silently.
+  const lwr = { repeaters: [4], protocolDataRate: 3, rssi: -60, repeaterRSSI: [], routeFailedBetween: null };
+  const rn = { rssiNormal: () => ({ median: -62, scale: 3, ready: true, days: 9 }) };
+  for (const cols of [48, 55, 60, 72, 80, 100, 160]) {
+    const routed = yardLines(withYard(rn, { stats: { ...node().stats, lwr } as never }), cols)
+      .find((l) => /^\s*Normal\s/.test(l)) ?? '';
+    const direct = yardLines(withYard(rn), cols).find((l) => /^\s*Normal\s/.test(l)) ?? '';
+    if (!routed) continue;
+    assert.match(routed, /last-hop/,
+      `${cols}: a routed node's yardstick must say whose signal it is: "${routed.trim()}"`);
+    assert.notEqual(routed, direct,
+      `${cols}: routed and direct rows must never be byte-identical: "${routed.trim()}"`);
+    // And never a mid-word cut of the claim itself.
+    assert.doesNotMatch(routed, /last-ho$|last-h$|the devi$|the dev$/,
+      `${cols}: the qualifier must not be clipped mid-word: "${routed.trim()}"`);
+  }
 });
 
 test('the EVIDENCE verdict is PINNED outside the scroll window (v0.48.0)', () => {

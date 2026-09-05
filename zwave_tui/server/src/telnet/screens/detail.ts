@@ -507,15 +507,25 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       const rn = data.rssiNormal?.(n.nodeId) ?? null;
       if (rn) {
         const normC = routedHere ? c.grey : c.white;
-        const hop = routedHere ? c.grey(' · last-hop, not the device') : '';
+        // THE QUALIFIER IS WELDED TO THE NUMBER (v0.56.0), not appended after
+        // the prose. `kv()` ends in a bare truncate, so a trailing qualifier is
+        // the FIRST thing cut: at the modal 80x24 this row printed
+        // `· last-hop, not the devi` — cut mid-word, unmarked — and at <=55
+        // columns the routed row was BYTE-IDENTICAL to a direct node's, the
+        // screen silently presenting a REPEATER's signal as the device's own.
+        // Same two words the live RSSI row uses eleven lines up, so the two
+        // rows now agree; the long explanation moves to a shedding tail where
+        // losing it costs context, not the claim.
+        const hop = routedHere ? c.grey(' last-hop') : '';
+        const hopWhy = routedHere ? c.grey(' · not the device') : '';
         const band = rn.ready
-          ? normC(`${Math.round(rn.median)} dBm`) + c.grey(` ±${Math.round(rn.scale)} dB`) +
+          ? normC(`${Math.round(rn.median)} dBm`) + hop + c.grey(` ±${Math.round(rn.scale)} dB`) +
             // The store keeps a separate normal per 4-hour time-of-day band and
             // this row answers for the band you are IN — ask at 3am and at 3pm
             // and the yardstick legitimately differs. Unlabelled, that reads as
             // the baseline contradicting itself (v0.35 review).
-            c.grey(` · ${rn.days}d · this time-of-day band`) + hop
-          : c.yellow('still learning') + c.grey(` · ${rn.days}d so far — not yet a yardstick`) + hop;
+            c.grey(` · ${rn.days}d · this time-of-day band`) + hopWhy
+          : c.yellow('still learning') + hop + c.grey(` · ${rn.days}d so far — not yet a yardstick`) + hopWhy;
         body.push(kv('Normal', band, inner));
       }
       // THE OTHER TWO YARDSTICKS (v0.48.0). rssi was bridged and these were not,

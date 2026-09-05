@@ -24,7 +24,7 @@ import { MIN_HOUR_TX } from '../../zwave/interference';
 import { sparkline, heatCell, chartRows } from '../gauges';
 import { noiseColor, timeoutPctColor } from '../bands';
 import type { ScreenCtx, InterferenceView } from '../../types';
-import { frame } from '../chrome';
+import { frame, shedLine } from '../chrome';
 
 type ColorFn = (s: string) => string;
 
@@ -33,6 +33,18 @@ type ColorFn = (s: string) => string;
  *  NOT normalized-to-max — a normalized scale would be baseline-relative, the
  *  exact thing this heatmap exists to avoid. */
 const HEAT_MAX = 0.05;
+
+/** dB by which the bucket PEAK must exceed the mean-of-means before the row
+ *  calls it out as an EVENT rather than a routine reading. */
+const NOISE_PEAK_NOTABLE_DB = 3;
+
+/** The peak callout, as a token shedLine can shed WHOLE rather than clip. */
+function peakTag(peak: number | null, meanOfMeans: number | null, notable: boolean): string {
+  if (peak == null) return '';
+  const base = `  peak ${Math.round(peak)} dBm`;
+  if (!notable || meanOfMeans == null) return c.grey(base);
+  return c.yellow(base) + c.grey(` (${Math.round(peak - meanOfMeans)} dB above the mean — a burst the mean hides)`);
+}
 
 /** Downsample a series into ≤`cells` mean-of-bin points so a fixed-width
  *  sparkline spans the WHOLE series, not just its last `cells` samples
@@ -125,6 +137,19 @@ export function renderInterference(ctx: ScreenCtx): string[] {
       // newest 24 buckets) and rows DOWN (so a 2 dB drift is visible instead of
       // rounded into one glyph). The fixed -110..-80 scale is kept so this and
       // the fine trend above stay directly comparable.
+      // THE PEAK IS NOT A CHART DECORATION (v0.56.0). Each bucket's noisiest
+      // sample is folded and persisted, and was averaged away before it reached
+      // the screen — so a five-minute burst diluted across 30 quiet minutes
+      // drew a flat line. v0.49.0 reported it, but only INSIDE the chart gate
+      // below, which needs `surplus >= 6`: at the modal 80x24 there is no chart
+      // and there was therefore no callout, so a measured 40 dB burst rendered
+      // BYTE-IDENTICAL to a flat trend — the exact symptom the fix was for.
+      const maxes = iv.noise.trendCoarseMax;
+      const peak = maxes.length ? Math.max(...maxes) : null;
+      const meanOfMeans = iv.noise.trendCoarse.length
+        ? iv.noise.trendCoarse.reduce((a, b) => a + b, 0) / iv.noise.trendCoarse.length
+        : null;
+      const notable = peak != null && meanOfMeans != null && peak - meanOfMeans >= NOISE_PEAK_NOTABLE_DB;
       const chartH = surplus >= 12 ? 6 : surplus >= 6 ? 4 : 0;
       if (chartH > 0) {
         const w = Math.max(24, Math.min(iv.noise.trendCoarse.length, W - 12));
@@ -136,16 +161,16 @@ export function renderInterference(ctx: ScreenCtx): string[] {
         // line — and the burst is the event worth seeing. Reported as a number
         // rather than a second chart: two overlaid series on an 8-level glyph
         // ramp would imply a resolution the ramp does not have.
-        const maxes = iv.noise.trendCoarseMax;
-        const peak = maxes.length ? Math.max(...maxes) : null;
-        const meanOfMeans = iv.noise.trendCoarse.length
-          ? iv.noise.trendCoarse.reduce((a, b) => a + b, 0) / iv.noise.trendCoarse.length
-          : null;
-        const peakTag = peak != null && meanOfMeans != null && peak - meanOfMeans >= 3
-          ? c.yellow(`  peak ${Math.round(peak)} dBm`) +
-            c.grey(` (${Math.round(peak - meanOfMeans)} dB above the mean — a burst the mean hides)`)
-          : peak != null ? c.grey(`  peak ${Math.round(peak)} dBm`) : '';
-        push('  ' + c.grey(`days  ${span} span (persisted 30-min buckets, survives restarts)`) + peakTag);
+        // WHOLE TOKENS (v0.56.0): this was one concatenation ending in `push`'s
+        // blind truncate, which cut `(23 dB above the mean...` to `(2` — a
+        // number that reads as complete and is off by an order of magnitude.
+        for (const l of shedLine(
+          '  ',
+          c.grey(`days  ${span} span`) + peakTag(peak, meanOfMeans, notable),
+          [c.grey('(persisted 30-min buckets, survives restarts)')],
+          W,
+          /* wrapTail */ true,
+        )) body.push(l);
         rows.forEach((line, i) => {
           // Label the scale ends only — an axis tick per row would imply a
           // precision the 8-level glyph does not have.
@@ -155,7 +180,16 @@ export function renderInterference(ctx: ScreenCtx): string[] {
       } else {
         const cells = downsampleMean(iv.noise.trendCoarse, 24);
         const coarseSpark = sparkline(cells, cells.length, { min: -110, max: -80, color: c.cyan });
-        push('  ' + c.grey('days  ') + coarseSpark + c.grey(`   ${span} span (persisted 30-min buckets, survives restarts)`));
+        // THE MODAL TERMINAL LANDS HERE. Whole-token shedding, and the peak is
+        // in the protected head: at 80x24 a 40 dB burst used to be invisible
+        // because the callout lived only in the chart branch above.
+        for (const l of shedLine(
+          '  ',
+          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakTag(peak, meanOfMeans, notable),
+          [c.grey('(persisted 30-min buckets, survives restarts)')],
+          W,
+          /* wrapTail */ true,
+        )) body.push(l);
       }
     } else {
       push('  ' + c.grey('days  ') + c.grey('· building multi-day history'));

@@ -334,3 +334,30 @@ test('the all-clear check mark never marks a line reporting degraded nodes (v0.5
   const cline = clean.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).find((l) => /No correlated mesh degradation/.test(l)) ?? '';
   assert.match(cline, /✓/, `a real all-clear keeps its mark: "${cline}"`);
 });
+
+test('a measured noise BURST is visible at the MODAL terminal, not just in the chart (v0.56.0)', () => {
+  // The bucket peak is folded and persisted precisely so a five-minute burst
+  // diluted across 30 quiet minutes is not averaged into a flat line. v0.49.0
+  // reported it — but only INSIDE the chart branch, which needs `surplus >= 6`.
+  // At 80x24 there is no chart, so a 40 dB burst rendered BYTE-IDENTICAL to a
+  // flat trend: the exact symptom the fold exists to prevent.
+  const flat = Array.from({ length: 48 }, () => -102);
+  const burst = flat.slice();
+  const iv = (maxes: number[]) => cleanView({
+    noise: {
+      channels: [-101, -103, -103, -95], floor: -102, real: true,
+      trend: flat.slice(0, 24), trendCoarse: flat, trendCoarseMax: maxes,
+      trendCoarseDays: 3, band: 'clean',
+    },
+  });
+  const quiet = renderInterference(ctx(80, 24, iv(burst.map(() => -101))))
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  const loud = renderInterference(ctx(80, 24, iv([...burst.slice(0, 47).map(() => -101), -62])))
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.notEqual(quiet, loud,
+    'a 40 dB burst must not render identically to a flat trend at the modal terminal');
+  assert.match(loud, /peak -62 dBm/, `the burst must be NAMED at 80x24:\n${loud}`);
+  // And the excess must not be clipped into a different, smaller number.
+  const row = loud.split('\n').find((l) => /peak -62/.test(l)) ?? '';
+  assert.doesNotMatch(row, /\(\d?$/, `no clipped dB excess: "${row.trim()}"`);
+});
