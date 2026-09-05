@@ -476,7 +476,19 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         // `inner - 11`, not `inner`. Getting that wrong is what let the long
         // form be chosen at 80 columns and then clipped by kv itself.
         const KV_GUTTER = 11;
-        const caveat = cov.probesAsked > 0
+        // THE CAVEAT CAN RETIRE (v0.63.1). Its gate was `probesAsked > 0` —
+        // inside a branch that already requires exactly that — so it was
+        // unconditional, and a node first seen long after the v0.40.2 upgrade
+        // carried a permanent disclosure about data it does not contain. The
+        // store now stamps when single-lane counting began; a node whose
+        // counting started at or after it has nothing to disclose.
+        //
+        // CONSERVATIVE BY CONSTRUCTION: `firstSeenAt` is roster-first-sight,
+        // not probe-counting start, so a node that existed before the upgrade
+        // but was first probed after it KEEPS the caveat. Over-disclosing is
+        // the right direction to be wrong in.
+        const preEpoch = cov.laneEpoch == null || cov.firstSeenAt < cov.laneEpoch;
+        const caveat = preEpoch
           ? c.grey(inner - KV_GUTTER >= caveatLong.trim().length ? caveatLong : caveatShort)
           : '';
         body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${pct}%)`) + self, inner));

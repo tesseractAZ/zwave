@@ -435,6 +435,10 @@ export interface DataProvider {
     probesEchoOnly: number;
     probesAttribUnknown: number;
     probesUnheard: number;
+    /** Store-level: when single-lane probe counting began (v0.63.1), or
+     *  null/absent on a store predating the stamp. Optional so a provider that
+     *  predates it still type-checks; absent means the caveat stays. */
+    laneEpoch?: number | null;
   } | null;
   /** Persisted long-horizon buckets for a node (v0.35) — the tier that outlives
    *  the fine ring, so the dossier can state the window behind its numbers. */

@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import type { CoarseBucket } from '../src/types';
 import assert from 'node:assert/strict';
 import { renderDetail, formatEntityState } from '../src/telnet/screens/detail';
 import { pickDisplayAttrs } from '../src/zwave/zwaveData';
@@ -241,10 +242,12 @@ test('columnize keeps the 80-column terminal single-column (no name collapse)', 
 
 type Cov = { firstSeenAt: number; samples: number; freshSamples: number; statusFeedLive: boolean; statsFeedLive: boolean };
 
-function withEvidence(cov: Cov | null, coarse: { t0: number; samples: number }[] = []): { data: DataProvider; nodes: NodeSnapshot[] } {
+// `coarse` was declared as `{ t0; samples }[]` — a shape naming a `samples`
+// field the runtime CoarseBucket does not have (v0.63.1).
+function withEvidence(cov: Cov | null, coarse: CoarseBucket[] = []): { data: DataProvider; nodes: NodeSnapshot[] } {
   const d = mkData();
   (d.data as { evidenceCoverage?: (n: number) => Cov | null }).evidenceCoverage = () => cov;
-  (d.data as { evidenceCoarse?: (n: number) => { t0: number; samples: number }[] }).evidenceCoarse = () => coarse;
+  (d.data as { evidenceCoarse?: (n: number) => CoarseBucket[] }).evidenceCoarse = () => coarse;
   return d;
 }
 const evidenceLines = (d: { data: DataProvider; nodes: NodeSnapshot[] }, rows = 60): string[] =>
@@ -253,7 +256,8 @@ const evidenceLines = (d: { data: DataProvider; nodes: NodeSnapshot[] }, rows = 
 test('EVIDENCE names the feeds and the window behind every other number on the screen', () => {
   const out = evidenceLines(withEvidence(
     { firstSeenAt: Date.now() - 3 * 86_400_000, samples: 500, freshSamples: 450, statusFeedLive: true, statsFeedLive: true },
-    [{ t0: Date.now() - 2 * 86_400_000, samples: 10 }],
+    // `samples` was a phantom field — the real bucket counts with `n`.
+    [CB({ t0: Date.now() - 2 * 86_400_000, n: 10 })],
   ));
   const body = out.join('\n');
   assert.match(body, /EVIDENCE/);
@@ -306,7 +310,7 @@ test('a provider WITHOUT evidence coverage renders exactly as before', () => {
 test('the render contract holds with the EVIDENCE section at every size', () => {
   const d = withEvidence(
     { firstSeenAt: Date.now() - 86_400_000, samples: 500, freshSamples: 100, statusFeedLive: true, statsFeedLive: false },
-    [{ t0: Date.now() - 86_400_000, samples: 10 }],
+    [CB({ t0: Date.now() - 86_400_000, n: 10 })],
   );
   for (const [cols, rows] of [[200, 60], [120, 40], [100, 24], [80, 24], [64, 20], [40, 12]] as const) {
     const out = renderDetail(ctx(mkView(cols, rows), d.data, d.nodes));
@@ -712,11 +716,18 @@ test('every EVIDENCE label fits the 8-column cell so the values align (v0.48.1)'
 
 /* ── v0.49.0: the coarse tier reaches a screen ────────────────────────────── */
 
-const CB = (over: Record<string, number | null> = {}): Record<string, number | null> => ({
-  t0: 0, n: 10, freshN: 8, invalidW: 0, dTx: 100, dTimeout: 2,
+// TYPED AS THE REAL SHAPE (v0.63.1). This returned
+// `Record<string, number | null>`, which let it carry members production does
+// not have (`rttMin`, `rttMax`, `dFlaps`, `dS2Resync`, `dRouteChanges`) and
+// OMIT ones it does (`dDropTx`, `dRx`, `flaps`, `routeChanges`, `s2`) — so
+// every test using it fed the screen an object the store never produces, and
+// the compiler could not say so. The v0.33 lesson: a cast on a fixture
+// disables the check the fixture exists to perform.
+const CB = (over: Partial<CoarseBucket> = {}): CoarseBucket => ({
+  t0: 0, n: 10, freshN: 8, invalidW: 0, dTx: 100, dTimeout: 2, dDropTx: 1, dRx: 95,
+  flaps: 0, routeChanges: 0, s2: 0,
   rssiN: 10, rssiSum: -650, rssiMin: -70, rssiMax: -60,
-  rttN: 10, rttSum: 400, rttMin: 30, rttMax: 55, rateMin: 100,
-  dFlaps: 0, dS2Resync: 0, dRouteChanges: 0, ...over,
+  rttN: 10, rttSum: 400, rateMin: 100, ...over,
 });
 
 test('the persisted RF ENVELOPE reaches the dossier — not just its mean (v0.49.0)', () => {
@@ -860,4 +871,30 @@ test('the per-node VERIFICATION DEBT is visible on the dossier (v0.62.0)', () =>
   assert.match(owed, /3 verification probes owed/, `the debt must render: ${owed.slice(0, 400)}`);
   const none = yardLines(withYard({ verifyOwedFor: () => 0 }), 140).join('\n');
   assert.doesNotMatch(none, /verification probe/, 'no debt ⇒ no row');
+});
+
+test('the probe caveat RETIRES for a node with no pre-upgrade counts (v0.63.1)', () => {
+  // Its gate was `probesAsked > 0` — inside a branch that already requires
+  // exactly that — so it was unconditional, and a node first seen long after
+  // the v0.40.2 upgrade carried a permanent disclosure about data it does not
+  // contain. That is over-disclosure that can never retire.
+  const base = { samples: 100, freshSamples: 80, statusFeedLive: true, statsFeedLive: true,
+    probesAsked: 10, probesAnswered: 10, probesSelfProven: 2, probesEchoOnly: 0,
+    probesAttribUnknown: 0, probesUnheard: 0 };
+  const after = withProbes({ ...base, firstSeenAt: 5_000, laneEpoch: 1_000 } as never);
+  assert.doesNotMatch(evidenceLines(after).join('\n'), /pre-v0\.40\.2|mixed probe lanes/,
+    'a node first seen AFTER the stamp has nothing to disclose');
+
+  // Before the stamp: the counters really do blend lanes, so it stays — and
+  // with ZERO self-proven credits, which is the worst case and the one a
+  // counter-based gate leaves uncovered (the v0.45.0 defect, one shape on).
+  const before = withProbes({ ...base, probesSelfProven: 0, firstSeenAt: 500, laneEpoch: 1_000 } as never);
+  assert.match(evidenceLines(before).join('\n'), /pre-v0\.40\.2|mixed probe lanes/,
+    'a node first seen BEFORE the stamp keeps the caveat');
+
+  // And a store that predates the stamp keeps it for everyone — absent is the
+  // conservative direction, not a licence to drop the disclosure.
+  const legacy = withProbes({ ...base, firstSeenAt: 5_000, laneEpoch: null } as never);
+  assert.match(evidenceLines(legacy).join('\n'), /pre-v0\.40\.2|mixed probe lanes/,
+    'no stamp ⇒ no claim ⇒ the caveat stays');
 });

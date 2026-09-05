@@ -487,7 +487,12 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       // came from: a capability the data layer implements and a screen reads.
       routeFailures: (n: number) => [{ t: 1000 + n, between: [n, n + 1] as [number, number] }],
       evidenceCoverage: (n: number) => ({ firstSeenAt: n, samples: n * 2, freshSamples: n, statusFeedLive: true, statsFeedLive: false }),
-      evidenceCoarse: (n: number) => [{ t0: n, n: 5, freshN: 4, invalidW: 1, dTx: 90, dTimeout: 3, rssiN: 6, rssiSum: -390, rssiMin: -72, rssiMax: -58, rttN: 6, rttSum: 300, rttMin: 40, rttMax: 70, rateMin: 40, dFlaps: 0, dS2Resync: 0, dRouteChanges: 1 }],
+      // THE REAL BUCKET SHAPE (v0.63.1). This carried `rttMin`/`rttMax`/`dFlaps`
+      // /`dS2Resync`/`dRouteChanges` — members production does not have — and
+      // omitted `dDropTx`/`dRx`/`flaps`/`routeChanges`/`s2`, which it does. The
+      // enclosing `as never` hid all of it, so a test written to pin the
+      // bridge's REQUIRED-ness was asserting against a fiction.
+      evidenceCoarse: (n: number) => [{ t0: n, n: 5, freshN: 4, invalidW: 1, dTx: 90, dTimeout: 3, dDropTx: 1, dRx: 85, flaps: 0, routeChanges: 1, s2: 0, rssiN: 6, rssiSum: -390, rssiMin: -72, rssiMax: -58, rttN: 6, rttSum: 300, rateMin: 40 }],
       falsePositives: (k: string) => (k === 'route-churn' ? 4 : 0),
       unverifiableCount: (k: string) => (k === 'rtt-degraded' ? 16 : 0),
       unverifiableTransientCount: (k: string) => (k === 'rtt-degraded' ? 5 : 0),
