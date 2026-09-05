@@ -2120,8 +2120,9 @@ const MUTANTS = [
     what: 'probes still owed say the score is PENDING, not absent' },
   { id: 'suppression-chip-only-when-suppressed', file: 'src/telnet/chrome.ts', tests: ['chrome'],
     // An always-on chip is noise, and a one-sided test passes for it.
-    find: "  const chip = o.apSuppressed && o.apSuppressed !== 'none'",
-    repl: '  const chip = o.apSuppressed != null',
+    // Renamed to `apChip` in v0.61.0 when the stats-feed chip joined it.
+    find: "  const apChip = o.apSuppressed && o.apSuppressed !== 'none'",
+    repl: '  const apChip = o.apSuppressed != null',
     what: 'the chip renders only for a real suppression, never for "none"' },
   { id: 'suppression-chip-is-never-shed', file: 'src/telnet/chrome.ts', tests: ['chrome'],
     // `lr` falls back to truncating the RIGHT once it alone exceeds the width,
@@ -2341,6 +2342,33 @@ const MUTANTS = [
     find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),",
     repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
     what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 'score-declares-its-assumptions', file: 'src/zwave/health.ts', tests: ['health'],
+    // Signal (25%) and Route (20%) fall back to a neutral 0.7, so up to 45% of
+    // a grade can stand on defaults — and the composite discarded every lane
+    // contribution, so no screen could say so.
+    find: "    assumedLanes.push('signal');",
+    repl: '    void 0;',
+    what: 'the score declares how much of itself is assumption' },
+  { id: 'assumed-route-lane-counted', file: 'src/zwave/health.ts', tests: ['health'],
+    find: "      assumedLanes.push('route');",
+    repl: '      void 0;',
+    what: 'an unmeasured ROUTE lane counts toward the assumed share too' },
+  { id: 'assumed-share-reaches-the-dossier', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    find: '  if (!dead(n) && (health.assumedPct ?? 0) > 0) {',
+    repl: '  if (false) {',
+    what: 'the dossier says what fraction of its grade is assumed' },
+  { id: 'dead-stats-feed-is-named', file: 'src/telnet/chrome.ts', tests: ['chrome'],
+    // linkState reads the roster POLL, so the masthead read ONLINE while the
+    // statistics SUBSCRIPTION was dead and no evidence was arriving at all.
+    find: '  const statsChip = o.statsStaleMs != null && o.statsStaleMs > STATS_STALE_MS',
+    repl: '  const statsChip = o.statsStaleMs != null && o.statsStaleMs < 0',
+    what: 'a dead statistics feed is named even while the roster polls' },
+  { id: 'stats-chip-not-always-on', file: 'src/telnet/chrome.ts', tests: ['chrome'],
+    // An always-on chip is noise, and a test that only asserts its presence
+    // passes for one — the rule this masthead already documents.
+    find: '  const statsChip = o.statsStaleMs != null && o.statsStaleMs > STATS_STALE_MS',
+    repl: '  const statsChip = o.statsStaleMs != null && o.statsStaleMs > -1',
+    what: 'a healthy quiet feed raises no chip' },
   { id: 'stability-order-claim-is-true', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
     // The sort is `perDayOf(b) - perDayOf(a)` — a RATE — and the disclosure
     // said "by count". They disagree whenever spans differ, i.e. normally.

@@ -41,7 +41,7 @@ function linkTag(link: LinkState): string {
  */
 export function masthead(
   view: ViewState,
-  o: { link: LinkState; homeId: number | null; now: number; apSuppressed?: string | null },
+  o: { link: LinkState; homeId: number | null; now: number; apSuppressed?: string | null; statsStaleMs?: number | null },
 ): string {
   // A SUPPRESSED SWEEP IS A STANDING CONDITION (v0.47.0), and it was legible
   // only on the ENGINE screen. An operator on OVERVIEW watching a node go quiet
@@ -49,9 +49,20 @@ export function masthead(
   // looked the same as one being actively watched. Rendered on EVERY screen,
   // and NOTHING when the sweep is running: an always-on chip is noise, and a
   // test that only ever asserts its presence passes for one.
-  const chip = o.apSuppressed && o.apSuppressed !== 'none'
+  const apChip = o.apSuppressed && o.apSuppressed !== 'none'
     ? c.yellow(`⚠ AUTO-PING ${o.apSuppressed.toUpperCase()}`)
     : null;
+  // A LIVE ROSTER IS NOT A LIVE FEED (v0.61.0). `linkState` reads
+  // `lastUpdated()` — the roster POLL — so the masthead read ONLINE while the
+  // statistics SUBSCRIPTION was dead and no evidence was arriving at all. Every
+  // detector, every baseline and every symptom is fed from that stream, so a
+  // node the engine has stopped observing scored as fully healthy on a screen
+  // that said the link was fine. Distinct chip, because the remedy is
+  // different: the roster is fine, the EVIDENCE is not.
+  const statsChip = o.statsStaleMs != null && o.statsStaleMs > STATS_STALE_MS
+    ? c.yellowB(`⚠ NO STATS ${Math.round(o.statsStaleMs / 60_000)}m`)
+    : null;
+  const chip = statsChip ?? apChip;
   // WHOLE FIELDS, dropped from the END. `lr` truncates the LEFT first but falls
   // back to `truncate(right, width)` once the right side alone exceeds the
   // width — which clips mid-word, and the chip sits at the front of that side.
@@ -298,6 +309,11 @@ export function rule(view: ViewState): string {
 }
 
 /** Roster link state, derived once and shared by every screen's masthead. */
+/** How long the statistics feed may be quiet before the masthead says so.
+ *  Generous: a healthy all-battery mesh legitimately produces little traffic,
+ *  and the subscription redelivers on reconnect. */
+export const STATS_STALE_MS = 10 * 60_000;
+
 export function linkState(data: DataProvider): LinkState {
   if (data.lastError() != null) return 'offline';
   const lu = data.lastUpdated();
@@ -327,7 +343,14 @@ export interface FrameOpts {
  */
 export function frame(view: ViewState, data: DataProvider, o: FrameOpts): string[] {
   const out: string[] = [];
-  out.push(masthead(view, { link: linkState(data), homeId: data.controller()?.homeId ?? null, now: Date.now(), apSuppressed: data.autoPingState?.()?.suppressed ?? null }));
+  const statsAt = data.lastStatsUpdated?.() ?? null;
+  out.push(masthead(view, {
+    link: linkState(data),
+    homeId: data.controller()?.homeId ?? null,
+    now: Date.now(),
+    apSuppressed: data.autoPingState?.()?.suppressed ?? null,
+    statsStaleMs: statsAt == null ? null : Date.now() - statsAt,
+  }));
   out.push(titleRule(view, o.title, o.rightStatus ?? ''));
   if (o.telemetry != null) out.push(truncate(o.telemetry, view.cols));
   const top = out.length;

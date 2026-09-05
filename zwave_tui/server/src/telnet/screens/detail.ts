@@ -107,6 +107,18 @@ export function renderDetail(ctx: ScreenCtx): string[] {
   // Flagship graphic — a wide health gauge. The node's identity, status, and
   // score live in the title rule (chrome), so they aren't repeated here.
   if (!dead(n)) pushG(healthGauge(health.score, health.grade, inner));
+  // HOW MUCH OF THAT GAUGE IS ASSUMPTION (v0.61.0). Signal (25%) and Route
+  // (20%) fall back to a NEUTRAL 0.7 when there is nothing to measure, so up to
+  // 45% of a grade can stand on defaults — and the composite discarded every
+  // lane contribution, so nothing said so. A `C` built half out of defaults and
+  // a `C` built out of measurements are different claims about a device, and
+  // only one is worth acting on. Directly under the gauge, in the SCROLLING
+  // content, so it is inside the row budget rather than appended past it.
+  if (!dead(n) && (health.assumedPct ?? 0) > 0) {
+    body.push(truncate(
+      c.yellow(`  ⚠ ${health.assumedPct}% of this grade is assumed`) +
+      c.grey(` — ${(health.assumedLanes ?? []).join(' + ')} not measured; credited at neutral`), W));
+  }
   sep();
 
   // IDENTITY — device, security, radio capabilities, power, location.

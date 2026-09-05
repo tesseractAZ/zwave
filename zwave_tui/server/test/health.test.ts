@@ -179,3 +179,24 @@ test('a thin denominator cannot outrank a large one (v0.54.0)', () => {
   assert.ok(decisive.flags.includes('F'),
     `19 timeouts out of 19 sends IS decisive: ${JSON.stringify(decisive)}`);
 });
+
+test('the score says how much of itself is ASSUMPTION (v0.61.0)', () => {
+  // Signal (25%) and Route (20%) both fall back to a neutral 0.7 when there is
+  // nothing to measure, so up to 45% of a grade can stand on defaults — and the
+  // composite discarded every lane contribution, so no screen could say so. A
+  // `B` built half out of defaults and a `B` built out of measurements are
+  // different claims about a device.
+  const noRf = scoreNode(makeNode({ stats: emptyStats({ commandsTX: 500, timeoutResponse: 5, lastSeen: Date.now() }) }), NOISE);
+  assert.ok((noRf.assumedPct ?? 0) >= 45,
+    `no RSSI and no route ⇒ both lanes assumed: got ${noRf.assumedPct}%`);
+  assert.deepEqual(noRf.assumedLanes, ['signal', 'route']);
+
+  // A fully measured node assumes nothing.
+  const measured = scoreNode(makeNode({
+    stats: emptyStats({
+      rssi: -60, rtt: 30, commandsTX: 500, timeoutResponse: 5, lastSeen: Date.now(),
+      lwr: { repeaters: [], protocolDataRate: 3, rssi: -60, repeaterRSSI: [], routeFailedBetween: null },
+    }),
+  }), NOISE);
+  assert.equal(measured.assumedPct, 0, `a measured node assumes nothing: ${JSON.stringify(measured.assumedLanes)}`);
+});

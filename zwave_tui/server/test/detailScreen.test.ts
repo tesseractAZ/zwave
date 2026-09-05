@@ -834,3 +834,19 @@ test("the Long RF ENVELOPE says whose signal it is, like every other RSSI row (v
   assert.doesNotMatch(direct, /last-hop/, `a direct node's envelope IS the device's: "${direct.trim()}"`);
   assert.notEqual(routed, direct, 'and the two must never be byte-identical');
 });
+
+test('the dossier says what fraction of its grade is ASSUMED (v0.61.0)', () => {
+  // A `B` built half out of neutral defaults and a `B` built out of
+  // measurements are different claims about a device, and only one of them is
+  // worth acting on. The composite discarded every lane contribution, so the
+  // dossier could not tell them apart.
+  const assumed = { score: 74, grade: 'C', state: 'ok', flags: [], assumedPct: 45, assumedLanes: ['signal', 'route'] };
+  const joined = yardLines(withYard({ scoreFor: () => assumed as never }), 140).join('\n');
+  assert.match(joined, /45% of this grade is assumed/, `the share must render: ${joined.slice(0, 500)}`);
+  assert.match(joined, /signal \+ route/, 'and WHICH lanes — a percentage with no names is not actionable');
+
+  // A fully measured node says nothing — an always-on warning is noise.
+  const measured = { score: 92, grade: 'A', state: 'ok', flags: [], assumedPct: 0, assumedLanes: [] };
+  const clean = yardLines(withYard({ scoreFor: () => measured as never }), 140).join('\n');
+  assert.doesNotMatch(clean, /is assumed/, 'a measured grade carries no caveat');
+});

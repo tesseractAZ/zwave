@@ -243,3 +243,14 @@ test('clipWords never leaves a colour span open past the row (v0.56.0)', () => {
   // Plain text gains nothing — no gratuitous escape bytes on the common path.
   assert.equal(clipWords('value changed 812 to 1240 now', 18), 'value changed …');
 });
+
+test('a live ROSTER is not a live FEED — the masthead says which (v0.61.0)', () => {
+  // linkState reads lastUpdated() — the roster POLL — so the masthead read
+  // ONLINE while the statistics SUBSCRIPTION was dead and no evidence was
+  // arriving. Every detector, baseline and symptom is fed from that stream.
+  const fresh = masthead(view(140), { link: 'online', homeId: 1, now: 1_000_000, statsStaleMs: 60_000 });
+  assert.doesNotMatch(strip(fresh), /NO STATS/, 'a minute of quiet is not an outage');
+  const dead = masthead(view(140), { link: 'online', homeId: 1, now: 1_000_000, statsStaleMs: 45 * 60_000 });
+  assert.match(strip(dead), /NO STATS 45m/,
+    `a dead feed must be named even while the roster polls: ${strip(dead)}`);
+});
