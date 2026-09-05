@@ -680,3 +680,45 @@ test('recent contact keeps a mains node quiet-node-free', () => {
   const fired = settle((now: number) => input({ nodes, recent: new Map([[6, []]]), now }), new Map(), T, 8);
   assert.equal(fired.filter((x) => x.kind === 'quiet-node').length, 0);
 });
+
+test('weak-signal treats an UNKNOWN route as NOT direct — fail closed (v0.54.0)', () => {
+  // A null routeKey means the statistics event carried no `lwr`, not that the
+  // node is direct. This detector coerced it to 'direct', then asserted
+  // "(direct route)" with basis 'measured' about a route it never observed —
+  // and the margin it reported may be a REPEATER's last hop, not the device's.
+  // rate-fallback already fails closed on this identical value.
+  const nodes = [node(1), node(6), node(7)];
+  const inp = (now: number) => input({
+    nodes,
+    recent: new Map([
+      // Known-direct: still fires, so the guard did not just disable the lane.
+      [6, window(now, 8, { rssi: -92, routeKey: 'direct', dTx: 100, dTimeout: 10 })],
+      // Route UNKNOWN: identical signal, but nothing established it is direct.
+      [7, window(now, 8, { rssi: -92, routeKey: null, dTx: 100, dTimeout: 10 })],
+    ]),
+    now,
+  });
+  const fired = settle(inp, new Map(), T, 6);
+  assert.ok(fired.some((s) => s.kind === 'weak-signal' && s.nodeId === 6),
+    'a KNOWN-direct thin margin must still fire');
+  assert.equal(fired.filter((s) => s.kind === 'weak-signal' && s.nodeId === 7).length, 0,
+    'an unknown route must not be asserted as direct');
+});
+
+test('one `lwr` blink does not stop weak-signal ever maturing (v0.54.0)', () => {
+  // The route must come from the newest FRESH sample that HAS one, not the raw
+  // newest. dwell() clears on any non-breaching tick, and the evidence cadence
+  // is ~10 s, so gating on the raw last sample means a single statistics event
+  // arriving without `lwr` — the v0.47.0 nullable-routeKey shape, which is
+  // common — resets the dwell every time and the detector never matures.
+  const nodes = [node(1), node(6)];
+  const inp = (now: number) => {
+    const w = window(now, 8, { rssi: -92, routeKey: 'direct', dTx: 100, dTimeout: 10 });
+    // The NEWEST sample carries no route — the blink.
+    w[w.length - 1] = { ...w[w.length - 1], routeKey: null };
+    return input({ nodes, recent: new Map([[6, w]]), now });
+  };
+  const fired = settle(inp, new Map(), T, 6);
+  assert.ok(fired.some((s) => s.kind === 'weak-signal' && s.nodeId === 6),
+    'a route the node has held all window is still its route when one event omits it');
+});

@@ -88,6 +88,22 @@ const SIGNAL_MARGIN_HI = 14;
 
 /** Response-timeout fraction above which the F (flaky) flag fires. */
 const TX_ERR_THRESHOLD = 0.15;
+/**
+ * Minimum DENOMINATOR for the response-reliability rate.
+ *
+ * The driver's counters RESET on restart, so a 1–6 tx denominator is routine,
+ * not exotic — and without a floor one timeout out of two sends read 50%,
+ * raised the F flag, set state 'flaky', and OUTRANKED a node failing 4% of
+ * 30,000 sends on a worst-first roster. The evidence for the thin node is one
+ * packet; the evidence against the busy one is twelve hundred.
+ *
+ * A hard sample floor (ignore nodes below N) was rejected: it silences 19
+ * timeouts out of 19 tx, which is decisive, and it docks a clean quiet node for
+ * being quiet. Flooring the DENOMINATOR instead keeps the rate monotone in
+ * evidence — 1-of-2 reads 5%, 19-of-19 still reads 95% — so a verdict only ever
+ * strengthens as samples arrive (v0.54.0).
+ */
+export const MIN_TX_FOR_RATE = 20;
 
 /** Response-timeout fraction that scores the reliability lane to zero. */
 const TX_ERR_FLOOR = 0.3;
@@ -132,7 +148,9 @@ export function responseTimeoutPct(stats: NodeStats): number | null {
   const tx = stats.commandsTX;
   if (tx <= 0) return null;
   const timeouts = Math.min(stats.timeoutResponse, tx);
-  return Math.min(100, (timeouts / tx) * 100);
+  // Same floored denominator the SCORE uses (v0.54.0) — the displayed rate and
+  // the graded one must not be two different numbers about the same node.
+  return Math.min(100, (timeouts / Math.max(tx, MIN_TX_FOR_RATE)) * 100);
 }
 
 // ── Small numeric helpers ────────────────────────────────────────────────────
@@ -355,7 +373,7 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   if (stats.commandsTX <= 0) {
     txFrac = 0.85; // nothing sent yet: give the benefit of the doubt, no flag
   } else {
-    const errRate = stats.timeoutResponse / stats.commandsTX;
+    const errRate = stats.timeoutResponse / Math.max(stats.commandsTX, MIN_TX_FOR_RATE);
     txFrac = 1 - linstep(errRate, 0, TX_ERR_FLOOR);
     if (errRate > TX_ERR_THRESHOLD) {
       flags.add('F');

@@ -2326,6 +2326,48 @@ const MUTANTS = [
     find: "          const pct = share >= 0.005 ? `${Math.round(share * 100)}%` : '<1%';",
     repl: '          const pct = `${Math.round(share * 100)}%`;',
     what: 'a rounded-to-zero share reads "<1%", never "(0%)" beside a non-zero count' },
+  { id: 'store-rejects-positive-rssi', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    // cleanRssi enumerated the driver's sentinel markers (>= 125) and let
+    // everything below through, so 0 dBm — and any positive reading short of
+    // the sentinel band — was folded into the baselines and the persisted
+    // envelopes as a real sample. RSSI is negative by physics.
+    find: '  return rssiReading(v);',
+    repl: '  return v == null || !Number.isFinite(v) || v >= 125 ? null : v;',
+    what: 'the evidence store applies the same RSSI domain rule the screens do' },
+  { id: 'weak-signal-fails-closed-on-unknown-route', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
+    // A null routeKey means the event carried no `lwr`, not that the node is
+    // direct — and this detector then asserted "(direct route)" with basis
+    // 'measured' about a route it never observed.
+    find: "      const routed = routeKey !== 'direct';",
+    repl: "      const routed = (routeKey ?? 'direct') !== 'direct';",
+    what: 'an UNKNOWN route is not asserted as direct' },
+  { id: 'weak-signal-route-is-dwell-stable', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
+    // dwell() clears on any non-breaching tick, so gating on the raw newest
+    // sample would let one `lwr` blink reset the dwell and stop this detector
+    // maturing — the v0.47.0 nullable-routeKey shape, one layer up.
+    find: '      const routeKey = latestFresh(samples, now, (s) => s.routeKey);',
+    repl: '      const routeKey = last?.routeKey ?? null;',
+    what: 'the route is resolved from the newest FRESH sample, not the raw last' },
+  { id: 'reliability-rate-has-a-floor', file: 'src/zwave/health.ts', tests: ['health'],
+    // The driver's counters reset on restart, so a 1-6 tx denominator is
+    // routine — and unfloored, ONE timeout of two sends read 50%, raised F, and
+    // outranked a node failing 4% of 30,000 on a worst-first roster.
+    find: '    const errRate = stats.timeoutResponse / Math.max(stats.commandsTX, MIN_TX_FOR_RATE);',
+    repl: '    const errRate = stats.timeoutResponse / stats.commandsTX;',
+    what: 'a thin denominator cannot manufacture a decisive failure rate' },
+  { id: 'shown-rate-matches-the-graded-rate', file: 'src/zwave/health.ts', tests: ['overviewScreen'],
+    // The displayed TMO percentage and the one the score grades must not be two
+    // different numbers about the same node.
+    find: '  return Math.min(100, (timeouts / Math.max(tx, MIN_TX_FOR_RATE)) * 100);',
+    repl: '  return Math.min(100, (timeouts / tx) * 100);',
+    what: 'the displayed timeout rate uses the same floor the score does' },
+  { id: 'one-floor-one-spelling', file: 'src/telnet/bands.ts', tests: ['chrome'],
+    // The driver's floor is an EMA (-95.062 live), and the rounding rule lived
+    // in four private copies — so one instant read `-95 dBm` on OVERVIEW and
+    // `-95.062dBm` on CONTROLLER.
+    find: '  return Number.isFinite(v) ? Math.round(v) : v;',
+    repl: '  return v;',
+    what: 'one noise-floor reading is spelt one way on every screen' },
   { id: 'fatal-survives-every-threshold', file: 'src/index.ts', tests: ['configContract'],
     // The bootstrap catch is the one line whose job is to explain a crash loop,
     // and it went out through the INFO sink — invisible at four of the seven

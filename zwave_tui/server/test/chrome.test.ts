@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { masthead, titleRule, commandBar, fieldStrip, field, frame, linkState, shedLine } from '../src/telnet/chrome';
 import { clipWords, visLen } from '../src/telnet/ansi';
+import { shownDbm } from '../src/telnet/bands';
 import type { DataProvider, ViewState, ControllerSnapshot } from '../src/types';
 
 const view = (cols: number, rows = 24) => ({ cols, rows }) as ViewState;
@@ -201,4 +202,17 @@ test('clipWords marks a shortened string, and the marker cannot read as content 
   const one = clipWords('supercalifragilisticexpialidocious', 10);
   assert.ok(visLen(one) <= 10, `over-long token still respects the budget: "${one}"`);
   assert.match(one, /…$/, 'an over-long token is still marked');
+});
+
+test('one noise-floor reading is spelt ONE way across every screen (v0.54.0)', () => {
+  // The driver's floor is an EMA, so it arrives fractional (-95.062 on the live
+  // mesh). OVERVIEW and INTERFERENCE rounded it; HEATMAP and CONTROLLER printed
+  // it raw — so the same instant read `-95 dBm` on one screen and `-95.062dBm`
+  // on another, and an operator comparing them could not tell it was one number.
+  assert.equal(shownDbm(-95.062), -95);
+  assert.equal(shownDbm(-95.02000000000001), -95);
+  assert.equal(shownDbm(-95), -95, 'an already-whole reading is untouched');
+  // Non-finite passes through: the caller decides how to render "no reading",
+  // and silently turning NaN into 0 dBm would invent a measurement.
+  assert.ok(Number.isNaN(shownDbm(NaN)));
 });

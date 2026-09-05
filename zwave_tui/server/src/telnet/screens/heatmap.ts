@@ -29,7 +29,7 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
-import { noiseColor, marginColor, rssiReading } from '../bands';
+import { noiseColor, marginColor, rssiReading, shownDbm } from '../bands';
 import { frame, fieldStrip, field } from '../chrome';
 
 /* ── layout constants ──────────────────────────────────────────────────── */
@@ -109,8 +109,8 @@ export function renderHeatmap(ctx: ScreenCtx): string[] {
       field('DEVICES', String(totalNodes)),
       field(
         'NOISE',
-        data.hasRealNoise() ? `${noise} dBm` : `${noise} dBm assumed`,
-        data.hasRealNoise() ? noiseColor(noise) : c.grey,
+        data.hasRealNoise() ? `${shownDbm(noise)} dBm` : `${shownDbm(noise)} dBm assumed`,
+        data.hasRealNoise() ? noiseColor(shownDbm(noise)) : c.grey,
       ),
       // The whole map is margins over that floor — if it is assumed, every
       // cell and every area grade on this screen is an estimate.

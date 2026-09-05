@@ -738,3 +738,25 @@ test('the four probe classes are counted APART, and a pre-v0.49.0 file loads at 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a positive RSSI is not a measurement — the STORE applies the same rule the screen does (v0.54.0)', () => {
+  // cleanRssi enumerated the driver's sentinel markers (>= 125) and let
+  // everything below through, so `0 dBm` — and any positive reading short of
+  // the sentinel band — was folded into the baselines and the persisted
+  // envelopes as a real sample. Received-signal strength is negative by
+  // physics; health.rssiReading has said so since v0.10 and is what every
+  // screen uses. A store that admits values its own renderer would reject
+  // writes a lie that outlives the sample.
+  const dir = mkdtempSync(join(tmpdir(), 'ev-rssi-'));
+  const s = mkStore(join(dir, 'e.json'));
+  const got: Array<number | null> = [];
+  for (const [i, rssi] of [-70, 0, 5, 124, -68].entries()) {
+    const sample = s.record(9, stats({ rssi, commandsTX: 100 + i * 10 }), NodeStatus.Alive, FRESH, FIXED + i * TICK);
+    got.push(sample?.rssi ?? null);
+  }
+  const kept = got.filter((v): v is number => v != null);
+  assert.ok(kept.every((v) => v < 0), `only negative dBm may be folded: ${JSON.stringify(got)}`);
+  assert.deepEqual(got, [-70, null, null, null, -68],
+    `0, 5 and 124 dBm are all markers, not readings: ${JSON.stringify(got)}`);
+  rmSync(dir, { recursive: true, force: true });
+});

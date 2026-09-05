@@ -98,7 +98,16 @@ test('responseTimeoutPct: timeoutResponse / TX, null when no traffic, clamped �
   assert.equal(responseTimeoutPct(stats({ commandsTX: 0, timeoutResponse: 0 })), null);
   assert.equal(responseTimeoutPct(stats({ commandsTX: 100, timeoutResponse: 8 })), 8);
   assert.equal(responseTimeoutPct(stats({ commandsTX: 100, timeoutResponse: 0 })), 0);
-  assert.equal(responseTimeoutPct(stats({ commandsTX: 10, timeoutResponse: 50 })), 100); // clamped
+  // Above the floor, the clamp still binds: 60 timeouts of 30 sends is a
+  // counter inconsistency, not 200%.
+  assert.equal(responseTimeoutPct(stats({ commandsTX: 30, timeoutResponse: 60 })), 100);
+  // BEHAVIOUR CHANGE (v0.54.0), not a weakened assertion: below MIN_TX_FOR_RATE
+  // the denominator is floored, so 10-of-10 reads 50%, not 100%. The driver's
+  // counters reset on restart, so a sub-20 denominator is routine — and an
+  // unfloored rate let one timeout out of two sends outrank a node failing 4%
+  // of 30,000 on the worst-first roster. The rate stays monotone in evidence.
+  assert.equal(responseTimeoutPct(stats({ commandsTX: 10, timeoutResponse: 50 })), 50);
+  assert.equal(responseTimeoutPct(stats({ commandsTX: 2, timeoutResponse: 1 })), 5);
 });
 
 test('responseTimeoutPct IGNORES commandsDroppedTX (RESEARCH.md §0 regression guard)', () => {

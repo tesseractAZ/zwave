@@ -570,7 +570,17 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
     // newest fresh RSSI (dwell-stable). Honest basis: 'measured' only when the
     // noise floor is a real reading; against the −95 fallback it is 'inferred'.
     {
-      const routed = (last?.routeKey ?? 'direct') !== 'direct';
+      // UNKNOWN IS NOT A ROUTE (v0.54.0). A null routeKey means the statistics
+      // event carried no `lwr`, not that the node is direct — the same value
+      // rate-fallback already treats fail-closed. This detector then asserted
+      // "(direct route)" with basis 'measured' about a route it never saw, and
+      // the margin it reported was a REPEATER's last hop, not the device's.
+      // Resolved through latestFresh, not the raw `last`: dwell() clears on any
+      // non-breaching tick, so gating on the newest sample would let one `lwr`
+      // blink (the v0.47.0 nullable-routeKey shape) reset the dwell and stop
+      // this detector maturing at all.
+      const routeKey = latestFresh(samples, now, (s) => s.routeKey);
+      const routed = routeKey !== 'direct';
       const rssi = latestFresh(samples, now, (s) => s.rssi);
       const floor = representativeFloor(input);
       const margin = rssi != null ? rssi - floor : null;

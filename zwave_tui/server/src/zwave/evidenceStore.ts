@@ -52,13 +52,15 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import type { LogSink } from '../logger';
 import { uptime as osUptime } from 'node:os';
+import { rssiReading } from './health';
 import { NodeStatus, type NodeStats, type RouteStat, type ControllerSnapshot } from '../types';
 
 /** The controller serial-link counters (nullable on the snapshot; non-null here). */
 type CtrlStats = NonNullable<ControllerSnapshot['statistics']>;
 
 /** RSSI values the driver uses as sentinels, not real dBm (RESEARCH.md §1.11). */
-const RSSI_SENTINEL_MIN = 125; // 125 no-signal · 126 saturated · 127 not-available
+// No local sentinel list: health.rssiReading is the domain rule — RESEARCH.md §1.11.
+// (125 no-signal / 126 saturated / 127 not-available are all >= 0, so the rule covers them.)
 
 /** protocolDataRate enum → link rate in kbps (4 = Long-Range 100k). */
 const RATE_KBPS: Record<number, number> = { 1: 9.6, 2: 40, 3: 100, 4: 100 };
@@ -418,10 +420,19 @@ interface CtrlSnapshot {
   timeoutResponse: number;
 }
 
+/**
+ * The CANONICAL RSSI domain rule, not a local copy of it.
+ *
+ * This enumerated the driver's sentinel markers (>= 125) and let everything
+ * below through — so `0 dBm`, and any positive reading short of the sentinel
+ * band, was folded into the baselines and the persisted envelopes as if it
+ * were a real measurement. A received-signal strength is negative by physics;
+ * `health.rssiReading` has said so since v0.10 and is what every SCREEN uses.
+ * A store that admits values its own renderer would reject writes a lie that
+ * outlives the sample (v0.53.0 → v0.54.0).
+ */
 function cleanRssi(v: number | null | undefined): number | null {
-  if (v == null || !Number.isFinite(v)) return null;
-  if (v >= RSSI_SENTINEL_MIN) return null;
-  return v;
+  return rssiReading(v);
 }
 
 /**

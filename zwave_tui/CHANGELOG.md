@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.54.0 — 2026-09-04
+
+**Four numbers that were not measurements.**
+
+**The evidence store admitted RSSI readings its own screens reject.**
+`cleanRssi` enumerated the driver's sentinel markers (`>= 125`) and let
+everything below through — so `0 dBm`, and any positive value short of the
+sentinel band, was folded into the baselines and the persisted envelopes as a
+real sample. Received-signal strength is negative by physics, and
+`health.rssiReading` has said so since v0.10. A store that admits values its own
+renderer would refuse writes a lie that outlives the sample; it now applies the
+canonical rule instead of a local copy of it.
+
+**`weak-signal` asserted a route it never observed.** A null `routeKey` means
+the statistics event carried no `lwr`, not that the node is direct — and this
+detector coerced it to `'direct'`, then reported "(direct route)" with basis
+`measured`, about a margin that may be a REPEATER's last hop rather than the
+device's. `rate-fallback` already fails closed on the identical value. The route
+is now resolved through `latestFresh`, not the raw newest sample: `dwell()`
+clears on any non-breaching tick, so gating on the raw sample let one `lwr`
+blink — the v0.47.0 shape, at a ~10 s cadence — reset the dwell forever and stop
+the detector maturing at all.
+
+**One timeout out of two sends read 50%.** The response-reliability lane had no
+minimum denominator, and the driver's counters RESET on restart, so a 1–6 tx
+denominator is routine rather than exotic. A node with one timeout raised the
+`F` flag, was branded `flaky`, and OUTRANKED a node failing 4% of 30,000 sends
+on a worst-first roster — one packet of evidence beating twelve hundred.
+Flooring the DENOMINATOR (`MIN_TX_FOR_RATE = 20`) rather than discarding thin
+samples keeps the rate monotone in evidence: 1-of-2 now reads 5%, and 19-of-19
+still reads 95%, because that is decisive. The displayed rate uses the same
+floor as the graded one — they must not be two numbers about one node.
+
+**One noise floor, spelt two ways.** The driver's floor is an EMA and arrives
+fractional (`-95.062` on the live mesh). OVERVIEW and INTERFERENCE rounded it;
+HEATMAP and CONTROLLER printed it raw — so the same instant read `-95 dBm` on
+one screen and `-95.062dBm` on another, with nothing to tell an operator it was
+one reading. The rule lived in four private copies and drifted; it is now
+`bands.shownDbm`, and callers keep the raw value for margin arithmetic.
+
+1024 tests, 496 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.53.0 — 2026-09-04
 
 **What the log could not tell you, part two: the crash, the stores, and both
