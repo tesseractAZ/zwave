@@ -9,6 +9,7 @@
  */
 
 import { test } from 'node:test';
+import { unscoreableReason } from '../src/telnet/ledgerText';
 import assert from 'node:assert/strict';
 import { renderEngine } from '../src/telnet/screens/engine';
 import { visLen } from '../src/telnet/ansi';
@@ -443,5 +444,42 @@ test('the LEARNED tallies row sheds whole tallies with +N, never a mid-word cut 
     }
     // And never a bare mid-word cut: the row must end on a complete tally or +N.
     assert.doesNotMatch(row, /\(node r$|misdiagnos$|unscoreabl$/, `${cols}: mid-word cut: "${row}"`);
+  }
+});
+
+test('ENGINE NAMES the kind it cannot score, rather than omitting it (v0.55.0)', () => {
+  // SCORED_KINDS never contained `node-down`, so the mesh's most alarming kind
+  // was ABSENT from the screen whose job is "what has it learned?" — a fourth
+  // way of saying nothing beside the three empty states above it. Absence read
+  // as "no episode has closed yet"; the truth is "this arm was never fed and
+  // never will be". node-down opens no episode at all, so no counter can bring
+  // the row into existence: it must be UNGATED.
+  for (const cols of [40, 48, 60, 80, 100, 120, 200]) {
+    const lines = renderEngine(ctx(cols, 40));
+    const joined = plain(lines);
+    assert.match(joined, /node-down/, `${cols}: the unscoreable kind must be named`);
+    const row = joined.split('\n').find((l) => /not scored/.test(l)) ?? '';
+    assert.ok(row, `${cols}: the reason must render`);
+    assert.match(row, /REMEDY/,
+      `${cols}: the pointer to the card that explains it must survive: "${row}"`);
+    assert.match(row, /by design/,
+      `${cols}: "by design" separates "never will be" from "still learning": "${row}"`);
+    lines.forEach((l) => assert.ok(visLen(l) <= cols, `${cols}: row over width: "${l}"`));
+  }
+});
+
+test('ENGINE names every kind the shared ORACLE calls unscoreable (v0.55.0)', () => {
+  // Bound in BOTH directions: the screen's list is not a second opinion. A
+  // future unscoreable kind added to ledgerText must not be silently omitted
+  // here, and a kind listed here that the oracle can score must not claim it.
+  const joined = plain(renderEngine(ctx(120, 40)));
+  const KINDS: SymptomKind[] = [
+    'return-path-degraded', 'chronic-return-path', 'quiet-node', 'dead-flap', 's2-desync',
+    'weak-signal', 'rtt-degraded', 'rate-fallback', 'route-churn', 'node-down',
+  ];
+  for (const k of KINDS) {
+    if (unscoreableReason(k) != null) {
+      assert.ok(joined.includes(k), `the oracle calls ${k} unscoreable — ENGINE must say so`);
+    }
   }
 });

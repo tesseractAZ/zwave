@@ -990,3 +990,50 @@ test('the REMEDY title rule never contradicts the empty state its own body rende
     }
   }
 });
+
+test('a blocked efficacy note keeps its qualifier at the supported width FLOOR (v0.55.0)', () => {
+  // session.ts clamps the terminal to [60,200], and a narrow HA ingress sidebar
+  // sits at the bottom of that. The no-harm ladder fell through to a bare head,
+  // so at 60-66 columns the row rendered `⚠ ledger measured 100% here` alone —
+  // a measurement under a SAFETY-gated action with nothing saying the action is
+  // BLOCKED. That is the endorsement-shaped reading this note exists to prevent.
+  // route-churn's ONLY executable candidate is hardcoded blocked — the fixture
+  // the existing blocked-note tests use.
+  const eff: Eff = { expectedEfficacy: 1.0, n: 10, baseRate: 0.2, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 };
+  let rendered = 0;
+  for (const cols of [60, 62, 64, 66, 70, 80, 120, 160]) {
+    const lines = renderRemedy(ctx(cols, 30, [sym({ kind: 'route-churn', nodeId: 6 })], () => eff))
+      .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    const row = lines.find((l) => /ledger measured/.test(l));
+    if (!row) continue;
+    rendered += 1;
+    // The WORDING may shorten — the CLAIM may not. Whichever rung fits, the row
+    // must still say the action is blocked, and must say it in a whole clause.
+    assert.match(row, /still blocked|blocked$|block above still applies/,
+      `${cols}: a blocked measurement must never render without its qualifier: "${row.trim()}"`);
+    assert.doesNotMatch(row, /above still$|applie$|block abov$/,
+      `${cols}: and the qualifier must not itself be clipped: "${row.trim()}"`);
+  }
+  // Without this the loop could `continue` at every width and prove nothing —
+  // the exact way an earlier test in this repo passed for the wrong reason.
+  assert.ok(rendered >= 3, `the note must actually render somewhere: rendered at ${rendered} widths`);
+});
+
+test('the open-episode disclosure keeps its ENGINE pointer at every width (v0.55.0)', () => {
+  // Built at 120 columns and never rendered at the modal 80, where the single
+  // form came back as `...— se`: a sentence stopping mid-word with the pointer
+  // to the screen that holds the episodes gone.
+  for (const cols of [60, 72, 80, 100, 120, 200]) {
+    const cx = ctx(cols, 30, []);
+    (cx.data as { openEpisodes?: () => unknown[] }).openEpisodes = () => ([
+      { key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded', onsetMs: now - 300_000, actionKind: null, confounded: false, beforeFreshN: 4, confirming: true },
+      { key: '9:rate-fallback', nodeId: 9, kind: 'rate-fallback', onsetMs: now - 60_000, actionKind: null, confounded: false, beforeFreshN: 2, confirming: false },
+    ]);
+    const lines = renderRemedy(cx).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    const row = lines.find((l) => /scoring|open,/.test(l) && /episode|confirming/.test(l));
+    assert.ok(row, `${cols}: the disclosure must render`);
+    assert.match(row, /ENGINE/,
+      `${cols}: the pointer is the actionable half — it must survive: "${row.trim()}"`);
+    assert.doesNotMatch(row, /— se$|windo$/, `${cols}: no mid-word cut: "${row.trim()}"`);
+  }
+});

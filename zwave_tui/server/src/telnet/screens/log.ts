@@ -54,14 +54,31 @@ export function renderLog(ctx: ScreenCtx): string[] {
       view.errorsOnly || view.logRange !== 'all'
         ? [
             c.grey('No events match the current filters.'),
-            c.grey(filterSummary(view) + ' — press ') + c.cyanB('D') + c.grey('/') + c.cyanB('O') + c.grey(' to widen'),
+            // D CYCLES, IT DOES NOT WIDEN (v0.55.0). `applyLogKey` steps MODULO
+            // LOG_RANGE_ORDER, and measured against rangeBounds three of the six
+            // steps do not widen:
+            //   all -> hour        infinite -> 1h    NARROWER
+            //   24h -> today       24h -> 12h        NARROWER (today is inside 24h)
+            //   today -> yesterday DISJOINT — yesterday's `hi` is today's start,
+            //                      so it is not a widening at all
+            // O is a TOGGLE, so from errorsOnly it narrows too. "widen" sent the
+            // operator to press a key that can REMOVE the evidence they came for.
+            c.grey(filterSummary(view) + ' — press ') + c.cyanB('D') + c.grey('/') + c.cyanB('O') + c.grey(' to change'),
             // The ring is in-memory and session-scoped (LOG_MAX entries, no
             // disk), so a wide date range can be empty because the evidence was
             // EVICTED or never survived a restart — not because the filter is
             // too narrow. Blaming the filter sends the operator to widen one
             // that is already at maximum (v0.41).
             ...(view.logRange === 'yesterday' || view.logRange === '7d' || view.logRange === '24h'
-              ? [c.grey('This ring is in memory only — it holds recent activity and is empty after a restart.')]
+              // TWO FORMS: the long one is 84 visible columns and `center()`
+              // falls through to a blind truncate at the modal 80, so the
+              // disclosure that the ring is VOLATILE was itself silently cut to
+              // "...and is empty after a rest" (v0.55.0).
+              ? [c.grey(pickFit(W - 4, [
+                  'This ring is in memory only — it holds recent activity and is empty after a restart.',
+                  'This ring is in memory only — it is empty after a restart.',
+                  'In-memory ring — empty after a restart.',
+                ]))]
               : []),
           ]
         : [c.grey('Waiting for activity — device, status and route changes appear here live.')];
@@ -260,6 +277,11 @@ function wrapDetail(text: string, width: number): string[] {
   if (line) out.push(line);
   // A blank payload is a blank row, never the string "undefined".
   return out.length ? out : [''];
+}
+
+/** The longest form that fits the width, never a clipped one. */
+function pickFit(width: number, forms: string[]): string {
+  return forms.find((f) => f.length <= width) ?? forms[forms.length - 1];
 }
 
 function field(label: string, value: string, W: number): string {

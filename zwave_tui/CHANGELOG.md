@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.55.0 — 2026-09-04
+
+**Disclosure at the narrow end — and a kind the ledger will never score.**
+
+**ENGINE never mentioned `node-down`.** `SCORED_KINDS` omitted it, and omission
+is a FOURTH way of saying nothing beside the three empty states the screen
+already distinguishes. So the mesh's most alarming kind was simply absent from
+the screen whose stated job is *"what has it learned?"*, and its absence read
+as "no episode has closed yet" rather than "this arm was never fed and never
+will be". `node-down` opens no episode at all, so no counter can ever bring the
+row into existence — it is UNGATED. Membership comes from `unscoreableReason`,
+the same oracle behind REMEDY's per-card disclosure, bound in both directions by
+a test so a future unscoreable kind cannot be silently dropped here.
+
+**The Activity Log told operators to press a key that narrows.** "press D/O to
+widen" — but `D` steps *modulo* the range order, and three of the six steps do
+not widen: `all → hour` goes from unbounded to one hour, `24h → today` goes 24h
+to 12h, and `today → yesterday` is disjoint. `O` is a toggle. The hint sent
+someone looking for missing evidence to a key that can remove more of it.
+
+**And the disclosure beneath it was itself cut.** The sentence saying the ring
+is volatile is 84 columns; `center()` falls through to a blind truncate at the
+modal 80, so it rendered "…and is empty after a rest".
+
+**REMEDY's open-episode line came back as `— se`.** Built at 120 columns and
+never rendered at 80, it lost both load-bearing tokens: the confirming count
+and the pointer to the screen that actually holds the episodes.
+
+**A blocked efficacy measurement lost its qualifier at the width floor.** The
+no-harm ladder fell through to a bare head, so at 60–66 columns — the supported
+floor, where a narrow HA ingress sidebar sits — the row read `⚠ ledger measured
+100% here` alone: a measurement under a SAFETY-gated action with nothing saying
+the action is blocked, which is the endorsement-shaped reading that note exists
+to prevent. Refusing to shed the long qualifier alone only moved the defect one
+layer down (the row then overflowed and the caller clipped it to "— the block
+above still"), so the ladder gained shorter rungs that are whole sentences and
+still say *blocked*.
+
+1030 tests, 502 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.54.0 — 2026-09-04
 
 **Four numbers that were not measurements.**
