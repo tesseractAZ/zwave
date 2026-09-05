@@ -1062,7 +1062,7 @@ const MUTANTS = [
     // Returns the last declared-but-unemitted kind to being unemitted. A mains
     // node whose probes stop landing is invisible until the driver happens to
     // attempt a transmission and fail — which is the gap this kind covers.
-    find: '      const b = eligible && seen != null && now - seen >= QUIET_MS;',
+    find: '      const b = eligible && seen != null && now - seen >= quietMs;',
     repl: '      const b = false;',
     what: 'a mains node silent past the sweep cadence surfaces as quiet-node' },
   { id: 'quiet-node-spares-sleepers', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
@@ -1074,8 +1074,8 @@ const MUTANTS = [
   { id: 'quiet-node-no-lastseen-is-not-silence', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
     // Treats "never heard from" as proof of silence, so a roster that has just
     // been rebuilt accuses every node at once.
-    find: '      const b = eligible && seen != null && now - seen >= QUIET_MS;',
-    repl: '      const b = eligible && (seen == null || now - seen >= QUIET_MS);',
+    find: '      const b = eligible && seen != null && now - seen >= quietMs;',
+    repl: '      const b = eligible && (seen == null || now - seen >= quietMs);',
     what: 'absence of a lastSeen reading is not evidence of silence' },
   { id: 'unscoreable-split-by-cause', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     // Back to one counter for two different facts: a permanent, unfixable
@@ -2343,6 +2343,31 @@ const MUTANTS = [
     find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),",
     repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
     what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 'truncation-marker-names-the-loss', file: 'src/telnet/screens/controller.ts', tests: ['controllerHeatmapScreen'],
+    // "…more (taller terminal shows the full roll-up)" said something was
+    // missing and nothing about what — and at 80x24 the casualty is the GRADE
+    // DISTRIBUTION, which has no other home on this screen.
+    find: '    body.push(c.grey(pickFits(W, [',
+    repl: "    body.push(c.grey('  …more')); if (false) body.push(c.grey(pickFits(W, [",
+    what: 'the truncation marker names the content and an alternative' },
+  { id: 'quiet-dwell-follows-the-config', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
+    // The constant was chosen against the DEFAULT cadence; on an install that
+    // lengthened it, the detector fired before one sweep had asked.
+    find: '      const quietMs = Math.max(QUIET_MS, (input.sweepMs ?? 0) * QUIET_SWEEPS);',
+    repl: '      const quietMs = QUIET_MS;',
+    what: "quiet-node's dwell follows the configured sweep cadence" },
+  { id: 'fine-ring-spans-its-widest-window', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    // The ring is capped in SAMPLES; its consumers think in TIME. Below a ~7.5 s
+    // cadence it spanned LESS than the 30-min S2 window that reads it.
+    find: '  const maxSamples = opts.maxSamples ?? Math.max(DEFAULT_MAX_SAMPLES, neededForWindows);',
+    repl: '  const maxSamples = opts.maxSamples ?? DEFAULT_MAX_SAMPLES;',
+    what: 'the fine ring always covers the longest window a detector reads' },
+  { id: 'ring-floor-respects-an-explicit-cap', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    // An explicit maxSamples is a deliberate constraint; overriding it silently
+    // would make the option a lie.
+    find: '  const maxSamples = opts.maxSamples ?? Math.max(DEFAULT_MAX_SAMPLES, neededForWindows);',
+    repl: '  const maxSamples = Math.max(opts.maxSamples ?? DEFAULT_MAX_SAMPLES, neededForWindows);',
+    what: 'an explicitly configured ring cap is honoured' },
   { id: 's2-lane-fault-has-a-cause', file: 'src/zwave/driverWsClient.ts', tests: ['driverWsClient'],
     // s2LaneLive collapses four causes into one boolean whose callers record
     // `null`, so "nothing to report" and "cannot report" were one value.

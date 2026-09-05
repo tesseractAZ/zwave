@@ -86,8 +86,22 @@ export function renderController(ctx: ScreenCtx): string[] {
   // letting frame() silently drop the trailing NETWORK HEALTH tallies.
   const bodyCap = Math.max(1, H - 3); // masthead + rule + command bar
   if (body.length > bodyCap) {
+    // NAME WHAT WAS WITHHELD, AND WHERE TO READ IT (v0.63.0). "…more (taller
+    // terminal shows the full roll-up)" told the operator that something was
+    // missing and nothing about what — and at the modal 80x24 the casualty is
+    // the GRADE DISTRIBUTION, which has no other home on this screen. A marker
+    // that names neither the content nor an alternative is barely better than
+    // silence, and it is the only thing standing between the operator and a
+    // number they came here for.
     body.length = Math.max(0, bodyCap - 1);
-    body.push(c.grey('  …more (taller terminal shows the full roll-up)'));
+    const lost = body.length;
+    body.push(c.grey(pickFits(W, [
+      `  …NETWORK HEALTH truncated — grade counts and link tallies need a taller frame · [1] OVERVIEW has the roll-up`,
+      `  …NETWORK HEALTH truncated — grade counts need more rows · [1] OVERVIEW`,
+      `  …NETWORK HEALTH truncated · [1] OVERVIEW`,
+      '  …more',
+    ])));
+    void lost;
   }
 
   const model = ctrl.model ?? ctrl.manufacturer ?? '—';
@@ -569,6 +583,11 @@ function grid2(a: string, b: string, W: number): string {
  * REBUILD ROUTES block when it is present — it costs 4 rows plus a separator,
  * and ignoring it made the gate over-count free rows during a rebuild.
  */
+/** The longest form that fits, never a clipped one. */
+function pickFits(width: number, forms: string[]): string {
+  return forms.find((f) => f.length <= width) ?? forms[forms.length - 1];
+}
+
 function surplusRows(H: number, rebuilding: boolean): number {
   const baseline = 26 + (rebuilding ? 5 : 0);
   return Math.max(0, (H - 3) - baseline);

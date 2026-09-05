@@ -1119,6 +1119,11 @@ class ZwaveDataImpl implements ZwaveData {
         coarse: (id) => ev.coarseForNode(id),
         controllerSamples: () => ev.controllerSamples(),
         coverage: (id) => ev.coverage(id),
+        // The CONFIGURED sweep cadence (v0.63.0) — quiet-node's dwell derives
+        // from it rather than from the default its constant was written
+        // against. 0/absent when the sweep is off, which floors the dwell at
+        // the old constant.
+        sweepMs: this.autoPingSnapshotFn?.()?.config.staleMs || undefined,
         recordingSince: () => ev.recordingSince(),
         hasRealNoise: () =>
           this.driverBgRssi != null && now - this.driverBgRssi.at <= 90_000 && this.driverHomeOk(),

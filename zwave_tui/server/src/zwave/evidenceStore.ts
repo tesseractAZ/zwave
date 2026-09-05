@@ -390,6 +390,13 @@ interface Persisted {
 
 const SCHEMA_V = 2;
 const DEFAULT_MAX_SAMPLES = 240; // ~40 min at the 10 s cadence
+/**
+ * The longest lookback any detector asks of the FINE ring (symptoms.ts
+ * `S2_WINDOW_MS`, 30 min). The ring is capped in SAMPLES; its consumers think
+ * in TIME. Keep these two in step or a fast poll silently shortens the horizon
+ * a detector believes it has (v0.63.0).
+ */
+const MAX_DETECTOR_WINDOW_MS = 30 * 60_000;
 const DEFAULT_CADENCE_MS = 10_000;
 const DEFAULT_MAX_AGE_MS = 60 * 60 * 1000; // fine tier only
 export const COARSE_BUCKET_MS = 30 * 60 * 1000;
@@ -513,7 +520,22 @@ function emptyMeta(t: number): NodeCoverage {
 export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   const path = opts.path;
   const tmp = `${path}.tmp`;
-  const maxSamples = opts.maxSamples ?? DEFAULT_MAX_SAMPLES;
+  // THE RING IS CAPPED IN SAMPLES, AND ITS CONSUMERS THINK IN TIME (v0.63.0).
+  // 240 samples is ~40 min at the 10 s default — comfortably more than the
+  // 30-minute S2 lookback that reads it. But the cadence follows
+  // `route_poll_interval`, and below ~7.5 s the ring spans LESS than that
+  // window: `windowS2` then counts over a shorter period than it believes,
+  // under-reporting resyncs with nothing saying the horizon shrank. Floor the
+  // cap so the ring always covers the longest window any detector asks of it.
+  const cadence = opts.cadenceMs ?? DEFAULT_CADENCE_MS;
+  // +1: N samples span N-1 intervals, so covering a 30-minute window at a 4 s
+  // cadence needs 451 samples, not 450. Off by one sample is off by one
+  // interval at the far edge of the window the detector is about to read.
+  const neededForWindows = Math.ceil(MAX_DETECTOR_WINDOW_MS / Math.max(1, cadence)) + 1;
+  // The floor applies to the DEFAULT only: an explicit `maxSamples` is a
+  // deliberate constraint (the ring-bounding tests set it to 2 and 3) and
+  // silently overriding it would make the option a lie.
+  const maxSamples = opts.maxSamples ?? Math.max(DEFAULT_MAX_SAMPLES, neededForWindows);
   const cadenceMs = opts.cadenceMs ?? DEFAULT_CADENCE_MS;
   const maxWindowMs = cadenceMs * MAX_WINDOW_CADENCES;
   const maxAgeMs = opts.maxAgeMs ?? DEFAULT_MAX_AGE_MS;

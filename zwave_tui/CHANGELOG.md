@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.63.0 — 2026-09-05
+
+**Three constants that stopped matching the thing they were chosen against.**
+
+**A truncation marker that named nothing.** At the modal 80x24 the CONTROLLER
+roll-up overflows, and the marker read `…more (taller terminal shows the full
+roll-up)` — it told the operator that something was missing and nothing about
+what. The casualty at that size is the GRADE DISTRIBUTION, which has no other
+home on this screen. The marker now names the content and points at the screen
+that does carry it, degrading through whole forms rather than clipping.
+
+**`quiet-node`'s dwell was blind to its own configuration.** `QUIET_MS` was a
+hardcoded 6 h, chosen as "several times the liveness sweep's DEFAULT cadence
+(120 min)". But the cadence is configurable — and on an install that lengthened
+it, this detector fired before even one sweep had asked, which is precisely the
+false alarm the constant exists to prevent. The dwell is now three sweeps of
+the CONFIGURED cadence, floored at the old value so no existing install becomes
+more trigger-happy.
+
+**The evidence ring is capped in SAMPLES; its consumers think in TIME.** 240
+samples is ~40 min at the 10 s default, comfortably more than the 30-minute S2
+lookback that reads it. But the cadence follows `route_poll_interval`, and below
+about 7.5 s the ring spans LESS than that window — so `windowS2` counted over a
+shorter period than it believed, under-reporting resyncs with nothing saying the
+horizon had shrunk. The default cap is now floored at whatever the widest
+detector window needs. An explicitly configured cap is still honoured exactly:
+overriding it silently would make the option a lie.
+
+1059 tests, 539 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.62.0 — 2026-09-05
 
 **Three things the engine knew and no screen could say.**

@@ -722,3 +722,24 @@ test('one `lwr` blink does not stop weak-signal ever maturing (v0.54.0)', () => 
   assert.ok(fired.some((s) => s.kind === 'weak-signal' && s.nodeId === 6),
     'a route the node has held all window is still its route when one event omits it');
 });
+
+test('quiet-node\'s dwell follows the CONFIGURED sweep, not the default (v0.63.0)', () => {
+  // QUIET_MS was "several times the sweep's DEFAULT cadence (120 min)" — but
+  // the cadence is configurable, and on an install that lengthened it this
+  // detector fired before even one sweep had asked, which is exactly the false
+  // alarm the constant exists to prevent.
+  const nodes = [node(1), node(6, { stats: { lastSeen: T - 8 * 3600_000 } as never })];
+  const run = (sweepMs?: number) => settle(
+    (now: number) => ({ ...input({ nodes, recent: new Map([[6, []]]), now }), sweepMs } as never),
+    new Map(), T, 8);
+
+  // POSITIVE CONTROL. Asserting an absence proves nothing unless the same
+  // fixture can produce the presence — the first draft of this test asserted
+  // only the absence and passed for a fixture that could never fire at all.
+  assert.ok(run(undefined).some((x) => x.kind === 'quiet-node' && x.nodeId === 6),
+    'control: at the default cadence, 8 h of silence DOES fire quiet-node');
+
+  // A 4-hour sweep means only two sweeps have asked in 8 h; the dwell is three.
+  assert.equal(run(4 * 3600_000).filter((x) => x.kind === 'quiet-node').length, 0,
+    'a lengthened sweep must lengthen the dwell — otherwise this fires before one sweep asked');
+});
