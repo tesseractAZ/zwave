@@ -798,3 +798,20 @@ test('the CONTROLLER surplus gates have pinned boundaries (v0.60.0)', () => {
     }
   }
 });
+
+test('the truncated NETWORK HEALTH marker names WHAT was withheld (v0.63.0)', () => {
+  // "…more (taller terminal shows the full roll-up)" told the operator that
+  // something was missing and nothing about what — and at 80x24 the casualty is
+  // the GRADE DISTRIBUTION, which has no other home on this screen.
+  // Sweep DOWN until the frame actually truncates — a test that returns early
+  // when it finds no marker proves nothing, and an earlier draft of this one
+  // did exactly that.
+  let found = '';
+  for (const rows of [24, 22, 20, 18, 16]) {
+    const row = render(ctrlCtx(NO_ERRORS, 80, rows)).split('\n').find((l) => /…/.test(l));
+    if (row) { found = row; break; }
+  }
+  assert.ok(found, 'the roll-up must truncate at SOME supported height, or this test is vacuous');
+  assert.match(found, /NETWORK HEALTH/, `the marker must name the content: "${found.trim()}"`);
+  assert.match(found, /OVERVIEW/, `and where to read it instead: "${found.trim()}"`);
+});

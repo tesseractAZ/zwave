@@ -117,6 +117,11 @@ export interface DetectInput {
   coarse: (nodeId: number) => CoarseBucket[];
   controllerSamples: () => ControllerSample[];
   coverage: (nodeId: number) => NodeCoverage | null;
+  /** The CONFIGURED liveness-sweep cadence in ms (v0.63.0), or undefined when
+   *  the sweep is off. quiet-node's dwell is derived from this rather than from
+   *  the default the constant was written against — on an install that
+   *  lengthened the cadence, the detector fired before one sweep had asked. */
+  sweepMs?: number;
   /** Store-level: epoch ms evidence collection began (coverage floor). */
   recordingSince: () => number | null;
   /** Is the noise floor a real measurement (driver-WS) vs the −95 fallback? */
@@ -134,6 +139,17 @@ const DWELL_MS = 5 * 60_000; // a breach must persist 5 min to surface
  * reference mesh, and would make this a nightly false alarm.
  */
 const QUIET_MS = 6 * 60 * 60_000;
+/**
+ * The multiple of the sweep cadence this dwell represents (v0.63.0).
+ *
+ * `QUIET_MS` was a hardcoded 6 h chosen as "several times the liveness sweep's
+ * DEFAULT cadence (120 min)" — but the cadence is configurable, and on an
+ * install that lengthened it this detector fired before even one sweep had
+ * asked, which is precisely the false alarm the constant exists to prevent.
+ * Derived from the live config instead, with the old value as the floor so no
+ * existing install becomes MORE trigger-happy.
+ */
+const QUIET_SWEEPS = 3;
 const WINDOW_MS = 10 * 60_000; // windowed-rate lookback
 const MIN_WINDOW_TX = 20; // minimum successful sends for a rate to be meaningful
 const TIMEOUT_RATE_ABS = 0.15; // chronic absolute threshold (health-check rubric)
@@ -380,7 +396,8 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // A node with NO lastSeen at all is not evidence of silence: it may
       // simply never have been heard from since a restart cleared the roster.
       // Fail closed rather than accuse on absence.
-      const b = eligible && seen != null && now - seen >= QUIET_MS;
+      const quietMs = Math.max(QUIET_MS, (input.sweepMs ?? 0) * QUIET_SWEEPS);
+      const b = eligible && seen != null && now - seen >= quietMs;
       const since = dwell(state, key(id, 'quiet-node'), b, now);
       if (since != null) {
         breaching = true;

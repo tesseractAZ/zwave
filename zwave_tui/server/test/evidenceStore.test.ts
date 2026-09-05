@@ -760,3 +760,23 @@ test('a positive RSSI is not a measurement — the STORE applies the same rule t
     `0, 5 and 124 dBm are all markers, not readings: ${JSON.stringify(got)}`);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('the fine ring always spans the longest window a detector asks of it (v0.63.0)', () => {
+  // The ring is capped in SAMPLES; its consumers think in TIME. 240 samples is
+  // ~40 min at the 10 s default, comfortably more than the 30-minute S2
+  // lookback that reads it — but the cadence follows route_poll_interval, and
+  // below ~7.5 s the ring spans LESS than that window, so windowS2 counts over
+  // a shorter period than it believes.
+  const dir = mkdtempSync(join(tmpdir(), 'ev-ring-'));
+  const fast = createEvidenceStore({ path: join(dir, 'f.json'), cadenceMs: 4_000, now: () => FIXED, uptimeMs: () => UP });
+  let t = FIXED;
+  for (let i = 0; i < 600; i++) {
+    fast.record(5, stats({ commandsTX: 100 + i }), NodeStatus.Alive, FRESH, t);
+    t += 4_000;
+  }
+  const ring = fast.forNode(5);
+  const span = ring.length ? ring[ring.length - 1].t - ring[0].t : 0;
+  assert.ok(span >= 30 * 60_000,
+    `at a 4 s cadence the ring must still span the 30-min S2 window: got ${Math.round(span / 60_000)} min`);
+  rmSync(dir, { recursive: true, force: true });
+});
