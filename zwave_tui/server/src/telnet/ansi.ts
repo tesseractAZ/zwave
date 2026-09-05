@@ -141,6 +141,13 @@ export function truncate(s: string, width: number): string {
  * marker sits flush: the cut is already visible INSIDE the word, so there is
  * no ambiguity for the space to resolve.
  */
+/** Append a RESET if the string leaves an SGR span open. Idempotent. */
+function closeSpan(s: string): string {
+  const codes = s.match(/\x1b\[[0-9;]*m/g);
+  if (!codes || codes[codes.length - 1] === RESET) return s;
+  return s + RESET;
+}
+
 export function clipWords(s: string, width: number): string {
   if (width <= 0) return '';
   if (visLen(s) <= width && !IS_CTL.test(s.replace(ANSI_RE, ''))) return s;
@@ -156,8 +163,15 @@ export function clipWords(s: string, width: number): string {
   }
   out = out.replace(/\s+$/, '');
   // `truncate` restores the control-byte scrub this function's split bypasses.
-  if (!out) return truncate(s, width - 1) + '…';
-  return truncate(out, budget) + ' …';
+  if (!out) return closeSpan(truncate(s, width - 1)) + '…';
+  // CLOSE ANY SPAN THE SPLIT ORPHANED (v0.56.0). Splitting on whitespace can
+  // drop the token carrying a span's closing RESET, leaving the attribute OPEN
+  // past the end of the row — the colour then bleeds into the frame border and
+  // every row below it until something else happens to reset. `truncate`
+  // appends a RESET at its own cut; this function did not at its. Latent when
+  // it shipped (both callers pass plain text and colour the result afterwards),
+  // and a trap for the next caller that does not.
+  return closeSpan(truncate(out, budget)) + ' …';
 }
 
 /** Pad (or truncate) to an exact visible width, content left-aligned. */

@@ -216,3 +216,30 @@ test('one noise-floor reading is spelt ONE way across every screen (v0.54.0)', (
   // and silently turning NaN into 0 dBm would invent a measurement.
   assert.ok(Number.isNaN(shownDbm(NaN)));
 });
+
+test('clipWords never leaves a colour span open past the row (v0.56.0)', () => {
+  // Splitting on whitespace can drop the token carrying a span's closing RESET.
+  // The attribute then stays OPEN past the end of the row and the colour bleeds
+  // into the frame border and every row below until something else resets it.
+  // `truncate` appends a RESET at its own cut; this did not at its. Latent when
+  // clipWords shipped in v0.51.0 — both callers pass plain text and colour the
+  // result afterwards — and a trap for the next caller that does not.
+  const ESC = '\x1b';
+  const open = (s: string): number =>
+    ((s.match(/\x1b\[[0-9;]*m/g) ?? []).filter((m) => m !== `${ESC}[0m`).length);
+  for (const [label, s, w] of [
+    ['span cut before its RESET', `${ESC}[90mrouted via repeater${ESC}[0m tail`, 18],
+    ['over-long coloured token', `${ESC}[31msupercalifragilistic${ESC}[0m`, 10],
+    ['span survives whole', `${ESC}[90mabc${ESC}[0m def ghi jkl`, 9],
+  ] as const) {
+    const out = clipWords(s, w);
+    const codes = out.match(/\x1b\[[0-9;]*m/g) ?? [];
+    if (open(out) > 0 || codes.length > 0) {
+      assert.equal(codes[codes.length - 1], `${ESC}[0m`,
+        `${label}: the row must end with the span CLOSED: ${JSON.stringify(out)}`);
+    }
+    assert.ok(visLen(out) <= w, `${label}: still within budget`);
+  }
+  // Plain text gains nothing — no gratuitous escape bytes on the common path.
+  assert.equal(clipWords('value changed 812 to 1240 now', 18), 'value changed …');
+});

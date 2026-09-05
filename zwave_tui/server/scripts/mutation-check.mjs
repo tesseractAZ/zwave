@@ -2326,6 +2326,39 @@ const MUTANTS = [
     find: "          const pct = share >= 0.005 ? `${Math.round(share * 100)}%` : '<1%';",
     repl: '          const pct = `${Math.round(share * 100)}%`;',
     what: 'a rounded-to-zero share reads "<1%", never "(0%)" beside a non-zero count' },
+  { id: 'noise-peak-outside-the-chart-gate', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
+    // v0.49.0 reported the bucket peak, but only inside the chart branch, which
+    // needs `surplus >= 6`. At the modal 80x24 there is no chart — so a
+    // measured 40 dB burst rendered byte-identical to a flat trend.
+    find: '      const notable = peak != null && meanOfMeans != null && peak - meanOfMeans >= NOISE_PEAK_NOTABLE_DB;',
+    repl: '      const notable = false;',
+    what: 'a measured burst is called out wherever the trend renders' },
+  { id: 'noise-peak-row-sheds-whole', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
+    // One concatenation ending in push's blind truncate cut `(23 dB above the
+    // mean...` to `(2` — a number that reads complete and is an order out.
+    find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakTag(peak, meanOfMeans, notable),",
+    repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
+    what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 'clipwords-closes-its-spans', file: 'src/telnet/ansi.ts', tests: ['chrome'],
+    // Splitting on whitespace can drop the token carrying a span's closing
+    // RESET, leaving the attribute OPEN past the row — the colour then bleeds
+    // into the frame border and every row below. Latent when clipWords shipped
+    // in v0.51.0 (both callers pass plain text) and a trap for the next one.
+    find: '  return closeSpan(truncate(out, budget)) + \' …\';',
+    repl: "  return truncate(out, budget) + ' …';",
+    what: 'a clipped row never leaves a colour attribute open' },
+  { id: 'lasthop-is-welded-to-the-number', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // kv() ends in a bare truncate, so a TRAILING qualifier is cut first: at
+    // 80x24 the row read `· last-hop, not the devi`, and at <=55 columns the
+    // routed row was byte-identical to a direct node's — a repeater's signal
+    // presented as the device's own.
+    find: "        const hop = routedHere ? c.grey(' last-hop') : '';",
+    repl: "        const hop = '';",
+    what: "a routed node's yardstick says whose signal it is, at every width" },
+  { id: 'lasthop-not-trailing', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    find: '          ? normC(`${Math.round(rn.median)} dBm`) + hop + c.grey(` ±${Math.round(rn.scale)} dB`) +',
+    repl: '          ? normC(`${Math.round(rn.median)} dBm`) + c.grey(` ±${Math.round(rn.scale)} dB`) +',
+    what: 'the qualifier sits beside the number, where truncate cannot reach it first' },
   { id: 'engine-names-the-unscored-kind', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     // SCORED_KINDS omits node-down, so the mesh's most alarming kind was ABSENT
     // from the screen whose job is "what has it learned?" — and absence reads as
@@ -2517,8 +2550,8 @@ const MUTANTS = [
   { id: 'clipword-marker-is-separated', file: 'src/telnet/ansi.ts', tests: ['chrome'],
     // `140…` cannot be read as "140 and more" rather than "1400"; the space is
     // what makes the marker a marker instead of another digit.
-    find: "  return truncate(out, budget) + ' …';",
-    repl: "  return truncate(out, budget) + '…';",
+    find: "  return closeSpan(truncate(out, budget)) + ' …';",
+    repl: "  return closeSpan(truncate(out, budget)) + '…';",
     what: 'the clip marker is separated from the text it follows' },
   { id: 'detail-pane-spends-its-slack', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
     // Detail is the LAST field; 3-5 of its 9 rows sat blank while the tail of
