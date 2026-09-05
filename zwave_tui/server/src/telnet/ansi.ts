@@ -123,6 +123,43 @@ export function truncate(s: string, width: number): string {
   return clipped ? out + RESET : out;
 }
 
+/**
+ * Clip to a visible width by dropping WHOLE WORDS, marking the loss with `…`.
+ *
+ * `truncate` cuts mid-character and says nothing, which on prose is merely
+ * ugly but on a VALUE is a lie: an Activity Log row reading `812 → 1240` came
+ * back as `812 → 12`, a different, entirely plausible number, on the same
+ * frame whose Detail row showed the true one. This is `shedLine`'s whole-token
+ * rule (chrome.ts) applied to a single string that has no tokens to shed.
+ *
+ * TWO columns are reserved, not one. The marker is separated by a space
+ * because `140…` cannot be read as "140, and more" rather than "1400" — the
+ * gap is what makes the marker a marker instead of another digit. Do not
+ * reclaim that column.
+ *
+ * A single over-long word cannot be shed whole, so it is clipped and the
+ * marker sits flush: the cut is already visible INSIDE the word, so there is
+ * no ambiguity for the space to resolve.
+ */
+export function clipWords(s: string, width: number): string {
+  if (width <= 0) return '';
+  if (visLen(s) <= width && !IS_CTL.test(s.replace(ANSI_RE, ''))) return s;
+  const budget = width - 2;
+  if (budget <= 0) return truncate(s, width);
+  let out = '';
+  let vis = 0;
+  for (const part of s.split(/(\s+)/)) {
+    const n = visLen(part);
+    if (vis + n > budget) break;
+    out += part;
+    vis += n;
+  }
+  out = out.replace(/\s+$/, '');
+  // `truncate` restores the control-byte scrub this function's split bypasses.
+  if (!out) return truncate(s, width - 1) + '…';
+  return truncate(out, budget) + ' …';
+}
+
 /** Pad (or truncate) to an exact visible width, content left-aligned. */
 export function padEnd(s: string, width: number): string {
   const len = visLen(s);

@@ -941,3 +941,21 @@ test('a provider that predates probeability claims nothing about it (v0.47.0)', 
   const joined = plain(renderRemedy(ctx(200, 40, [sym({ kind: 'node-down', nodeId: 6 })])));
   assert.doesNotMatch(joined, /cannot be probed/);
 });
+
+test('a candidate\'s [cost · basis] tag is whole or shed, never a half bracket (v0.51.0)', () => {
+  // shedLine's HEAD has no whole-token path — an over-wide head is handed to a
+  // blind truncate — so at the modal 80 columns the longest candidate ended
+  // `[physical`, silently dropping ` · lore]`. That is the difference between
+  // "we measured this" and "this is folklore", lost with no disclosure, and an
+  // unbalanced bracket on top.
+  for (const cols of [40, 56, 80, 100, 120, 200]) {
+    const lines = renderRemedy(ctx(cols, 24, [sym({ kind: 'dead-flap' })]))
+      .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    for (const l of lines) {
+      const opens = (l.match(/\[/g) ?? []).length;
+      const closes = (l.match(/\]/g) ?? []).length;
+      assert.equal(opens, closes,
+        `${cols} cols: a candidate row must never carry a half-open tag: "${l}"`);
+    }
+  }
+});

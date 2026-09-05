@@ -315,7 +315,14 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     if (unprobe > 0) tallies.push(`${unprobe} unprobeable`);
     if (conf > 0) tallies.push(`${conf} confounded`);
     if (fp > 0) tallies.push(`${fp} refused as misdiagnosis`);
-    if (tallies.length) push('    ' + c.grey('○ ' + tallies.join(' · ')));
+    // fitBits, NOT a raw join (v0.51.0). `push` blind-truncates, so at 80 cols
+    // this row read "...· 2 undersampled (node r" and three tallies — including
+    // `refused as misdiagnosis`, the ledger's own count of times it decided a
+    // detector was WRONG — vanished with nothing disclosing the loss. The row
+    // eight lines above already used fitBits; this one never did.
+    // `push` stays: at cols 1-5 fitBits emits prefix + `+N` wider than the
+    // frame, and only truncate enforces renderContract's `visLen <= cols`.
+    if (tallies.length) push(fitBits('    ' + c.grey('○ '), tallies.map((t) => c.grey(t)), view.cols));
   }
   if (!anyLearned) {
     push('  ' + c.grey('○ nothing learned yet — no episode of any scored kind has closed.'));

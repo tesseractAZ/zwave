@@ -251,7 +251,13 @@ export function renderInterference(ctx: ScreenCtx): string[] {
   push(c.label('CORRELATED DEGRADATION'));
   if (iv.correlated.active) {
     push('  ' + c.yellowB('⚠ correlated mesh degradation'));
-    for (const line of wrap(iv.correlated.narrative, W - 4).slice(0, 2)) push('    ' + c.grey(line));
+    // NOT capped (v0.51.0). The old `.slice(0, 2)` dropped, at 80 columns, the
+    // entire hedge — "treat as a lead, not a verdict" — from a symptom whose
+    // basis is 'inferred' and whose basis this screen never renders, leaving a
+    // guess reading as a finding. At the modal 80x24 the body is 19 of 21 rows,
+    // so the third line is free; where it is not, frame() substitutes its own
+    // "N more lines hidden" row, which DISCLOSES the loss instead of hiding it.
+    for (const line of wrap(iv.correlated.narrative, W - 4)) push('    ' + c.grey(line));
     // A companion count, NOT the event's reach (v0.35, reworded on review).
     // `degradedNodes` counts distinct nodes carrying ANY per-node symptom right
     // now — including faults with no relationship to this event (a dead-flap,
