@@ -2029,8 +2029,12 @@ const MUTANTS = [
   { id: 'probes-caveat-follows-the-ratio', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
     // Gated on the self-proven counter, the worst case — a fully blended
     // history with zero self-proven credits — was the one case with no caveat.
-    find: '        const caveat = cov.probesAsked > 0',
-    repl: '        const caveat = cov.probesSelfProven > 0',
+    // Anchor moved to the epoch gate in v0.63.1; the invariant is unchanged —
+    // the caveat must not depend on a probe COUNTER, because the worst case (a
+    // fully blended history with zero self-proven credits) is exactly the one
+    // such a gate leaves uncovered.
+    find: '        const preEpoch = cov.laneEpoch == null || cov.firstSeenAt < cov.laneEpoch;',
+    repl: '        const preEpoch = cov.probesSelfProven > 0;',
     what: 'the lifetime-tally caveat is attached to the ratio it qualifies' },
   { id: 'remedy-partial-coverage', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // Collapses partial coverage back into "Learning" — the v0.44.0 state that
@@ -2343,6 +2347,18 @@ const MUTANTS = [
     find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),",
     repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
     what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 'probe-caveat-can-retire', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // The gate was `probesAsked > 0` INSIDE a branch that already requires it,
+    // so the caveat was unconditional — a node first seen long after the
+    // upgrade carried a permanent disclosure about data it does not contain.
+    find: '        const preEpoch = cov.laneEpoch == null || cov.firstSeenAt < cov.laneEpoch;',
+    repl: '        const preEpoch = true;',
+    what: 'the probe caveat retires for a node with no pre-upgrade counts' },
+  { id: 'no-epoch-keeps-the-caveat', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Absent is the CONSERVATIVE direction, not a licence to drop a disclosure.
+    find: '        const preEpoch = cov.laneEpoch == null || cov.firstSeenAt < cov.laneEpoch;',
+    repl: '        const preEpoch = cov.laneEpoch != null && cov.firstSeenAt < cov.laneEpoch;',
+    what: 'a store with no stamp keeps the caveat for everyone' },
   { id: 'truncation-marker-names-the-loss', file: 'src/telnet/screens/controller.ts', tests: ['controllerHeatmapScreen'],
     // "…more (taller terminal shows the full roll-up)" said something was
     // missing and nothing about what — and at 80x24 the casualty is the GRADE

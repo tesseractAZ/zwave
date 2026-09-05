@@ -179,6 +179,10 @@ export type ProbeClassLite = 'self-proven' | 'echo-only' | 'attribution-unknown'
 export interface NodeCoverage {
   /** First time this node appeared on the roster (registerNode). */
   firstSeenAt: number;
+  /** Store-level: when single-lane probe counting began (v0.63.1), or null on a
+   *  store that predates the stamp. A node first seen at or after this has no
+   *  pre-v0.40.2 counts to disclose. */
+  laneEpoch?: number | null;
   /** Cumulative counts since firstSeenAt (not ring-bounded). */
   samples: number;
   freshSamples: number;
@@ -378,6 +382,20 @@ interface Persisted {
   savedAt: number;
   homeId: number | null;
   recordingSince: number | null;
+  /**
+   * When this install began counting probes on the SWEEP LANE ONLY (v0.63.1).
+   *
+   * Before v0.40.2 the probe counters blended three lanes and per-boot
+   * fabricated credits, so DETAIL carries a caveat saying so — and that caveat
+   * was unconditional, which meant a node first seen long after the upgrade
+   * carried a disclosure about data it does not contain, permanently.
+   *
+   * OPTIONAL, and deliberately NOT a schema bump: `load` discards the entire
+   * store on a version mismatch, and wiping weeks of evidence to retire a
+   * caveat would be a bad trade. Absent ⇒ undefined ⇒ the caveat stays, which
+   * is the conservative direction.
+   */
+  laneEpoch?: number;
   nodes: Record<string, FineCols>;
   coarse: Record<string, CoarseCols>;
   controller: CtrlCols | null;
@@ -557,6 +575,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   let homeId: number | null = null;
   let loadedHomeId: number | null = null;
   let since: number | null = null;
+  let laneEpoch: number | null = null;
   let dirty = false;
   let implausibleLogged = false;
 
@@ -883,7 +902,10 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       meta.set(nodeId, m);
       dirty = true;
     },
-    coverage: (nodeId) => meta.get(nodeId) ?? null,
+    coverage: (nodeId) => {
+      const m = meta.get(nodeId);
+      return m ? { ...m, laneEpoch } : null;
+    },
     recordingSince: () => since,
     all: () => fine,
 
@@ -949,6 +971,16 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           return fine;
         }
         since = typeof obj.recordingSince === 'number' ? obj.recordingSince : null;
+        // Absent on a store written before v0.63.1 — left null, so the caveat
+        // stays for every node on that install (the conservative direction).
+        //
+        // NO MUTANT PINS save-time vs load-time stamping, deliberately: both
+        // are defensible. A node registered after the upgrade has single-lane
+        // counters whichever instant the stamp takes, and the difference only
+        // moves nodes registered in the window between load and first save.
+        // Save-time is the more conservative of two correct answers, and an
+        // entry asserting one over the other would be pinning taste as truth.
+        laneEpoch = typeof obj.laneEpoch === 'number' ? obj.laneEpoch : null;
         // Boot-grace: the coarse tier + coverage metadata are age-judgment-free
         // history — load them; drop only the recency-dependent fine ring.
         const fineTooOld = grace || (maxAgeMs > 0 && ageMs > maxAgeMs) || ageMs < 0;
@@ -1219,6 +1251,11 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           savedAt: now(),
           homeId,
           recordingSince: since,
+          // Stamped on the FIRST save after the upgrade, so every node already
+          // on the roster keeps the caveat and only nodes first seen from here
+          // on shed it. Stamping at load instead would retire it for nodes
+          // whose counters really do blend lanes.
+          laneEpoch: laneEpoch ?? (laneEpoch = now()),
           nodes,
           coarse: coarseOut,
           controller,

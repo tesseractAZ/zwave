@@ -780,3 +780,23 @@ test('the fine ring always spans the longest window a detector asks of it (v0.63
     `at a 4 s cadence the ring must still span the 30-min S2 window: got ${Math.round(span / 60_000)} min`);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('the lane epoch is stamped on SAVE, so nodes present at upgrade keep the caveat (v0.63.1)', () => {
+  // Stamping at LOAD would retire the caveat for every node already on the
+  // roster — precisely the nodes whose counters really do blend lanes.
+  const dir = mkdtempSync(join(tmpdir(), 'ev-epoch-'));
+  const path = join(dir, 'e.json');
+  // A store written BEFORE the stamp existed: no laneEpoch on disk.
+  const legacy = mkStore(path);
+  legacy.registerNode(6, FIXED - 1_000);
+  legacy.record(6, stats({ commandsTX: 100 }), NodeStatus.Alive, FRESH, FIXED);
+  legacy.save();
+  const onDisk = JSON.parse(readFileSync(path, 'utf8')) as { laneEpoch?: number };
+  assert.equal(typeof onDisk.laneEpoch, 'number', 'the first save stamps it');
+  // The node registered BEFORE that save must still be pre-epoch.
+  const cov = legacy.coverage(6);
+  assert.ok(cov, 'coverage must exist');
+  assert.ok(cov!.firstSeenAt < (cov!.laneEpoch ?? 0),
+    `a node present at upgrade time is pre-epoch: seen ${cov!.firstSeenAt} vs epoch ${cov!.laneEpoch}`);
+  rmSync(dir, { recursive: true, force: true });
+});

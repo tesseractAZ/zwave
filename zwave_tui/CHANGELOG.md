@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.63.1 — 2026-09-05
+
+**A disclosure that could never retire, and two fixtures the compiler was not
+allowed to check.**
+
+**The probe caveat was permanent.** DETAIL's *"lifetime tally; pre-v0.40.2
+counts blend probe lanes and boot credits"* was gated on `probesAsked > 0` —
+inside a branch that already requires exactly that — so it was unconditional. A
+node first seen long after the upgrade carried a permanent disclosure about data
+it does not contain. The store now stamps when single-lane counting began, and a
+node whose counting started at or after it sheds the caveat.
+
+Deliberately NOT a schema bump: `load` discards the entire store on a version
+mismatch, and wiping weeks of live evidence to retire a caveat would be a bad
+trade. The field is optional, and absent means the caveat stays — over-disclosing
+is the right direction to be wrong in. `firstSeenAt` is roster-first-sight
+rather than probe-counting start, so a node that existed before the upgrade but
+was first probed after it also keeps it.
+
+**Two test fixtures were typed to fictions.** `withEvidence` declared its coarse
+buckets as `{ t0; samples }` — naming a `samples` field the runtime
+`CoarseBucket` does not have — and `CB()` returned `Record<string, number |
+null>`, which let it carry `rttMin`/`rttMax`/`dFlaps`/`dS2Resync`/`dRouteChanges`
+(not in the type) while omitting `dDropTx`/`dRx`/`flaps`/`routeChanges`/`s2`
+(which are). The bridge fixture in `driverWsClient.test.ts` did the same behind
+an `as never`. Every test using them fed the screen an object the store never
+produces, and the compiler was not allowed to say so — the v0.33 lesson, one
+layer down: a cast on a fixture disables the check the fixture exists to
+perform. Typing them caught two call sites immediately.
+
+One mutant was REMOVED rather than pinned: save-time versus load-time stamping
+of the epoch are both defensible, and an entry asserting one over the other
+would be pinning taste as truth.
+
+1061 tests, 541 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.63.0 — 2026-09-05
 
 **Three constants that stopped matching the thing they were chosen against.**
