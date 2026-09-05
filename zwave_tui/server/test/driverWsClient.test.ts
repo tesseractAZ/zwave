@@ -538,3 +538,38 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
     provider.stop();
   }
 });
+
+test('a peer that upgrades and PONGS but never handshakes is torn down (v0.53.0)', async () => {
+  // The liveness probe measures `lastMsgAt`, which `sock.on('pong')` refreshes.
+  // So a server that completes the WS upgrade, answers every ping, and never
+  // answers `start_listening` looked healthy forever: state stuck at
+  // `handshake`, no evidence stream, no reconnect, for the life of the process.
+  // The handshake needs its own clock, measured from OPEN — which nothing
+  // refreshes — and it must be tested FIRST so the reason is accurate.
+  const wss = new WebSocketServer({ port: 0 });
+  await new Promise<void>((r) => wss.once('listening', () => r()));
+  const port = (wss.address() as { port: number }).port;
+  let connections = 0;
+  wss.on('connection', (ws) => {
+    connections += 1;
+    // Answer the version handshake, then go deliberately mute — but keep
+    // answering protocol pings, which is what defeated the liveness probe.
+    ws.send(JSON.stringify({ type: 'version', driverVersion: '15.0.0', serverVersion: '3.0.0', minSchemaVersion: 32, maxSchemaVersion: 41, homeId: 1 }));
+    ws.on('message', () => { /* never resolves start_listening */ });
+  });
+  const logs: string[] = [];
+  const c = createDriverWsClient({
+    url: `ws://127.0.0.1:${port}`,
+    callbacks: collect().callbacks,
+    reconnectBaseMs: 20,
+    livenessMs: 300,
+    log: (m: string) => logs.push(m),
+  } as never);
+  c.start();
+  await new Promise((r) => setTimeout(r, 1600));
+  c.stop();
+  wss.close();
+  assert.ok(logs.some((l) => /handshake never completed/.test(l)),
+    `a wedged handshake must be named as such: ${logs.join(' | ')}`);
+  assert.ok(connections >= 2, `and must reconnect, not sit forever: ${connections} connections`);
+});

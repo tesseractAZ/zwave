@@ -362,3 +362,22 @@ test('the release workflow resolves against the version being released', () => {
   assert.match(resolve, /ref:\s*\$\{\{\s*inputs\.version\s*&&/,
     'the resolve job must check out the REQUESTED tag on a dispatch, not the default branch');
 });
+
+test('the bootstrap crash cause is emitted at FATAL, not through the info sink (v0.53.0)', () => {
+  // A source assertion, and labelled as one: index.ts's top-level catch cannot
+  // be driven from a test without killing the process, and the thing that must
+  // hold is WHICH SINK it uses. The defect it guards is real — at
+  // `log_level: warning`, the level translations/en.yaml recommends to "quiet
+  // routine output", a crash loop left only the s6 restart banner repeating and
+  // not one line saying why. `fatal` is the top of the ladder, so it survives
+  // every configurable threshold. (Behaviour of `fatal` itself is pinned for
+  // real in logger.test.ts.)
+  const index = read('server/src/index.ts');
+  assert.match(
+    index,
+    /main\(\)\.catch[\s\S]{0,600}?log\.fatal\(/,
+    'the bootstrap catch must not emit through the info sink — it is invisible at '
+    + 'log_level notice/warning/error/fatal, which is exactly when a crash loop is '
+    + 'all the operator has',
+  );
+});

@@ -53,6 +53,7 @@
  */
 
 import WebSocket from 'ws';
+import type { LogSink } from '../logger';
 
 /** The ONLY commands this client may ever send. Frozen — see header. */
 export const DRIVER_WS_ALLOWLIST: readonly string[] = Object.freeze([
@@ -86,7 +87,10 @@ export interface DriverWsClientOptions {
   /** ws:// URL; empty/null ⇒ the client is permanently disabled. */
   url: string | null;
   callbacks: DriverWsCallbacks;
-  log?: (msg: string) => void;
+  /** Widened to LogSink (v0.53.0) for the handshake-timeout line only — every
+   *  other site here is deliberately `info`, since the state machine already
+   *  reports the link on screen. */
+  log?: LogSink;
   /** Reconnect backoff base (ms); doubles per attempt, capped at 60×base. */
   reconnectBaseMs?: number;
   /** Terminate a socket silent for this long (ms). */
@@ -238,7 +242,7 @@ export function parseBgRssi(bg: unknown): BgRssiChannels | null {
 
 export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClient {
   const url = (opts.url ?? '').trim() || null;
-  const log = opts.log ?? (() => {});
+  const log: LogSink = opts.log ?? (() => {});
   const cb = opts.callbacks;
   const reconnectBaseMs = opts.reconnectBaseMs ?? 5_000;
   const reconnectMaxMs = reconnectBaseMs * 60; // ~5 min at the default base
@@ -355,7 +359,21 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       // its pong land WELL before the terminate threshold — otherwise the ping
       // and terminate ticks coincide and a healthy socket is a coin-flip.
       const checkMs = Math.max(250, Math.min(livenessMs / 4, 30_000));
+      // THE HANDSHAKE HAS ITS OWN CLOCK (v0.53.0). The liveness probe above
+      // measures `lastMsgAt`, which a PONG refreshes — so a peer that upgrades
+      // and answers pings but never completes `start_listening` looked healthy
+      // forever and sat in `handshake` for the life of the process, with no
+      // evidence stream and no reconnect. Measure from OPEN, which nothing
+      // refreshes, and test it FIRST so the operator gets the accurate reason.
+      const openedAt = Date.now();
+      const handshakeMs = Math.min(livenessMs, 30_000);
       livenessTimer = setInterval(() => {
+        if (state !== 'live' && Date.now() - openedAt > handshakeMs) {
+          (log.error ?? log)('driver-ws: handshake never completed — terminating socket for reconnect');
+          teardownSocket();
+          scheduleReconnect('handshake timeout');
+          return;
+        }
         const idle = Date.now() - lastMsgAt;
         if (idle > livenessMs) {
           log('driver-ws: no pong/traffic — terminating wedged socket for reconnect');

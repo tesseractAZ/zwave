@@ -578,3 +578,78 @@ test('a telnet session logs its END, its duration and the remaining count (v0.50
   assert.match(bye[0], /disconnected after \S+ \(\d+ active\)/,
     `teardown must carry duration AND the remaining count: ${bye[0]}`);
 });
+
+test('the ingress console logs its session open AND close, with the cause (v0.53.0)', async () => {
+  // v0.50.0 put telnet's session lifecycle on the record and left this half
+  // silent — so the transport most people actually use had no accounting at
+  // all: no way to tell a live session from one that ended, and `liveSessions`
+  // was unobservable. The CAUSE matters too: `socket.close()` is async, so a
+  // naive handler records every server-initiated eviction as "peer closed".
+  const Fastify = (await import('fastify')).default;
+  const wsPlugin = (await import('@fastify/websocket')).default;
+  const { registerWsConsole } = await import('../src/telnet/wsConsole');
+  const { connect } = await import('node:net');
+  void connect;
+
+  const lines: string[] = [];
+  const app = Fastify({ logger: false });
+  await app.register(wsPlugin);
+  registerWsConsole({
+    app,
+    data: mockData({ nodes: [mkNode()] }),
+    log: (m: string) => lines.push(m),
+    isOriginAllowed: () => true,
+    signalDisplay: 'margin',
+    isTrusted: () => true,
+  } as never);
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const port = (app.server.address() as { port: number }).port;
+
+  const { WebSocket } = await import('ws');
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/console/ws`);
+  await new Promise<void>((r) => { ws.on('open', () => r()); ws.on('error', () => r()); });
+  await new Promise((r) => setTimeout(r, 250));
+  ws.close();
+  await new Promise((r) => setTimeout(r, 400));
+  await app.close();
+
+  const dump = lines.join(' | ');
+  assert.ok(lines.some((l) => /ws session opened/.test(l)), `open must be recorded: ${dump}`);
+  const closed = lines.find((l) => /ws session closed/.test(l));
+  assert.ok(closed, `close must be recorded: ${dump}`);
+  assert.match(closed, /\(peer closed\)/, `the peer hung up, so say so: ${closed}`);
+  assert.match(closed, /after \S+ \(\d+ active\)/, `duration and remaining count: ${closed}`);
+});
+
+test('a SERVER-initiated eviction is not recorded as the peer hanging up (v0.53.0)', async () => {
+  // `socket.close()` is async — the 'close' event fires later — so a handler
+  // that names the cause at teardown time would attribute every idle eviction,
+  // quit and lockout to the peer. Whoever INITIATES the close names it.
+  const Fastify = (await import('fastify')).default;
+  const wsPlugin = (await import('@fastify/websocket')).default;
+  const { registerWsConsole } = await import('../src/telnet/wsConsole');
+  const lines: string[] = [];
+  const app = Fastify({ logger: false });
+  await app.register(wsPlugin);
+  registerWsConsole({
+    app,
+    data: mockData({ nodes: [mkNode()] }),
+    log: (m: string) => lines.push(m),
+    isOriginAllowed: () => true,
+    signalDisplay: 'margin',
+    isTrusted: () => true,
+    idleTimeoutMs: 150,
+  } as never);
+  await app.listen({ host: '127.0.0.1', port: 0 });
+  const port = (app.server.address() as { port: number }).port;
+  const { WebSocket } = await import('ws');
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/console/ws`);
+  await new Promise<void>((r) => { ws.on('open', () => r()); ws.on('error', () => r()); });
+  // Say nothing at all — the idle timer is the one that fires.
+  await new Promise((r) => setTimeout(r, 900));
+  try { ws.close(); } catch { /* already gone */ }
+  await app.close();
+  const closed = lines.find((l) => /ws session closed/.test(l));
+  assert.ok(closed, `close must be recorded: ${lines.join(' | ')}`);
+  assert.match(closed, /\(idle timeout\)/, `WE closed it, so do not blame the peer: ${closed}`);
+});

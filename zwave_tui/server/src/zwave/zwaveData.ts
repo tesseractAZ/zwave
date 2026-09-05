@@ -290,6 +290,11 @@ interface DeviceRec {
 }
 
 export interface ZwaveDataOptions {
+  /** How long a node must be absent from the roster before its learning is
+   *  discarded (default 5 min). Injectable ONLY so a test can drive the
+   *  eviction path without five minutes of wall clock — production never
+   *  passes it. */
+  evictAfterMs?: number;
   client: HaWsClient;
   /** Explicit config-entry id; empty/undefined → auto-discover. */
   entryId?: string | null;
@@ -588,6 +593,7 @@ const EMPTY_SERIES: readonly number[] = Object.freeze([]);
 class ZwaveDataImpl implements ZwaveData {
   private readonly client: HaWsClient;
   private readonly refreshMs: number;
+  private readonly evictAfterMs: number;
   private readonly routePollMs: number;
   private readonly log: (msg: string) => void;
 
@@ -779,6 +785,7 @@ class ZwaveDataImpl implements ZwaveData {
   constructor(opts: ZwaveDataOptions) {
     this.client = opts.client;
     this.refreshMs = opts.refreshMs ?? Number(process.env.REFRESH_INTERVAL_MS ?? 2000);
+    this.evictAfterMs = opts.evictAfterMs ?? 5 * 60_000;
     this.routePollMs = opts.routePollMs ?? Number(process.env.ROUTE_POLL_INTERVAL_MS ?? 10_000);
     this.log = opts.log ?? (() => {});
     const seed = opts.entryId ?? process.env.ZWAVE_ENTRY_ID ?? '';
@@ -1891,7 +1898,7 @@ class ZwaveDataImpl implements ZwaveData {
         const since = this.missingSince.get(id);
         if (since == null) {
           this.missingSince.set(id, now);
-        } else if (now - since > 5 * 60_000) {
+        } else if (now - since > this.evictAfterMs) {
           this.log(`node ${id} left the network — evicting its evidence + caches`);
           this.evidenceStore?.evictNode(id);
           // Baselines too (v0.35 review): the onNodeRemoved hook only covers a
@@ -1937,11 +1944,29 @@ class ZwaveDataImpl implements ZwaveData {
           // M5: abandon any open episodes for the departed node — their after-
           // window would be empty, and a node-id reuse after replace_failed_node
           // must start clean (mirrors the evidence eviction).
+          const lostOpen = this.outcomes
+            ? this.outcomes.openEpisodes().filter((ep) => ep.nodeId === id).length
+            : 0;
           if (this.outcomes) {
             for (const ep of this.outcomes.openEpisodes()) {
               if (ep.nodeId === id) { this.outcomes.abandon(ep.nodeId, ep.kind); this.pendingResolve.delete(ep.key); }
             }
           }
+          // ON THE RECORD, not only in stdout (v0.53.0). This throws away weeks
+          // of learned baselines, the persisted evidence ring and any in-flight
+          // ledger episode; the sibling home-id purge pushes a Log event and
+          // this one did not, so from inside the TUI the loss was invisible.
+          //
+          // nodeId is NULL deliberately: the Log's node column resolves LIVE
+          // against the roster, and this is the one path built FOR node-id
+          // reuse — `nodeId: id` would print the REPLACEMENT device's name
+          // beside "node 23 left the network". The id belongs in the text,
+          // which is frozen at push time. Count first: the row clips at ~46
+          // columns of text at 80x24, so a trailing count would never render.
+          this.pushEvent('engine', 'info', 'system', null,
+            lostOpen > 0
+              ? `${lostOpen} in-flight episode${lostOpen === 1 ? '' : 's'} + node ${id}'s baselines discarded — it left the network`
+              : `node ${id} left the network — its baselines + evidence discarded`);
         }
       }
     }

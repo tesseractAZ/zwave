@@ -34,9 +34,30 @@ export type Logger = ((msg: string) => void) & {
   warn: (msg: string) => void;
   /** Survives `log_level: error`. */
   error: (msg: string) => void;
+  /**
+   * Survives EVERY configurable threshold, `fatal` included.
+   *
+   * The process-death diagnostic is the one line whose entire job is to explain
+   * a crash loop, and it went out through the `info` sink — invisible at four of
+   * the seven levels the option offers, including the `warning` that the
+   * option's own help text recommends "to quiet routine output". The evidence
+   * was then the s6 restart banner repeating and nothing else (v0.53.0).
+   */
+  fatal: (msg: string) => void;
   /** The resolved threshold (after unknown-value fallback). */
   readonly level: LogLevel;
 };
+
+/**
+ * What a subsystem accepts as its logger.
+ *
+ * Most of the tree takes a bare `(msg: string) => void`, so a store that wanted
+ * to report a failed save had no way to claim a level and its line vanished at
+ * `log_level: warning` along with the routine chatter. Widening the PARAMETER
+ * (not the argument) lets a caller pass either, and each site opts in with
+ * `(log.error ?? log)(…)`.
+ */
+export type LogSink = ((msg: string) => void) & Partial<Pick<Logger, 'debug' | 'warn' | 'error'>>;
 
 /**
  * Resolve a configured level to a known one.
@@ -78,6 +99,7 @@ export function createLogger(
   log.debug = (msg: string) => emit('debug', msg);
   log.warn = (msg: string) => emit('warning', msg);
   log.error = (msg: string) => emit('error', msg);
+  log.fatal = (msg: string) => emit('fatal', msg);
   Object.defineProperty(log, 'level', { value: level, enumerable: true });
   return log;
 }

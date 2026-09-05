@@ -4138,6 +4138,20 @@ returned nothing on a log that contained errors, and the single error in a
 it. `info` deliberately stays bare — it is the overwhelming majority of the
 volume, and tagging it would break existing greps to no benefit.
 
+`Logger` also carries `fatal`, the top of the ladder: the `main().catch()`
+bootstrap diagnostic emits there (v0.53.0), so the reason a crash loop is
+crashing survives every configurable threshold — including `log_level: fatal`,
+which until then was the one setting that could produce no output at all.
+
+Subsystems that take a bare `(msg: string) => void` accept `LogSink` instead —
+the callable plus optional `debug`/`warn`/`error`. Six were widened because
+their failures were otherwise unreportable: the four persistence stores (a
+failed save is the ONLY signal that a store stopped persisting — no screen, no
+`/api/health` field), the telnet listener (a listen failure means the LAN port
+never opened and nothing else says so), and the console asset check. Each opts
+in per call with `(log.error ?? log)(…)`; every other site stays `info`
+deliberately, because the state machine already reports it on screen.
+
 The levelled sinks are optional members on the log companion (`log2.warn`,
 `log2.debug`), so a caller that supplies a bare function still works and simply
 lands at `info`; call sites choose their level with `(log2?.warn ?? log2)?.(m)`.

@@ -56,3 +56,19 @@ test('EVERY level the option offers can produce output — none is a silent sett
     }
   }
 });
+
+test('a FATAL survives EVERY configurable threshold (v0.53.0)', () => {
+  // index.ts's `main().catch()` is the one line whose whole job is to explain a
+  // crash loop, and it went out through the INFO sink. At `log_level: warning`
+  // — the value translations/en.yaml recommends to "quiet routine output" —
+  // the add-on log was the s6 restart banner repeating and not one line saying
+  // why. `fatal` is the top of the ladder, so the gate in `emit` is false for
+  // all seven configurable values.
+  for (const level of LOG_LEVELS) {
+    const out: string[] = [];
+    const log = createLogger(level, (l) => out.push(l));
+    log.fatal('bootstrap died');
+    assert.deepEqual(out, ['[zwave-tui] FATAL: bootstrap died\n'],
+      `${level}: the bootstrap crash cause must still reach the log`);
+  }
+});

@@ -50,6 +50,7 @@
  */
 
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import type { LogSink } from '../logger';
 import { uptime as osUptime } from 'node:os';
 import { NodeStatus, type NodeStats, type RouteStat, type ControllerSnapshot } from '../types';
 
@@ -251,7 +252,10 @@ export interface EvidenceStoreOptions {
   maxDeltaPerSec?: number;
   now?: () => number;
   uptimeMs?: () => number;
-  log?: (msg: string) => void;
+  /** Widened to LogSink (v0.53.0) so a failed save can claim `error` — it was
+   *  the only report of a store that stopped persisting, and it vanished at
+   *  `log_level: warning` along with the routine chatter. */
+  log?: LogSink;
 }
 
 export interface EvidenceStore {
@@ -507,7 +511,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   const maxDeltaPerSec = opts.maxDeltaPerSec ?? DEFAULT_MAX_DELTA_PER_SEC;
   const now = opts.now ?? Date.now;
   const uptimeMs = opts.uptimeMs ?? (() => osUptime() * 1000);
-  const log = opts.log ?? (() => {});
+  const log: LogSink = opts.log ?? (() => {});
 
   const fine: EvidenceMap = new Map();
   const coarse = new Map<number, CoarseBucket[]>();
@@ -1193,7 +1197,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         renameSync(tmp, path);
         dirty = false;
       } catch (e) {
-        log(`evidence: save failed (${(e as Error).message})`);
+        (log.error ?? log)(`evidence: save failed (${(e as Error).message})`);
       }
     },
 

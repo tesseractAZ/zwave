@@ -25,6 +25,8 @@
  */
 
 import { createRequire } from 'node:module';
+import type { LogSink } from '../logger';
+import { fmtElapsed } from './gauges';
 import { readFileSync } from 'node:fs';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { WebSocket } from '@fastify/websocket';
@@ -52,7 +54,7 @@ const WS_TRY_AGAIN_LATER = 1013;
 export interface WsConsoleOptions {
   app: FastifyInstance;
   data: DataProvider;
-  log: (msg: string) => void;
+  log: LogSink;
   /**
    * Origin allow-list check for the ws upgrade. Should mirror the panel's
    * existing same-origin/LAN policy (auth.ts `isAllowedOrigin`). A missing
@@ -311,7 +313,9 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
   const idleTimeoutMs = opts.idleTimeoutMs ?? WS_IDLE_TIMEOUT_MS;
 
   if (!XTERM_JS || !XTERM_CSS) {
-    log('console: WARNING — @xterm/xterm dist not found in node_modules; /console assets will 404');
+    // The sink writes the level now — a hand-typed "WARNING — " was the
+    // workaround for a logger that discarded severity (v0.50.0 fixed the sink).
+    (log.warn ?? log)('console: @xterm/xterm dist not found in node_modules; /console assets will 404');
   }
 
   // Live /console/ws session count for the concurrency cap. Incremented when a
@@ -369,6 +373,16 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
     // HA Ingress upgrades are already authenticated; direct LAN upgrades are not.
     const trusted = isTrusted ? isTrusted(req) : false;
 
+    // BOTH TRANSPORTS ARE ON THE RECORD (v0.53.0). v0.50.0 put telnet's session
+    // open/close in the log and left this half silent, so the ingress console —
+    // the transport most people actually use — had no accounting at all: no way
+    // to tell an active session from one that ended, and `liveSessions` was
+    // unobservable. `req.ip` is the Supervisor bridge for EVERY ingress session
+    // (trustProxy is false), so it names the proxy, not a person — say which
+    // transport instead, and print a peer only when it means something.
+    const openedAt = Date.now();
+    log(`console: ws session opened (${trusted ? 'ingress' : `lan ${req.ip}`}, ${liveSessions} active)`);
+
     const session = new TuiSession({
       // xterm renders the bytes verbatim; no telnet alt-buffer dance needed.
       write: (payload) => {
@@ -394,10 +408,16 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
     // WS_IDLE_TIMEOUT_MS so a forgotten tab stops holding the render loop.
     // Reset on every inbound ws message.
     let idleTimer: NodeJS.Timeout;
+    // WHOEVER INITIATES THE CLOSE NAMES IT. `socket.close()` is async — the
+    // 'close' event fires later — so a bare handler would record every
+    // server-initiated eviction (idle, quit, lockout) as "peer closed".
+    let closeCause = 'peer closed';
+
     const armIdle = () => {
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         log('console: ws session idle timeout — closing');
+        closeCause = 'idle timeout';
         try { socket.close(); } catch { /* ignore */ }
       }, idleTimeoutMs);
     };
@@ -408,6 +428,7 @@ export function registerWsConsole(opts: WsConsoleOptions): void {
       clearInterval(timer);
       clearTimeout(idleTimer);
       liveSessions -= 1;
+      log(`console: ws session closed (${closeCause}) after ${fmtElapsed(Date.now() - openedAt)} (${liveSessions} active)`);
     };
 
     armIdle();

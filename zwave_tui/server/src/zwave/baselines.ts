@@ -40,6 +40,7 @@
  */
 
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import type { LogSink } from '../logger';
 import { uptime as osUptime } from 'node:os';
 import type { EvidenceSample } from './evidenceStore';
 
@@ -129,7 +130,10 @@ export interface BaselineStoreOptions {
   bootGraceMs?: number; // kept: baselines are age-judgment-free, boot-grace does NOT drop them
   now?: () => number;
   uptimeMs?: () => number;
-  log?: (msg: string) => void;
+  /** Widened to LogSink (v0.53.0) so a failed save can claim `error` — it was
+   *  the only report of a store that stopped persisting, and it vanished at
+   *  `log_level: warning` along with the routine chatter. */
+  log?: LogSink;
 }
 
 export interface BaselineStore {
@@ -254,7 +258,7 @@ export function createBaselineStore(opts: BaselineStoreOptions): BaselineStore {
   const bootGraceMs = opts.bootGraceMs ?? DEFAULT_BOOT_GRACE_MS;
   const now = opts.now ?? Date.now;
   const uptimeMs = opts.uptimeMs ?? (() => osUptime() * 1000);
-  const log = opts.log ?? (() => {});
+  const log: LogSink = opts.log ?? (() => {});
 
   const map = new Map<number, NodeBaseline>();
   let dirty = false;
@@ -414,7 +418,7 @@ export function createBaselineStore(opts: BaselineStoreOptions): BaselineStore {
         renameSync(tmp, path);
         dirty = false;
       } catch (e) {
-        log(`baselines: save failed (${(e as Error).message})`);
+        (log.error ?? log)(`baselines: save failed (${(e as Error).message})`);
       }
     },
   };
