@@ -136,7 +136,14 @@ export function renderEngine(ctx: ScreenCtx): string[] {
   push(c.label('AUTO-PING') + c.grey('  — the engine\'s one autonomous write'));
   const ap = data.autoPingState() ?? null;
   if (!ap) {
-    push('  ' + c.grey('◷ off — auto-ping is disabled, or write actions are off. Nothing here probes the mesh.'));
+    // TWO DIFFERENT FACTS, AND THE SCREEN HAS BOTH (v0.59.0). "auto-ping is
+    // disabled, or write actions are off" made the operator go and check which,
+    // when `ctx.actionsEnabled` already answers it — and the remedies are
+    // opposite: one is a feature toggle, the other is the add-on's master
+    // safety gate, which also silences every manual action on every screen.
+    push('  ' + c.grey(ctx.actionsEnabled === false
+      ? '◷ off — WRITE ACTIONS are off (the master gate). Auto-ping cannot act, and neither can you.'
+      : '◷ off — auto-ping is disabled. Write actions are on, so manual actions still work.'));
   } else if (ap.lastTickMs == null) {
     push('  ' + c.grey('◷ started, but has not completed a decision pass yet.'));
   } else {

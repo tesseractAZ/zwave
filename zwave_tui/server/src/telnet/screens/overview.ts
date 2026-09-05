@@ -357,7 +357,7 @@ function nodeRow(
   const trendW = cols.find((col) => col.key === 'trend')?.w ?? 8;
   const g = statusGlyph(n.status);
   const isDead = dead(n);
-  const score = scoreDisplay(health.score, isDead);
+  const score = scoreDisplay(health.score, isDead || ungraded(health));
   const sig = signalDisplay(n, noise, view.signalDisplay);
   const rtt = rttCell(n);
   const tmo = timeoutCell(n);
@@ -465,8 +465,10 @@ function scoreColor(score: number): (s: string) => string {
  * The number stays authoritative; the vblock is a redundant at-a-glance level.
  * Dead/unknown nodes show a right-aligned '—' (no fabricated level).
  */
-function scoreDisplay(score: number, isDead: boolean): GraphicCell {
-  if (isDead) {
+function scoreDisplay(score: number, ungradable: boolean): GraphicCell {
+  // Renamed from `isDead` in v0.59.0: the parameter has always meant "there is
+  // nothing to grade", and Dead was only one of the two ways to get there.
+  if (ungradable) {
     const cell = padStart('—', 4);
     return { colored: c.grey(cell), plain: cell };
   }
@@ -789,6 +791,20 @@ export function centeredNotice(
 
 function dead(n: NodeSnapshot): boolean {
   return n.status === NodeStatus.Dead || n.status === NodeStatus.Unknown;
+}
+
+/**
+ * A node the scorer could not GRADE — distinct from one that is Dead.
+ *
+ * The "no fabricated level" suppression keyed on NodeStatus, so an ALIVE node
+ * the engine has never measured rendered its fabricated placeholder score as a
+ * MEASURED grade, in the same colour band as a node with weeks of evidence
+ * behind it. `health.state === 'unknown'` is the scorer's own word for "I have
+ * nothing to assess", and it is the only thing that can distinguish the two
+ * (v0.59.0).
+ */
+function ungraded(h: HealthResult): boolean {
+  return h.state === 'unknown';
 }
 
 /**

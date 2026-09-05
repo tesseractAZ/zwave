@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.59.0 — 2026-09-05
+
+**Three rows that described something other than what they measured.**
+
+**The Long RF envelope did not say whose signal it was.** Every other RSSI row
+in the dossier qualifies itself for a routed node — the live row, and since
+v0.56.0 the learned yardstick — but the multi-day worst…best envelope rendered
+BYTE-IDENTICALLY for a routed and a direct node, in the same bright white the
+screen uses for the device's own measurements. A multi-day envelope reads as
+the device's radio history, and for a routed node it is a repeater's.
+
+**An ALIVE node with no evidence rendered a fabricated grade.** The "no
+fabricated level" suppression keyed on `NodeStatus`, so it caught Dead and
+Unknown but not the case it was actually written for: a node that is up, is
+answering, and simply has not been measured yet. Its placeholder score rendered
+in the same colour band as a node with weeks of evidence behind it. The scorer
+already has a word for this — `state === 'unknown'` — and that is what the
+suppression now reads.
+
+**ENGINE could not say which gate was shut.** `off — auto-ping is disabled, or
+write actions are off` made the operator go and check which, when
+`ctx.actionsEnabled` was already on the screen's own context. The two have
+opposite remedies: one is a feature toggle, the other is the add-on's master
+safety gate, which also silences every manual action on every screen.
+
+1045 tests, 521 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.58.0 — 2026-09-05
 
 **The home roster now shows what the engine found.**

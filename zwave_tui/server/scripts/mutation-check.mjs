@@ -1394,8 +1394,10 @@ const MUTANTS = [
   { id: 'engine-off-is-not-empty', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     // A disabled feature renders as blank rather than saying it is off — the
     // silence-reads-as-healthy failure this whole screen exists to end.
-    find: "    push('  ' + c.grey('◷ off — auto-ping is disabled, or write actions are off. Nothing here probes the mesh.'));",
-    repl: '    void 0;',
+    find: "    push('  ' + c.grey(ctx.actionsEnabled === false",
+    repl: "    void 0; if (false) push('  ' + c.grey(ctx.actionsEnabled === false",
+    // Anchor updated in v0.59.0 when the single line became a two-way branch.
+
     what: 'a disabled auto-ping SAYS it is off rather than rendering empty' },
   { id: 'engine-idle-ledger-is-not-absent', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     // Conflates "no ledger wired" with "ledger has nothing open" — two very
@@ -2339,6 +2341,25 @@ const MUTANTS = [
     find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),",
     repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
     what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 'long-rf-envelope-is-qualified', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // A multi-day worst…best envelope reads as the DEVICE's radio history; for
+    // a routed node it is a repeater's, and this row rendered byte-identically
+    // for both while every other RSSI row on the screen qualifies itself.
+    find: "            (routedHere ? c.grey : c.white)(`${worst}…${best} dBm`) + (routedHere ? c.grey(' last-hop') : ''),",
+    repl: '            c.white(`${worst}…${best} dBm`),',
+    what: "the Long RF envelope says whose signal it is" },
+  { id: 'ungraded-is-not-a-grade', file: 'src/telnet/screens/overview.ts', tests: ['overviewScreen'],
+    // The suppression keyed on NodeStatus, so an ALIVE node with no evidence
+    // showed its placeholder score in the same band as a fully measured one.
+    find: '  const score = scoreDisplay(health.score, isDead || ungraded(health));',
+    repl: '  const score = scoreDisplay(health.score, isDead);',
+    what: 'a never-measured node shows a dash, not a fabricated grade' },
+  { id: 'engine-names-which-gate-is-shut', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    // Two facts with OPPOSITE remedies: a feature toggle, versus the master
+    // safety gate that also silences every manual action on every screen.
+    find: '    push(\'  \' + c.grey(ctx.actionsEnabled === false',
+    repl: '    push(\'  \' + c.grey(false',
+    what: 'ENGINE names WHICH gate is shut, not "one or the other"' },
   { id: 'roster-marks-the-engines-finding', file: 'src/telnet/screens/overview.ts', tests: ['overviewScreen'],
     // The health flags are the SCORER's opinion; the symptom engine is a
     // separate judgment. A node under an open CRIT rendered an EMPTY flags cell
