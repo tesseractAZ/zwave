@@ -271,6 +271,14 @@ export function renderInterference(ctx: ScreenCtx): string[] {
       push('    ' + c.grey('meanwhile · ') + c.white(String(k)) +
         c.grey(` node${k === 1 ? '' : 's'} symptomatic across ALL detectors — not necessarily this event`));
     }
+  } else if (iv.correlated.degradedNodes > 0) {
+    // A GREEN ✓ IS THE ALL-CLEAR MARK (v0.52.0), and this branch's narrative
+    // names degraded nodes. `active` is "correlated into a mesh event";
+    // `degradedNodes` counts ANY per-node symptom, so a single weak-signal
+    // gives active=false with degradedNodes=1 — and the screen ticked a line
+    // reading "1 node degraded, but not correlated into a mesh event."
+    // Not correlated is not the same as nothing wrong.
+    push('  ' + c.grey('· ') + c.grey(iv.correlated.narrative));
   } else {
     push('  ' + c.green('✓ ') + c.grey(iv.correlated.narrative));
   }

@@ -312,3 +312,25 @@ test('the correlated-degradation narrative keeps its HEDGE at the modal terminal
   assert.doesNotMatch(joined, /more lines hidden/,
     'the third line was free at 80x24; if this fires, some section above grew');
 });
+
+test('the all-clear check mark never marks a line reporting degraded nodes (v0.52.0)', () => {
+  // `active` means "correlated into a mesh event"; `degradedNodes` counts ANY
+  // per-node symptom. A single weak-signal gives active=false with
+  // degradedNodes=1, and the screen printed a GREEN CHECK on a line reading
+  // "1 node degraded, but not correlated into a mesh event." Not correlated is
+  // not the same as nothing wrong.
+  const degraded = renderInterference(ctx(100, 30, cleanView({
+    correlated: { active: false, degradedNodes: 2, narrative: '2 nodes degraded, but not correlated into a mesh event.' },
+  })));
+  const dline = degraded.find((l) => /2 nodes degraded/.test(l.replace(/\x1b\[[0-9;]*m/g, ''))) ?? '';
+  assert.ok(dline, 'the narrative must still render');
+  assert.doesNotMatch(dline.replace(/\x1b\[[0-9;]*m/g, ''), /✓/,
+    `a degraded count must not be ticked: "${dline.replace(/\x1b\[[0-9;]*m/g, '')}"`);
+
+  // The genuine all-clear KEEPS its mark.
+  const clean = renderInterference(ctx(100, 30, cleanView({
+    correlated: { active: false, degradedNodes: 0, narrative: 'No correlated mesh degradation.' },
+  })));
+  const cline = clean.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).find((l) => /No correlated mesh degradation/.test(l)) ?? '';
+  assert.match(cline, /✓/, `a real all-clear keeps its mark: "${cline}"`);
+});

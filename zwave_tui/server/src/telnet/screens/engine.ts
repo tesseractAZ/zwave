@@ -81,6 +81,10 @@ function age(ms: number | null): string {
   return `${(m / 60).toFixed(1)}h`;
 }
 
+/** The longest form that fits, never a clipped one. */
+const pick = (width: number, forms: string[]): string =>
+  forms.find((f) => f.length <= width) ?? forms[forms.length - 1];
+
 export function renderEngine(ctx: ScreenCtx): string[] {
   const { view, data } = ctx;
   const now = Date.now();
@@ -117,7 +121,17 @@ export function renderEngine(ctx: ScreenCtx): string[] {
       n.deadSinceMs != null || n.attempts > 0 || n.missStreak > 0 ||
       n.launchFailures > 0 || n.gaveUp || n.launchGaveUp);
     if (tracked.length === 0) {
-      push('  ' + c.grey('○ no node is in a dead episode, a miss streak, or a launch failure.'));
+      // NOT an all-clear when the population is empty by construction
+      // (v0.52.0): with the driver-WS flag dump missing, every node's
+      // `isListening` is unknown, so the candidate set is empty and this line
+      // described an inspection that never happened.
+      push('  ' + (ap.suppressed === 'no-capability-data'
+        ? c.yellow('○ nothing could be inspected — node capability data is missing, so the') 
+        : c.grey('○ no node is in a dead episode, a miss streak, or a launch failure.')));
+      if (ap.suppressed === 'no-capability-data') {
+        push('    ' + c.yellow(`ladder cannot arm. ${ap.capabilityUnknown} node(s) have unknown is-listening; the driver-WS`));
+        push('    ' + c.yellow('flag dump is the only source. This is a MONITORING gap, not a healthy mesh.'));
+      }
     } else {
       for (const n of tracked.slice(0, 8)) {
         const name = data.nodeById?.(n.nodeId)?.name ?? `node ${n.nodeId}`;
@@ -180,7 +194,15 @@ export function renderEngine(ctx: ScreenCtx): string[] {
   if (open == null) {
     push('  ' + c.grey('◷ no outcome ledger — the learning loop is off.'));
   } else if (open.length === 0) {
-    push('  ' + c.grey('○ no open episodes. Nothing is being measured (this is the healthy steady state).'));
+    // Two forms (v0.52.0). At the modal 80 columns the long one came back as
+    // `...(this is the healthy steady stat` — `push` blind-truncates, and a
+    // sentence that stops mid-word is the defect v0.51.0 closed everywhere else.
+    push('  ' + c.grey(pick(view.cols - 2, [
+      '○ no open episodes. Nothing is being measured (this is the healthy steady state).',
+      '○ no open episodes — nothing being measured (the healthy steady state).',
+      '○ no open episodes — the healthy steady state.',
+      '○ no open episodes.',
+    ])));
   } else {
     for (const ep of open.slice(0, 6)) {
       const who = ep.nodeId == null ? c.blue('MESH') : c.cyan(`#${ep.nodeId}`);

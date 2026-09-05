@@ -122,8 +122,8 @@ const MUTANTS = [
     find: '  view.scroll = start;', repl: '',
     what: 'the Overview writes its clamped scroll window back' },
   { id: 'overview-unknown-mesh', file: 'src/telnet/screens/overview.ts',
-    find: '    ? Math.max(0, all.length - dead - flaky - unknown) / all.length',
-    repl: '    ? Math.max(0, all.length - dead - flaky) / all.length',
+    find: '    ? Math.max(0, all.length - dead - flaky - unknown - failing) / all.length',
+    repl: '    ? Math.max(0, all.length - dead - flaky - failing) / all.length',
     what: 'never-contacted nodes do not count as healthy in MESH%' },
   { id: 'overview-bars-band', file: 'src/telnet/screens/overview.ts',
     find: '  const bars = signalBars(frac, 4, routed ? c.grey : colorFn);',
@@ -2326,6 +2326,64 @@ const MUTANTS = [
     find: "          const pct = share >= 0.005 ? `${Math.round(share * 100)}%` : '<1%';",
     repl: '          const pct = `${Math.round(share * 100)}%`;',
     what: 'a rounded-to-zero share reads "<1%", never "(0%)" beside a non-zero count' },
+  { id: 'remedy-title-follows-the-body', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    // The rule read `all clear` in ALL FIVE no-symptom states, including the
+    // permanent partial-coverage one whose own body says "COVERAGE, not health".
+    find: "    : empty ? EMPTY_TOKEN[empty] : '';",
+    repl: "    : 'all clear';",
+    what: "REMEDY's title rule names the state its own body rendered" },
+  { id: 'remedy-unknown-state-claims-nothing', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
+    equivalent: true,
+    // EQUIVALENT, deliberately. All five of today's empty branches assign
+    // `empty` before their headline push, so no current input can reach the
+    // initialiser — the two forms are indistinguishable at HEAD and no test
+    // could kill this without asserting an unreachable state.
+    //
+    // The invariant it guards is real but LATENT: the initialiser is what a
+    // SIXTH empty branch would inherit if its author forgot the assignment,
+    // and inheriting `'clear'` there is precisely the defect v0.52.0 closed —
+    // a green verdict over a body that says coverage is incomplete. The
+    // exhaustiveness that IS enforced today is the total `EMPTY_TOKEN` record:
+    // adding a member to `EmptyState` without a token fails the typecheck.
+    // Re-label this the day a branch can leave `empty` null.
+    find: "  let empty: EmptyState | null = null;",
+    repl: "  let empty: EmptyState | null = 'clear';",
+    what: 'an unassigned empty state carries no verdict at all' },
+  { id: 'mesh-meter-counts-failing-nodes', file: 'src/telnet/screens/overview.ts', tests: ['overviewScreen'],
+    // Five ALIVE, non-flaky nodes scoring 49/F left the meter at a full-green
+    // 100% on the same frame as the roll-up's own `F 5`.
+    find: '    ? Math.max(0, all.length - dead - flaky - unknown - failing) / all.length',
+    repl: '    ? Math.max(0, all.length - dead - flaky - unknown) / all.length',
+    what: 'the MESH meter subtracts the nodes its own scorer failed' },
+  { id: 'mesh-meter-does-not-double-count', file: 'src/telnet/screens/overview.ts', tests: ['overviewScreen'],
+    // Dead and Unknown already grade F; counting them again would land the
+    // meter on a percentage matching no count on the strip.
+    find: "    else if (h.grade === 'F' && n.status !== NodeStatus.Dead && n.status !== NodeStatus.Unknown) failing++;",
+    repl: "    else if (h.grade === 'F') failing++;",
+    what: 'a Dead node is subtracted once, not twice' },
+  { id: 'failing-term-is-named', file: 'src/telnet/screens/overview.ts', tests: ['overviewScreen'],
+    find: "    ...(failing > 0 ? [field('FAILING', String(failing), c.redB)] : []),",
+    repl: '    ...[],',
+    what: 'the term the meter subtracted is visible on the same strip' },
+  { id: 'empty-population-is-not-an-all-clear', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // With the driver-WS link dark every node's isListening is null, so the
+    // candidate set is empty BY CONSTRUCTION and the engine reported
+    // `running · candidates 0 · dead 0` over a roster holding six Dead nodes.
+    find: '  if (listeningNodes.length === 0 && capabilityUnknown > 0) {',
+    repl: '  if (listeningNodes.length === 0 && capabilityUnknown < 0) {',
+    what: 'a pass over an unassemblable population suppresses instead of reporting clean' },
+  { id: 'known-not-listening-is-a-measurement', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // An all-battery mesh HAS capability data — it is genuinely nothing to
+    // sweep, and must not be reported as a monitoring gap.
+    find: "  const capabilityUnknown = nodes.filter((n) => !n.isController && n.isListening == null).length;",
+    repl: "  const capabilityUnknown = nodes.filter((n) => !n.isController && !n.isListening).length;",
+    what: 'unknown capability is distinguished from known-not-listening' },
+  { id: 'allclear-tick-only-when-clear', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
+    // A green tick is the all-clear mark, and this branch's narrative names
+    // degraded nodes: "2 nodes degraded, but not correlated into a mesh event."
+    find: '  } else if (iv.correlated.degradedNodes > 0) {',
+    repl: '  } else if (iv.correlated.degradedNodes < 0) {',
+    what: 'the all-clear mark appears only when NO node is degraded' },
   { id: 'log-row-sheds-whole-words', file: 'src/telnet/screens/log.ts', tests: ['logScreen'],
     // `truncate` cut mid-character with no marker, so a value change of
     // `812 -> 1240` rendered as `812 -> 12` — a DIFFERENT number that reads as

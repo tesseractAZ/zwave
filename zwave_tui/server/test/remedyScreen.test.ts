@@ -959,3 +959,34 @@ test('a candidate\'s [cost · basis] tag is whole or shed, never a half bracket 
     }
   }
 });
+
+test('the REMEDY title rule never contradicts the empty state its own body rendered (v0.52.0)', () => {
+  // The rule read `all clear` in ALL FIVE no-symptom states — including
+  // `● Engine disabled.` and the PERMANENT partial-coverage state whose own
+  // body says, in as many words, "a statement about COVERAGE, not health".
+  // The one word an operator scans first contradicted the paragraph two rows
+  // below that exists to stop them reading it that way. Confirmed live on the
+  // 39-node mesh at v0.51.0: `── REMEDY ──… all clear` over
+  // `◑ No symptoms — partial detector coverage for the 16:00-20:00 band`.
+  const E = (over: Partial<ReturnType<DataProvider['engineStatus']>>) =>
+    ({ enabled: true, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 0, bands: 6, ...over });
+  const CASES: Array<[string, ReturnType<DataProvider['engineStatus']>, RegExp, RegExp]> = [
+    ['engine off',  E({ enabled: false }),                              /engine off/,      /Engine disabled/],
+    ['no roster',   E({ total: 0, ready: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0 }), /no roster/, /No nodes yet/],
+    ['learning',    E({ timeoutReady: 0, rttReady: 0, rssiReady: 0 }),  /learning/,        /Learning/],
+    ['partial',     E({ timeoutReady: 3, rttReady: 1, rssiReady: 1 }),  /partial coverage/, /partial detector coverage/],
+    ['all clear',   E({}),                                              /all clear/,       /All clear/],
+  ];
+  for (const [label, eng, titleRe, bodyRe] of CASES) {
+    const lines = renderRemedy(engCtx(120, 30, eng)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    const rule = lines.find((l) => /REMEDY/.test(l)) ?? '';
+    const joined = lines.join('\n');
+    assert.match(rule, titleRe, `${label}: the rule must name THIS state, not inherit one: "${rule}"`);
+    assert.match(joined, bodyRe, `${label}: fixture must actually reach the intended branch`);
+    // The specific contradiction that motivated this: a green verdict in the
+    // rule above a body that says coverage is incomplete.
+    if (label !== 'all clear') {
+      assert.doesNotMatch(rule, /all clear/i, `${label}: must NOT claim all clear: "${rule}"`);
+    }
+  }
+});

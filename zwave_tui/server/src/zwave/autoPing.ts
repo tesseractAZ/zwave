@@ -53,6 +53,7 @@ export type AutoPingSuppression =
   | 'write-actions-off'
   | 'boot-window'
   | 'rebuilding-routes'
+  | 'no-capability-data'
   | 'storm'
   | 'none';
 
@@ -361,6 +362,10 @@ export interface AutoPingDecision {
   suppressed: AutoPingSuppression;
   /** Listening nodes currently Dead — the storm-guard numerator. */
   deadListening: number;
+  /** Non-controller nodes whose `isListening` is UNKNOWN (v0.52.0). Non-zero
+   *  means the candidate set is empty because the driver-WS flag dump is
+   *  missing, not because there is nothing to sweep. */
+  capabilityUnknown: number;
   /** Listening nodes total — the storm-guard denominator. */
   listening: number;
   /** Nodes past the stale window and off cooldown (before the one-per-tick cap). */
@@ -424,8 +429,13 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const { now, nodes, controller, config, booting } = input;
   const listeningNodes = nodes.filter(isPingCandidate);
   const dead = listeningNodes.filter((n) => n.status === NodeStatus.Dead);
+  // `isListening` is filled ONLY from the driver-WS flag dump, and that map is
+  // cleared on a homeId mismatch. With the link dark every node reads null, so
+  // the candidate set is empty BY CONSTRUCTION — not because there is nothing
+  // to sweep. Counting the unknowns is what separates the two.
+  const capabilityUnknown = nodes.filter((n) => !n.isController && n.isListening == null).length;
   const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyOwed: 0, gaveUp: [] as number[], launchGaveUp: [] as number[], talkingWhileDead: [] as number[],
-    deadListening: dead.length,
+    deadListening: dead.length, capabilityUnknown,
     listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
   if (!config.enabled) return { ...base, suppressed: 'disabled' };
@@ -437,6 +447,16 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   if (booting) return { ...base, suppressed: 'boot-window' };
   // A rebuild is already rewriting routes; nodes drop in and out by design.
   if (controller?.isRebuildingRoutes) return { ...base, suppressed: 'rebuilding-routes' };
+
+  // A PASS OVER AN EMPTY POPULATION IS NOT AN ALL-CLEAR (v0.52.0). With the
+  // driver-WS link dark the engine reported `running · candidates 0 · dead 0 ·
+  // no node is in a dead episode` while the roster held six Dead nodes — the
+  // ladder cannot arm, and the screen said so in the words it uses for health.
+  // Predicated on the UNKNOWN count, not on emptiness: an all-battery mesh has
+  // capability data and is genuinely nothing to sweep.
+  if (listeningNodes.length === 0 && capabilityUnknown > 0) {
+    return { ...base, suppressed: 'no-capability-data' };
+  }
 
   const stormLimit = Math.max(STORM_MIN_NODES, Math.ceil(listeningNodes.length * STORM_FRACTION));
   if (dead.length >= stormLimit) return { ...base, suppressed: 'storm' };
@@ -792,6 +812,8 @@ export interface AutoPingSnapshot {
   suppressed: AutoPingSuppression;
   listening: number;
   deadListening: number;
+  /** See AutoPingDecision.capabilityUnknown (v0.52.0). */
+  capabilityUnknown: number;
   /** null when the last pass was SUPPRESSED and never computed them — a
    *  structural absence rendered as `0` reads as a measurement (v0.41.0). */
   staleDue: number | null;
@@ -1213,6 +1235,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       suppressed: lastDecision?.suppressed ?? 'none',
       listening: lastDecision?.listening ?? 0,
       deadListening: lastDecision?.deadListening ?? 0,
+      capabilityUnknown: lastDecision?.capabilityUnknown ?? 0,
       // A suppressed pass returns before the sweep/verify queues are read, so
       // their fields are structural zeros, not counts. Say "not computed".
       staleDue: lastDecision == null || lastDecision.suppressed !== 'none' ? null : lastDecision.staleDue,

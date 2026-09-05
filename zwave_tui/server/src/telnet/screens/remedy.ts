@@ -531,6 +531,19 @@ function bandLabel(eng: { band: number; bands: number }, compact = false): strin
   return compact ? `${from}–${from + width}h` : `the ${hh(from)}–${hh(from + width)} band`;
 }
 
+/** Which of REMEDY's five no-symptom states the body rendered (v0.52.0). */
+type EmptyState = 'disabled' | 'no-nodes' | 'learning' | 'partial' | 'clear';
+
+/** Total by construction: a new EmptyState fails the typecheck until it is
+ *  given a token, rather than quietly inheriting "all clear". */
+const EMPTY_TOKEN: Record<EmptyState, string> = {
+  clear: 'all clear',
+  disabled: 'engine off',
+  'no-nodes': 'no roster',
+  learning: 'learning',
+  partial: 'no symptoms · partial coverage',
+};
+
 export function renderRemedy(ctx: ScreenCtx): string[] {
   const { view, data } = ctx;
   const W = view.cols;
@@ -556,6 +569,21 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     verifyOwedFor: (nodeId) => data.verifyOwedFor?.(nodeId) ?? 0,
   };
 
+  /**
+   * Which empty state the body actually rendered — so the title rule agrees
+   * with the paragraph two rows below it (v0.52.0).
+   *
+   * The rule read `all clear` in ALL FIVE no-symptom states, including
+   * `● Engine disabled.` and the PERMANENT partial-coverage state whose own
+   * body says, in as many words, that it is "a statement about COVERAGE, not
+   * health". The one word an operator scans first contradicted the paragraph
+   * that exists to stop them reading it that way.
+   *
+   * A total Record, not a ternary chain: adding a sixth empty state becomes a
+   * TYPE ERROR instead of silently inheriting the previous branch's claim.
+   */
+  let empty: EmptyState | null = null;
+
   const body: string[] = [];
   if (symptoms.length === 0) {
     // Three honest, DISTINCT empty states (v0.14 review): engine off vs still
@@ -563,6 +591,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     const eng = data.engineStatus();
     body.push('');
     if (!eng.enabled) {
+      empty = 'disabled';
       body.push(c.yellow('    ● Engine disabled.'));
       body.push('');
       body.push(c.grey('    The symptom engine is not running on this install (no baselines'));
@@ -573,6 +602,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       // so this used to render the green all-clear, asserting three graduated
       // series and a measurement band from zero observations. That is the state
       // at boot, before the first roster poll returns.
+      empty = 'no-nodes';
       body.push(c.cyan('    ◷ No nodes yet.'));
       body.push('');
       body.push(c.grey('    The engine is running but the roster is empty — nothing has been'));
@@ -633,6 +663,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       };
 
       if (eng.timeoutReady === 0 && eng.rttReady === 0) {
+        empty = 'learning';
         // NOTHING has graduated. Deliberately silent about symptoms: with no
         // detector able to fire, "no symptoms" would describe the instrument.
         body.push(c.cyan(pickHead([
@@ -647,6 +678,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         body.push(c.grey('    from the evidence stream across several distinct days, before its'));
         body.push(c.grey('    detectors may fire. Nothing here is a health claim yet.'));
       } else if (blind.length > 0) {
+        empty = 'partial';
         // PARTIAL COVERAGE (v0.46.0) — the steady state on any mesh with routed
         // nodes, and the state v0.44.0 rendered as "Learning" forever.
         //
@@ -681,6 +713,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       } else {
         // FULL coverage in this band. "All clear" is a claim about the WHOLE
         // engine, and this screen only knows about live symptoms (v0.43.1).
+        empty = 'clear';
         body.push(c.green(`    ✓ All clear — ${eng.total} nodes learned, no symptoms detected.`));
         body.push('');
         body.push(truncate(c.grey('    Every node has a graduated timeout and rtt baseline — the two'), W));
@@ -765,7 +798,11 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     }
   }
 
-  const right = symptoms.length ? `${symptoms.length} symptom${symptoms.length === 1 ? '' : 's'}` : 'all clear';
+  // `null` is not a state — it is the ABSENCE of one, so the rule carries no
+  // verdict rather than inheriting the last branch's claim.
+  const right = symptoms.length
+    ? `${symptoms.length} symptom${symptoms.length === 1 ? '' : 's'}`
+    : empty ? EMPTY_TOKEN[empty] : '';
   return frame(view, data, {
     title: 'REMEDY',
     rightStatus: right,
