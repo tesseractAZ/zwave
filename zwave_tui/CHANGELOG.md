@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.61.0 — 2026-09-05
+
+**How much of that grade is assumption, and whether anything is still feeding
+it.**
+
+**Up to 45% of a health grade could stand on defaults, silently.** Signal (25%)
+and Route (20%) both fall back to a neutral `0.7` when there is nothing to
+measure — a routed node has no usable RSSI of its own, a node with no `lwr` has
+no route information — and the weighted composite discarded every lane
+contribution on its way out. So a `C` built half out of defaults and a `C` built
+out of measurements rendered identically, and only one of them is worth acting
+on. `HealthResult` now carries `assumedPct` and `assumedLanes`, and DETAIL says
+so directly under the gauge it qualifies.
+
+**A live roster is not a live feed.** `linkState` reads `lastUpdated()` — the
+roster POLL — so the masthead read `● ONLINE` while the statistics SUBSCRIPTION
+was dead and no evidence was arriving at all. Every detector, every baseline
+and every symptom is fed from that stream, so a node the engine had stopped
+observing scored as fully healthy on a screen that said the link was fine. A
+separate `⚠ NO STATS <n>m` chip now names it, because the remedy is different:
+the roster is fine, the evidence is not. Threshold is a generous 10 minutes — a
+healthy all-battery mesh legitimately produces little traffic.
+
+### Five items closed by verification, not by code
+
+Re-checking the remaining worklist against HEAD rather than trusting its labels
+found five already done: the probe-count zero states (v0.47.0 renders all four),
+probeability on DETAIL, the action-arm attempt count below readiness, the manual
+probe lane, and auto-ping's standing masthead indicator. One of them I had
+begun to re-implement before checking, which would have duplicated a v0.47.0
+branch.
+
+1051 tests, 530 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.60.0 — 2026-09-05
 
 **A list that named the wrong order, a panel nobody knew existed, and two gates

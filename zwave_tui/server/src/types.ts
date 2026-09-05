@@ -170,6 +170,19 @@ export interface HealthResult {
   grade: string; // A..F
   state: 'ok' | 'weak' | 'flaky' | 'asleep' | 'dead' | 'unknown';
   flags: string[]; // e.g. ['W','F'] — single-char flags rendered in the table
+  /**
+   * Percent of the score's WEIGHT credited from a neutral default rather than
+   * a measurement (v0.61.0).
+   *
+   * Signal (25%) and Route (20%) both fall back to 0.7 when there is nothing to
+   * measure, so up to 45% of a grade can be assumption — and the composite
+   * discarded every lane contribution, so no screen could say so. A `B` built
+   * half out of defaults and a `B` built out of measurements are different
+   * claims about a device. Optional so a provider predating this still type-checks.
+   */
+  assumedPct?: number;
+  /** WHICH lanes were assumed — a percentage with no names is not actionable. */
+  assumedLanes?: string[];
 }
 
 /** The category of a log event — drives the glyph, colour, and detail pane. */

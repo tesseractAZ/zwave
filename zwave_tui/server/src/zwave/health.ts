@@ -325,8 +325,16 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
       : DEFAULT_NOISE_FLOOR;
   const routed = !isLR && (stats.lwr?.repeaters?.length ?? 0) > 0;
   const rssi = validRssi(stats.rssi) ?? validRssi(stats.lwr?.rssi ?? null);
+  // HOW MUCH OF THIS SCORE IS ASSUMED (v0.61.0). Signal (25%) and Route (20%)
+  // both fall back to a NEUTRAL 0.7 when there is nothing to measure — so up to
+  // 45% of a grade could be credited from an assumption, and the composite
+  // discarded every lane contribution, leaving nothing on any screen to say so.
+  // A `B` built half out of defaults and a `B` built out of measurements are
+  // different claims about a device.
+  const assumedLanes: string[] = [];
   let signalFrac: number;
   if (rssi == null || routed) {
+    assumedLanes.push('signal');
     signalFrac = 0.7; // no usable RSSI, or routed (last-hop RSSI): neutral, no W
   } else {
     const margin = rssi - nf;
@@ -340,6 +348,7 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   if (!isLR) {
     const lwr = stats.lwr;
     if (!lwr) {
+      assumedLanes.push('route');
       routeFrac = 0.7; // no route info yet: neutral
     } else {
       const hops = Array.isArray(lwr.repeaters) ? lwr.repeaters.length : 0;
@@ -404,6 +413,11 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   );
   score = clamp(score, 0, 100);
 
+  // The share of the WEIGHT (not of the score) standing on a neutral default.
+  const assumedFrac = assumedLanes.reduce(
+    (acc, lane) => acc + (lane === 'signal' ? w.signal : lane === 'route' ? w.route : 0), 0);
+  const assumedPct = Math.round(assumedFrac * 100);
+
   // ── Gate 2b: UNKNOWN status caps the score regardless of the lanes.
   if (node.status === NodeStatus.Unknown) score = Math.min(score, UNKNOWN_SCORE_CAP);
 
@@ -422,5 +436,7 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
     grade: gradeFor(score),
     state,
     flags: orderFlags(flags),
+    assumedPct,
+    assumedLanes,
   };
 }
