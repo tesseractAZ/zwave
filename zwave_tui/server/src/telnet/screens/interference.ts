@@ -38,12 +38,26 @@ const HEAT_MAX = 0.05;
  *  calls it out as an EVENT rather than a routine reading. */
 const NOISE_PEAK_NOTABLE_DB = 3;
 
-/** The peak callout, as a token shedLine can shed WHOLE rather than clip. */
-function peakTag(peak: number | null, meanOfMeans: number | null, notable: boolean): string {
+/**
+ * The peak callout, split so the CLAIM sits in shedLine's head and the
+ * EXPLANATION is a tail token it can shed whole.
+ *
+ * The first cut of this fix put the whole sentence in the head — and
+ * `shedLine`'s head has no whole-token path (`visLen(headRow) > cols` falls
+ * straight to `truncate`), so at 80x24 it rendered
+ * `peak -94 dBm (4 dB above the mean —` : the same defect v0.51.0 closed in
+ * REMEDY, reintroduced one screen over. Caught on the live mesh, not by a test.
+ */
+function peakHead(peak: number | null, notable: boolean): string {
   if (peak == null) return '';
   const base = `  peak ${Math.round(peak)} dBm`;
-  if (!notable || meanOfMeans == null) return c.grey(base);
-  return c.yellow(base) + c.grey(` (${Math.round(peak - meanOfMeans)} dB above the mean — a burst the mean hides)`);
+  return notable ? c.yellow(base) : c.grey(base);
+}
+
+/** The tail token — shed whole, never clipped. */
+function peakWhy(peak: number | null, meanOfMeans: number | null, notable: boolean): string[] {
+  if (peak == null || meanOfMeans == null || !notable) return [];
+  return [c.grey(`(${Math.round(peak - meanOfMeans)} dB above the mean — a burst the mean hides)`)];
 }
 
 /** Downsample a series into ≤`cells` mean-of-bin points so a fixed-width
@@ -166,10 +180,14 @@ export function renderInterference(ctx: ScreenCtx): string[] {
         // number that reads as complete and is off by an order of magnitude.
         for (const l of shedLine(
           '  ',
-          c.grey(`days  ${span} span`) + peakTag(peak, meanOfMeans, notable),
-          [c.grey('(persisted 30-min buckets, survives restarts)')],
+          c.grey(`days  ${span} span`) + peakHead(peak, notable),
+          [...peakWhy(peak, meanOfMeans, notable), c.grey('(persisted 30-min buckets, survives restarts)')],
           W,
-          /* wrapTail */ true,
+          // NOT wrapped: a continuation row costs the CORRELATED DEGRADATION
+          // hedge its third line at 80x24 (v0.51.0 pinned that hedge because
+          // losing it turns a guess into a verdict). These tails shed with `+N`
+          // instead — disclosed, and free.
+          /* wrapTail */ false,
         )) body.push(l);
         rows.forEach((line, i) => {
           // Label the scale ends only — an axis tick per row would imply a
@@ -185,10 +203,14 @@ export function renderInterference(ctx: ScreenCtx): string[] {
         // because the callout lived only in the chart branch above.
         for (const l of shedLine(
           '  ',
-          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakTag(peak, meanOfMeans, notable),
-          [c.grey('(persisted 30-min buckets, survives restarts)')],
+          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),
+          [...peakWhy(peak, meanOfMeans, notable), c.grey('(persisted 30-min buckets, survives restarts)')],
           W,
-          /* wrapTail */ true,
+          // NOT wrapped: a continuation row costs the CORRELATED DEGRADATION
+          // hedge its third line at 80x24 (v0.51.0 pinned that hedge because
+          // losing it turns a guess into a verdict). These tails shed with `+N`
+          // instead — disclosed, and free.
+          /* wrapTail */ false,
         )) body.push(l);
       }
     } else {
