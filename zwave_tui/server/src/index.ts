@@ -29,6 +29,7 @@ import { startAutoPing, type AutoPingSnapshot } from './zwave/autoPing';
 import { buildZwaveDataSource, createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
 import { registerWsConsole } from './telnet/wsConsole';
 import { startTelnetServer } from './telnet/server';
+import { buildStates, startHaStates, ENTITY_DEGRADED, HA_STATE_PUBLISH_MS } from './haStates';
 import type { LogEvent } from './types';
 
 /* ── logging ─────────────────────────────────────────────────────────────
@@ -227,7 +228,18 @@ async function main(): Promise<void> {
   app.get('/', (req, reply) => reply.redirect(ingressRedirectTarget(req.headers['x-ingress-path'])));
   app.get('/api/version', () => ({ version: config.version }));
   app.get('/api/health', (_req, reply) => {
+    // `ok` IS A TRANSPORT VERDICT AND NOTHING MORE (v0.57.0). It answers "can
+    // this add-on see Home Assistant?", so a mesh with every node Dead and the
+    // ladder exhausted still returned 200 OK — and this endpoint was the only
+    // machine-readable surface the add-on had. Everything the ENGINE concludes
+    // now rides alongside it under `engine`, and `degraded` is the one field a
+    // monitor should page on. The HTTP CODE deliberately still tracks `ok`
+    // alone: a degraded mesh is not a broken add-on, and conflating them would
+    // make an existing uptime check flap on a single crit symptom.
     const healthy = client.ready() && provider.ready() && !provider.lastError();
+    const conclusions = buildStates(provider);
+    const byEntity = new Map(conclusions.map((s) => [s.entity, s]));
+    const degraded = byEntity.get(ENTITY_DEGRADED);
     reply.code(healthy ? 200 : 503).send({
       ok: healthy,
       ready: provider.ready(),
@@ -241,6 +253,14 @@ async function main(): Promise<void> {
       // layer with nothing to report but "not ready", so the only line that
       // names the actual cause was the one the endpoint did not print.
       haError: client.lastError(),
+      // WHAT THE ENGINE CONCLUDED — the half this endpoint never carried.
+      // Same values published as HA states, so a monitor polling here and an
+      // automation triggering there can never disagree about the mesh.
+      degraded: degraded?.state === 'on',
+      degradedReason: degraded?.attrs.reason ?? 'none',
+      engine: Object.fromEntries(
+        conclusions.map((s) => [s.entity.split('.')[1], { state: s.state, ...s.attrs }]),
+      ),
     });
   });
 
@@ -269,6 +289,19 @@ async function main(): Promise<void> {
   await app.listen({ host: config.host, port: config.port });
   log(`HTTP + /console on ${config.host}:${config.port} — ingress ready`);
 
+  // 7b) Publish the engine's conclusions as HA states, so the operator's own
+  // automations can act on them. Deliberately NOT a built-in notifier: who is
+  // told, how loudly, and whether it bypasses Do Not Disturb are policy, and
+  // policy belongs to the person being woken up. See haStates.ts.
+  const haStates = startHaStates({
+    data: provider,
+    token: config.supervisorToken,
+    log,
+  });
+  log(config.supervisorToken
+    ? `HA states: publishing ${ENTITY_DEGRADED} + 3 sensors every ${HA_STATE_PUBLISH_MS / 1000}s`
+    : 'HA states: no SUPERVISOR_TOKEN — engine conclusions stay local (bare dev)');
+
   // 8) Graceful shutdown — stop the transports, timers, and sockets in order.
   let closing = false;
   const shutdown = (sig: string): void => {
@@ -276,6 +309,7 @@ async function main(): Promise<void> {
     closing = true;
     log(`${sig} — shutting down`);
     try { telnet?.stop(); } catch { /* ignore */ }
+    try { haStates.stop(); } catch { /* ignore */ }
     try { stopProvider(); } catch { /* ignore */ }
     try { zwaveData.stop(); } catch { /* ignore */ }
     try { client.stop(); } catch { /* ignore */ }

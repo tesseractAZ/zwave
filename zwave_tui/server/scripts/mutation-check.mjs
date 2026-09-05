@@ -2339,6 +2339,37 @@ const MUTANTS = [
     find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),",
     repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
     what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 'degraded-is-not-any-symptom', file: 'src/haStates.ts', tests: ['haStates'],
+    // A warn-level symptom on one node is the resting state of a real 39-node
+    // mesh. An alert that is always on is not an alert.
+    find: '  const degraded = summonsNodes.length > 0',
+    repl: '  const degraded = syms.length > 0 || summonsNodes.length > 0',
+    what: 'the degraded boolean fires on incidents, not on the resting state' },
+  { id: 'degraded-covers-the-monitoring-gap', file: 'src/haStates.ts', tests: ['haStates'],
+    // `no-capability-data` means the driver-WS flag dump is dark and the
+    // candidate set is empty BY CONSTRUCTION — reporting that as healthy is the
+    // v0.52.0 defect one surface over.
+    find: "    || (ap != null && (ap.suppressed === 'storm' || ap.suppressed === 'no-capability-data'));",
+    repl: '    || false;',
+    what: 'an engine that cannot see the mesh is not reported as healthy' },
+  { id: 'summons-names-the-nodes', file: 'src/haStates.ts', tests: ['haStates'],
+    // A count with no ids sends the operator back to the telnet screen the
+    // whole boundary exists to replace.
+    find: '        node_ids: summonsNodes,',
+    repl: '        node_ids: [],',
+    what: 'the summons names WHICH nodes need a human' },
+  { id: 'engine-state-keeps-its-reason', file: 'src/haStates.ts', tests: ['haStates'],
+    // `storm` and `no-capability-data` mean opposite things to whoever is woken
+    // up: one is the mesh failing, the other is the add-on unable to see it.
+    find: "        : `suppressed:${ap.suppressed}`;",
+    repl: "        : 'suppressed';",
+    what: 'the suppression REASON survives to the automation' },
+  { id: 'ha-publish-failure-is-latched', file: 'src/haStates.ts', tests: ['haStates'],
+    // An HA Core restart fails every POST at once; an ERROR per entity per 30s
+    // would bury the log three releases went into making readable.
+    find: '        if (msg !== lastErr) {',
+    repl: '        if (msg !== null) {',
+    what: 'a repeated publish failure is reported once, not every tick' },
   { id: 'peak-explanation-is-a-tail-token', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
     // shedLine's HEAD has no whole-token path, so putting the explanation there
     // rendered `(4 dB above the mean —` at 80x24 and stopped — the exact defect

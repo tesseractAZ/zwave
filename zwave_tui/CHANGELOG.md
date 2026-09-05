@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.57.0 — 2026-09-05
+
+**The machine-readable boundary: what the engine concludes, where something
+other than a human can read it.**
+
+Everything this engine works out — a node the ladder gave up on, a critical
+symptom, an auto-ping pass suppressed because it cannot see the mesh at all —
+was reachable only from a telnet screen behind a login gate. Nothing can poll
+that, and nobody watches it at 3am. `/api/health` answered exactly one
+question, *"can this add-on see Home Assistant?"*, so a mesh with every node
+Dead and the ladder exhausted still returned `200 OK`.
+
+**`/api/health` now carries the conclusions.** `ok` stays a pure TRANSPORT
+verdict and the HTTP code still tracks it alone — deliberately, because a
+degraded mesh is not a broken add-on, and conflating them would make an
+existing uptime check flap on one critical symptom. Alongside it: `degraded`,
+`degradedReason`, and an `engine` object.
+
+**And they are published as Home Assistant states**, re-asserted every 30 s:
+`binary_sensor.zwave_tui_degraded` (with `reason`), `sensor.zwave_tui_summons`
+(with `node_ids`), `sensor.zwave_tui_symptoms`, `sensor.zwave_tui_engine`. Both
+surfaces are built from the same function, so a monitor polling HTTP and an
+automation triggering on state can never disagree about the mesh.
+
+**`degraded` is deliberately not "any symptom exists".** A warn-level symptom
+on one node is the resting state of a real 39-node mesh, and an alert that is
+always on is not an alert. It fires on a summons, a critical symptom, or the
+engine being structurally unable to do its job.
+
+**No built-in notifier, on purpose.** The add-on holds `homeassistant_api:
+true` and already makes `call_service` calls, so it could push to
+`notify.mobile_app_*` itself. It does not, because that hardcodes a POLICY —
+who is told, when, how loudly, whether it bypasses Do Not Disturb — into a
+diagnostic console. As state, the operator's existing notification setup,
+automations, dashboards and history all work on it unchanged. DOCS §12.11
+carries a five-line example automation.
+
+The states are unmanaged (REST-created, no device, no `unique_id`) and do not
+survive an HA Core restart; re-publishing on the interval self-heals that within
+30 s rather than adding an MQTT dependency. The entity ids are published API.
+
+1039 tests, 513 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.56.1 — 2026-09-05
 
 **The v0.56.0 peak callout was itself cut mid-sentence. Caught on the live mesh
