@@ -480,6 +480,17 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           ? c.grey(inner - KV_GUTTER >= caveatLong.trim().length ? caveatLong : caveatShort)
           : '';
         body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${pct}%)`) + self, inner));
+        // THE VERIFICATION DEBT FOR *THIS* NODE (v0.62.0). ENGINE carries one
+        // fleet number, which cannot answer the question an operator asks while
+        // looking at a dossier: is THIS node's evidence going to be confirmed,
+        // or is it queued behind something? A debt that never drains is the
+        // starvation this lane exists to prevent, and it was legible nowhere
+        // per-node.
+        const owed = data.verifyOwedFor?.(n.nodeId) ?? 0;
+        if (owed > 0) {
+          body.push(kv('', c.yellow(`${owed} verification probe${owed === 1 ? '' : 's'} owed`) +
+            c.grey(' — episode evidence is not yet confirmed for this node'), inner));
+        }
         if (caveat) body.push(kv('', c.grey(caveat.trim()), inner));
         // THE OTHER THREE ARMS (v0.49.0). The sweep's judgment is four-way and
         // only `self-proven` was ever recorded; the rest were computed,

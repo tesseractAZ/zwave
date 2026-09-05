@@ -54,10 +54,18 @@ function peakHead(peak: number | null, notable: boolean): string {
   return notable ? c.yellow(base) : c.grey(base);
 }
 
-/** The tail token — shed whole, never clipped. */
-function peakWhy(peak: number | null, meanOfMeans: number | null, notable: boolean): string[] {
-  if (peak == null || meanOfMeans == null || !notable) return [];
-  return [c.grey(`(${Math.round(peak - meanOfMeans)} dB above the mean — a burst the mean hides)`)];
+/** The tail tokens — shed whole, never clipped. */
+function peakWhy(peak: number | null, meanOfMeans: number | null, notable: boolean, quiet: number | null): string[] {
+  const out: string[] = [];
+  if (peak != null && meanOfMeans != null && notable) {
+    out.push(c.grey(`(${Math.round(peak - meanOfMeans)} dB above the mean — a burst the mean hides)`));
+  }
+  // THE FLOOR OF THE FLOOR (v0.62.0). The peak answers "was there a burst?";
+  // this answers whether the BACKGROUND itself has risen, so even the quiet
+  // moments are noisier than they were — a persistent degradation rather than
+  // an event, and the one an operator cannot see coming.
+  if (quiet != null) out.push(c.grey(`quietest ${Math.round(quiet)} dBm`));
+  return out;
 }
 
 /** Downsample a series into ≤`cells` mean-of-bin points so a fixed-width
@@ -159,6 +167,8 @@ export function renderInterference(ctx: ScreenCtx): string[] {
       // and there was therefore no callout, so a measured 40 dB burst rendered
       // BYTE-IDENTICAL to a flat trend — the exact symptom the fix was for.
       const maxes = iv.noise.trendCoarseMax;
+      const mins = iv.noise.trendCoarseMin ?? [];
+      const quiet = mins.length ? Math.min(...mins) : null;
       const peak = maxes.length ? Math.max(...maxes) : null;
       const meanOfMeans = iv.noise.trendCoarse.length
         ? iv.noise.trendCoarse.reduce((a, b) => a + b, 0) / iv.noise.trendCoarse.length
@@ -181,7 +191,7 @@ export function renderInterference(ctx: ScreenCtx): string[] {
         for (const l of shedLine(
           '  ',
           c.grey(`days  ${span} span`) + peakHead(peak, notable),
-          [...peakWhy(peak, meanOfMeans, notable), c.grey('(persisted 30-min buckets, survives restarts)')],
+          [...peakWhy(peak, meanOfMeans, notable, quiet), c.grey('(persisted 30-min buckets, survives restarts)')],
           W,
           // NOT wrapped: a continuation row costs the CORRELATED DEGRADATION
           // hedge its third line at 80x24 (v0.51.0 pinned that hedge because
@@ -204,7 +214,7 @@ export function renderInterference(ctx: ScreenCtx): string[] {
         for (const l of shedLine(
           '  ',
           c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),
-          [...peakWhy(peak, meanOfMeans, notable), c.grey('(persisted 30-min buckets, survives restarts)')],
+          [...peakWhy(peak, meanOfMeans, notable, quiet), c.grey('(persisted 30-min buckets, survives restarts)')],
           W,
           // NOT wrapped: a continuation row costs the CORRELATED DEGRADATION
           // hedge its third line at 80x24 (v0.51.0 pinned that hedge because

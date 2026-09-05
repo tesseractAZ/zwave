@@ -1571,8 +1571,9 @@ const MUTANTS = [
   { id: 'engine-shows-driver-link', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     // Back to the dead accessor: the driver socket that feeds bgRSSI, S2
     // resync detection and the real lastSeen degrades with no surface saying so.
-    find: "    push(fitBits(c.label('DRIVER LINK') + '  ', [tone(st), c.grey(ws)], view.cols));",
-    repl: '    void tone;',
+    // Anchor updated in v0.62.0 when the S2-lane token joined the row.
+    find: "      [tone(st), c.grey(ws), ...(s2 ? [c.yellowB(`S2 lane ${s2}`)] : [])], view.cols));",
+    repl: "      [], view.cols));",
     what: 'ENGINE renders the driver-WS lifecycle instead of hiding it' },
   { id: 'driver-link-degraded-stands-out', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     find: "    const tone = st === 'live' ? c.grey : st === 'connecting' || st === 'handshake' ? c.grey : c.yellow;",
@@ -2342,6 +2343,33 @@ const MUTANTS = [
     find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),",
     repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
     what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 's2-lane-fault-has-a-cause', file: 'src/zwave/driverWsClient.ts', tests: ['driverWsClient'],
+    // s2LaneLive collapses four causes into one boolean whose callers record
+    // `null`, so "nothing to report" and "cannot report" were one value.
+    find: "  if (o.logStormStopped) return 'storm-stopped';",
+    repl: '  if (false) return null;',
+    what: 'the S2 lane reports WHY it is dark, not just that it is' },
+  { id: 's2-pending-is-not-a-fault', file: 'src/zwave/driverWsClient.ts', tests: ['driverWsClient'],
+    // A normal connect/reconnect is in-flight, and a fault row on every
+    // reconnect is the always-on chip this codebase keeps refusing to add.
+    find: "  if (!o.logsAcked && o.logsMsgId == null && o.live) return 'refused';",
+    repl: "  if (!o.logsAcked && o.live) return 'refused';",
+    what: 'a pending log subscription is not reported as a refusal' },
+  { id: 's2-fault-reaches-the-screen', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
+    find: '    const s2 = data.s2LaneFault?.() ?? null;',
+    repl: '    const s2 = null;',
+    what: 'a dark S2 lane is visible beside the DRIVER LINK row' },
+  { id: 'per-node-verify-debt-is-visible', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // ENGINE carries one FLEET number, which cannot answer whether THIS node's
+    // evidence will be confirmed or is queued behind something.
+    find: '        const owed = data.verifyOwedFor?.(n.nodeId) ?? 0;',
+    repl: '        const owed = (0 as number);',
+    what: "a node's own verification debt is on its dossier" },
+  { id: 'quietest-floor-is-published', file: 'src/zwave/interference.ts', tests: ['interferenceScreen'],
+    // The one member of the v0.49.0 fold-then-average sweep that was missed.
+    find: '    trendCoarseMin.push(b.floorMin ?? mean);',
+    repl: '    trendCoarseMin.push(mean);',
+    what: 'the quietest bucket reading survives to the screen' },
   { id: 'score-declares-its-assumptions', file: 'src/zwave/health.ts', tests: ['health'],
     // Signal (25%) and Route (20%) fall back to a neutral 0.7, so up to 45% of
     // a grade can stand on defaults — and the composite discarded every lane

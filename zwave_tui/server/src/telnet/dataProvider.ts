@@ -104,6 +104,8 @@ export interface ZwaveDataSource {
   driverWsStatus(): string;
   /** Structured link state (v0.43.0). REQUIRED — see ackEvent. */
   driverWsState(): DriverWsState;
+  /** WHY the S2 lane is dark (v0.62.0). REQUIRED — see ackEvent. */
+  s2LaneFault(): 'refused' | 'storm-stopped' | null;
   /** Learned RSSI normal for a node (v0.35). REQUIRED — see ackEvent. */
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** REQUIRED — see ackEvent. Two of the three learned yardsticks had no bridge
@@ -235,6 +237,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     autoPingState: () => zd.autoPingState(),
     driverWsStatus: () => zd.driverWsStatus(),
     driverWsState: () => zd.driverWsState(),
+    s2LaneFault: () => zd.s2LaneFault(),
     rssiNormal: (n) => zd.rssiNormal(n),
     rttNormal: (n) => zd.rttNormal(n),
     timeoutNormal: (n) => zd.timeoutNormal(n),
@@ -355,6 +358,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     autoPingState: () => zwaveData.autoPingState(),
     driverWsStatus: () => zwaveData.driverWsStatus(),
     driverWsState: () => zwaveData.driverWsState(),
+    s2LaneFault: () => zwaveData.s2LaneFault(),
     rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
     rttNormal: (nodeId) => zwaveData.rttNormal(nodeId),
     timeoutNormal: (nodeId) => zwaveData.timeoutNormal(nodeId),

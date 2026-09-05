@@ -219,7 +219,20 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     // none of the words a regex looks for. 'live' is the only healthy state.
     const st = data.driverWsState?.() ?? 'disabled';
     const tone = st === 'live' ? c.grey : st === 'connecting' || st === 'handshake' ? c.grey : c.yellow;
-    push(fitBits(c.label('DRIVER LINK') + '  ', [tone(st), c.grey(ws)], view.cols));
+    // THE S2 LANE IS A SEPARATE LIVENESS (v0.62.0). The socket can be `live`
+    // while the log subscription that feeds S2-desync detection is dark — the
+    // server refused it, or the storm backstop stopped it — and the detector is
+    // then permanently blind on a screen still rendering DRIVER LINK `live`.
+    // `s2LaneLive` collapsed four causes into one boolean whose callers record
+    // `null`, so "nothing to report" and "cannot report" were the same value.
+    const s2 = data.s2LaneFault?.() ?? null;
+    push(fitBits(c.label('DRIVER LINK') + '  ',
+      [tone(st), c.grey(ws), ...(s2 ? [c.yellowB(`S2 lane ${s2}`)] : [])], view.cols));
+    if (s2) {
+      push('    ' + c.yellow(s2 === 'storm-stopped'
+        ? 's2-desync detection is OFF — the log backstop stopped the lane after a burst; it returns on reconnect.'
+        : 's2-desync detection is OFF — the driver refused the log subscription. Raise its log level to verbose.'));
+    }
     // THE CAUSE, ON ITS OWN ROW (v0.47.0). A homeId mismatch PURGES driver
     // telemetry, and the operator saw only the bare word `stopped` — the one
     // fact that explains it, and names the misconfiguration behind it, sat in a

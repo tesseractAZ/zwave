@@ -44,7 +44,7 @@ function data(over: Partial<DataProvider> = {}): DataProvider {
     history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
     lastUpdated: () => NOW - 1000, ready: () => true, lastError: () => null, symptoms: () => [],
     engineStatus: () => ({ enabled: true, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 0, bands: 6 }), efficacyFor: () => null,
-    interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
+    interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
     entityStates: () => [], configParams: () => ({ status: 'ready', params: [] }), requestConfigParams: () => {},
     // Required on DataProvider as of v0.44.0. This literal is `as DataProvider`,
     // so omitting them COMPILES and fails at runtime — which is precisely the
@@ -496,4 +496,26 @@ test('ENGINE tells "auto-ping off" apart from "write actions off" (v0.59.0)', ()
   assert.match(apOff, /auto-ping is disabled/, `the feature toggle must be named: ${apOff.slice(0, 400)}`);
   assert.match(apOff, /manual actions still work/, 'and its DIFFERENT consequence stated');
   assert.notEqual(off, apOff, 'the two states must not render identically');
+});
+
+test('ENGINE says WHY the S2 lane is dark, not just that the socket is live (v0.62.0)', () => {
+  // The socket can be `live` while the log subscription feeding S2-desync
+  // detection is dark — refused, or stopped by the storm backstop — and the
+  // detector is then permanently blind on a screen still rendering DRIVER LINK
+  // `live`. `s2LaneLive` collapsed four causes into one boolean whose callers
+  // record `null`, so "nothing to report" and "cannot report" were one value.
+  for (const [fault, phrase] of [['storm-stopped', /log backstop/], ['refused', /refused the log subscription/]] as const) {
+    const joined = plain(renderEngine(ctx(140, 40, {
+      driverWsStatus: () => 'live (schema 41)',
+      driverWsState: () => 'live',
+      s2LaneFault: () => fault,
+    })));
+    assert.match(joined, /S2 lane/, `${fault}: the lane's state must reach the row`);
+    assert.match(joined, phrase, `${fault}: and the CAUSE must be named: ${joined.slice(0, 500)}`);
+  }
+  // A healthy lane says nothing — an always-on row is noise.
+  const ok = plain(renderEngine(ctx(140, 40, {
+    driverWsStatus: () => 'live (schema 41)', driverWsState: () => 'live', s2LaneFault: () => null,
+  })));
+  assert.doesNotMatch(ok, /S2 lane/, 'a live lane raises no row');
 });

@@ -514,6 +514,8 @@ export interface DataProvider {
   driverWsStatus?(): string;
   /** The same link as a STATE (v0.43.0) — classify on this, never on the prose. */
   driverWsState?(): DriverWsState;
+  /** WHY the S2 log lane is dark, or null when live/pending (v0.62.0). */
+  s2LaneFault?(): 'refused' | 'storm-stopped' | null;
   /**
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.
@@ -582,6 +584,9 @@ export interface InterferenceView {
      * permanent alarm.
      */
     trendCoarseMax: number[];
+    /** Per-bucket QUIETEST floor (v0.62.0) — a rising floor here is a
+     *  persistent background change, not a burst. */
+    trendCoarseMin: number[];
     /** Days of coarse noise-floor history behind `trendCoarse` (honest "n days" label). */
     trendCoarseDays: number;
     band: 'clean' | 'elevated' | 'noisy' | 'unknown';

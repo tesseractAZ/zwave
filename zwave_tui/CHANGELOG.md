@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.62.0 — 2026-09-05
+
+**Three things the engine knew and no screen could say.**
+
+**The S2 log lane can be dark while the socket is `live`.** The driver-WS
+subscription that feeds S2-desync detection can be refused by the driver, or
+stopped by the storm backstop — and `s2LaneLive` collapsed all four causes into
+one boolean whose callers record `null`. So "nothing to report" and "cannot
+report" were the same value, and the detector sat permanently blind on a screen
+still rendering `DRIVER LINK live`. ENGINE now names the cause and what it
+means, and a *pending* subscription is deliberately silent: a normal reconnect
+is not a fault, and a row on every reconnect is the always-on chip this
+codebase keeps refusing to add.
+
+**The verification debt was a fleet number only.** ENGINE carries one total,
+which cannot answer the question an operator asks while looking at a dossier:
+is THIS node's evidence going to be confirmed, or is it queued behind something?
+A debt that never drains is exactly the starvation the verify lane exists to
+prevent, and it was legible nowhere per-node.
+
+**The quietest noise-floor reading was folded, persisted and then read by
+nobody** — the one member of the v0.49.0 "nothing is folded and then averaged
+away" sweep that was missed. `floorMax` reached the screen as the peak;
+`floorMin` had no consumer at all. The peak answers *"was there a burst?"*; the
+floor of the floor answers whether the background itself has risen, so even the
+quiet moments are noisier than they were. That is a persistent degradation
+rather than an event — the one an operator cannot see coming.
+
+`s2Fault` was extracted as a pure predicate so it could be tested without a
+socket, the same move `refuseSocket` took in v0.50.0.
+
+1056 tests, 535 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.61.0 — 2026-09-05
 
 **How much of that grade is assumption, and whether anything is still feeding

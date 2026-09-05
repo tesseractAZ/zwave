@@ -106,6 +106,26 @@ export type DriverWsState =
   | 'dormant' // permanent (schema mismatch) — no retry until restart
   | 'stopped'; // stop() called — start() can re-establish
 
+/**
+ * WHY the S2 log lane is dark — extracted so it can be tested without a socket.
+ *
+ * `s2LaneLive` collapses four causes into one boolean, and its callers record
+ * `null` — so a mesh whose S2-desync detector had been switched off by the
+ * storm backstop looked identical to one with nothing to report, on screens
+ * that went on rendering DRIVER LINK `live` (v0.62.0).
+ *
+ * The PENDING case (`logsMsgId != null && !logsAcked`) deliberately returns
+ * null: that is a normal connect or reconnect in progress, and a fault row on
+ * every reconnect is the always-on chip this codebase keeps refusing to add.
+ */
+export function s2Fault(
+  o: { logsAcked: boolean; logsMsgId: string | null; logStormStopped: boolean; live: boolean },
+): 'refused' | 'storm-stopped' | null {
+  if (o.logStormStopped) return 'storm-stopped';
+  if (!o.logsAcked && o.logsMsgId == null && o.live) return 'refused';
+  return null;
+}
+
 export interface DriverWsClient {
   /** Is the S2 log lane ACTUALLY listening right now? False when logs were
    *  never started, were refused, or the storm backstop stopped them. The
@@ -113,6 +133,8 @@ export interface DriverWsClient {
    *  "lane switched off" must never read as "no resyncs happened" (v0.26
    *  review: it converted a switched-off measurement into a recovery). */
   s2LaneLive(): boolean;
+  /** WHY the S2 log lane is dark, or null when it is live or merely pending. */
+  s2LaneFault(): 'refused' | 'storm-stopped' | null;
   start(): void;
   stop(): void;
   state(): DriverWsState;
@@ -563,6 +585,9 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       // currently live. Callers record `null` (unknown) rather than 0 when this
       // is false.
       return logsAcked && !logStormStopped && state === 'live';
+    },
+    s2LaneFault(): 'refused' | 'storm-stopped' | null {
+      return s2Fault({ logsAcked, logsMsgId, logStormStopped, live: state === 'live' });
     },
     start(): void {
       if (!url) {
