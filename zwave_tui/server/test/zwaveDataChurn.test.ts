@@ -33,6 +33,10 @@ const HOME = 3586281591;
 /** Lets one test simulate a stick swap / NVM restore — the ONLY thing that
  *  legitimately changes home_id. Reset to null in that test's finally. */
 let homeOverride: number | null = null;
+/** Roster the fake controller reports. Mutable so a test can make a node
+ *  LEAVE the network — the eviction path cannot be reached otherwise. */
+const NODE7 = { node_id: 7, status: 4, ready: true, is_routing: true, is_secure: false };
+let rosterNodes: Array<Record<string, unknown>> = [NODE7];
 const DEV_ID = 'dev-7';
 
 function cannedResult(cmd: Record<string, unknown>): unknown {
@@ -52,7 +56,7 @@ function cannedResult(cmd: Record<string, unknown>): unknown {
         client: { server_version: 't' },
         controller: {
           home_id: homeOverride ?? HOME, own_node_id: 1,
-          nodes: [{ node_id: 7, status: 4, ready: true, is_routing: true, is_secure: false }],
+          nodes: rosterNodes,
         },
       };
     default:
@@ -1203,3 +1207,30 @@ test('the engine tick RETAINS the quarantine it builds (v0.48.0)', async () => {
   }
 });
 
+
+test('a departed node discarding its learning is visible IN THE TUI (v0.53.0)', async () => {
+  // Eviction throws away weeks of learned baselines, the persisted evidence
+  // ring and any in-flight ledger episode. The sibling home-id purge pushes a
+  // Log event; this path only wrote to stdout, so from inside the TUI — which
+  // cannot read the container log — the loss was invisible.
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha, { refreshMs: 40, routePollMs: 80, evictAfterMs: 1 });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7));
+    // Drop node 7 from the roster and let the eviction window elapse.
+    // Add a second node, let it register, then remove ONLY it — an empty
+    // roster is (correctly) treated as a transient poll glitch, not a mass
+    // exodus, so the eviction path needs a surviving roster to run against.
+    rosterNodes = [NODE7, { node_id: 8, status: 4, ready: true, is_routing: true, is_secure: false }];
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 8), 4000);
+    rosterNodes = [NODE7];
+    await waitFor(() => zd.events().some((e) => /left the network/.test(e.text)), 4000);
+    const ev = zd.events().find((e) => /left the network/.test(e.text))!;
+    assert.match(ev.text, /node 8/, `the id belongs in the TEXT, frozen at push time: ${ev.text}`);
+    assert.match(ev.text, /baselines/, 'the event must name what was discarded');
+    // nodeId is NULL on purpose: the Log's node column resolves LIVE against
+    // the roster, and this is the one path built FOR node-id reuse — a
+    // nodeId here would print the REPLACEMENT device's name.
+    assert.equal(ev.nodeId, null, 'the row must not resolve against a future occupant of this id');
+  } finally { zd.stop(); rosterNodes = [NODE7]; }
+});

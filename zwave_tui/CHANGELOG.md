@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.53.0 — 2026-09-04
+
+**What the log could not tell you, part two: the crash, the stores, and both
+transports.**
+
+**The one line that explains a crash loop went out through the `info` sink.**
+`main().catch()` is the last-resort diagnostic — the only thing that ever says
+*why* the add-on died — and it was invisible at four of the seven levels the
+option offers, including the `warning` its own help text recommends "to quiet
+routine output". The evidence in that state was the s6 restart banner
+repeating, and nothing else. `Logger` gains `fatal`, the top of the ladder, so
+this line survives every configurable threshold. The rendered bytes are
+unchanged.
+
+**A store that stopped persisting said so at `info`.** `history`, `evidence`,
+`baselines` and `outcomes` each report a failed save exactly once, to a logger
+that could not claim a level — no screen shows it, `/api/health` does not carry
+it, and at `log_level: warning` it vanished with the routine chatter. The new
+`LogSink` type widens the six genuinely-silent subsystems so those failures can
+be `error`, and `grep ERROR` finds them.
+
+**The driver-WS link could wedge in `handshake` forever.** The liveness probe
+measures `lastMsgAt`, which `sock.on('pong')` refreshes — so a peer that
+completed the WebSocket upgrade and answered every ping but never resolved
+`start_listening` looked perfectly healthy, with no evidence stream and no
+reconnect, for the life of the process. The handshake now has its own clock,
+measured from OPEN (which nothing refreshes) and tested first, so the operator
+gets `handshake timeout` rather than a misattributed liveness failure.
+
+**The ingress console had no session accounting.** v0.50.0 put telnet's session
+open and close on the record and left this half silent — the transport most
+people actually use. Both ends are logged now, with the duration and the
+remaining count, and the cause is attributed to whoever *initiated* the close:
+`socket.close()` is asynchronous, so a naive handler records every
+server-initiated eviction — idle, quit, lockout — as "peer closed".
+
+**A departed node discarded weeks of learning invisibly.** Eviction throws away
+the learned baselines, the persisted evidence ring and any in-flight ledger
+episode. The sibling home-id purge pushes a Log event; this path wrote only to
+stdout, so from inside the TUI the loss never happened. The event is
+network-scoped on purpose — this is the one path built for node-id reuse, and a
+node-scoped row would resolve against whichever device next occupies the id.
+
+1019 tests, 490 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.52.0 — 2026-09-04
 
 **A fleet verdict that cannot contradict its own screen.**

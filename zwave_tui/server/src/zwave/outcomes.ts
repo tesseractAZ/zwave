@@ -34,6 +34,7 @@
  */
 
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import type { LogSink } from '../logger';
 import type { ActionKind, Efficacy } from '../types';
 import type { SymptomKind } from './symptoms';
 import type { EvidenceSample } from './evidenceStore';
@@ -147,7 +148,10 @@ export interface OutcomeStoreOptions {
   decay?: number;
   /** Persistent path on /data (atomic temp+rename). Absent ⇒ in-memory only. */
   path?: string;
-  log?: (msg: string) => void;
+  /** Widened to LogSink (v0.53.0) so a failed save can claim `error` — it was
+   *  the only report of a store that stopped persisting, and it vanished at
+   *  `log_level: warning` along with the routine chatter. */
+  log?: LogSink;
 }
 
 export interface OutcomeStore {
@@ -620,7 +624,7 @@ export function wilsonLower(ok: number, n: number, z = 1.96): number {
 
 export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore {
   const cfg = { ...DEFAULTS, ...clean(opts) };
-  const log = opts.log ?? (() => {});
+  const log: LogSink = opts.log ?? (() => {});
   const open = new Map<string, Episode>();
   /** Learned-arm state changed since the last successful save (v0.26 review).
    *  outcomes.ts was the ONLY persisted store without this — its own docs
@@ -1019,7 +1023,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         dirty = false; // cleared only on a SUCCESSFUL write — a failed save
                        // must retry on the next tick, not silently drop state.
       } catch (e) {
-        log(`outcomes: save failed (${e instanceof Error ? e.message : String(e)})`);
+        (log.error ?? log)(`outcomes: save failed (${e instanceof Error ? e.message : String(e)})`);
       }
     },
 

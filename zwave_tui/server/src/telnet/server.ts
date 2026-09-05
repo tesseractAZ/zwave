@@ -18,6 +18,7 @@
  */
 
 import { createServer } from 'node:net';
+import type { LogSink } from '../logger';
 import { fmtElapsed } from './gauges';
 import type { Socket } from 'node:net';
 import type { DataProvider, ActionRunner } from '../types';
@@ -188,7 +189,7 @@ export interface TelnetServerOptions {
   data: DataProvider;
   host: string;
   port: number;
-  log: (msg: string) => void;
+  log: LogSink;
   /** Initial signal-unit default passed through to each session. */
   signalDisplay?: 'margin' | 'dbm';
   /** Login policy. Telnet is always direct LAN — never trusted — so an enabled
@@ -425,7 +426,9 @@ export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void
     socket.on('error', () => endConn(conn));
   });
 
-  server.on('error', (e: any) => log(`telnet: server error: ${e?.message ?? e}`));
+  // ERROR: a listen failure means the LAN port never opened, and nothing else
+  // reports it — the TUI is simply unreachable, silently, at `log_level: warning`.
+  server.on('error', (e: any) => (log.error ?? log)(`telnet: server error: ${e?.message ?? e}`));
   server.listen(port, host);
 
   // Reclaim connections that have RECEIVED nothing for idleTimeoutMs. Runs on

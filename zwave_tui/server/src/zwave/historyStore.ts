@@ -40,6 +40,7 @@
  */
 
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import type { LogSink } from '../logger';
 import { uptime as osUptime } from 'node:os';
 
 /**
@@ -77,7 +78,10 @@ export interface HistoryStoreOptions {
   now?: () => number;
   /** Injectable host-uptime source in ms (tests); defaults to `os.uptime()`. */
   uptimeMs?: () => number;
-  log?: (msg: string) => void;
+  /** Widened to LogSink (v0.53.0) so a failed save can claim `error` — it was
+   *  the only report of a store that stopped persisting, and it vanished at
+   *  `log_level: warning` along with the routine chatter. */
+  log?: LogSink;
 }
 
 export interface HistoryStore {
@@ -111,7 +115,7 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
   const bootGraceMs = opts.bootGraceMs ?? DEFAULT_BOOT_GRACE_MS;
   const now = opts.now ?? Date.now;
   const uptimeMs = opts.uptimeMs ?? (() => osUptime() * 1000);
-  const log = opts.log ?? (() => {});
+  const log: LogSink = opts.log ?? (() => {});
 
   /** Coerce an arbitrary value into a bounded array of finite numbers. */
   const cleanSeries = (a: unknown, cap: number): number[] => {
@@ -209,7 +213,7 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
         writeFileSync(tmp, JSON.stringify(payload), 'utf8');
         renameSync(tmp, path);
       } catch (e) {
-        log(`history: save failed (${(e as Error).message})`);
+        (log.error ?? log)(`history: save failed (${(e as Error).message})`);
       }
     },
   };

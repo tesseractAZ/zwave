@@ -151,3 +151,24 @@ test('save omits all-empty nodes from disk', () => {
 test('save never throws on an unwritable path', () => {
   assert.doesNotThrow(() => mkStore('/proc/zwave-cannot-write/history.json').save(mapOf({ 1: { rssi: [-50], rtt: [1] } })));
 });
+
+test('a store that stops persisting says so at ERROR (v0.53.0)', () => {
+  // A failed save was the ONLY report that a store had stopped persisting —
+  // no screen, no /api/health field — and it went out through the bare `info`
+  // sink, so it vanished at `log_level: warning` along with the routine
+  // chatter. The level is the whole point: `grep ERROR` must find it.
+  const lines: string[] = [];
+  const sink = Object.assign((m: string) => lines.push(`INFO ${m}`), {
+    error: (m: string) => lines.push(`ERROR ${m}`),
+    warn: (m: string) => lines.push(`WARN ${m}`),
+    debug: () => {},
+  });
+  // A path that cannot be written: its parent is a FILE, not a directory.
+  const bad = join(tmpdir(), `zwave-store-${process.pid}.notadir`, 'x.json');
+  writeFileSync(join(tmpdir(), `zwave-store-${process.pid}.notadir`), 'x');
+  const store = createHistoryStore({ path: bad, log: sink } as never);
+  store.save(new Map());
+  const errs = lines.filter((l) => l.startsWith('ERROR'));
+  assert.ok(errs.length > 0, `a failed save must claim a level: ${lines.join(' | ')}`);
+  assert.match(errs[0], /save failed/);
+});

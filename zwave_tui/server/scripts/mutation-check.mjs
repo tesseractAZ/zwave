@@ -2326,6 +2326,50 @@ const MUTANTS = [
     find: "          const pct = share >= 0.005 ? `${Math.round(share * 100)}%` : '<1%';",
     repl: '          const pct = `${Math.round(share * 100)}%`;',
     what: 'a rounded-to-zero share reads "<1%", never "(0%)" beside a non-zero count' },
+  { id: 'fatal-survives-every-threshold', file: 'src/index.ts', tests: ['configContract'],
+    // The bootstrap catch is the one line whose job is to explain a crash loop,
+    // and it went out through the INFO sink — invisible at four of the seven
+    // levels the option offers, including the `warning` its own help suggests.
+    // The rendered bytes are identical, so ONLY the severity changes.
+    find: '  log.fatal(msg);',
+    repl: '  log(`FATAL: ${msg}`);',
+    what: 'the bootstrap crash cause survives a raised log_level' },
+  { id: 'store-save-failure-claims-error', file: 'src/zwave/historyStore.ts', tests: ['historyStore'],
+    // A failed save is the ONLY report that a store stopped persisting — no
+    // screen, no /api/health field — and it vanished at log_level: warning.
+    find: '        (log.error ?? log)(`history: save failed (${(e as Error).message})`);',
+    repl: '        log(`history: save failed (${(e as Error).message})`);',
+    what: 'a store that stops persisting is greppable as an ERROR' },
+  { id: 'handshake-has-its-own-clock', file: 'src/zwave/driverWsClient.ts', tests: ['driverWsClient'],
+    // The liveness probe measures lastMsgAt, which a PONG refreshes — so a peer
+    // that upgrades and answers pings but never completes start_listening sat
+    // in `handshake` for the life of the process with no evidence stream.
+    find: "        if (state !== 'live' && Date.now() - openedAt > handshakeMs) {",
+    repl: "        if (state !== 'live' && Date.now() - lastMsgAt > handshakeMs) {",
+    what: 'the handshake is timed from OPEN, which no pong can refresh' },
+  { id: 'handshake-timeout-fires', file: 'src/zwave/driverWsClient.ts', tests: ['driverWsClient'],
+    find: "        if (state !== 'live' && Date.now() - openedAt > handshakeMs) {",
+    repl: "        if (state !== 'live' && Date.now() - openedAt < 0) {",
+    what: 'a wedged handshake is torn down rather than held forever' },
+  { id: 'console-session-teardown-logged', file: 'src/telnet/wsConsole.ts', tests: ['ingressTrust'],
+    // v0.50.0 put telnet's session lifecycle on the record and left the ingress
+    // console — the transport most people actually use — with no accounting.
+    find: '      log(`console: ws session closed (${closeCause}) after ${fmtElapsed(Date.now() - openedAt)} (${liveSessions} active)`);',
+    repl: '      void openedAt;',
+    what: "the ingress console's session end, cause and duration are on the record" },
+  { id: 'close-cause-is-attributed', file: 'src/telnet/wsConsole.ts', tests: ['ingressTrust'],
+    // socket.close() is async, so a bare handler records every SERVER-initiated
+    // eviction as "peer closed" — the opposite of what happened.
+    find: "        closeCause = 'idle timeout';",
+    repl: '        void 0;',
+    what: 'a server-initiated close is not recorded as the peer hanging up' },
+  { id: 'eviction-reaches-the-log-screen', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Eviction throws away weeks of baselines, the persisted evidence ring and
+    // any in-flight episode; the sibling home-id purge pushes an event and this
+    // one did not, so from inside the TUI the loss was invisible.
+    find: "          this.pushEvent('engine', 'info', 'system', null,\n            lostOpen > 0",
+    repl: "          if (lostOpen < 0) this.pushEvent('engine', 'info', 'system', null,\n            lostOpen > 0",
+    what: 'a departed node discarding its learning is visible in the TUI' },
   { id: 'remedy-title-follows-the-body', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // The rule read `all clear` in ALL FIVE no-symptom states, including the
     // permanent partial-coverage one whose own body says "COVERAGE, not health".

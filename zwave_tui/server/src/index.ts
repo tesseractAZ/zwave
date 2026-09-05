@@ -289,6 +289,12 @@ async function main(): Promise<void> {
 
 main().catch((e: unknown) => {
   const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
-  log(`FATAL: ${msg}`);
+  // `fatal`, the TOP of the ladder — so the reason a crash loop is crashing
+  // survives every configurable threshold (v0.53.0). This went out through the
+  // info sink, which meant the one line explaining a bootstrap death was
+  // invisible at `log_level: warning` — the value the option's own help text
+  // recommends — leaving only the s6 restart banner repeating. The rendered
+  // bytes are unchanged: `emit` writes the `FATAL: ` tag itself.
+  log.fatal(msg);
   process.exit(1);
 });
