@@ -224,7 +224,14 @@ export function renderTopology(ctx: ScreenCtx): string[] {
   const failCap = Math.max(FAIL_GUARANTEE, Math.min(padRows, Math.max(3, Math.floor(padRows / 2))));
   const failures = routeFailurePanel(view, ctx, endNodes, nameBudget, failCap);
   const stabPad = Math.max(0, padRows - failures.length);
+  // ABSENCE MUST BE VISIBLE (v0.60.0). This panel needs 51 rows at 80 columns
+  // on the committed 38-node fixture, and is unreachable at ANY supported size
+  // once the roster passes ~67 end nodes — so at the modal 80x24 the frame was
+  // BYTE-IDENTICAL with and without a measured re-route history. A panel that
+  // silently is not there reads as a panel with nothing to say, which is the
+  // one reading this screen must never produce.
   const stability = stabPad >= 3 ? routeStabilityPanel(view, ctx, endNodes, nameBudget, stabPad) : [];
+  const stabWithheld = stabPad < 3 && routeStabilityPanel(view, ctx, endNodes, nameBudget, 99).length > 0;
   const treeCap = Math.max(1, treeCapBase - stability.length - failures.length);
 
   const body: string[] = [...histLines];
@@ -283,6 +290,14 @@ export function renderTopology(ctx: ScreenCtx): string[] {
     (lrNodes.length ? c.grey(' · ') + c.blue(`${lrNodes.length} LR`) : '') +
     (pending.length ? c.grey(' · ') + c.yellow(`${pending.length} PEND`) : '') +
     churnTok +
+    // ABSENCE IS DISCLOSED, WITHOUT SPENDING A ROW (v0.60.0). The stability
+    // panel is LEFTOVER-funded on purpose — a scrolling tree must never lose a
+    // row to it, and a test pins that the frame is byte-identical with and
+    // without a provider at 80x24. But that made the panel invisible rather
+    // than merely absent: an operator at the modal size had no way to know a
+    // measured re-route history existed at all. The title rule already exists,
+    // so the disclosure rides there and the row budget is untouched.
+    (stabWithheld ? c.grey(' · ') + c.yellow('RS⇕') : '') +
     (rebuilding ? c.grey(' · ') + c.yellow('REBUILDING') : '');
 
   return frame(view, data, {
@@ -741,7 +756,12 @@ function routeStabilityPanel(
   }
   if (canDisclose) {
     const rest = ranked.length - shown.length;
-    lines.push(c.grey(`  +${rest} more node(s) with re-routes — by count, most first`));
+    // SAY THE ORDER THAT IS ACTUALLY USED (v0.60.0). The sort above is
+    // `perDayOf(b) - perDayOf(a)` — a RATE — and this line said "by count".
+    // The two disagree whenever nodes have different measured spans, which is
+    // the normal case, so an operator hunting the busiest node by count was
+    // told the list was something it is not.
+    lines.push(c.grey(`  +${rest} more node(s) with re-routes — by re-routes per day, worst first`));
   } else if (lines.length < budget) {
     lines.push(c.grey(`  ${rows.length - ranked.length} node(s) held every path · ${span} measured`));
   }

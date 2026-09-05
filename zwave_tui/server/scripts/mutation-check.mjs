@@ -2341,6 +2341,29 @@ const MUTANTS = [
     find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),",
     repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
     what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 'stability-order-claim-is-true', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // The sort is `perDayOf(b) - perDayOf(a)` — a RATE — and the disclosure
+    // said "by count". They disagree whenever spans differ, i.e. normally.
+    find: '    lines.push(c.grey(`  +${rest} more node(s) with re-routes — by re-routes per day, worst first`));',
+    repl: '    lines.push(c.grey(`  +${rest} more node(s) with re-routes — by count, most first`));',
+    what: "the overflow line names the order the list is ACTUALLY in" },
+  { id: 'withheld-stability-is-disclosed', file: 'src/telnet/screens/topology.ts', tests: ['topologyRoutes'],
+    // The panel needs 51 rows at 80 columns on the committed fixture, so at the
+    // modal 80x24 the frame was BYTE-IDENTICAL with and without a measured
+    // re-route history — absence reading as "nothing to say".
+    find: '  const stabWithheld = stabPad < 3 && routeStabilityPanel(view, ctx, endNodes, nameBudget, 99).length > 0;',
+    repl: '  const stabWithheld = false;',
+    what: 'a route-stability panel withheld for want of rows says so' },
+  { id: 'ctrl-rates-gate-boundary', file: 'src/telnet/screens/controller.ts', tests: ['controllerHeatmapScreen'],
+    // Three gate-drift mutants survived the whole suite before v0.60.0 — a
+    // gate nobody tests is a gate that moves.
+    find: '    ...(surplus >= 4 ? [serialRateBlock(ctx, W)] : []),',
+    repl: '    ...(surplus >= 5 ? [serialRateBlock(ctx, W)] : []),',
+    what: 'the RECENT RATES surplus boundary is pinned' },
+  { id: 'ctrl-symptoms-gate-boundary', file: 'src/telnet/screens/controller.ts', tests: ['controllerHeatmapScreen'],
+    find: '    ...(surplus >= 9 ? [meshSymptomBlock(ctx, W)] : []),',
+    repl: '    ...(surplus >= 4 ? [meshSymptomBlock(ctx, W)] : []),',
+    what: 'the ACTIVE MESH EVENTS surplus boundary is pinned' },
   { id: 'long-rf-envelope-is-qualified', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
     // A multi-day worst…best envelope reads as the DEVICE's radio history; for
     // a routed node it is a repeater's, and this row rendered byte-identically

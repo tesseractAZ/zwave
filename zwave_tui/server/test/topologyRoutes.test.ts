@@ -388,7 +388,29 @@ test('the panel is LEFTOVER-funded — a scrolling tree never loses a row to it'
   // must not exist, and the frame must be unchanged from the no-provider case.
   const withRs = lines(withStability(bigMesh(), () => ({ changes: 4, hours: 72 }), { cols: 80, rows: 24 }));
   const without = lines(ctxFor(bigMesh(), { cols: 80, rows: 24 }));
-  assert.deepEqual(withRs, without, 'no surplus ⇒ byte-identical frame');
+  // SCOPED in v0.60.0, and stated: what this test protects is the ROW BUDGET —
+  // "a scrolling tree never loses a row to it" — not byte-identity of the whole
+  // frame. Byte-identity was the stronger claim, and it had a cost: the panel
+  // was not merely absent at the modal size, it was INVISIBLE, so an operator
+  // had no way to know a measured re-route history existed. The title rule
+  // already occupies a row, so the disclosure rides there for free.
+  assert.equal(withRs.length, without.length, 'row count unchanged');
+  const bodyOf = (f: string[]): string[] => f.slice(2);   // drop masthead + title rule
+  assert.deepEqual(bodyOf(withRs), bodyOf(without), 'no surplus ⇒ not one BODY row spent');
+});
+
+test('a route-stability panel withheld for want of rows is disclosed in the title rule (v0.60.0)', () => {
+  // The panel needs ~51 rows at 80 columns on this fixture. Absent is fine —
+  // invisible is not: without a marker the modal frame is indistinguishable
+  // from a mesh that has never re-routed at all.
+  const withRs = lines(withStability(bigMesh(), () => ({ changes: 4, hours: 72 }), { cols: 80, rows: 24 }));
+  const rule = withRs.find((l) => /TOPOLOGY/.test(l)) ?? '';
+  assert.ok(rule, 'the title rule must render');
+  assert.match(rule, /RS⇕/, `a withheld panel must be disclosed: "${rule.trim()}"`);
+  // And a provider with NOTHING to show must not raise the marker.
+  const none = lines(withStability(bigMesh(), () => null, { cols: 80, rows: 24 }));
+  const noneRule = none.find((l) => /TOPOLOGY/.test(l)) ?? '';
+  assert.doesNotMatch(noneRule, /RS⇕/, `nothing measured ⇒ nothing withheld: "${noneRule.trim()}"`);
 });
 
 test('render contract holds with the panel across sizes', () => {
@@ -701,4 +723,16 @@ test('the "+N more" disclosure accounts for EVERY link — shown + N === total (
   // from a panel that is already the scarcest thing on the screen.
   assert.equal(shownRows, 2,
     `the panel must fill its guaranteed budget, not waste a row: showed ${shownRows}`);
+});
+
+test('the re-route overflow line names the order the list is ACTUALLY in (v0.60.0)', () => {
+  // The sort is by per-day RATE; the disclosure said "by count, most first".
+  // The two disagree whenever nodes have different measured spans — the normal
+  // case — so an operator hunting the busiest node by count was misdirected.
+  const out = lines(withStability(bigMesh(), (id) => ({ changes: (id % 7) + 1, hours: 24 * ((id % 3) + 1) }),
+    { cols: 200, rows: 80 }));
+  const row = out.find((l) => /more node\(s\) with re-routes/.test(l));
+  if (!row) return;                       // the overflow line is size-gated
+  assert.match(row, /per day/, `the order claim must match the sort: "${row.trim()}"`);
+  assert.doesNotMatch(row, /by count/, `and must not claim an order it does not use: "${row.trim()}"`);
 });

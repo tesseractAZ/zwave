@@ -771,3 +771,30 @@ test('controller: a route REBUILD does not let a new block evict existing conten
       `${cols}x${rows}: a rebuild evicted the link tally that renders when idle`);
   }
 });
+
+test('the CONTROLLER surplus gates have pinned boundaries (v0.60.0)', () => {
+  // The two optional blocks are gated on `surplus >= 4` and `surplus >= 9`,
+  // and NOTHING pinned either boundary — three gate-drift mutants (>=9 to >=4,
+  // >=9 to >=10, >=4 to >=5) survived the whole suite. A gate nobody tests is
+  // a gate that moves.
+  //
+  //   surplus = max(0, (H - 3) - 26)   [idle]
+  //   RECENT RATES     surplus >= 4  =>  H >= 33
+  //   ACTIVE MESH ...  surplus >= 9  =>  H >= 38
+  const at = (rows: number): string => render(ctrlCtx(NO_ERRORS, 100, rows));
+
+  // NON-VACUITY: the frame one row BELOW each gate must not already be
+  // overflowing, or a loosened gate would add the block, have it sliced by the
+  // bodyCap clamp, and still fail to match — an absence that proves nothing.
+  for (const [label, re, on] of [
+    ['RECENT RATES', /RECENT RATES/, 33],
+    ['ACTIVE MESH EVENTS', /ACTIVE MESH/, 38],
+  ] as const) {
+    assert.doesNotMatch(at(on - 1), re, `${label}: must be ABSENT at ${on - 1} rows`);
+    assert.match(at(on), re, `${label}: must be PRESENT at exactly ${on} rows`);
+    // The frame contract still holds on both sides of the boundary.
+    for (const h of [on - 1, on]) {
+      assert.equal(renderController(ctrlCtx(NO_ERRORS, 100, h)).length, h, `${label}: ${h} rows exactly`);
+    }
+  }
+});
