@@ -4188,3 +4188,67 @@ direction — `frame()` substitutes its own "N more lines hidden" row, so a
 narrative that does not fit is disclosed as missing rather than dropped. That is
 why capping a narrative with a bare `.slice()` is wrong even when the text is
 long: the cap hides what the frame would have disclosed.
+
+### 12.11 The machine-readable boundary
+
+Everything the engine concludes was, until v0.57.0, reachable only from a
+telnet screen behind a login gate — which nothing can poll and nobody watches at
+3am. `/api/health` answered exactly one question, "can this add-on see Home
+Assistant?", so a mesh with every node Dead and the ladder exhausted still
+returned `200 OK`.
+
+Two surfaces now carry the conclusions, and they are built from the SAME
+function (`haStates.buildStates`) so a monitor polling HTTP and an automation
+triggering on state can never disagree about the mesh:
+
+- **`GET /api/health`** keeps `ok` as a pure TRANSPORT verdict — and the HTTP
+  code still tracks `ok` alone, deliberately, because a degraded mesh is not a
+  broken add-on and conflating them would make an existing uptime check flap on
+  a single critical symptom. Alongside it: `degraded`, `degradedReason`, and an
+  `engine` object mirroring every published entity.
+- **Home Assistant states**, re-published every 30 s:
+
+  | entity | state | notable attributes |
+  |---|---|---|
+  | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason` |
+  | `sensor.zwave_tui_summons` | count | `node_ids` |
+  | `sensor.zwave_tui_symptoms` | count | `critical`, `warning`, `kinds` |
+  | `sensor.zwave_tui_engine` | `running` / `suppressed:<why>` / `disabled` | `detectors_ready`, `detectors_total` |
+
+**`degraded` is deliberately not "any symptom exists".** A warn-level symptom on
+one node is the resting state of a real mesh, and an alert that is always on is
+not an alert. It fires on a summons (the ladder gave up and is asking for a
+person), a critical symptom, or the engine being structurally unable to do its
+job — `storm`, or `no-capability-data` where the driver-WS flag dump is dark and
+the candidate set is empty by construction.
+
+**Why states and not a built-in notifier.** The add-on holds
+`homeassistant_api: true` and already makes `call_service` calls, so it could
+push to `notify.mobile_app_*` directly. It does not, because that hardcodes a
+POLICY — who is told, when, how loudly, whether it bypasses Do Not Disturb —
+into a diagnostic console. Published as state, the operator's existing
+notification setup, automations, dashboards and history all work on it
+unchanged:
+
+```yaml
+automation:
+  - alias: Z-Wave needs a human
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.zwave_tui_degraded
+        to: "on"
+        for: "00:05:00"          # ride out a transient
+    action:
+      - service: notify.mobile_app_iphone
+        data:
+          title: Z-Wave mesh degraded
+          message: >-
+            {{ state_attr('binary_sensor.zwave_tui_degraded', 'reason') }}
+            (nodes: {{ state_attr('sensor.zwave_tui_summons', 'node_ids') }})
+```
+
+**These are unmanaged states**: created over the REST API, with no device and no
+`unique_id`, and they do NOT survive a Home Assistant Core restart. That is
+handled by re-publishing on the interval rather than by adding an MQTT
+dependency — a Core restart self-heals within 30 s. The entity ids are published
+API: renaming one breaks every automation built on it.
