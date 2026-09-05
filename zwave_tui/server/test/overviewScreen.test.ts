@@ -110,3 +110,58 @@ test('responseTimeoutPct IGNORES commandsDroppedTX (RESEARCH.md §0 regression g
   // And droppedTX must not change a timeout-driven reading either.
   assert.equal(responseTimeoutPct(stats({ commandsTX: 100, commandsDroppedTX: 40, timeoutResponse: 8 })), 8);
 });
+
+test('the MESH meter cannot read 100% while the roster grades nodes F (v0.52.0)', () => {
+  // Reproduced at v0.51.0: five ALIVE, non-flaky nodes scoring 49/F (weak
+  // margin, failed route, 9.6 kbps) rendered
+  //   `NODES 39  ONLINE 39  DEAD 0  ASLEEP 0  FLAKY 0  ... MESH ████████ 100%`
+  // on the same frame as its own roll-up's `F 5` and `WORST F 49`. The meter
+  // subtracted only dead/flaky/unknown, so the scorer's own verdict — the one
+  // the operator reads three rows below — was invisible to it.
+  const failing: Record<number, HealthResult> = {};
+  for (const id of [10, 11, 12, 13, 14]) failing[id] = { score: 49, grade: 'F', state: 'weak', flags: ['W', 'R', 'L'] };
+  const d: DataProvider = { ...data, scoreFor: (id) => failing[id] ?? { score: 90, grade: 'A', state: 'ok', flags: [] } };
+  const lines = renderOverview({ view: mkView(160, 40), data: d, visibleNodes: nodes, filtering: false, actionsEnabled: true })
+    .map(strip);
+  const strip5 = lines.find((l) => /NODES\s+\d+/.test(l) && /MESH/.test(l)) ?? '';
+  assert.ok(strip5, 'the telemetry strip must render');
+  assert.doesNotMatch(strip5, /MESH .*100%/, `five F nodes cannot leave a full-green meter: "${strip5}"`);
+  // And the subtracted term is NAMED — a percentage that reconciles against no
+  // field on the strip is its own defect.
+  assert.match(strip5, /FAILING\s+5/, `the meter's own term must be on the strip: "${strip5}"`);
+});
+
+test('a clean fleet still reads 100% — the new term does not double-count (v0.52.0)', () => {
+  // Dead (0/F) and Unknown (capped 15/F) also grade F; counting them as
+  // `failing` too would subtract the same node twice and land the meter on a
+  // percentage matching no count on the strip.
+  const lines = renderOverview({ view: mkView(160, 40), data, visibleNodes: nodes, filtering: false, actionsEnabled: true })
+    .map(strip);
+  const strip5 = lines.find((l) => /NODES\s+\d+/.test(l) && /MESH/.test(l)) ?? '';
+  // The base fixture has exactly one flaky node (6) out of 39.
+  assert.doesNotMatch(strip5, /FAILING/, `no F node beyond the flaky one: "${strip5}"`);
+});
+
+test('a DEAD node is subtracted from the mesh meter once, not twice (v0.52.0)', () => {
+  // Dead (0/F) and Unknown (capped 15/F) both grade F. Counting them in the
+  // new `failing` term as well as their own would subtract the same node twice
+  // and land the meter on a percentage that reconciles against no field on the
+  // strip — trading one unreadable number for another.
+  const deadNodes = nodes.map((n, i) => (i >= 1 && i <= 4
+    ? { ...n, status: NodeStatus.Dead, statusLabel: 'dead' } : n));
+  const d: DataProvider = {
+    ...data,
+    nodes: () => deadNodes,
+    nodeById: (id) => deadNodes.find((n) => n.nodeId === id),
+    scoreFor: (id) => (id >= 2 && id <= 5
+      ? { score: 0, grade: 'F', state: 'dead', flags: ['D'] }
+      : { score: 90, grade: 'A', state: 'ok', flags: [] }),
+  };
+  const lines = renderOverview({ view: mkView(160, 40), data: d, visibleNodes: deadNodes, filtering: false, actionsEnabled: true })
+    .map(strip);
+  const s5 = lines.find((l) => /NODES\s+\d+/.test(l) && /MESH/.test(l)) ?? '';
+  assert.match(s5, /DEAD\s+4/, `fixture must actually produce 4 dead: "${s5}"`);
+  // 4 of 39 gone => 35/39 = 90%. Double-counting would give 31/39 = 79%.
+  assert.match(s5, /MESH .*\b90%/, `a dead node counts once: "${s5}"`);
+  assert.doesNotMatch(s5, /FAILING/, `dead is already its own term: "${s5}"`);
+});

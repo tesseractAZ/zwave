@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.52.0 — 2026-09-04
+
+**A fleet verdict that cannot contradict its own screen.**
+
+Every fix here is a summary line disagreeing with the detail directly beneath
+it. The summary is what an operator reads first, so when the two disagree the
+summary is the one that gets believed.
+
+**REMEDY said `all clear` in all five no-symptom states.** Including
+`● Engine disabled.`, and including the PERMANENT partial-coverage state whose
+own body says, in as many words, that it is *"a statement about COVERAGE, not
+health"*. Confirmed on the live mesh at v0.51.0: the rule read `all clear`
+directly above `◑ No symptoms — partial detector coverage for the 16:00–20:00
+band`. The rule now names the state the body actually rendered, through a total
+`Record` — so a sixth empty state is a **type error** rather than a silent
+inheritance of the previous branch's claim.
+
+**OVERVIEW's MESH meter read a full-green 100% beside its own `F 5`.** The
+meter subtracted dead, flaky and unknown nodes — but not the ones its own
+scorer simply *failed*. Five alive, non-flaky nodes scoring 49/F (weak margin,
+failed route, 9.6 kbps) left the bar full while the roll-up three rows below
+said `F 5` and `WORST F 49`. The failing count is now subtracted and, so the
+percentage reconciles against something visible, `FAILING n` is on the strip.
+Dead and Unknown already grade F and are still counted once.
+
+**Auto-ping reported an all-clear over a population it could not assemble.**
+`isListening` comes only from the driver-WS flag dump, and that map is cleared
+on a homeId mismatch — so with the link dark every node reads `null`, the
+candidate set is empty *by construction*, and ENGINE rendered `running ·
+candidates 0 · dead 0 · no node is in a dead episode` over a roster holding six
+Dead nodes. The ladder cannot arm in that state. It now suppresses as
+`no-capability-data` and says so: a monitoring gap, not a healthy mesh. The gate
+keys on the count of UNKNOWN capability, not on emptiness, so an all-battery
+mesh — which genuinely has nothing to sweep — is unaffected.
+
+**INTERFERENCE ticked a line reporting degraded nodes.** `active` means
+"correlated into a mesh event"; `degradedNodes` counts any per-node symptom. A
+single weak-signal gives `active: false` with `degradedNodes: 1`, and the screen
+printed a green ✓ against *"1 node degraded, but not correlated into a mesh
+event."* Not correlated is not the same as nothing wrong.
+
+**And one more clipped sentence.** ENGINE's ledger empty-state came back at 80
+columns as `(this is the healthy steady stat` — the defect v0.51.0 closed
+everywhere else, on a path that release did not touch. It now picks the longest
+form that fits.
+
+1012 tests, 483 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.51.0 — 2026-09-04
 
 **Nothing clips into a lie — the sequel, and this time it was a number.**

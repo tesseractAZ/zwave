@@ -28,7 +28,7 @@ const node = (id: number): NodeSnapshot => ({
 const nodes = [node(1), node(7), node(49)];
 
 const AP = (over: Partial<AutoPingSnapshot> = {}): AutoPingSnapshot => ({
-  lastTickMs: NOW - 30_000, suppressed: 'none', listening: 35, deadListening: 0,
+  lastTickMs: NOW - 30_000, suppressed: 'none', listening: 35, deadListening: 0, capabilityUnknown: 0,
   staleDue: 4, stalestMs: 90 * 60_000, verifyOwed: 0,
   config: { enabled: true, writeActions: true, afterMs: 600_000, maxAttempts: 3, staleMs: 7_200_000 },
   nodes: [], ...over,

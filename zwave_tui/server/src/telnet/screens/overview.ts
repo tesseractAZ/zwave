@@ -277,19 +277,29 @@ function telemetryStrip(ctx: ScreenCtx): string {
   let asleep = 0;
   let flaky = 0;
   let unknown = 0;
+  let failing = 0;
   for (const n of all) {
     if (n.status === NodeStatus.Alive || n.status === NodeStatus.Awake) online++;
     else if (n.status === NodeStatus.Dead) dead++;
     else if (n.status === NodeStatus.Asleep) asleep++;
     else if (n.status === NodeStatus.Unknown) unknown++;
-    if (data.scoreFor(n.nodeId).state === 'flaky') flaky++;
+    const h = data.scoreFor(n.nodeId);
+    if (h.state === 'flaky') flaky++;
+    // A node the SCORER fails that no other term already subtracts (v0.52.0).
+    // Measured at v0.51.0: five alive, non-flaky nodes scoring 49/F — weak
+    // margin, failed route, 9.6 kbps — and the strip read `MESH ████████ 100%`
+    // on the same frame as its own roll-up's `F 5` and `WORST F 49`.
+    // Dead (0/F) and Unknown (capped 15/F) also grade F, so counting them here
+    // would subtract the same node twice and land the meter on a percentage
+    // that matches no count on this strip.
+    else if (h.grade === 'F' && n.status !== NodeStatus.Dead && n.status !== NodeStatus.Unknown) failing++;
   }
   const noise = data.noiseFloor();
   // Unknown nodes counted as healthy here: health.ts gives them the state
   // 'unknown' (not 'flaky') and only NodeStatus.Dead subtracts, so a node the
   // controller has never heard from inflated the mesh percentage.
   const meshFrac = all.length > 0
-    ? Math.max(0, all.length - dead - flaky - unknown) / all.length
+    ? Math.max(0, all.length - dead - flaky - unknown - failing) / all.length
     : 0;
 
   const fields = [
@@ -310,6 +320,9 @@ function telemetryStrip(ctx: ScreenCtx): string {
       data.hasRealNoise() ? `${Math.round(noise)} dBm` : `${Math.round(noise)} dBm assumed`,
       data.hasRealNoise() ? noiseColor(Math.round(noise)) : c.grey,
     ),
+    // PROVENANCE for the term the meter just subtracted — a percentage the
+    // operator cannot reconcile against any field on the strip is its own defect.
+    ...(failing > 0 ? [field('FAILING', String(failing), c.redB)] : []),
     c.grey('MESH ') + meter(meshFrac, 8) + c.grey(` ${Math.round(meshFrac * 100)}%`),
   ];
   return fieldStrip(view, fields);

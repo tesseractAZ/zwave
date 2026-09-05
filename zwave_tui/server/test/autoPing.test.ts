@@ -1642,3 +1642,33 @@ test('a Dead node with NO lastSeen on record is dated from now (v0.50.0)', () =>
   trackEpisodes(s, nodes, T);
   assert.equal(s.deadSince.get(9), T);
 });
+
+test('an empty candidate set from MISSING capability data is not an all-clear (v0.52.0)', () => {
+  // `isListening` is filled ONLY from the driver-WS flag dump, and that map is
+  // cleared on a homeId mismatch. With the link dark every node reads null, so
+  // isPingCandidate is false fleet-wide and the ladder cannot arm — while the
+  // engine reported `running · candidates 0 · dead 0` over a roster holding
+  // six Dead nodes. The population was empty BY CONSTRUCTION, not because
+  // there was nothing to sweep.
+  const s = createAutoPingState();
+  const blind = [node(1, { isController: true }),
+    ...Array.from({ length: 8 }, (_, i) => dead(20 + i, { isListening: null as unknown as boolean }))];
+  const d = tick(s, blind, T + 60 * MIN);
+  assert.equal(d.suppressed, 'no-capability-data',
+    `an unknowable population must suppress, not report a clean pass: ${d.suppressed}`);
+  assert.equal(d.capabilityUnknown, 8, 'and must say how many nodes it could not classify');
+  assert.deepEqual(d.ping, [], 'nothing is probed on a population it cannot assemble');
+});
+
+test('an all-BATTERY mesh is genuinely nothing to sweep, not a monitoring gap (v0.52.0)', () => {
+  // The gate keys on the UNKNOWN count, not on emptiness: a mesh whose nodes
+  // are all sleeping battery devices HAS capability data and correctly reports
+  // an ordinary empty pass.
+  const s = createAutoPingState();
+  const batt = [node(1, { isController: true }),
+    ...Array.from({ length: 6 }, (_, i) => node(30 + i, { isListening: false }))];
+  const d = tick(s, batt, T + 60 * MIN);
+  assert.notEqual(d.suppressed, 'no-capability-data',
+    'known-not-listening is a measurement, not a missing one');
+  assert.equal(d.capabilityUnknown, 0);
+});
