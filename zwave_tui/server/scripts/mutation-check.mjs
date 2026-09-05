@@ -2336,9 +2336,16 @@ const MUTANTS = [
   { id: 'noise-peak-row-sheds-whole', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
     // One concatenation ending in push's blind truncate cut `(23 dB above the
     // mean...` to `(2` — a number that reads complete and is an order out.
-    find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakTag(peak, meanOfMeans, notable),",
+    find: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`) + peakHead(peak, notable),",
     repl: "          c.grey('days  ') + coarseSpark + c.grey(`   ${span} span`),",
     what: 'the peak survives at the modal terminal, shed whole or not at all' },
+  { id: 'peak-explanation-is-a-tail-token', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
+    // shedLine's HEAD has no whole-token path, so putting the explanation there
+    // rendered `(4 dB above the mean —` at 80x24 and stopped — the exact defect
+    // v0.51.0 closed in REMEDY, reintroduced one screen over. Live-caught.
+    find: '  return notable ? c.yellow(base) : c.grey(base);',
+    repl: '  return (notable ? c.yellow(base) : c.grey(base)) + c.grey(\' (a burst the mean hides, explained at length so it cannot fit)\');',
+    what: "the peak's explanation is a sheddable tail, not part of the protected head" },
   { id: 'clipwords-closes-its-spans', file: 'src/telnet/ansi.ts', tests: ['chrome'],
     // Splitting on whitespace can drop the token carrying a span's closing
     // RESET, leaving the attribute OPEN past the row — the colour then bleeds

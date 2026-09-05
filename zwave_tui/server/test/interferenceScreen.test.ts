@@ -357,7 +357,45 @@ test('a measured noise BURST is visible at the MODAL terminal, not just in the c
   assert.notEqual(quiet, loud,
     'a 40 dB burst must not render identically to a flat trend at the modal terminal');
   assert.match(loud, /peak -62 dBm/, `the burst must be NAMED at 80x24:\n${loud}`);
-  // And the excess must not be clipped into a different, smaller number.
+  // And the excess must not be clipped into a different, smaller number, nor
+  // cut mid-sentence. The FIRST cut of this fix put the explanation in
+  // shedLine's protected HEAD — which has no whole-token path — so at 80x24 it
+  // rendered `(4 dB above the mean —` and stopped. Caught on the live mesh.
   const row = loud.split('\n').find((l) => /peak -62/.test(l)) ?? '';
   assert.doesNotMatch(row, /\(\d?$/, `no clipped dB excess: "${row.trim()}"`);
+  // THE REAL INVARIANT: the explanation is either COMPLETE or absent with a
+  // `+N`. A partial one is the failure mode — shedLine's head has no
+  // whole-token path, so anything long placed there is blind-truncated.
+  if (/dB above/.test(row)) {
+    assert.match(row, /a burst the mean hides\)/,
+      `a started explanation must finish: "${row.trim()}"`);
+  } else {
+    assert.match(row, /\+\d+|peak -62 dBm\s*$/,
+      `a dropped explanation must be disclosed or cleanly absent: "${row.trim()}"`);
+  }
+});
+
+test('the peak EXPLANATION sheds whole, and never costs the correlated hedge a row (v0.56.0)', () => {
+  // Two rules in tension: the burst must be callable out at 80x24, and the
+  // CORRELATED DEGRADATION hedge — "treat as a lead, not a verdict" — must keep
+  // its third line (v0.51.0 pinned that; losing it turns a guess into a
+  // verdict). Wrapping the peak's tail to a continuation row broke the second.
+  const flat = Array.from({ length: 48 }, () => -102);
+  const NARRATIVE = 'Many nodes degraded together with no controller-serial or flooding cause — '
+    + 'likely an RF-environment event (interference). No noise-floor measurement is used to '
+    + 'confirm this yet; treat as a lead, not a verdict.';
+  const lines = renderInterference(ctx(80, 24, cleanView({
+    noise: {
+      channels: [-101, -103, -103, -95], floor: -102, real: true,
+      trend: flat.slice(0, 24), trendCoarse: flat,
+      trendCoarseMax: [...flat.slice(0, 47).map(() => -101), -62],
+      trendCoarseDays: 3, band: 'clean',
+    },
+    correlated: { active: true, degradedNodes: 4, narrative: NARRATIVE },
+  })));
+  const joined = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join(' ').replace(/\s+/g, ' ');
+  assert.equal(lines.length, 24, 'the frame contract still holds');
+  assert.match(joined, /peak -62 dBm/, `the burst is still named: ${joined.slice(0, 400)}`);
+  assert.match(joined, /treat as a lead, not a verdict/,
+    `and it must not have cost the hedge its row: ${joined.slice(0, 600)}`);
 });

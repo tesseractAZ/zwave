@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.56.1 — 2026-09-05
+
+**The v0.56.0 peak callout was itself cut mid-sentence. Caught on the live mesh
+an hour after shipping.**
+
+The new callout rendered at the modal 80x24 — which was the point — but as
+`peak -94 dBm (4 dB above the mean —` and then stopped. The explanation had
+been put inside `shedLine`'s protected HEAD, and the head has no whole-token
+path: `visLen(headRow) > cols` falls straight through to `truncate`. That is
+the exact defect v0.51.0 closed in REMEDY's `[cost · basis]` tag, reintroduced
+one screen over by the release that was cleaning up clipping.
+
+The claim (`peak -94 dBm`) stays in the head where it cannot be shed; the
+explanation is now a TAIL token, shed whole with `+N`.
+
+The tail is deliberately NOT wrapped to a continuation row. Wrapping it cost
+the CORRELATED DEGRADATION narrative its third line at 80x24 — and that third
+line is the hedge, *"treat as a lead, not a verdict"*, which v0.51.0 pinned
+precisely because losing it turns a guess into a verdict. Two disclosure rules
+in tension; the one that changes a reading wins, and a test now holds both at
+once.
+
+1034 tests, 508 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.56.0 — 2026-09-05
 
 **A colour that never closed, a qualifier that was cut first, and a burst the
