@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.60.0 — 2026-09-05
+
+**A list that named the wrong order, a panel nobody knew existed, and two gates
+nothing was holding.**
+
+**TOPOLOGY's re-route overflow line claimed an order the list was not in.** The
+sort is `perDayOf(b) - perDayOf(a)` — a RATE — and the disclosure said *"by
+count, most first"*. The two disagree whenever nodes have different measured
+spans, which is the normal case, so an operator hunting the busiest node by
+count was reading a list ordered by something else. (The route-FAILURE panel's
+identical-looking claim is correct: that one really does sort by count.)
+
+**The route-stability panel was invisible, not merely absent.** It is
+LEFTOVER-funded on purpose — a scrolling tree must never lose a row to it, and
+a test pins that — but it needs ~51 rows at 80 columns, so at the modal size the
+frame was byte-identical with and without a measured re-route history. Absent
+reads as "nothing to say". The disclosure now rides in the title rule, which
+already occupies a row, so the row budget is untouched and the pinned decision
+stands. The old test asserted byte-identity of the whole frame while its stated
+reason was about rows; it now asserts exactly that — not one BODY row spent —
+and separately pins the disclosure.
+
+**Two CONTROLLER surplus gates had no boundary pin.** `surplus >= 4` and
+`surplus >= 9` decide whether RECENT RATES and ACTIVE MESH EVENTS render at
+all, and three gate-drift mutants survived the entire suite. A gate nobody
+tests is a gate that moves. Both boundaries are now pinned on each side, with a
+non-vacuity check that the frame one row below is not already overflowing —
+otherwise a loosened gate would add the block, have it sliced by the bodyCap
+clamp, and still pass.
+
+1048 tests, 525 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.59.0 — 2026-09-05
 
 **Three rows that described something other than what they measured.**
