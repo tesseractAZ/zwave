@@ -14,6 +14,7 @@ on which this script is modeled — there is no release-asset path.)
 It concatenates, in reading order:
     README.md            (the tour + install/quick-start)
     SECURITY.md          (the security posture + reporting)
+    PERFORMANCE.md       (measured footprint, render + verification cost)
     zwave_tui/DOCS.md    (the full system & engine reference)
 with a hard page break between each, strips DOCS.md's hand-maintained
 "## Table of Contents" (Pandoc's generated Word TOC is the single source of
@@ -93,8 +94,14 @@ def internalize_links(md: str) -> str:
 def assemble(repo_root: Path) -> str:
     readme = (repo_root / "README.md").read_text(encoding="utf-8").strip()
     security = (repo_root / "SECURITY.md").read_text(encoding="utf-8").strip()
+    # PERFORMANCE.md rides along so each release's manual carries the figures
+    # measured AT that version — the document is dated and versioned, so a
+    # snapshot per release is the useful form of it.
+    perf = (repo_root / "PERFORMANCE.md").read_text(encoding="utf-8").strip()
     docs = strip_manual_toc((repo_root / "zwave_tui" / "DOCS.md").read_text(encoding="utf-8").strip())
-    return internalize_links(readme + PAGE_BREAK + security + PAGE_BREAK + docs)
+    return internalize_links(
+        readme + PAGE_BREAK + security + PAGE_BREAK + perf + PAGE_BREAK + docs
+    )
 
 
 def main() -> int:
