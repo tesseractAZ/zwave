@@ -10,7 +10,7 @@ same rule the screens themselves keep.
 
 Reproduce any of it with the commands given; each section names its own method.
 
-- **Measured at:** v0.63.4, 2026-09-06
+- **Measured at:** v0.63.5, 2026-09-06
 - **Reference mesh:** 39 nodes (38 + controller), Zooz ZST39 LR 800-series,
   ~14 days of continuous evidence
 - **Host:** Raspberry Pi 5, Home Assistant OS, add-on container
@@ -77,13 +77,19 @@ session and transport layers. That means:
    the body, and hashes the entire body to decide whether to write at all
    (`session.ts:1107`). At 200×60 that hash walks ~17 KB. Those costs are real,
    per-frame, and excluded here.
-2. **Interference and Controller are not meaningfully measured and are omitted
-   from the tables above.** Both call `data.interference()`, which in production
-   is a **10-second TTL memo** over every node's coarse buckets
+2. **Interference and Controller are omitted from the tables above**, because
+   both are dominated by `data.interference()` rather than by rendering. In
+   production that is a **10-second TTL memo** over every node's coarse buckets
    (`zwaveData.ts:1608`, whose own comment says the fold "must NOT run per render
-   frame"). The benchmark's provider is a stub that returns a literal, so those
-   two screens' figures would measure neither the memo nor the fold. One frame in
-   ten pays the real cost, and that cost is not in this document.
+   frame"), and the benchmark's provider is a stub returning a literal — so those
+   two screens' render figures would measure neither the memo nor the fold.
+
+   The **fold itself is now measured** against a realistic bucket set (38 nodes ×
+   672 half-hour buckets over 14 days, plus the controller ring — 26 208
+   buckets): **0.87 ms per miss**, 30 iterations. At a 1 Hz redraw and a 10 s TTL
+   that is one frame in ten paying **0.09 % of the frame budget**. The memo is
+   justified caution rather than a live hazard, and the comment's warning holds
+   without the cost being operator-visible.
 3. **The draw path is not pure.** `renderOverview` writes `view.scroll`,
    `renderLog` writes `view.logCursor`. An earlier revision of this section reused
    one `ViewState` across all 500 iterations and so measured the already-converged
@@ -171,9 +177,16 @@ sample size is not distinguishable from the neighbouring hours.
 Measured by restarting the add-on and polling from a second machine, **n=1**,
 poll interval 250 ms:
 
-| milestone | measured |
-| --- | --- |
-| telnet accepting connections again | **+5.8 s** |
+| milestone | measured | poll granularity |
+| --- | --- | --- |
+| telnet accepting connections again | **+5.8 s** | 250 ms |
+| first frame with a **populated roster** | **same moment** (+8.0 s on a coarser 300 ms/2.2 s sampler) | 300 ms |
+
+The second row is the number an operator experiences, and the finding is that
+there is no gap: the persisted stores restore *before* the listener opens, so the
+add-on never serves a half-ready screen. The two runs differ (5.8 s vs 8.0 s)
+because the second sampler holds each connection open for 2.2 s to read a whole
+frame; the useful conclusion is the absence of a gap, not the absolute figure.
 
 Within that window the process restores three persisted stores and the outcome
 ledger, opens both transports, and connects the driver-WS. The engine then
@@ -214,39 +227,50 @@ Core restart, so re-publishing is what restores them.
 
 ---
 
-## 7. Not measured — and why it is listed rather than filled in
+## 7. Not measured — and why most of it does not need to be
 
-- **A whole frame.** §2 measures `renderScreen` only. The roster sort, body
-  assembly and the frame hash are per-frame and unmeasured; measuring
-  `session.draw()` with the write stubbed would settle it.
-- **Interference and Controller render cost.** Dominated by a 10-second TTL memo
-  over ~26 k coarse buckets that a synthetic provider never exercises. Both the
-  hit and the miss path need measuring against the real store.
+Everything below could be measured. The question this section asks of each is
+whether the number would **change a decision** — and for most of it the answer is
+no, so it is recorded as a known gap rather than carried as pending work.
+
+**Worth measuring if the cost is ever felt:**
+
+- **Where the harness's 836 s goes** — baseline, 542 typechecks, targeted runs,
+  full-suite fallbacks. This is the one item with a real ongoing cost: the
+  harness gates every release and was run ~15 times in a single working session.
+  A per-phase breakdown is what an optimisation attempt would start from.
+  Without `sys` time it also means "startup-bound" stays a hypothesis (§3).
+- **Per-session bandwidth.** The one attempt produced a 0 KB/s reading at 80×24
+  that the code contradicts, and it was withdrawn (§5). Re-measuring is about
+  correcting a published claim rather than about capacity — 17 KB/s at 200×60
+  against a 32-session policy cap is not a limit anyone will meet.
+
+**Known, and deliberately not measured** — the figure would not change anything
+at these magnitudes:
+
+- **A whole frame.** §2 measures `renderScreen` only; the roster sort, body
+  assembly and frame hash are per-frame and excluded. The worst measured
+  component is 412 µs against a 1 000 ms budget, so even a threefold miss leaves
+  the conclusion intact.
 - **The server's own memory,** as distinct from the container's 93.2 MB (which
-  includes `npm` and the `tsx` loader).
-- **CPU over an interval,** as distinct from one 0.02 % sample, and under varied
-  mesh traffic.
-- **Where the harness's 836 s actually goes** — baseline, 542 typechecks,
-  targeted runs, full-suite fallbacks. Without `sys` time and a per-phase
-  breakdown, "startup-bound" is a hypothesis, not a finding.
-- **Per-session bandwidth.** The one measurement attempted produced a zero at
-  80×24 that the code contradicts; it is withdrawn (§5) rather than reported.
-- **Time to first *useful* frame.** `/api/health` exposes `ready`, which is the
-  predicate that stops Overview rendering its notice card; polling that would
-  give the figure. Not done.
-- **Uncompressed `/data` size.** The compressed size is **under 5 KB** (the
-  Supervisor's per-add-on backup figure rounds to 0.00 MB; the enclosing 0.14 MB
-  archive is mostly backup metadata). The stores are columnar numeric JSON, which
-  compresses by an unknown factor, so this does **not** bound the uncompressed
-  size. Instrumenting `JSON.stringify(payload).length` at save would. (The backup
-  made for this measurement was deleted afterwards.)
-- **Throughput.** The per-IP telnet cap (4), the global telnet cap (16) and the
-  separate `/console/ws` cap (16) bound concurrency by policy at 32
-  simultaneously-drawing sessions — that is a limit, not a measured capacity.
-- **Whether the rtt coverage ceiling can be raised.** Measured at 22/38 and
-  understood: route churn resets continuous baselines, and a repeater-routed node
-  must hold one route for roughly two weeks to graduate a band. Five redesigns
-  were evaluated and rejected, each with a concrete false-symptom scenario.
+  includes `npm` and the `tsx` loader) — on a host with 7 952 MB.
+- **CPU over an interval and under varied mesh traffic,** as distinct from one
+  0.02 % sample.
+- **Uncompressed `/data` size.** Compressed it is under 5 KB (the Supervisor's
+  per-add-on backup figure rounds to 0.00 MB; the enclosing 0.14 MB archive is
+  mostly metadata). Columnar numeric JSON compresses by an unknown factor, so
+  this does not bound the uncompressed size — but nothing about a store this
+  small changes a decision. (The backup made for it was deleted afterwards.)
+- **Throughput.** The per-IP telnet cap (4), global telnet cap (16) and separate
+  `/console/ws` cap (16) bound concurrency by policy at 32 simultaneously-drawing
+  sessions. That is a limit, not a measured capacity, and one operator will not
+  approach it.
+
+**Not a gap at all:** the rtt baseline ceiling of 22/38 is *measured and
+understood* — route churn resets continuous baselines, and a repeater-routed node
+must hold one route for roughly two weeks to graduate a band. Five redesigns were
+evaluated and rejected, each with a concrete false-symptom scenario. It was
+previously listed here, which wrongly implied open work.
 
 ---
 
@@ -254,5 +278,6 @@ Core restart, so re-publishing is what restores them.
 
 | date | version | what changed |
 | --- | --- | --- |
+| 2026-09-06 | v0.63.5 | interference fold miss measured (0.87 ms, 0.09 % of budget) and time-to-useful-frame measured (no gap after listening); §7 triaged from 10 items to 2 worth measuring, 5 deliberately not, and 1 that was never a gap |
 | 2026-09-06 | v0.63.4 | **substantial correction after an adversarial audit** — render figures re-measured with a fresh `ViewState` (Overview 80×24 was understated 3.5×), Interference/Controller withdrawn as unmeasured, two cold-start figures and the bandwidth row retracted with their causes, §1/§3 claims scoped to what the samples support, §7 expanded from 4 items to 10 |
 | 2026-09-06 | v0.63.3 | first record: runtime footprint, render benchmark, verification cost, live engine figures |
