@@ -1,5 +1,27 @@
 # Per-arch base images supplied by Home Assistant.
 # 3.21 ships Node 22 in the Alpine main repo (we apk-install nodejs+npm).
+#
+# ── Why the runtime is Node 22, and what would change it (checked 2026-09-06) ──
+# The Node version is NOT a choice made here — it is whatever the base image's
+# Alpine ships. Three independent constraints, in the order they bind:
+#
+#   1. HA publishes no base newer than 3.21. ghcr.io/home-assistant/*-base tags
+#      run 3.14 … 3.21 and stop. Nothing to move to.
+#   2. Alpine main carries Node 22 on 3.21 AND 3.22; 3.23 and edge carry Node
+#      24. NO Alpine branch packages Node 26 — it exists only in Docker Hub's
+#      official `node:26-alpine`, which is itself built on Alpine 3.23/3.24.
+#   3. Node 26 is not LTS (`lts: false`); 24 is Active LTS and 22 is LTS. An
+#      unattended home-automation add-on should not lead on a Current release.
+#
+# So an upgrade needs HA to publish an Alpine 3.23+ base, and the realistic
+# target is Node 24 (LTS), not 26. Grafting binaries out of `node:26-alpine`
+# into a 3.21 base would cross two Alpine majors of musl to replace a
+# distro-maintained runtime with a hand-assembled one — for a non-LTS Node, with
+# no functional driver: the server runs on 22 in production and its full suite
+# and mutation harness already pass on Node 26 locally.
+#
+# `@types/node` is therefore pinned to ^22 on purpose (server/package.json).
+# Typing against 26 would let code compile against APIs absent at runtime.
 build_from:
   aarch64: ghcr.io/home-assistant/aarch64-base:3.21
   amd64: ghcr.io/home-assistant/amd64-base:3.21
