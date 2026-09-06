@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.63.6 — 2026-09-06
+
+**The README's own summary contradicted the document it links to.**
+
+The performance blurb added in v0.63.2 quoted *"the slowest screen redraw is
+249 µs"* and *"93 MB resident"*. Both figures were corrected in v0.63.4 — the
+render number was understated 3.5× by a benchmark that reused one mutable
+fixture, and the memory figure is the whole container rather than the server's
+own RSS — but the README was not updated with them. So the summary asserted
+numbers the detail three clicks away already retracted.
+
+That is precisely the fleet-verdict defect this project spent v0.52.0 and
+v0.60.0 removing from the screens, reproduced in the documentation. Fixed, and
+each headline is now stated as narrowly as it was actually measured.
+
+Also: `fastify` 5.12.1 → 5.12.3 and `tsx` 4.23.12 → 4.23.13, both patch. Full
+harness re-run after the bump because Fastify carries the HTTP surface —
+533 killed, 0 survived. `@types/node` stays pinned at `^22` on purpose: the
+container installs Node 22, and typing against 26 would let code compile against
+APIs absent at runtime.
+
+1061 tests, 541 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.63.5 — 2026-09-06
 
 **Two of the open performance questions answered; the rest triaged rather than
