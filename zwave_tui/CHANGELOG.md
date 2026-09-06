@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.63.4 — 2026-09-06
+
+**PERFORMANCE.md, substantially corrected after an adversarial audit of its own
+numbers.**
+
+The document shipped in v0.63.3 claimed every figure was measured. A six-lens
+audit against the source found that several measured something other than what
+they claimed, and it was right. Corrections, all verified:
+
+- **Render figures were understated up to 3.5×.** The benchmark reused one
+  `ViewState` across all 500 iterations — but the draw path is *not* pure
+  (`renderOverview` writes `view.scroll`, `renderLog` writes `view.logCursor`),
+  so iterations 2–500 took the already-converged path. Re-measured with a fresh
+  state per iteration: Overview at 80×24 is **385 µs**, not 109 µs. Worst case
+  is now 412 µs (Overview at 80×60) — still 0.04 % of the frame budget, but the
+  earlier number was not what it said it was.
+- **Interference and Controller are withdrawn from the table.** Both are
+  dominated by `data.interference()`, a 10-second TTL memo whose own comment says
+  the fold "must NOT run per render frame". The benchmark's provider is a stub,
+  so those figures measured neither the memo nor the fold.
+- **Two cold-start figures retracted.** The first polled `last_changed` (advances
+  only on a value change); the correction polled `last_updated` — but Home
+  Assistant drops a byte-identical republish, so that does not advance either.
+  Both described the polling method, not the add-on.
+- **The 0 KB/s bandwidth row retracted, along with its explanation.** It was
+  attributed to the masthead shedding its clock at 80 columns. The repo's own
+  test asserts the opposite (`chrome.test.ts:172`, *"80 cols keeps the clock"*).
+  The reading is unexplained, so it is withdrawn rather than published with a
+  story attached.
+- **§1 and §3 scoped to what the samples support.** 93.2 MB is the whole
+  container (`npm` + `tsx` + node), not the server's RSS; 0.02 % CPU is one
+  instantaneous sample. The "startup-bound, not CPU-bound" inference is dropped —
+  it needed `sys` time that was never captured.
+- **§7 grew from 4 open items to 10**, each naming the measurement that would
+  settle it.
+
+The engine section's interpretation was corrected too: the ≥2-node rule gates
+the *harm* finding, not the benefit claim, and `rssi` coverage arms no detector.
+
+1061 tests, 541 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.63.3 — 2026-09-06
 
 **A performance record, measured rather than recalled.**
