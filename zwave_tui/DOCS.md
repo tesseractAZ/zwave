@@ -119,13 +119,17 @@ diagnostic superset — but it is unauthenticated, so it is treated as privilege
 and locked down hard:
 
 ```
-DRIVER_WS_ALLOWLIST = Object.freeze(['set_api_schema', 'start_listening'])
+DRIVER_WS_ALLOWLIST = Object.freeze([
+  'set_api_schema', 'start_listening',          // state dump
+  'start_listening_logs', 'stop_listening_logs' // v0.26 log stream (read-only)
+])
 DRIVER_SCHEMA_MIN = 32   DRIVER_SCHEMA_MAX = 41
 ```
 
 - **Closed command allowlist, enforced in code**: `send()` *throws* on anything
-  outside the two-command frozen list. No health checks, no pings, no route
-  surgery — nothing that transmits RF. (The `extra` object is spread *first* so a
+  outside the four-command frozen list. No health checks, no pings, no route
+  surgery — nothing that transmits RF; the v0.26 log pair only toggles this
+  client's own `receiveLogs` flag server-side. (The `extra` object is spread *first* so a
   colliding `extra.command` can never override the checked value — the v0.13
   spread-order bypass fix.)
 - **Read-only telemetry only**: the `start_listening` state dump plus
@@ -2689,7 +2693,7 @@ The remediation engine's fourth stage (evidence → baselines → symptoms → *
 
 Two properties define this milestone and everything below follows from them:
 
-1. **Advisory.** Per the owner's decision, the engine never executes its recommendations. There is no `executor.ts` and no `auto_remediation` tier this milestone (DESIGN §3.5). The ledger's "action arm" is therefore not populated by the engine — it is populated by whatever the operator ran through the pre-existing type-CONFIRM Actions Menu (v0.9). The learned numbers flow *back into* the planner as advice; they never trigger anything.
+1. **Advisory — as of M5, and still advisory for every action but one.** Per the owner's decision there is no `executor.ts` and no `auto_remediation` tier (DESIGN §3.5), so the planner recommends and a person acts. **As shipped this is no longer the whole story, and the difference shows up right here in the ledger.** v0.30's opt-in auto-ping added one autonomous remediation lane, and it runs through the same `ActionRunner` with `learn: true` and `origin: 'engine'` (`zwaveActions.ts`) — so the action arm is populated by operator type-CONFIRM actions **and** by engine auto-pings, not by the operator alone as this milestone originally described. The distinction that *is* still exact is per-lane, not per-actor: the **remediation** ping teaches the ledger, while the **measurement** probes — the sweep and the verification lanes — deliberately pass `learn: false` (v0.38.1) so instrumentation never scores itself. The learned numbers flow *back into* the planner as advice; they never trigger anything beyond that one gated lane.
 2. **The unit is an episode, not an action.** The ledger records **every** symptom episode whether or not an action was taken. Episodes that resolve untouched are the **control arm** — the spontaneous-recovery base rate the mesh self-heals at. *Untouched now has teeth (v0.40):* an episode whose node went **Dead** mid-episode, or on which a successful remediation ran unattributed (the confirmation-window skip), is **confounded** — counted apart (`confounded(kind)`, its own REMEDY row, a closure-line tag) and credited to NEITHER arm, the non-improvements excluded from the control *n* as well. The audited exemplar: an rtt-degraded symptom cleared, the dead-remediation ping revived the node during the confirmation window, and the ledger booked "improved (no action)" — a spontaneous recovery that was nothing of the sort. The Dead transition is marked by the data layer (`markConfounded`), which owns node status; the skip path marks itself inside `recordAction`. A death that opens and closes **between two level samples** is invisible to a status read but not to the event-driven flap counter, which is drained into the evidence tier every tick — so the guard consults that counter too (v0.40.2), on the same argument the evidence tier already makes for flaps generally. **Never `dead-flap`** (pre-release review, critical): Dead status is that symptom's own *definition* — its node is Dead by construction while the episode is open, so status-marking it would structurally starve the dead-flap control arm forever, the exact v0.36 inert-learning-loop disease reintroduced by the guard built to protect the arms. A confound is a death *external* to the measured signal; the action-skip path still applies to every kind, dead-flap included. Without that control arm you cannot honestly say an action "helped," because a Z-Wave Plus mesh self-heals via explorer frames on its own (RESEARCH §5; the patio-light switches that healed unaided are the canonical example, and the "regression-to-the-mean trap" the guards below defend against).
 
 ### 9.1 Data shapes
