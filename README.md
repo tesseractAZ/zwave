@@ -213,9 +213,15 @@ takes, and appropriate for a panel that can remove a failed node or unlock a loc
 
 Measured runtime footprint, render cost, verification cost and what the engine
 has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
-Headlines — 0.02 % CPU and 93 MB resident; the slowest screen redraw is 249 µs
-against a 1 000 ms frame budget; 1 061 tests in 11 s and 541 mutants in 14 min
-gate every release.
+
+Headlines, each stated as narrowly as it was measured: the slowest screen
+redraw is **412 µs** against a 1 000 ms frame budget; the container holds
+**93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
+RSS) and sampled **0.02 % CPU** once, not as an average; **1 061 tests in 11.4 s**
+and **541 mutants in ~14 min** gate every release.
+
+That document also carries what is *not* measured, and why most of it does not
+need to be.
 
 ## The machine-readable boundary
 
