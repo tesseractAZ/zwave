@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.63.7
+
+### Fixed — the security policy claimed a guarantee the code does not make
+
+`SECURITY.md` is the one document a reader consults *instead of* auditing the
+code, so a claim there that is stronger than the mechanism behind it is worse
+than no claim at all. Six such claims had accumulated across `SECURITY.md` and
+`DOCS.md`, each true when written and left standing while a later release added
+an exception. No code changed in this release — the code was already correct;
+the documents describing it were not.
+
+- **"There is no automatic-remediation path in the shipped build" — false since
+  v0.30.** Auto-ping is exactly that path. It is double-gated
+  (`auto_ping_enabled` defaults off *and* it independently obeys
+  `write_actions_enabled`, `index.ts:121`), and `config.yaml` has said so at the
+  option itself the whole time — "the ONLY thing the engine does without a human
+  pressing a key". A ping transmits, and `SECURITY.md` lists ping among the
+  mutating mesh actions, so the policy contradicted its own list. It now names
+  auto-ping as a genuine autonomous write and states its bounds — the double
+  gate, mains-only, the attempt cap and backoff, and the storm / rebuild /
+  restart suppressors — rather than denying the path exists. A reviewer who
+  believed "it never executes" would have skipped auditing the one path most
+  worth auditing.
+- **The driver-WebSocket allowlist is four commands, not two.** The v0.26 log
+  pair (`start_listening_logs` / `stop_listening_logs`) joined
+  `set_api_schema` / `start_listening`. `DOCS.md` carried the worse form of this
+  error — a *quoted code literal* showing the two-entry array. Both are
+  corrected, and both now record that none of the four transmits over RF. Also
+  now stated where a security reader will find it: zwave-js-server's log
+  forwarder is a single global transport whose first subscriber's filter applies
+  to every other client, which is why this client subscribes with **no filter**
+  rather than narrowing a stream the operator's own log viewer shares.
+- **Home-id binding covers the evidence envelope, not "learned state".**
+  `bindHomeId` reaches `evidenceStore` alone; the outcome ledger, the per-node
+  baselines and the history series persist as separate `/data` files with no
+  home-id tag. After a controller swap they are stale rather than purged. The
+  policy said both were bound.
+- **The outcome ledger's action arm is no longer operator-only.** `DOCS.md` §M5
+  described an arm populated solely by type-CONFIRM actions. Since v0.30 the
+  auto-ping *remediation* lane runs through the same runner with `learn: true`
+  and `origin: 'engine'` (`zwaveActions.ts:240`). The distinction that is still
+  exact is per-lane rather than per-actor: the remediation ping teaches the
+  ledger, while the sweep and verification *measurement* lanes pass
+  `learn: false` (v0.38.1) so instrumentation never scores itself.
+
+`README.md` needed no change — it already carved out auto-ping as "the one
+autonomous write" in three places, which is how the contradiction was visible at
+all.
+
 ## 0.63.6 — 2026-09-06
 
 **The README's own summary contradicted the document it links to.**

@@ -32,15 +32,32 @@ seriously.
   one — mesh maintenance (ping / refresh / re-interview / rebuild-routes /
   remove-failed), device control (on/off/toggle, open/close, lock/unlock), and
   config writes — still requires the operator to open the Actions Menu and type
-  the literal word **CONFIRM** (only a bare `p` ping shortcut is immediate). The
-  *engine* is **advisory-only**: it recommends, it never executes — there is no
-  automatic-remediation path in the shipped build, and device control / config
-  writes are operator-initiated only.
+  the literal word **CONFIRM** (only a bare `p` ping shortcut is immediate).
+  Device control and config writes are operator-initiated only.
+- **The engine recommends; exactly one narrow path acts on its own.** The engine
+  is advisory by default: it diagnoses, and what it proposes waits for a person.
+  The single exception is **auto-ping**, which is *double*-gated —
+  `auto_ping_enabled` defaults **off** *and* it independently obeys
+  `write_actions_enabled`, so both must be turned on deliberately before it can
+  do anything. With both on, a **mains-powered** node still Dead after the dwell
+  is probed with no keypress, as is a node silent past `auto_ping_stale_min`. A
+  ping transmits, so this is a genuine automatic path and is named here as one.
+  It is bounded: `auto_ping_max_attempts` per outage on a widening backoff, and
+  suppressed during storms, route rebuilds and restarts. Nothing else — refresh,
+  re-interview, rebuild-routes, remove-failed, device control, config writes —
+  has any automatic path whatsoever.
 - **All mesh mutations ride the Home Assistant WebSocket** (authenticated with
   the Supervisor token). The separate, unauthenticated **driver WebSocket**
   (`ws://core-zwave-js:3000`) is used **strictly read-only**, behind a closed
-  two-command allowlist, and is **never proxied or re-exposed** to the TUI,
-  ingress, or logs.
+  four-command allowlist — `set_api_schema`, `start_listening`, and the
+  log-stream pair `start_listening_logs` / `stop_listening_logs` — and is
+  **never proxied or re-exposed** to the TUI, ingress, or logs. None of the four
+  transmits over RF: the log pair toggles this client's own receive flag and
+  nothing more. One cross-client property is worth naming rather than leaving
+  implicit — zwave-js-server's log forwarder is a *single global transport*
+  whose first subscriber's filter is silently applied to every other client, so
+  this client subscribes with **no filter** rather than narrowing a stream the
+  operator's own Z-Wave log viewer shares.
 - **Trust model.** Access over the Home Assistant sidebar (ingress) is already
   HA-authenticated, and the panel is **admin-only** (`panel_admin: true`) — the
   console can remove a failed node and, with write actions on, unlock a lock.
@@ -78,10 +95,14 @@ seriously.
   the network beyond what the TUI already shows an authenticated operator.** It
   writes no other entity, and it sends no notification: alerting policy is left
   to the operator's own automations rather than hardcoded here.
-- **The controller mesh is bound by home id.** Persisted evidence and learned
-  state are tagged with the controller's `homeId`; a mismatch on reconnect (a
-  stick swap / different NVM) purges the restored state rather than aliasing one
-  network's data onto another.
+- **The controller mesh is bound by home id.** The persisted **evidence**
+  envelope is tagged with the controller's `homeId`; a mismatch on load (a stick
+  swap / a different NVM) starts fresh rather than aliasing one network's data
+  onto another, and a driver-versus-Core mismatch purges driver telemetry and
+  stops that client. The bound store is the evidence envelope specifically: the
+  learned outcome ledger, the per-node baselines and the history series persist
+  as separate `/data` files carrying no home-id tag, so after a controller swap
+  they are stale rather than purged.
 
 ## Scope
 
