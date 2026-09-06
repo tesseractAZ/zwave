@@ -1,7 +1,7 @@
 name: "Z-Wave TUI"
-version: "0.63.1"
+version: "0.63.2"
 slug: zwave_tui
-description: "Telnet control-room TUI for Z-Wave mesh/node health"
+description: "Control-room TUI for Z-Wave mesh health — telnet + sidebar console, a learned advisory engine, and its conclusions as HA entities"
 url: https://github.com/tesseractAZ/zwave
 arch:
   - aarch64

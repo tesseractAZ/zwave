@@ -798,13 +798,22 @@ via n7 @ 9.6k, F+R flags, RSSI improving) and #3 South Patio Light (77, "DROP
 ## 7. Honest gaps (unknowns to close before depending on them)
 
 **Blocking / probe-before-build:**
-1. **Does HA's `subscribe_node_statistics` event serialize the nested `lwr/nlwr`
-   objects** (protocolDataRate, repeaters, repeaterRSSI, `routeFailedBetween`,
-   routeSchemeState), or only flat counters? Per-hop localization (§2.3) and rate
-   diagnosis (§2.2) depend on it. **Capture a live event before building M3.**
-2. **Background RSSI / SNR is unreachable via HA** (§1.5) — confirmed dropped at
-   the WS boundary. Interference detection (M6) is passive-only until a driver-WS
-   phase or upstream HA PR. Design the interface; gate SNR features as phase-2.
+1. ~~**Does HA's `subscribe_node_statistics` event serialize the nested
+   `lwr/nlwr` objects**~~ — **ANSWERED: yes.** The event carries the nested
+   route objects, including `repeaters` (as HA `device_id`s, mapped back to node
+   ids by `zwaveData.mapRoute`), `protocolDataRate`, `repeaterRSSI` and
+   `routeFailedBetween`. Per-hop localization and rate diagnosis were built on
+   it and ship; the TOPOLOGY route tree and DETAIL's LWR/NLWR rows are the
+   consumers. **Caveat that survived:** `repeaters` arrives as device ids, not
+   node ids — a mesh whose registry join is incomplete silently maps to node `0`.
+2. ~~**Background RSSI / SNR is unreachable via HA**~~ — **CLOSED by the
+   driver-WS phase (v0.13), not by an HA change.** The premise still holds — HA
+   drops it at the WS boundary — but the read-only driver-WS client reads
+   `backgroundRSSI` directly and the noise floor is now measured rather than
+   assumed. Every screen that quotes it distinguishes the two (`-99 dBm` vs
+   `-99 dBm assumed`), and `hasRealNoise()` gates the distinction on a reading
+   under 90 s old **from the bound home id** — a stale or wrong-network value
+   falls back to the assumed floor rather than being presented as measured.
 3. **Priority-route cached reads** (`getPriorityReturnRoutesCached`) are not in
    HA WS → the safe-rebuild precondition can't be checked; **warn
    unconditionally** (§2.4).
