@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.63.5 — 2026-09-06
+
+**Two of the open performance questions answered; the rest triaged rather than
+carried.**
+
+v0.63.4 left ten items under *Not measured*. A list that long reads as pending
+work, so each was put to one test: **would the number change a decision?**
+
+Two could have, and were measured:
+
+- **The interference fold's miss path** — the one render cost with a plausible
+  operator-visible effect, since `data.interference()` is a 10-second TTL memo
+  whose own comment says the fold "must NOT run per render frame". Measured
+  against a realistic set (38 nodes × 672 half-hour buckets + the controller
+  ring, 26 208 total): **0.87 ms per miss**, i.e. one frame in ten paying
+  **0.09 %** of the budget. The memo is justified caution, not a live hazard.
+- **Time to a genuinely useful frame** — the number an operator experiences
+  after a restart. It arrives at the **same moment** telnet starts accepting:
+  the persisted stores restore before the listener opens, so the add-on never
+  serves a half-ready screen.
+
+The remaining eight are now split three ways: **two worth measuring if the cost
+is ever felt** (where the harness's 836 s goes — the one item with a real
+recurring cost; and per-session bandwidth, to correct a withdrawn claim), **five
+deliberately not measured** because 412 µs against a 1 000 ms budget, 93 MB
+against 7 952 MB, and a sub-5 KB store do not change anything, and **one that was
+never a gap at all** — the 22/38 rtt baseline ceiling is measured and understood,
+and listing it implied open work that does not exist.
+
+1061 tests, 541 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.63.4 — 2026-09-06
 
 **PERFORMANCE.md, substantially corrected after an adversarial audit of its own
