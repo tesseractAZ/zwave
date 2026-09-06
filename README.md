@@ -12,16 +12,19 @@ config-write actions) and, strictly read-only, to the **Z-Wave JS driver WebSock
 for the real background-noise
 floor and capability flags that HA does not expose. It persists a per-node
 evidence time-series, scores every node worst-health-first, detects mesh symptoms,
-and recommends fixes — across **eight screens**, over a telnet server and a
-browser console.
+and recommends fixes — across **nine screens**, over a telnet server and a
+browser console, and publishes what it concludes as Home Assistant entities.
 
 ![The Overview screen: a live node table sorted worst-health-first, with per-node health scores, SNR margin, RTT, timeout rate, hop count, data rate and triage flags](docs/screenshots/overview.svg)
 
-**One engine, two front doors:**
+**One engine, three front doors — two for people, one for machines:**
 
 - **Telnet** on port `2324` — a full-screen terminal on your LAN.
 - **Browser console** in the Home Assistant sidebar (HA Ingress) — works inside
   the HA mobile app, no extra ports exposed.
+- **Home Assistant entities** + `GET /api/health` — everything the engine
+  concludes, in a form an automation or a monitor can act on. See
+  *[The machine-readable boundary](#the-machine-readable-boundary)*.
 
 The Home Assistant add-on — including the Node/TypeScript server — lives in
 [`./zwave_tui`](./zwave_tui); the server source is under
@@ -89,10 +92,11 @@ dismisses with `q` / `Esc`.
 | 6 | **Log** | Driver/value/notification events + command outcomes; scroll, filter; error events latch **bold-red until acknowledged** (`M` releases the latch, for every session). |
 | 7 | **Remedy** | The engine's diagnoses + ranked recommendations, with learned "helped X%" efficacy. |
 | 8 | **Interference** | Noise floor + recent/multi-day trend, serial-link health, diurnal timeout heatmap. |
+| 9 | **Engine** | The engine's own runtime: auto-ping state and per-node ladder, the episodes it is measuring right now, and every learned rate with the `n` behind it. |
 
-**Keys.** `1`–`8` jump to a screen (`c` Controller, `e` Log, `y` Remedy, `f`
+**Keys.** `1`–`9` jump to a screen (`c` Controller, `e` Log, `y` Remedy, `f`
 Interference are shortcuts too). On Overview: `j`/`k` move, `Enter` detail, `/`
-filter, `s` sort, `t` margin↔dBm. `a` opens the **Actions Menu** for the selected
+filter, `s` sort (health · id · name · rssi · seen · **symptom**), `t` margin↔dBm. `a` opens the **Actions Menu** for the selected
 node (on the Controller screen it opens the **mesh-wide** actions instead);
 `p` pings the selected node (gated); `q` quits.
 
@@ -148,7 +152,16 @@ Grade bands: **A** ≥ 90, **B** ≥ 80, **C** ≥ 70, **D** ≥ 55, **F** < 55.
 
 Flags: `D` dead · `S` stale · `W` weak signal · `F` response timeouts · `R` route
 problem · `L` high latency · `I` incomplete interview · `B` battery low ·
-`U` firmware update available (advisory — never affects the score).
+`U` firmware update available (advisory — never affects the score). A trailing
+`!` marks a node the **engine** holds an open critical finding on, and `·` a
+lesser one — a separate judgement from the score, and it sorts.
+
+**The score says how much of itself is assumption.** Signal (25%) and Route
+(20%) fall back to a neutral value when there is nothing to measure — a routed
+node has no usable RSSI of its own — so up to 45% of a grade can stand on
+defaults. Detail states the share and which lanes, directly under the gauge: a
+`C` built half out of defaults and a `C` built out of measurements are different
+claims about a device.
 
 ## Write actions & safety
 
@@ -195,6 +208,64 @@ untrusted network, enable the optional **login gate** (plaintext or `scrypt:`
 passwords, with a per-peer backoff). The sidebar console is **restricted to Home
 Assistant administrators** — the same position the official Z-Wave JS add-on
 takes, and appropriate for a panel that can remove a failed node or unlock a lock.
+
+## The machine-readable boundary
+
+Everything the engine concludes used to be reachable only from a terminal behind
+a login gate — which nothing can poll and nobody watches at 3am. `/api/health`
+answered one question, *"can this add-on see Home Assistant?"*, so a mesh with
+every node dead still returned `200 OK`.
+
+The engine's conclusions are published as ordinary Home Assistant entities,
+re-asserted every 30 seconds:
+
+| entity | state | notable attributes |
+| --- | --- | --- |
+| `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason` |
+| `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
+| `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
+| `sensor.zwave_tui_engine` | `running` / `suppressed:<why>` / `disabled` | `detectors_ready`, `detectors_total` |
+
+`GET /api/health` carries the same values — built from the same function, so a
+monitor polling HTTP and an automation triggering on state cannot disagree about
+the mesh. `ok` there stays a pure **transport** verdict and the HTTP status code
+still tracks it alone: a degraded mesh is not a broken add-on, and conflating
+them would make an existing uptime check flap on a single symptom.
+
+**`degraded` is deliberately not "any symptom exists."** A warning-level symptom
+on one node is the resting state of a real mesh, and an alert that is always on
+is not an alert. It fires on a summons (the remediation ladder has spent its
+budget and is asking for a person), a critical symptom, or the engine being
+structurally unable to do its job.
+
+**There is no built-in notifier, on purpose.** The add-on could call
+`notify.mobile_app_*` directly — it has the permission — but that hardcodes a
+*policy* (who is told, when, how loudly, whether it bypasses Do Not Disturb)
+into a diagnostic console. As state, your existing notification setup,
+automations, dashboards and history all work on it unchanged:
+
+```yaml
+automation:
+  - alias: Z-Wave needs a human
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.zwave_tui_degraded
+        to: "on"
+        for: "00:05:00"          # ride out a transient
+    action:
+      - service: notify.mobile_app_iphone
+        data:
+          title: Z-Wave mesh degraded
+          message: >-
+            {{ state_attr('binary_sensor.zwave_tui_degraded', 'reason') }}
+            (nodes: {{ state_attr('sensor.zwave_tui_summons', 'node_ids') }})
+```
+
+These are *unmanaged* states — created over the REST API, with no device and no
+`unique_id` — so they do **not** survive a Home Assistant Core restart.
+Re-publishing on the interval self-heals that within 30 seconds rather than
+adding an MQTT dependency. The entity ids are published API: renaming one breaks
+every automation built on it.
 
 ## Install
 

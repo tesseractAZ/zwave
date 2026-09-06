@@ -57,7 +57,12 @@ seriously.
   **per-source-IP cap of 4**, reclamation of connections that have *received*
   nothing for 30 minutes, and TCP keepalive for half-open peers. Without the
   per-IP cap and the idle reclaim, a single LAN machine could hold every slot
-  indefinitely and deny the TUI to every operator.
+  indefinitely and deny the TUI to every operator. **A refused connection is
+  also reclaimed** — `end()` is only a half-close, so the descriptor stayed the
+  server's until the peer closed its own side, and a refused socket joins no
+  connection set, meaning neither the active counter nor the idle sweep could
+  see it. A peer that never closes pinned one descriptor per refusal, without
+  limit, on the exact branch whose job is to shed load.
 - **Input is sanitized at the boundary.** Device names and externally-sourced
   state strings — **including error text from Home Assistant, the driver and the
   device**, which reaches the frame on the action-result card and the roster's
@@ -65,6 +70,14 @@ seriously.
   terminal frame. The strip covers **C0, DEL and C1 (U+0080–U+009F)**; C1 matters
   because U+009B is an 8-bit CSI and U+009D an 8-bit OSC, and xterm.js executes
   both. Inbound console WebSocket frames are size-capped.
+- **What the add-on writes to Home Assistant, and what it does not.** Besides
+  operator-initiated mesh actions, the add-on publishes four *diagnostic* states
+  over the Core REST API — a degraded flag, a count of nodes needing attention,
+  a live symptom count, and the engine's own run state. They carry node ids,
+  counts and symptom kinds; **no credentials, no device state, and nothing about
+  the network beyond what the TUI already shows an authenticated operator.** It
+  writes no other entity, and it sends no notification: alerting policy is left
+  to the operator's own automations rather than hardcoded here.
 - **The controller mesh is bound by home id.** Persisted evidence and learned
   state are tagged with the controller's `homeId`; a mismatch on reconnect (a
   stick swap / different NVM) purges the restored state rather than aliasing one

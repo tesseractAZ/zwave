@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.63.2 — 2026-09-05
+
+**Documentation caught up with sixteen releases.**
+
+No behaviour change. The docs had drifted from the code in ways that mattered
+to a reader:
+
+- **README claimed eight screens.** There are nine — ENGINE shipped in v0.41.0
+  and was never added to the table, and the key hint still said `1`–`8`.
+- **README described two front doors.** There are three: telnet, the sidebar
+  console, and — since v0.57.0 — the Home Assistant entities and enriched
+  `/api/health` that let something other than a person act on what the engine
+  concludes. That surface had no README section at all; it now has one, with the
+  entity table and a worked automation.
+- **DESIGN.md said no container image is published.** It is: `config.yaml`
+  declares `image: ghcr.io/<owner>/{arch}-zwave-tui` and `publish-release.yml`
+  pushes multi-arch on every tag, which is why installs pull rather than build.
+  The milestone table also stopped at M7 (v0.18); everything since is grouped by
+  what each run *proved* rather than listed release by release.
+- **SECURITY.md** now records the refused-socket reclaim (a descriptor leak on
+  the branch whose job is to shed load) and states plainly what the add-on
+  writes to Home Assistant — four diagnostic states, no credentials, no device
+  state, and no notification, because alerting policy belongs to the operator.
+- **RESEARCH.md's honest-gaps list** carried two questions the project has since
+  answered. They are marked answered with what was found, not deleted: a
+  research register that quietly drops its own open questions is worth less than
+  one that records how they closed.
+
+The printable `.docx`/`.pdf` manual is assembled in CI from README + SECURITY +
+DOCS, so it inherits all of the above and is reattached to this release.
+
+1061 tests, 541 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.63.1 — 2026-09-05
 
 **A disclosure that could never retire, and two fixtures the compiler was not

@@ -582,4 +582,28 @@ options only for knobs a stranger genuinely needs.
 Each lands as its own `vX.Y`, typecheck+tests+adversarial review, same
 pipeline as v0.5–v0.11. The repository is **public**, and each version is cut
 as a GitHub Release with the printable manual attached (`publish-release.yml`).
-No container image is published — Supervisor builds the add-on from source.
+That workflow also builds and pushes a **multi-arch container image** to GHCR
+(`ghcr.io/<owner>/{arch}-zwave-tui`), which is what `image:` in `config.yaml`
+points the Supervisor at — so an install pulls a prebuilt image rather than
+building from source. (An earlier revision of this section said the opposite;
+`config.yaml:24` and `publish-release.yml` are the record.)
+
+### 5.1 After M7 — the honesty milestones
+
+M2–M7 built the engine. Everything after is about the same question asked of
+the engine itself: **can a screen be trusted to mean what it says?** Grouped by
+what each run proved, rather than listed per release.
+
+| | ships | proves |
+| --- | --- | --- |
+| the ledger's voice (v0.41–v0.44) | ENGINE screen; `worse` tallied apart from `no-change`; harm gated on the control arm's own regression rate; provenance (`n` + node count) beside every rate | a learned claim carries the evidence behind it, and an idle ledger is distinguishable from an absent one |
+| nothing clips into a lie (v0.45, v0.51, v0.55–v0.56) | whole-token shedding (`shedLine`/`fieldStrip`/`fitBits`), then `clipWords` for prose; ladders that shed whole *forms* | degradation is disclosed, never silent — a row that runs out of room says so rather than ending mid-claim |
+| coverage is not health (v0.46–v0.48) | partial-coverage empty state; the route-change baseline wipe fixed; dossier yardsticks bridged | "no symptoms" is separated from "no detector could fire" |
+| the log can be read (v0.50, v0.53) | severity written to the sink; `LogSink` for silent subsystems; `fatal` for the bootstrap catch; descriptor reclaim; session teardown on both transports | an operator grepping the container log can find the one line that matters |
+| measurements are measurements (v0.54, v0.59, v0.61) | RSSI domain rule applied at the store; fail-closed on an unknown route; a floored reliability denominator; one spelling per reading; the score declares how much of itself is assumption | a number on screen is a measurement or is labelled as not one |
+| fleet verdicts agree with their own screen (v0.52, v0.58, v0.60) | empty-state token keyed to the branch that rendered; the mesh meter counts what the scorer failed; symptoms on the roster; ordering claims that match the sort | the summary line and the detail beneath it cannot contradict each other |
+| the machine-readable boundary (v0.57) | engine conclusions as HA entities + enriched `/api/health`, from one shared builder | what the engine concludes is reachable by something other than a person at a terminal |
+
+The verification gate grew with them: **mutation coverage** (`scripts/mutation-check.mjs`)
+is now the release gate, with `MISSING`, `AMBIGUOUS` and `INVALID` all counted
+as failures and an anchor pre-flight that refuses to run over a stale entry.
