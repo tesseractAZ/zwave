@@ -209,6 +209,14 @@ passwords, with a per-peer backoff). The sidebar console is **restricted to Home
 Assistant administrators** — the same position the official Z-Wave JS add-on
 takes, and appropriate for a panel that can remove a failed node or unlock a lock.
 
+## Performance
+
+Measured runtime footprint, render cost, verification cost and what the engine
+has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
+Headlines — 0.02 % CPU and 93 MB resident; the slowest screen redraw is 249 µs
+against a 1 000 ms frame budget; 1 061 tests in 11 s and 541 mutants in 14 min
+gate every release.
+
 ## The machine-readable boundary
 
 Everything the engine concludes used to be reachable only from a terminal behind

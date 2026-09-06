@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.63.3 — 2026-09-06
+
+**A performance record, measured rather than recalled.**
+
+New `PERFORMANCE.md` — a living document of what the add-on costs to run, what
+it costs to verify, and what the engine has actually learned on a live mesh.
+Every figure was measured for this pass; nothing was carried over from memory or
+estimated.
+
+- **Runtime footprint:** 0.02 % CPU, 93.2 MB resident, steady state with both
+  transports live.
+- **Render cost:** per-screen, 500 iterations each, at 80×24 and 200×60. The
+  worst case is Overview at 200×60 — **249 µs against a 1 000 ms frame budget**.
+  Three screens are *faster* at the larger size, because the narrow frame does
+  extra shedding work the wide one skips.
+- **Verification cost:** 1 061 tests in 11.4 s; 541 mutants in 836 s wall
+  against 621 s CPU — the gap is why the harness is startup-bound rather than
+  CPU-bound, and why kill-fast selection earns its bookkeeping.
+- **What the engine learned:** the live efficacy arms with their `n`, the
+  detector-coverage ceiling, and the evidence-quality split. Both action arms
+  currently read *not distinguishable* — the ledger declining to credit a ping
+  that has not beaten spontaneous recovery is the system working, not a gap.
+- **§6 lists what is NOT measured** — cold-start time, on-disk store size,
+  render cost under symptom load, throughput limits — rather than filling those
+  rows with plausible numbers. Same rule the screens keep.
+
+The printable manual now carries it between SECURITY and DOCS, so each release's
+`.docx`/`.pdf` snapshots the figures measured at that version.
+
+1061 tests, 541 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
+
 ## 0.63.2 — 2026-09-05
 
 **Documentation caught up with sixteen releases.**
