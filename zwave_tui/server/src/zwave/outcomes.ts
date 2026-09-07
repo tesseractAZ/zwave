@@ -33,7 +33,9 @@
  *     not merely until minimum-attempts — and always renders with its n.
  */
 
+import type { IdentityChoice, IdentityDecision } from './homeTag';
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { readHomeTag, tagToWrite, archiveLiveFile, hasArchiveFor, restoreArchive } from './homeTag';
 import type { LogSink } from '../logger';
 import type { ActionKind, Efficacy } from '../types';
 import type { SymptomKind } from './symptoms';
@@ -265,6 +267,16 @@ export interface OutcomeStore {
   /** Pure serialize / restore (the fs wrappers above delegate to these). */
   toJSON(): unknown;
   loadJSON(raw: unknown): void;
+  /** Bind the live controller identity. The first known id validates what was
+   *  restored; a CHANGE parks the store (memory wiped, saves latched off, file
+   *  untouched) and waits for `resolveIdentity`. */
+  bindHomeId(id: number): void;
+  /** The identity decision waiting on the operator, or null. */
+  pendingIdentity(): IdentityDecision | null;
+  /** Answer it. `fresh` archives the previous network's ledger and starts over;
+   *  `keep` re-adopts it under the live identity. False = still pending (the
+   *  archive failed, so saves stay latched rather than overwrite it). */
+  resolveIdentity(choice: IdentityChoice): boolean;
 }
 
 /** Median of a numeric list, or null if empty. */
@@ -631,6 +643,16 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
    *  claimed it had one — so it rewrote the whole file 288×/day regardless.
    *  baselines.ts and evidenceStore.ts both open save() with the same guard. */
   let dirty = false;
+  /** Read in load() from the RAW envelope — before loadJSON's `v !== 1` gate,
+   *  which returns silently and would otherwise leave the tag unread. */
+  let loadedHomeId: number | null = null;
+  let boundHomeId: number | null = null;
+  let persistBlocked = false;
+  /** The foreign id awaiting an operator decision (null = none pending). */
+  let pendingPrevious: number | null = null;
+  /** A decision is open. Separate from pendingPrevious, which is legitimately
+   *  null for a returning stick with nothing live to conflict with. */
+  let pendingAsked = false;
 
   // Per-kind control arm (no-action episodes) and per-detector false positives.
   const control = new Map<SymptomKind, Tally>();
@@ -1005,7 +1027,11 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const path = opts.path;
       if (!path || !existsSync(path)) return;
       try {
-        this.loadJSON(JSON.parse(readFileSync(path, 'utf8')));
+        const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+        // IDENTITY FIRST: loadJSON's `v !== 1` guard returns SILENTLY, so a tag
+        // read inside it would go unread on exactly the paths that reject data.
+        loadedHomeId = readHomeTag(parsed);
+        this.loadJSON(parsed);
         log(`outcomes: restored ${control.size} kind(s) + ${action.size} action arm(s)`);
       } catch (e) {
         log(`outcomes: load failed (${e instanceof Error ? e.message : String(e)}) — starting fresh`);
@@ -1016,6 +1042,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const path = opts.path;
       if (!path) return;
       if (!dirty) return; // nothing learned since the last write (v0.26)
+      // A foreign ledger we could not archive is still on disk — leave it.
+      if (persistBlocked) return;
       try {
         const tmp = `${path}.tmp`;
         writeFileSync(tmp, JSON.stringify(this.toJSON()), 'utf8');
@@ -1027,9 +1055,72 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       }
     },
 
+    bindHomeId(id: number): void {
+      if (boundHomeId === id) return;
+      // ASK when the live state is not already this controller's — which covers
+      // TWO cases, not one. The obvious one is a conflicting tag. The other is
+      // a RETURNING stick with nothing live to conflict with: swap A→B, never
+      // save on B, swap back to A. `loadedHomeId` is null there, so a
+      // conflict-only test finds nothing and A's own archived learning is never
+      // offered — the archive exists and the operator is never told.
+      const conflict = loadedHomeId != null && loadedHomeId !== id;
+      const returning = loadedHomeId !== id && hasArchiveFor(opts.path ?? '', id);
+      boundHomeId = id;
+      if (!conflict && !returning) { loadedHomeId = id; return; }
+      // DECIDE NOTHING. Park: wipe memory so the engine cannot act on another
+      // network's learning, latch saves so nothing overwrites the file, and
+      // wait to be asked.
+      pendingPrevious = loadedHomeId;
+      pendingAsked = true;
+      persistBlocked = true;
+      // Efficacy learned on other hardware is not merely stale — it is about
+      // different devices. reset() marks dirty so the empty state persists.
+      this.reset();
+    },
+
+    pendingIdentity(): IdentityDecision | null {
+      if (!pendingAsked || boundHomeId == null) return null;
+      return {
+        previous: pendingPrevious,
+        live: boundHomeId,
+        resumable: hasArchiveFor(opts.path ?? '', boundHomeId),
+      };
+    },
+
+    resolveIdentity(choice: 'fresh' | 'keep' | 'resume'): boolean {
+      if (!pendingAsked || boundHomeId == null) return false;
+      if (choice === 'fresh') {
+        // Archive FIRST: if the previous network's file cannot be moved to
+        // safety, stay latched rather than resume saving over it.
+        if (!archiveLiveFile(opts.path ?? '', pendingPrevious, (m) => log(m))) return false;
+        this.reset();
+      } else if (choice === 'resume') {
+        // The returning stick's own learning. restoreArchive parks what is live
+        // before moving the archive in, so a failure changes nothing.
+        if (!restoreArchive(opts.path ?? '', boundHomeId, pendingPrevious, (m) => log(m))) return false;
+        this.load();
+      } else {
+        // KEEP: the operator says this is the same mesh under a new identity
+        // (the NVM-restore case). Re-read, then RE-STAMP below — load() puts
+        // the OLD id back, and without the re-stamp the next swap would archive
+        // this file under the wrong controller.
+        this.load();
+      }
+      loadedHomeId = boundHomeId;
+      pendingPrevious = null;
+      pendingAsked = false;
+      persistBlocked = false;
+      dirty = true; // the re-stamp (or the fresh/resumed state) must reach disk
+      return true;
+    },
+
     toJSON(): unknown {
       return {
         v: 1,
+        // OPTIONAL — `v` stays 1. loadJSON's guard is a strict `v !== 1`, so a
+        // bump would silently discard every install's ledger while still
+        // logging the success-shaped "restored 0 kind(s)".
+        homeId: tagToWrite(boundHomeId, loadedHomeId),
         control: [...control.entries()],
         action: [...action.entries()],
         fp: [...fp.entries()],

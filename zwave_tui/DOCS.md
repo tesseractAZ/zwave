@@ -3731,6 +3731,133 @@ Everything else in this reference is advisory: the engine detects, explains, and
 
 **Observability.** The runner emits a decision trace — `auto-ping: candidates=N dead=N stale-due=N [stalest=Nm] -> probing N | suppressed: <reason>` — to both the event ring and the server log, on every state change plus a 30-minute heartbeat, so "there was nothing to do" and "this is broken" never produce identical (empty) logs. Every probe line reports the node's **measured** silence with the threshold alongside (v0.32.1) — never the threshold alone, which once masked a timestamp-parsing skew by printing a constant. All outcomes are recorded through the M5 ledger, so `efficacyFor('dead-flap','ping')` turns "usually wakes them up" into a measured recovery rate on the REMEDY screen; if the rate comes back poor, the honest response is to switch the feature off — and the data will say so.
 
+## 11.5 Mesh Identity: Tagging Learned State, and Asking Before Acting (v0.64.0)
+
+### The problem
+
+Three stores persist what the engine has learned: the outcome ledger
+(`outcomes.json`), the per-node baselines (`baselines.json`) and the history
+rings (`history.json`). All three are keyed by **numeric node id and nothing
+else**. Swap the Z-Wave stick — or restore a different NVM backup — and node 23
+is a different physical device in a different room, while the file still says
+"node 23".
+
+Only `evidenceStore` carried a controller identity. `zwaveData` did have a
+mesh-identity guard that wiped the learned stores, but it is gated on
+`this.lastHomeId != null && homeId !== this.lastHomeId`, and `lastHomeId` is
+**in-memory only** — null at every boot. So:
+
+| how the stick was swapped | before v0.64.0 |
+| --- | --- |
+| while the add-on was **running** | caught; all three wiped |
+| while it was **stopped**, or any restart after | **not caught**; adopted unvalidated |
+
+The second row is the more likely one — you power down, swap, power up.
+
+### The tag
+
+Each envelope gained an **optional** `homeId`, at the **same schema version**.
+That is deliberate: `outcomes`' guard is `if (!o || o.v !== 1) return;`, a silent
+return that still logs the success-shaped `restored 0 kind(s)`, and `baselines`'
+is a strict `!== SCHEMA_V`. Bumping either would discard every existing install's
+learning. The in-repo precedent is `evidenceStore`'s `laneEpoch`, added the same
+way for the same reason. **Absent means UNKNOWN, and unknown is adopted** — every
+file written before this release is untagged, and treating untagged as foreign
+would make a data-preserving feature open by discarding everyone's data.
+
+### The tag is read BEFORE the gates that reject the payload
+
+This is the part that is easy to get wrong, and an adversarial review of the
+first design caught it. Every one of these `load()`s has early returns that
+predate this feature — history on a **1 h age gate** and a 3 min boot grace,
+baselines on a 30-day age gate, outcomes on the version guard. Each `return`s
+before the payload is parsed.
+
+Read the tag after those gates and, on the *exact* scenario the tag exists for —
+powered down, stick swapped, powered up an hour later — history's file is
+age-rejected, the tag reads `null`, no conflict is detected, and the next flush
+overwrites the previous network's file. **Loading data and identifying data are
+separate questions.** `readHomeTag` answers the second from the raw parsed
+object, before any gate that can reject the first.
+
+### What happens on a mismatch: nothing, until asked
+
+`bindHomeId(id)` is called from one site in `zwaveData`, hoisted **above** the
+legacy wipe branch — order is load-bearing, because that branch calls
+`outcomes.reset(); outcomes.save()`, writing the empty ledger through to disk.
+Binding afterwards would archive a file that had already been emptied.
+
+On a mismatch each store **parks**:
+
+- memory is wiped, so the engine cannot serve advice learned on other hardware;
+- saves are **latched off**, so no routine flush overwrites the file;
+- **nothing is archived or deleted** — the operator has not been asked yet.
+
+Two triggers, not one. The obvious one is a conflicting tag. The other is a
+**returning stick with nothing live to conflict with**: swap A→B, never save on
+B, swap back to A. `loadedHomeId` is null there, so a conflict-only test finds
+nothing and A's own archived learning is never offered.
+
+### The three answers
+
+Offered as mesh-wide rows on the Controller screen's Actions menu (`3` then `A`),
+gated to appear only while a decision is pending — the same shape as
+`stopRebuild`. Each takes the typed **CONFIRM**.
+
+| answer | offered when | effect |
+| --- | --- | --- |
+| **Keep existing learning** | something live to keep | adopt it under the live id. Correct for an **NVM backup restored onto replacement hardware**: physically the same mesh, new home id, so the learning is not stale — it is exactly right. |
+| **Resume this controller's learning** | this controller has an archive | park what is live, restore this controller's own most recent archived generation. |
+| **Start fresh** | always | park the live file, begin learning again. |
+
+`resolveIdentity` re-stamps `loadedHomeId` to the live id afterwards. That looks
+redundant — `tagToWrite` already prefers the bound id, so the save path is
+identical without it — but it governs the **next** swap: keep under B without
+re-stamping and a later move to C parks the file as `home-A`, a mislabelled
+archive of B's learning, which is worse than no archive because it reads as
+authoritative.
+
+### Nothing is ever deleted
+
+Archives are renames: `/data/outcomes.json` → `/data/outcomes.home-3586281591.json`,
+then `.2.json`, `.3.json`. `archivePathFor` walks a counter until it finds a free
+name, so **an archive is never a rename target** and parking can only ever ADD a
+file. The tempting one-sidecar-per-home design looks equivalent until the second
+swap back, which renames over the older, richer archive.
+
+`restoreArchive` takes the **highest** index, because the first-free rule means
+`.2` was written after `.1`; taking the lowest would hand a twice-returned
+controller its stalest learning while the newer generation sat unused. It also
+parks what is live **before** moving the archive in — that is the one operation
+here that could lose data, and if the parking fails nothing moves at all.
+
+If an archive cannot be written (EACCES, ENOSPC, 50 generations already parked),
+`resolveIdentity` returns **false**: memory stays wiped so the engine is safe,
+saves stay latched so the file survives, and the decision stays pending for a
+retry. Wiping anyway and letting the next flush overwrite would be a purge
+wearing a warning label.
+
+### How the operator finds out
+
+The console is not where anyone is at 3 am, so the held decision is published as
+Home Assistant state (§12.11): `binary_sensor.zwave_tui_degraded` goes `on` with
+`reason` naming both home ids, and `sensor.zwave_tui_engine` reads
+`awaiting-identity-decision`. It is degraded by the existing definition — the
+engine is structurally unable to do its job — and it is the only engine
+condition here that **never resolves on its own**, which is exactly what an
+alert is for.
+
+### Answerable in read-only
+
+`write_actions_enabled` gates **mesh** mutations. This decision mutates nothing
+on the mesh, so it is offered without it — otherwise a read-only monitor that
+swapped a stick is held indefinitely with `degraded` latched on and no reachable
+way out. The menu footer tracks this per row: it reads `⏎ select` on an identity
+row and `⏎ locked` on a real mesh action, rather than claiming everything is
+locked over a row the operator can press.
+
+---
+
 ## 12. Configuration, Deployment, Security & Operations
 
 Everything the add-on lets an operator tune, every internal path it writes, how a
@@ -3743,6 +3870,7 @@ three languages:
 | --- | --- |
 | `zwave_tui/config.yaml` | The HA add-on manifest: option **defaults** (`options:`) and their **types/validation** (`schema:`). |
 | `zwave_tui/translations/en.yaml` | The Configuration-page **labels** (`name`) and **help text** (`description`), keyed by option. |
+| `zwave_tui/translations/es-419.yaml` | The same, in Latin American Spanish (`es-419` is HA's code for it; plain `es` is Peninsular). Enforced against `config.yaml` by `test/translations.test.ts` — a key that does not match makes HA render the **raw key** as the field label, with no warning anywhere, in one language only. |
 | `rootfs/etc/services.d/zwave-tui/run` | The s6/bashio **env-bridge**: turns each HA option into an environment variable. |
 | `server/src/config.ts` | The **typed consumer**: reads those env vars into the `config` object the rest of the server uses. |
 

@@ -1,5 +1,116 @@
 # Changelog
 
+## 0.64.0
+
+### Added — learned state is bound to the controller that taught it, and a change is ASKED
+
+Three stores persist what the engine has learned — the outcome ledger, the
+per-node baselines and the history rings — and all three were keyed by numeric
+node id and nothing else. Swap the stick and node 23 is a different device in a
+different room while the file still says "node 23". Only `evidenceStore` carried
+an identity.
+
+There *was* a mesh-identity guard in `zwaveData`, but it is gated on
+`lastHomeId != null && homeId !== lastHomeId`, and `lastHomeId` is in-memory
+only — null at every boot. So a swap while the add-on was RUNNING wiped all
+three, and a swap while it was STOPPED (or any restart afterwards) adopted them
+unvalidated. The second is the likelier one: power down, swap, power up.
+
+**Nothing is deleted, and nothing is decided for you.** On a mismatch each store
+parks: memory wiped so the engine cannot serve advice learned on other hardware,
+saves latched off so no flush overwrites the file, and the operator asked. Three
+answers, offered as mesh-wide rows on the Controller screen's menu (`3` then
+`A`), gated to the pending decision and each behind the typed CONFIRM:
+
+- **Keep existing learning** — adopt it under the new id. Correct for an NVM
+  backup restored onto replacement hardware: physically the same mesh, new home
+  id, so the learning is not stale but exactly right.
+- **Resume this controller's learning** — offered when this controller has an
+  archive from a previous stint. Parks what is live, restores its own.
+- **Start fresh** — parks the live file and begins again.
+
+"Parks" means a rename: `/data/outcomes.json` → `.home-<id>.json`, then `.2`,
+`.3`. `archivePathFor` walks a counter to a free name, so an archive is never a
+rename target and parking can only ADD a file — the tempting
+one-sidecar-per-home design looks identical until the second swap back, which
+renames over the older, richer archive. If an archive cannot be written the
+decision returns false and stays pending: memory stays wiped (engine safe) and
+the file stays put (nothing lost). Wiping anyway would be a purge with a
+warning label.
+
+### Fixed — five defects an adversarial review of the first design found
+
+- **The tag was read after gates that reject the payload.** Every one of these
+  `load()`s has early returns older than this feature — history on a 1 h age
+  gate, baselines on a 30-day one, outcomes on a silent `v !== 1`. On the exact
+  scenario the tag exists for (powered down, swapped, powered up an hour later)
+  the file is age-rejected, the tag reads null, no conflict is found, and the
+  next flush overwrites the previous network's file. The tag is now read from
+  the raw parsed object before any gate: loading data and identifying data are
+  separate questions.
+- **A returning stick with nothing live was invisible.** Swap A→B, never save on
+  B, swap back to A: `loadedHomeId` is null, so a conflict-only test finds
+  nothing and A's own archive is never offered. The trigger is now "the live
+  state is not already this controller's", which covers both cases.
+- **Binding ran after the legacy wipe branch**, which calls `outcomes.reset();
+  outcomes.save()` — writing the empty ledger through to disk. Archiving
+  afterwards would have preserved an already-emptied file. Hoisting it then
+  broke v0.44.0's "in-flight episodes are COUNTED, not dropped silently", since
+  binding resets the ledger before the count is taken; the count moved with the
+  wipe.
+- **`identityPending` as an optional field hid a dead feature.** The compiler
+  accepted a `buildMenu` call site that never passed it — rows unreachable,
+  every test green. The v0.33 dead-`M`-key shape exactly. Required now, which
+  also surfaced both production bridges in `dataProvider.ts`.
+- **The menu footer read "⏎ locked · enable write_actions_enabled to unlock"
+  over rows that are pressable.** `write_actions_enabled` gates MESH mutations;
+  this decision touches only the add-on's own `/data`, so it is answerable in
+  read-only — otherwise a read-only monitor that swapped a stick is held
+  forever with `degraded` latched on and no way out. The footer now tracks the
+  row under the cursor.
+
+### Added — Latin American Spanish, and a guard that makes it stay correct
+
+`translations/es-419.yaml` (`es-419` is HA's code for Latin American Spanish;
+plain `es` is Peninsular). All 18 option keys, order matching `en.yaml`.
+
+A wrong key here fails **silently**: HA renders the raw key as the field label,
+with no warning, in one language only. So `test/translations.test.ts` enforces
+parity against `config.yaml` for every translation file present, checks each
+option has a non-empty name and description, pins the literals an operator must
+type or match (CONFIRM, `margin`, `dbm`, the WS URLs), and enforces the
+no-nesting rule `en.yaml` previously only described in prose. The guard was
+verified by injecting the realistic mistake — `auth_idle_lock_min` →
+`auth_idle_lock_mins` — and confirming it fails.
+
+### Measured — the two open performance questions are closed
+
+`PERFORMANCE.md` §3 and the new §5a. Both had been flagged as unmeasured rather
+than guessed at; measuring overturned one standing assumption.
+
+- **Harness phase profile** (`--profile`, under `/usr/bin/time -l`): targeted
+  test runs are **70 %** of the 821 s, at 1.02 s each across 558 invocations.
+  **"Startup-bound" is refuted**: sys is 78 s (9.5 %) and the directly measured
+  spawn floor is 83.3 s (10.2 %), while user is 689 s (84 %); two consecutive
+  runs agreed to within half a point. The cost is `tsx`
+  re-transpiling the sources on every invocation, so the lever is precompiling,
+  not spawning less.
+- **Per-session bandwidth**: 4.96 KB/s at 80×24, 17.22 KB/s at 200×60. The
+  200×60 figure confirms what the document already carried; the withdrawn
+  "0 KB/s at 80×24" is refuted. Its cause is now understood and recorded — a
+  quiet-detection heuristic that never fires against a 1 Hz whole-frame redraw,
+  reported as a measured absence. Max is exactly 2× median at both sizes, and a
+  clock-aligned run reads 4994 B/s with zero variance: this is not a rate, it is
+  `frame_bytes × 1 Hz` (`telnet/server.ts:419`). `scripts/bw-probe.mjs` is
+  committed so it can be re-run.
+
+### Housekeeping
+
+Seven kill-fast mapping misses harvested from the harness's own report (each one
+costs a ~12 s full-suite fallback), and a copy-pasted path-splitting helper
+deduplicated into `splitStem` — the harness found that as an `AMBIGUOUS(2)`
+anchor, which is duplication showing up as a testing problem.
+
 ## 0.63.7
 
 ### Fixed — the security policy claimed a guarantee the code does not make

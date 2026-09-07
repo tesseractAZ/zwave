@@ -64,6 +64,12 @@ export function buildStates(data: DataProvider): StatePost[] {
   const warn = syms.filter((s) => s.severity === 'warn').length;
   const ap = data.autoPingState?.() ?? null;
   const eng = data.engineStatus();
+  // A held identity decision is degraded by the EXISTING definition — the
+  // engine is structurally unable to do its job: it is running with no learned
+  // state and cannot resume until a person answers. It is also the only engine
+  // condition here that never resolves on its own, which is precisely what an
+  // alert is for; everything else eventually clears itself.
+  const ident = data.pendingIdentity?.() ?? null;
 
   // A node the ladder GAVE UP on is the engine's only actual summons: it has
   // spent its whole budget and is asking for a person. Everything else here is
@@ -76,8 +82,10 @@ export function buildStates(data: DataProvider): StatePost[] {
   // collapsed to "off": `storm` and `no-capability-data` mean opposite things
   // to whoever is woken up by this — one is the mesh failing, the other is the
   // add-on unable to see the mesh at all.
-  const engineState = !eng.enabled
-    ? 'disabled'
+  const engineState = ident != null
+    ? 'awaiting-identity-decision'
+    : !eng.enabled
+      ? 'disabled'
     : ap == null
       ? 'no-auto-ping'
       : ap.suppressed === 'none'
@@ -91,6 +99,7 @@ export function buildStates(data: DataProvider): StatePost[] {
   // structurally unable to do its job.
   const degraded = summonsNodes.length > 0
     || crit > 0
+    || ident != null
     || (ap != null && (ap.suppressed === 'storm' || ap.suppressed === 'no-capability-data'));
 
   return [
@@ -102,7 +111,9 @@ export function buildStates(data: DataProvider): StatePost[] {
         device_class: 'problem',
         reason: !degraded
           ? 'none'
-          : summonsNodes.length > 0
+          : ident != null
+            ? `mesh identity changed (${ident.previous} → ${ident.live}) — awaiting Keep or Start-fresh`
+            : summonsNodes.length > 0
             ? `${summonsNodes.length} node(s) need a human`
             : crit > 0
               ? `${crit} critical symptom(s)`

@@ -197,6 +197,7 @@ export type LogKind =
 
 // Type-only import (no runtime cycle): the symptom engine's output shape, read
 // by DataProvider.symptoms() and the REMEDY screen.
+import type { IdentityChoice, IdentityDecision } from './zwave/homeTag';
 import type { Symptom, SymptomKind } from './zwave/symptoms';
 import type { AutoPingSnapshot } from './zwave/autoPing';
 import type { DriverWsState } from './zwave/driverWsClient';
@@ -459,6 +460,10 @@ export interface DataProvider {
   /** Engine state: enabled + graduated-baseline count, for the REMEDY empty
    *  state to tell "off" from "learning" from "all healthy". */
   engineStatus(): EngineStatus;
+  /** The mesh-identity decision awaiting an operator answer, or null (v0.64.0). */
+  pendingIdentity(): IdentityDecision | null;
+  /** Answer it: `keep` re-adopts the old learning, `fresh` archives it. */
+  resolveIdentityDecision(choice: IdentityChoice): boolean;
   /** M5 learned efficacy of an action against a symptom kind, or null when the
    *  outcome ledger is off / has no estimate yet. Read by the REMEDY screen so
    *  the planner's candidates can carry an evidence-backed efficacy note. */

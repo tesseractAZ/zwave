@@ -47,7 +47,102 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** @type {Mutant[]} */
 const MUTANTS = [
-  /* ── shared chrome ─────────────────────────────────────────────────── */
+  /* ── home-id tag: identity, and never a purge ──────────────────────── */
+  { id: 'hometag-returning-stick-asks', file: 'src/zwave/outcomes.ts', tests: ['homeTag'],
+    // A conflict-only test cannot see the returning stick that has nothing live
+    // to disagree with: swap A→B, never save on B, swap back. The archive is
+    // right there and the operator is never told it exists.
+    find: '      if (!conflict && !returning) { loadedHomeId = id; return; }',
+    repl: '      if (!conflict) { loadedHomeId = id; return; }',
+    what: 'a returning stick is asked even with no conflicting live file' },
+  { id: 'hometag-resume-newest', file: 'src/zwave/homeTag.ts', tests: ['homeTag'],
+    // Lowest-index looks equivalent until a controller has been away twice: it
+    // hands back the STALEST learning while the newer generation sits unused.
+    find: '    if (exists(candidate)) found = candidate;',
+    repl: '    if (exists(candidate) && found == null) found = candidate;',
+    what: 'resume restores the newest archived generation, not the oldest' },
+  { id: 'hometag-resume-parks-first', file: 'src/zwave/homeTag.ts', tests: ['homeTag'],
+    // Restoring before parking trades one network's learning for another's —
+    // the single operation in this feature that can actually lose data.
+    find: '    if (!archiveLiveFile(path, previous, log, fs)) return false;\n    fs.rename(src, path);',
+    repl: '    fs.rename(src, path);',
+    what: 'resume parks the live file BEFORE restoring over it' },
+  { id: 'hometag-resume-gated-on-archive', file: 'src/telnet/actionsCatalog.ts', tests: ['homeTag'],
+    find: "    if (d.kind === 'identityResume' && !ctx.identityResumable) continue;",
+    repl: '',
+    what: 'RESUME is offered only when this controller has something archived' },
+
+  { id: 'hometag-decides-nothing', file: 'src/zwave/outcomes.ts', tests: ['homeTag'],
+    // Revert to deciding on the operator's behalf. The archive is the SAFE
+    // half of the answer, which is exactly why an auto-archive reads as
+    // harmless — but it silently answers a question the owner asked to be put
+    // to them, and picks the option that discards the live learning.
+    find: '      pendingPrevious = loadedHomeId;\n      pendingAsked = true;\n      persistBlocked = true;',
+    repl: "      if (!archiveLiveFile(opts.path ?? '', loadedHomeId, (m) => log(m))) persistBlocked = true;\n      loadedHomeId = id;",
+    what: 'a mismatch parks the store and asks, rather than deciding' },
+  { id: 'hometag-keep-restamps', file: 'src/zwave/outcomes.ts', tests: ['homeTag'],
+    // Without the re-stamp, load() has just restored the OLD id, so the very
+    // next boot asks the same question again — forever.
+    find: '      loadedHomeId = boundHomeId;\n      pendingPrevious = null;\n      pendingAsked = false;\n      persistBlocked = false;',
+    repl: '      pendingPrevious = null;\n      pendingAsked = false;\n      persistBlocked = false;',
+    what: "'keep' re-stamps to the live id so the question is asked once" },
+  { id: 'hometag-refusal-stays-pending', file: 'src/zwave/outcomes.ts', tests: ['homeTag'],
+    find: "        if (!archiveLiveFile(opts.path ?? '', pendingPrevious, (m) => log(m))) return false;",
+    repl: "        archiveLiveFile(opts.path ?? '', pendingPrevious, (m) => log(m));",
+    what: 'an archive that failed leaves the decision pending, not "done"' },
+  { id: 'hometag-rows-gated', file: 'src/telnet/actionsCatalog.ts', tests: ['actionsCatalog'],
+    find: "    if ((d.kind === 'identityKeep' || d.kind === 'identityFresh' || d.kind === 'identityResume') && !ctx.identityPending) continue;",
+    repl: '',
+    what: 'the identity rows appear only while a decision is pending' },
+  { id: 'hometag-answerable-readonly', file: 'src/telnet/session.ts', tests: ['homeTag'],
+    // Gating the answer on write_actions_enabled leaves a read-only install
+    // that swapped a stick held forever, with no reachable way out.
+    find: '    if (!isIdentity && !this.actions?.enabled) {',
+    repl: '    if (!this.actions?.enabled) {',
+    what: 'the identity decision is answerable without write actions' },
+  { id: 'hometag-footer-honest', file: 'src/telnet/screens/actionsMenu.ts', tests: ['homeTag'],
+    find: "  const right = locked && !cursorActionable",
+    repl: '  const right = locked',
+    what: 'the menu footer does not say "locked" over a row that is pressable' },
+  { id: 'hometag-degraded-on-hold', file: 'src/haStates.ts', tests: ['homeTag'],
+    // The held decision never resolves on its own — if it does not raise
+    // `degraded`, nothing off-console ever tells the operator to answer it.
+    find: '    || ident != null\n',
+    repl: '',
+    what: 'a held identity decision raises the HA degraded flag' },
+
+  { id: 'hometag-absent-is-unknown', file: 'src/zwave/homeTag.ts',
+    // An absent tag must read as UNKNOWN. If it reads as anything comparable,
+    // the upgrade boot calls every existing install's real data "foreign" and
+    // archives it — a data-preserving feature whose first act is a wipe.
+    find: "  return typeof v === 'number' && Number.isFinite(v) ? v : null;",
+    repl: "  return typeof v === 'number' ? v : -1;",
+    what: 'an untagged file is adopted, not archived' },
+  { id: 'hometag-carry-loaded', file: 'src/zwave/homeTag.ts',
+    // The pre-bind flush window: stamping null erases the tag, and by the
+    // absent-means-adopt rule the next boot silently adopts a foreign file.
+    find: '  return bound ?? loaded ?? null;', repl: '  return bound ?? null;',
+    what: 'a save before binding carries the loaded tag instead of erasing it' },
+  { id: 'hometag-archive-unique', file: 'src/zwave/homeTag.ts',
+    // One sidecar per home id looks equivalent until the SECOND swap back,
+    // which renames over the older, richer archive.
+    find: '    if (!exists(candidate)) return candidate;', repl: '    return candidate;',
+    what: 'an archive is never a rename target, so parking cannot clobber' },
+  { id: 'hometag-ext-in-basename', file: 'src/zwave/homeTag.ts',
+    find: '  const hasExt = dot > slash && dot > 0;', repl: '  const hasExt = dot > 0;',
+    what: 'a dot in a parent directory is not treated as an extension' },
+  { id: 'hometag-history-tag-first', file: 'src/zwave/historyStore.ts', tests: ['homeTag'],
+    // Move the tag read AFTER the gates that reject the payload — the exact
+    // defect an adversarial review caught. history's 1h age gate fires on the
+    // very scenario the tag exists for, so the swap goes undetected.
+    find: '        loadedHomeId = readHomeTag(obj);', repl: '',
+    what: 'history reads its identity even when the payload is age-rejected' },
+  { id: 'hometag-baselines-tag-first', file: 'src/zwave/baselines.ts', tests: ['homeTag'],
+    find: '        loadedHomeId = readHomeTag(parsed);', repl: '',
+    what: 'baselines read their identity even when the schema gate rejects' },
+  { id: 'hometag-outcomes-tag-first', file: 'src/zwave/outcomes.ts', tests: ['homeTag'],
+    find: '        loadedHomeId = readHomeTag(parsed);', repl: '',
+    what: 'outcomes read their identity past loadJSON\'s silent version guard' },
   { id: 'cmdbar-whole-caps', file: 'src/telnet/chrome.ts',
     // Faithful revert to the pre-fix behaviour (a bare character clip), NOT a
     // `null &&` short-circuit — that failed to typecheck, so it "killed" by
@@ -260,7 +355,7 @@ const MUTANTS = [
     find: "  const out = rows.slice(0, o.rows);\n  while (out.length < o.rows) out.push('');",
     repl: '  const out = rows.slice(0, o.rows);',
     what: 'renderLogin returns EXACTLY view.rows lines like every other path' },
-  { id: 'login-framed-exact-rows', file: 'src/telnet/screens/login.ts',
+  { id: 'login-framed-exact-rows', file: 'src/telnet/screens/login.ts', tests: ['renderHonesty'],
     // The site the ambiguous anchor never reached. A short box left the caller
     // to decide what the remaining rows contain, so bytes from the PREVIOUS
     // frame could linger on the one screen that takes a password.
@@ -1823,8 +1918,12 @@ const MUTANTS = [
     repl: '    if (!this.outcomes) return [];',
     what: 'no outcome ledger is distinguishable from an idle one' },
   { id: 'discarded-episodes-are-counted', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
-    find: '        const lostOpen = this.outcomes?.openEpisodes().length ?? 0;',
-    repl: '        const lostOpen: number = 0;',
+    // Re-anchored in v0.64.0: the count moved ABOVE the bindHomeId calls,
+    // because binding resets the ledger and a count taken after it reads 0 —
+    // the same silent-vanishing this mutant exists to prevent, reintroduced by
+    // the ordering fix rather than by an edit to the count itself.
+    find: '      const lostOpen = this.outcomes?.openEpisodes().length ?? 0;',
+    repl: '      const lostOpen: number = 0;',
     what: 'in-flight episodes lost to an identity change are counted, not dropped silently' },
   { id: 'base-rate-carries-its-own-n', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     find: "  const healProv = e.baseN > 0 ? ` (${weight(e.baseN)}${provenance(e.baseNodes, ' · ')})` : '';",
@@ -2406,7 +2505,7 @@ const MUTANTS = [
     find: '        const owed = data.verifyOwedFor?.(n.nodeId) ?? 0;',
     repl: '        const owed = (0 as number);',
     what: "a node's own verification debt is on its dossier" },
-  { id: 'quietest-floor-is-published', file: 'src/zwave/interference.ts', tests: ['interferenceScreen'],
+  { id: 'quietest-floor-is-published', file: 'src/zwave/interference.ts', tests: ['interference'],
     // The one member of the v0.49.0 fold-then-average sweep that was missed.
     find: '    trendCoarseMin.push(b.floorMin ?? mean);',
     repl: '    trendCoarseMin.push(mean);',
@@ -3173,13 +3272,36 @@ if (only && run.length === 0) {
 // to launch a compiler. The flags are kept identical to the npm script so the
 // harness and CI check exactly the same thing.
 const TSC = join(ROOT, 'node_modules', '.bin', 'tsc');
+
+/**
+ * PHASE PROFILE (--profile).
+ *
+ * The run is ~14 minutes and gates every release, so "where does it go" is the
+ * only question an optimisation attempt can start from. Wall time per phase and
+ * a COUNT per phase are both needed: a phase that is slow because it runs 549
+ * times is a different problem from one that is slow per call, and only the
+ * pair distinguishes them. Overhead is two Date.now() calls per exec, against
+ * subprocesses that cost ~1s each.
+ */
+const PROFILE = process.argv.includes('--profile');
+const prof = {
+  baselineTsc: 0, baselineSuite: 0,
+  tscMs: 0, tscN: 0,
+  targetedMs: 0, targetedN: 0,
+  fullMs: 0, fullN: 0,
+};
+let phaseBucket = 'targeted'; // which test bucket the next testsFail() belongs to
+
 const compiles = () => {
+  const t = Date.now();
   try {
     execFileSync(TSC, ['--noEmit', '-p', 'tsconfig.test.json'],
       { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
     return true;
   } catch {
     return false;
+  } finally {
+    prof.tscMs += Date.now() - t; prof.tscN += 1;
   }
 };
 
@@ -3196,11 +3318,19 @@ const allTestFiles = () =>
  * instead of leaving the table to be fixed by guesswork.
  */
 const testsFail = (files) => {
+  const t = Date.now();
+  const charge = () => {
+    const dt = Date.now() - t;
+    if (phaseBucket === 'full') { prof.fullMs += dt; prof.fullN += 1; }
+    else { prof.targetedMs += dt; prof.targetedN += 1; }
+  };
   try {
     execFileSync(process.execPath, ['--import', 'tsx', '--test', ...files],
       { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
+    charge();
     return null; // exit 0 → green
   } catch (e) {
+    charge();
     const out = `${e.stdout ?? ''}${e.stderr ?? ''}`;
     // Failure stacks point back into the test file that raised them.
     const seen = [...out.matchAll(/test\/([A-Za-z0-9_.-]+)\.test\.ts/g)].map((m) => m[1]);
@@ -3324,14 +3454,22 @@ const fastTestsFor = (m) => {
 // red suite every entry would report `killed` and the run would exit 0, making
 // the published count compatible with a suite that never passes.
 process.stdout.write('baseline: ');
+const baseT0 = Date.now();
 if (!compiles()) {
   console.log('TYPECHECK FAILS — fix the tree before running the harness.');
   process.exit(2);
 }
+prof.baselineTsc = Date.now() - baseT0;
+prof.tscMs = 0; prof.tscN = 0; // charged to the baseline, not the per-mutant loop
+const baseT1 = Date.now();
+phaseBucket = 'full';
 if (suiteFails()) {
   console.log('SUITE IS ALREADY RED — every mutant would falsely report "killed".');
   process.exit(2);
 }
+prof.baselineSuite = Date.now() - baseT1;
+prof.fullMs = 0; prof.fullN = 0; // ditto
+phaseBucket = 'targeted';
 console.log('green\n');
 
 let killed = 0;
@@ -3457,10 +3595,13 @@ for (const m of run) {
     } else {
       // Cheap targeted files first — a red here is already a kill.
       const fast = fastTestsFor(m);
+      phaseBucket = 'targeted';
       red = fast.length > 0 && testsFail(fast) != null;
       // Green (or nothing to run) proves nothing: SURVIVED must face everything.
       if (!red) {
+        phaseBucket = 'full';
         const caught = testsFail(allTestFiles());
+        phaseBucket = 'targeted';
         red = caught != null;
         if (red && fast.length > 0) {
           missedBy = { tried: fast.map((f) => basename(f, '.test.ts')).join(', '), caughtBy: caught.join(', ') };
@@ -3504,6 +3645,41 @@ if (mappingMisses.length) {
     console.log(`  ${x.id.padEnd(26)} tried [${x.tried}] → actually caught by [${x.caughtBy}]`);
   }
 }
+if (PROFILE) {
+  // A FLOOR measurement, not a guess: time one bare invocation of each
+  // subprocess against a trivial input. Multiplied by the counts above it says
+  // how much of the run is process startup rather than work — which is the
+  // difference between "make the tests faster" and "stop launching compilers".
+  const floorT0 = Date.now();
+  try {
+    execFileSync(TSC, ['--version'], { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
+  } catch { /* the number is all we want */ }
+  const tscStartupMs = Date.now() - floorT0;
+  const floorT1 = Date.now();
+  try {
+    execFileSync(process.execPath, ['--import', 'tsx', '-e', '0'], { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
+  } catch { /* ditto */ }
+  const tsxStartupMs = Date.now() - floorT1;
+
+  const total = prof.baselineTsc + prof.baselineSuite + prof.tscMs + prof.targetedMs + prof.fullMs;
+  const pc = (ms) => total > 0 ? `${((ms / total) * 100).toFixed(1)}%`.padStart(6) : '  n/a';
+  const sec = (ms) => `${(ms / 1000).toFixed(1)}s`.padStart(8);
+  const per = (ms, n) => n > 0 ? `${(ms / n / 1000).toFixed(2)}s` : '—';
+  console.log('\nPHASE PROFILE (wall clock)');
+  console.log(`  baseline typecheck   ${sec(prof.baselineTsc)} ${pc(prof.baselineTsc)}   1 run`);
+  console.log(`  baseline full suite  ${sec(prof.baselineSuite)} ${pc(prof.baselineSuite)}   1 run`);
+  console.log(`  per-mutant typecheck ${sec(prof.tscMs)} ${pc(prof.tscMs)}   ${String(prof.tscN).padStart(4)} runs · ${per(prof.tscMs, prof.tscN)} each`);
+  console.log(`  targeted test runs   ${sec(prof.targetedMs)} ${pc(prof.targetedMs)}   ${String(prof.targetedN).padStart(4)} runs · ${per(prof.targetedMs, prof.targetedN)} each`);
+  console.log(`  full-suite fallbacks ${sec(prof.fullMs)} ${pc(prof.fullMs)}   ${String(prof.fullN).padStart(4)} runs · ${per(prof.fullMs, prof.fullN)} each`);
+  console.log(`  ${'TOTAL'.padEnd(20)} ${sec(total)}`);
+  const spawnFloor = tscStartupMs * prof.tscN + tsxStartupMs * (prof.targetedN + prof.fullN);
+  console.log(`\n  process-startup floor: tsc ${tscStartupMs}ms × ${prof.tscN} + tsx ${tsxStartupMs}ms × ${prof.targetedN + prof.fullN}`);
+  console.log(`                       = ${sec(spawnFloor)} (${pc(spawnFloor)} of the run) spent before any work begins`);
+  console.log('  Run under `/usr/bin/time -l` for the user/sys split this cannot see:');
+  console.log('  wall time here charges a child\u2019s CPU to nobody, so sys-heavy spawn');
+  console.log('  cost is invisible from inside the parent process.');
+}
+
 if (survived.length || missing.length || ambiguous.length || invalid.length || relabel.length) {
   console.log('\nA SURVIVED entry is a fix no test protects. A MISSING entry means this');
   console.log('file has drifted from the code. An INVALID entry is a mutant that does not');

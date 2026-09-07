@@ -19,6 +19,7 @@
  * own: byte parsing, connection lifecycle, and any protocol negotiation.
  */
 
+import type { IdentityChoice } from '../zwave/homeTag';
 import type { DataProvider, NodeSnapshot, ScreenCtx, ViewState, ActionRunner, ActionKind, ConfigParam, EntityVerb } from '../types';
 import { applyKey, clampSelection, filteredEvents, syncLogCursor, syncRemedyCursor, visibleNodes } from './input';
 import type { InputEvent } from './input';
@@ -26,7 +27,7 @@ import { renderScreen } from './screens/index';
 import { renderLogin } from './screens/login';
 import { centeredNotice } from './screens/overview';
 import { sortedSymptoms, symptomKey } from './screens/remedy';
-import { buildMenu, buildEntityRows, buildConfigRows, clampMenuIndex, describeAction, CONFIRM_WORD } from './actionsCatalog';
+import { buildMenu, buildEntityRows, buildConfigRows, clampMenuIndex, describeAction, CONFIRM_WORD, type MenuActionKind } from './actionsCatalog';
 import type { MenuScope } from './actionsCatalog';
 import type { MenuItem, ActionImpact } from './actionsCatalog';
 import { renderActionsMenu, renderTypeConfirm, renderParamEdit } from './screens/actionsMenu';
@@ -81,7 +82,7 @@ type SessionMode = 'login' | 'tui' | 'denied';
 
 /** A mutating action awaiting confirmation / in flight. */
 interface PendingAction {
-  kind: ActionKind;
+  kind: MenuActionKind;
   nodeId: number | null;
   label: string; // human title, e.g. "Rebuild ALL routes" / "Ping node — #16 Kitchen"
   target: string; // "whole mesh (39 nodes)" | "#16 Kitchen Lights"
@@ -93,6 +94,8 @@ interface PendingAction {
   verb?: EntityVerb;
   param?: ConfigParam;
   value?: number;
+  /** v0.64.0 identity decision — set for the two identity kinds only. */
+  identityChoice?: IdentityChoice;
 }
 
 /** The transient config value-picker state (between menu-select and CONFIRM). */
@@ -674,6 +677,8 @@ export class TuiSession {
       hasNode: this.menuTarget != null,
       cursorScreen: this.view.screen === 'log' || this.view.screen === 'remedy',
       rebuilding: this.data.controller()?.isRebuildingRoutes ?? false,
+      identityPending: this.data.pendingIdentity() != null,
+      identityResumable: this.data.pendingIdentity()?.resumable ?? false,
     });
     // v0.23: append device-control + config-edit rows for the target node. These
     // are frozen at open time (same snapshot discipline as the catalog rows).
@@ -721,7 +726,14 @@ export class TuiSession {
    *  explain why it's locked. */
   private selectMenuItem(item: MenuItem | undefined): void {
     if (!item) return;
-    if (!this.actions?.enabled) {
+    const ip = item.payload;
+    const isIdentity = ip.type === 'catalog' && (ip.kind === 'identityKeep' || ip.kind === 'identityFresh');
+    // `write_actions_enabled` governs MESH mutations. An identity decision
+    // mutates nothing on the mesh — it answers a question about the add-on's
+    // OWN persisted state. Gating it here would leave a read-only install that
+    // swapped a stick permanently held: no learned state, `degraded` latched
+    // on forever, and no reachable way to answer.
+    if (!isIdentity && !this.actions?.enabled) {
       // Read-only: the menu already shows a READ-ONLY badge; make the block
       // explicit so a keypress isn't silently ignored.
       this.closeMenu();
@@ -732,10 +744,23 @@ export class TuiSession {
     if (item.disabled) return; // the reason is shown inline on the row
     const node = this.menuTarget ?? undefined; // frozen at open time
     const p = item.payload;
-    if (p.type === 'catalog') {
+    if (p.type === 'catalog' && (p.kind === 'identityKeep' || p.kind === 'identityFresh' || p.kind === 'identityResume')) {
+      // Not a mesh action: this resolves the add-on's own held state, so it
+      // does not go through ActionRunner and is never scored by the ledger.
+      // It still takes the typed CONFIRM — it is the one decision that decides
+      // what months of learning were about.
       this.closeMenu();
       this.confirmFromMenu = true;
-      this.beginAction(p.kind, false, node); // menu always requires the typed CONFIRM
+      this.beginIdentityDecision(p.kind === 'identityKeep' ? 'keep' : p.kind === 'identityResume' ? 'resume' : 'fresh');
+    } else if (p.type === 'catalog') {
+      this.closeMenu();
+      this.confirmFromMenu = true;
+      // The two identity kinds are excluded by the branch above, but TS cannot
+      // see that through a conjunction — so re-narrow here rather than cast.
+      // A cast would silence the compiler on exactly the union it exists to check.
+      if (p.kind !== 'identityKeep' && p.kind !== 'identityFresh' && p.kind !== 'identityResume') {
+        this.beginAction(p.kind, false, node); // menu always requires the typed CONFIRM
+      }
     } else if (p.type === 'entity' && node) {
       this.closeMenu();
       this.confirmFromMenu = true;
@@ -761,6 +786,51 @@ export class TuiSession {
       verb,
     };
     this.confirmBuffer = '';
+  }
+
+  /**
+   * Arm the mesh-identity decision. Deliberately routed through the SAME
+   * type-CONFIRM box as a destructive mesh action: `keep` re-adopts another
+   * controller's learned normals, and `fresh` sets months of learning aside.
+   * Neither is recoverable by pressing a key again.
+   */
+  private beginIdentityDecision(choice: IdentityChoice): void {
+    const pend = this.data.pendingIdentity?.() ?? null;
+    if (!pend) return; // answered elsewhere (or by another session) meanwhile
+    const d = describeAction(choice === 'keep' ? 'identityKeep' : choice === 'resume' ? 'identityResume' : 'identityFresh');
+    this.pendingAction = {
+      kind: choice === 'keep' ? 'identityKeep' : choice === 'resume' ? 'identityResume' : 'identityFresh',
+      nodeId: null,
+      label: d?.label ?? 'Mesh identity',
+      target: `home ${pend.previous} → ${pend.live}`,
+      impact: d?.impact ?? 'caution',
+      desc: d?.desc ?? '',
+      impactNote: d?.impactNote ?? '',
+      identityChoice: choice,
+    };
+    this.confirmBuffer = '';
+  }
+
+  /**
+   * Apply the answer. Synchronous and runner-free — it moves files and flips
+   * latches inside this process, so there is nothing to await and no mesh
+   * traffic. A refusal (an archive that could not be written) is reported as
+   * such and leaves the decision pending, rather than claiming success.
+   */
+  private executeIdentityDecision(choice: IdentityChoice): void {
+    const ok = this.data.resolveIdentityDecision(choice);
+    this.actionNotice = ok
+      ? (choice === 'keep'
+          ? '✓  Existing learning kept under the new controller.'
+          : choice === 'resume'
+            ? '✓  Resumed this controller\u2019s own archived learning.'
+            : '✓  Started fresh — the previous network\u2019s files were archived, not deleted.')
+      : '✗  Could not archive the previous files — nothing was changed, and the decision is still pending.';
+    this.actionNoticeDetail = ok && choice !== 'keep'
+      ? 'Archived beside the originals in /data as <name>.home-<id>.json.'
+      : null;
+    this.lastFrameHash = '';
+    this.draw();
   }
 
   /* ── config value picker (v0.23) ─────────────────────────────────────────── */
@@ -922,6 +992,7 @@ export class TuiSession {
   }
 
   private async executeAction(action: PendingAction): Promise<void> {
+    if (action.identityChoice) { this.executeIdentityDecision(action.identityChoice); return; }
     if (!this.actions) return;
     this.actionInFlight = true;
     this.actionRunningLabel = action.label;

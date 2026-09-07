@@ -21,6 +21,8 @@ const scores: Record<number, HealthResult> = {};
 scores[6] = { score: 34, grade: 'F', state: 'flaky', flags: ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B', 'U'] };
 const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
 const data: DataProvider = {
+  pendingIdentity: () => null,
+  resolveIdentityDecision: () => false,
   nodes: () => nodes, nodeById: (id) => nodes.find((n) => n.nodeId === id), controller: () => ctrl, events: () => [],
   scoreFor: (id) => scores[id] ?? { score: 90, grade: 'A', state: 'ok', flags: [] },
   noiseFloor: () => -92, hasRealNoise: () => true, history: () => ({ rssi: [-60, -59, -58], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),

@@ -46,6 +46,13 @@ seriously.
   suppressed during storms, route rebuilds and restarts. Nothing else — refresh,
   re-interview, rebuild-routes, remove-failed, device control, config writes —
   has any automatic path whatsoever.
+- **One decision is answerable without write actions.** `write_actions_enabled`
+  gates mesh mutations. The mesh-identity decision above mutates nothing on the
+  mesh — it answers a question about the add-on's own `/data` — so it is
+  offered in read-only installs too. Gating it there would leave a read-only
+  monitor that swapped a stick held indefinitely: no learned state, the HA
+  `degraded` flag latched on, and no reachable way to clear it. It still
+  requires the typed **CONFIRM**.
 - **All mesh mutations ride the Home Assistant WebSocket** (authenticated with
   the Supervisor token). The separate, unauthenticated **driver WebSocket**
   (`ws://core-zwave-js:3000`) is used **strictly read-only**, behind a closed
@@ -92,17 +99,34 @@ seriously.
   over the Core REST API — a degraded flag, a count of nodes needing attention,
   a live symptom count, and the engine's own run state. They carry node ids,
   counts and symptom kinds; **no credentials, no device state, and nothing about
-  the network beyond what the TUI already shows an authenticated operator.** It
-  writes no other entity, and it sends no notification: alerting policy is left
-  to the operator's own automations rather than hardcoded here.
-- **The controller mesh is bound by home id.** The persisted **evidence**
-  envelope is tagged with the controller's `homeId`; a mismatch on load (a stick
-  swap / a different NVM) starts fresh rather than aliasing one network's data
-  onto another, and a driver-versus-Core mismatch purges driver telemetry and
-  stops that client. The bound store is the evidence envelope specifically: the
-  learned outcome ledger, the per-node baselines and the history series persist
-  as separate `/data` files carrying no home-id tag, so after a controller swap
-  they are stale rather than purged.
+  the network beyond what the TUI already shows an authenticated operator.** A
+  held mesh-identity decision raises the same `degraded` flag with the two home
+  ids in its `reason` — a home id is a network identifier, not a secret, and it
+  is already on the Controller screen. It writes no other entity, and it sends
+  no notification: alerting policy is left to the operator's own automations
+  rather than hardcoded here.
+- **Every persisted store is bound by home id, and a change is ASKED, not
+  assumed** (v0.64.0). The evidence envelope carries the controller's `homeId`
+  and starts fresh on a mismatch, as it always has — it is a rolling measurement
+  window that refills in hours. The three LEARNED stores — the outcome ledger,
+  the per-node baselines and the history series — now carry the tag too, and
+  behave differently on purpose: a mismatch **parks** them. Memory is wiped so
+  the engine cannot act on another network's learning, saves are latched off so
+  nothing overwrites the file, and the operator is asked to choose: keep the
+  existing learning under the new identity (correct for an NVM backup restored
+  onto replacement hardware — physically the same mesh, new id), resume this
+  controller's own archived learning if it has been here before, or start fresh.
+  Nothing is ever deleted: "start fresh" renames the previous network's files
+  aside in `/data` as `<name>.home-<id>.json`, and an archive that cannot be
+  written leaves the decision pending rather than proceeding.
+  <br>
+  The prior wording was imprecise in a way worth recording: it said a controller
+  swap left the learned stores "stale rather than purged". That was true only of
+  a swap performed while the add-on was STOPPED. A swap while it was RUNNING was
+  already caught by an in-memory guard in `zwaveData` and did purge all three —
+  but that guard is keyed on a value that starts null every boot, so it could
+  never fire across a restart, which is the more likely way a stick gets
+  swapped.
 
 ## Scope
 

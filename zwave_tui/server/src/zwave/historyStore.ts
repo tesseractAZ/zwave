@@ -39,7 +39,9 @@
  *           fire there — persistence survives those, as intended.
  */
 
+import type { IdentityChoice, IdentityDecision } from './homeTag';
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { readHomeTag, tagToWrite, archiveLiveFile, hasArchiveFor, restoreArchive } from './homeTag';
 import type { LogSink } from '../logger';
 import { uptime as osUptime } from 'node:os';
 
@@ -91,12 +93,26 @@ export interface HistoryStore {
   load(): HistoryMap;
   /** Atomically persist the current rings. Best-effort; never throws. */
   save(map: HistoryMap): void;
+  /** Bind the live controller identity. The first known id validates whatever
+   *  was restored; a CHANGE parks the store (saves latched off, file untouched)
+   *  and waits for `resolveIdentity`. Returns true when the caller must drop
+   *  its rings — this store holds no state of its own. */
+  bindHomeId(id: number): boolean;
+  /** The identity decision waiting on the operator, or null. */
+  pendingIdentity(): IdentityDecision | null;
+  /** Answer it. On `keep` the caller re-runs load() and installs the result. */
+  resolveIdentity(choice: IdentityChoice): boolean;
 }
 
 /** On-disk shape. `v` gates format changes; v1 (fine-only) still loads. */
 interface Persisted {
   v: number;
   savedAt: number;
+  /** Controller this was learned on. OPTIONAL and deliberately NOT a schema
+   *  bump — `v` is an exact allowlist here, so bumping it would discard every
+   *  existing install's rings. Absent (pre-v0.64 file) reads as UNKNOWN, which
+   *  is adopted, not archived. Same shape as evidenceStore's `laneEpoch`. */
+  homeId?: number | null;
   nodes: Record<string, { rssi: number[]; rtt: number[]; crssi?: number[]; crtt?: number[] }>;
 }
 
@@ -116,6 +132,20 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
   const now = opts.now ?? Date.now;
   const uptimeMs = opts.uptimeMs ?? (() => osUptime() * 1000);
   const log: LogSink = opts.log ?? (() => {});
+
+  /** Identity read from the file — set even when the payload is REJECTED by a
+   *  gate below, because the age gate is exactly what fires on a stick swap. */
+  let loadedHomeId: number | null = null;
+  /** Identity of the live controller, once one is known. */
+  let boundHomeId: number | null = null;
+  /** Latched when a foreign file could not be moved aside: memory is wiped so
+   *  the engine is safe, but the disk is left alone so nothing is lost. */
+  let persistBlocked = false;
+  /** The foreign id awaiting an operator decision (null = none pending). */
+  let pendingPrevious: number | null = null;
+  /** A decision is open (pendingPrevious is legitimately null for a returning
+   *  stick, so it cannot double as the flag). */
+  let pendingAsked = false;
 
   /** Coerce an arbitrary value into a bounded array of finite numbers. */
   const cleanSeries = (a: unknown, cap: number): number[] => {
@@ -138,6 +168,12 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
         const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
         if (!parsed || typeof parsed !== 'object') return map;
         const obj = parsed as Partial<Persisted>;
+        // IDENTITY FIRST — before every gate below, all of which `return`.
+        // The 1h age gate and the 3min boot grace both fire on the exact
+        // scenario this tag exists for (powered down, stick swapped, powered
+        // up later); reading the tag after them would leave it null, find no
+        // conflict, and let the next flush overwrite the old network's file.
+        loadedHomeId = readHomeTag(obj);
         // v1 (fine-only) still loads — its coarse tier just starts empty and
         // fills over time. Anything else is an unknown format → start fresh.
         if (obj.v !== 1 && obj.v !== 2) {
@@ -196,7 +232,50 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
       return map;
     },
 
+    bindHomeId(id: number): boolean {
+      if (boundHomeId === id) return false;
+      // Two triggers, not one — see the note in baselines.ts: a RETURNING stick
+      // has an archive but nothing live to conflict with.
+      const conflict = loadedHomeId != null && loadedHomeId !== id;
+      const returning = loadedHomeId !== id && hasArchiveFor(path, id);
+      boundHomeId = id;
+      if (!conflict && !returning) {
+        // Untagged or already ours — adopt, and stamp the tag from here on.
+        loadedHomeId = id;
+        return false;
+      }
+      // Park — decide nothing. See homeTag.ts.
+      pendingPrevious = loadedHomeId;
+      pendingAsked = true;
+      persistBlocked = true;
+      return true; // caller drops its rings — they belong to the old network
+    },
+
+    pendingIdentity(): IdentityDecision | null {
+      if (!pendingAsked || boundHomeId == null) return null;
+      return { previous: pendingPrevious, live: boundHomeId, resumable: hasArchiveFor(path, boundHomeId) };
+    },
+
+    resolveIdentity(choice: IdentityChoice): boolean {
+      if (!pendingAsked || boundHomeId == null) return false;
+      if (choice === 'fresh' && !archiveLiveFile(path, pendingPrevious, (m) => log(m))) return false;
+      if (choice === 'resume' && !restoreArchive(path, boundHomeId, pendingPrevious, (m) => log(m))) return false;
+      loadedHomeId = boundHomeId;
+      pendingPrevious = null;
+      pendingAsked = false;
+      persistBlocked = false;
+      // On `keep` the CALLER re-runs load() and installs the rings: this store
+      // holds no state of its own, so there is nothing here to restore. Note the
+      // rings are age-gated at 1h, so a decision taken later than that reloads
+      // nothing — acceptable, because these are cosmetic sparklines rather than
+      // learned state, and saying so beats pretending the reload is lossless.
+      return true;
+    },
+
     save(map: HistoryMap): void {
+      // A foreign file we could not archive is still on disk — do not let a
+      // routine flush do what the archive refused to risk.
+      if (persistBlocked) return;
       try {
         const nodes: Persisted['nodes'] = {};
         for (const [id, h] of map) {
@@ -208,7 +287,7 @@ export function createHistoryStore(opts: HistoryStoreOptions): HistoryStore {
           if (rssi.length === 0 && rtt.length === 0 && crssi.length === 0 && crtt.length === 0) continue;
           nodes[String(id)] = { rssi, rtt, crssi, crtt };
         }
-        const payload: Persisted = { v: SCHEMA_V, savedAt: now(), nodes };
+        const payload: Persisted = { v: SCHEMA_V, savedAt: now(), homeId: tagToWrite(boundHomeId, loadedHomeId), nodes };
         // Atomic: write temp on the SAME dir/fs, then rename onto the target.
         writeFileSync(tmp, JSON.stringify(payload), 'utf8');
         renameSync(tmp, path);

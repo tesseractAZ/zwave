@@ -31,13 +31,24 @@ export type MenuGroup = 'maintenance' | 'control' | 'config' | 'system';
 
 /** What a menu row does when confirmed. Catalog rows carry a kind; the v0.23
  *  device rows carry the concrete entity/verb or config parameter to act on. */
+/**
+ * The menu's vocabulary is DELIBERATELY WIDER than `ActionKind`.
+ *
+ * `ActionKind` is the learned-efficacy vocabulary: the outcome ledger keys its
+ * action arm on it and `efficacyFor(kind, action)` scores it. The two identity
+ * choices are not remediations — they act on the add-on's own persisted state,
+ * not on the mesh — so putting them in `ActionKind` would make them scoreable
+ * by a ledger that can never observe their effect on a symptom.
+ */
+export type MenuActionKind = ActionKind | 'identityKeep' | 'identityFresh' | 'identityResume';
+
 export type MenuPayload =
-  | { type: 'catalog'; kind: ActionKind }
+  | { type: 'catalog'; kind: MenuActionKind }
   | { type: 'entity'; entityId: string; entityName: string; domain: string; verb: EntityVerb }
   | { type: 'config'; param: ConfigParam };
 
 export interface ActionDescriptor {
-  kind: ActionKind;
+  kind: MenuActionKind;
   /** Short imperative label shown in the menu row + confirm title. */
   label: string;
   /** Device-scoped (needs a target node) vs system/network-wide. */
@@ -111,6 +122,33 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
     needsNode: false,
   },
   {
+    kind: 'identityKeep',
+    label: 'Mesh identity: KEEP existing learning',
+    scope: 'system',
+    impact: 'caution',
+    desc: 'Treat the learning from the previous controller as belonging to this one.',
+    impactNote: "Correct when the mesh is PHYSICALLY THE SAME and only its id changed — an NVM backup restored onto replacement hardware. Wrong if this is a different network: the baselines and efficacy rates describe other devices in other rooms, and the engine would invent symptoms against strangers.",
+    needsNode: false,
+  },
+  {
+    kind: 'identityResume',
+    label: 'Mesh identity: RESUME this controller\u2019s learning',
+    scope: 'system',
+    impact: 'caution',
+    desc: 'Put back the learning this controller built during a previous stint.',
+    impactNote: 'For a stick that has COME BACK. Its own archived baselines and efficacy rates return to service, and whatever the interim controller learned is archived aside in their place. Nothing is deleted either way.',
+    needsNode: false,
+  },
+  {
+    kind: 'identityFresh',
+    label: 'Mesh identity: START FRESH',
+    scope: 'system',
+    impact: 'caution',
+    desc: 'Archive the previous controller\u2019s learned state and begin learning again.',
+    impactNote: 'RECOVERABLE: the previous files are renamed aside on disk (never deleted), so they can be inspected or restored by hand. The engine re-learns from zero, which takes days for baselines and longer for efficacy.',
+    needsNode: false,
+  },
+  {
     kind: 'stopRebuild',
     label: 'Stop route rebuild',
     scope: 'system',
@@ -122,7 +160,7 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
 ];
 
 /** Look up a descriptor by kind (never undefined for a known ActionKind). */
-export function describeAction(kind: ActionKind): ActionDescriptor | undefined {
+export function describeAction(kind: MenuActionKind): ActionDescriptor | undefined {
   return ACTION_CATALOG.find((d) => d.kind === kind);
 }
 
@@ -142,6 +180,16 @@ export interface MenuContext {
   scope: MenuScope;
   /** A target node is selected (device actions need one). */
   hasNode: boolean;
+  /** The live controller has archived learning from a previous stint, so
+   *  RESUME is a real option rather than a row that would fail. */
+  identityResumable: boolean;
+  /** A mesh-identity decision is awaiting an answer (v0.64.0). Gates the
+   *  identity rows the same way `rebuilding` gates stopRebuild.
+   *
+   *  REQUIRED, not optional: as an optional member the compiler accepted a
+   *  call site that never passed it, and the rows were unreachable while every
+   *  test and mutant still passed — the v0.33 dead-key shape exactly. */
+  identityPending: boolean;
   /**
    * True when the screen HAS a per-node cursor (Overview/Detail/Log/Remedy).
    * The reason a device action is unavailable differs: on those screens the
@@ -185,6 +233,13 @@ export function buildMenu(ctx: MenuContext): MenuItem[] {
   for (const d of ACTION_CATALOG) {
     if (d.scope !== want) continue;
     if (d.kind === 'stopRebuild' && !ctx.rebuilding) continue;
+    // Offered ONLY while a decision is actually pending — like stopRebuild,
+    // an action with nothing to act on is a row that can only confuse.
+    if ((d.kind === 'identityKeep' || d.kind === 'identityFresh' || d.kind === 'identityResume') && !ctx.identityPending) continue;
+    // RESUME needs more than a pending decision: it needs this controller to
+    // actually have something archived. Offering it otherwise is a row that can
+    // only fail, on the screen where the operator is least sure what to press.
+    if (d.kind === 'identityResume' && !ctx.identityResumable) continue;
     if (d.kind === 'rebuildAll' && ctx.rebuilding) continue;
     const disabled = d.needsNode && !ctx.hasNode;
     items.push({

@@ -95,6 +95,8 @@ export function mockData(opts: { events?: LogEvent[]; nodes?: NodeSnapshot[] } =
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
   return {
     nodes: () => nodes,
+    pendingIdentity: () => null,
+    resolveIdentityDecision: () => false,
     nodeById: (id) => byId.get(id),
     controller: () => null,
     events: () => events,

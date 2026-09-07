@@ -103,28 +103,69 @@ session and transport layers. That means:
 
 | | measured |
 | --- | --- |
-| Test suite | **1 061 tests, 11.4 s** (`npm test`) |
-| Mutation harness | **541 mutants, 836 s wall / 621 s user** |
+| Test suite | **1 098 tests, 12.5 s** (`npm test`) |
+| Mutation harness | **559 mutants, 821 s wall · 689 s user · 78 s sys** |
 | Source | 24 457 lines TypeScript · Tests | 18 614 lines |
 
-Latest full run: **533 killed · 0 survived · 8 equivalent · 0 missing ·
+Latest full run: **551 killed · 0 survived · 8 equivalent · 0 missing ·
 0 ambiguous · 0 invalid · 0 relabel.**
 
-836 s over 541 mutants is **~1.55 s each**, against a full suite of 11.4 s — so
-most mutants are plainly not paying for the whole suite. That is the kill-fast
-selection working: run only the test files that provably catch a given mutant,
-and fall back to the full suite only when they come back green. Each mutant also
-pays a typecheck, which the per-mutant figure includes.
+### Where the 821 seconds actually go
 
-> The `sys` time was not captured on that run, so this document does **not**
-> claim the harness is startup-bound rather than CPU-bound — that inference needs
-> a breakdown this measurement cannot give (§7).
+`node scripts/mutation-check.mjs --profile` reports a per-phase breakdown; the
+run below was taken under `/usr/bin/time -l` so the user/sys split is real
+rather than inferred.
+
+| phase | wall | share | runs | each |
+| --- | ---: | ---: | ---: | ---: |
+| baseline typecheck | 0.2 s | 0.0 % | 1 | 0.20 s |
+| baseline full suite | 12.5 s | 1.5 % | 1 | 12.5 s |
+| per-mutant typecheck | 122.9 s | 15.1 % | 559 | 0.22 s |
+| **targeted test runs** | **571.9 s** | **70.2 %** | 558 | **1.02 s** |
+| full-suite fallbacks | 107.0 s | 13.1 % | 9 | 11.89 s |
+| total | 814.5 s | | | |
+
+### The startup-bound hypothesis is REFUTED
+
+Earlier revisions of this document flagged "startup-bound" as an untested guess
+and declined to assert it. Measured, it is wrong:
+
+- **`sys` is 77.8 s — 9.5 % of 821.3 s real.** `user` is 688.8 s, **84 %**.
+- The harness now measures its own **process-startup floor** directly, by timing
+  one bare invocation of each subprocess: `tsc` 78 ms, `tsx` 70 ms. Against the
+  observed counts that is `78 ms × 559 + 70 ms × 567` = **83.3 s, 10.2 %** of the
+  run spent before any work begins. Two consecutive runs agreed to within half a
+  point, so this is a stable property and not one run's weather.
+
+Two independent measurements agree at ~10 %. The harness is **CPU-bound on real
+work**, not on launching processes.
+
+The cost centre is the **targeted test runs: 70 % of the run**, at 1.02 s each
+across 558 invocations — of which only ~76 ms is startup. The other ~0.95 s is
+`tsx` transpiling the TypeScript afresh **on every single invocation**. So the
+lever is not "spawn fewer processes", it is "stop re-transpiling the same
+sources 558 times": precompile once and run plain JS, or keep a warm worker.
+
+Two smaller levers, for scale: the per-mutant typecheck is 15.1 % (30 % of which
+*is* startup, so an incremental/`--watch` tsc server would help there), and the
+full-suite fallbacks are 13.1 % from only **9** runs at 11.9 s each. Fallbacks
+are triggered by kill-fast mapping misses, so each one fixed is ~12 s saved;
+seven were harvested from the run's own report during v0.64.0, taking the miss
+count to **zero** — the fallbacks that remain are mutants no single test file
+catches, not mapping errors.
+
+> Caveat on the phase table: it is wall clock measured inside the parent, so a
+> child's CPU is charged to nobody. That is exactly why the `time -l` line above
+> is quoted beside it — the two together are what make the refutation safe.
 
 `SURVIVED`, `MISSING`, `AMBIGUOUS` and `INVALID` are all failures. An anchor
 pre-flight checks every mutant's target text against its file before any
 *mutant's* tests run — it runs after the baseline, so a stale entry costs the
-baseline (~12 s) rather than the full 14 minutes. It fired six times during the
-v0.51–v0.63 work, each on an anchor one of my own edits had moved.
+baseline (~12 s) rather than the full 14 minutes. It fired eight times during
+the v0.51–v0.64 work, each on an anchor one of my own edits had moved — most
+recently on an `AMBIGUOUS(2)`, where a copy-pasted path-splitting helper made
+one anchor match two sites. The duplication was the real defect; the harness
+found it as a testing problem.
 
 ---
 
@@ -209,8 +250,67 @@ than probing the whole mesh on every restart.
 > test asserts the opposite — `test/chrome.test.ts:172`, *"80 cols keeps the
 > clock"* — and `chrome.ts:86` sheds the home id first. So the explanation was
 > false, built on a misread capture in which the command bar and masthead ran
-> together. The zero itself is unexplained and is therefore withdrawn rather
-> than published with a story attached. Per-session bandwidth is in §7.
+> together. The zero was withdrawn rather than published with a story attached.
+>
+> **Now measured, and the zero is refuted — see §5a.** The cause is also
+> understood, and it is instructive: the first re-measurement attempt used
+> quiet-detection to separate the opening paint from the steady state, and the
+> line never fell quiet, so every steady-state field came back `0`. That is very
+> likely the original failure too — *a heuristic that never fired, reported as a
+> measured absence*. The replacement uses fixed time windows and no heuristic.
+
+---
+
+## 5a. Per-session bandwidth
+
+Measured against the live add-on (v0.63.7 on the Pi) over a 60 s window after a
+10 s warm-up, with the terminal size negotiated over telnet NAWS. No
+quiet-detection, no averaging across the opening paint.
+
+| terminal | opening paint | median | p95 | **steady** |
+| --- | ---: | ---: | ---: | ---: |
+| 80 × 24 | 50.0 KB | 4 994 B/s | 9 988 B/s | **4.96 KB/s** |
+| 200 × 60 | 179.0 KB | 17 395 B/s | 31 875 B/s | **17.22 KB/s** |
+
+The 200×60 figure **confirms** the ~17 KB/s this document already carried. Only
+the 80×24 zero was wrong.
+
+### It is not a rate — it is the frame size
+
+At both sizes the maximum second is **exactly twice the median**, with a
+scattering of zero-seconds. That is not burstiness: it is a whole-frame redraw
+on a 1 Hz timer, sampled by a 1 s clock that drifts against it, so occasionally
+two frames land in one bucket and occasionally none. `telnet/server.ts:419`
+confirms it in one line:
+
+```js
+conn.timer = setInterval(() => session.draw(), 1000);
+```
+
+So per-session bandwidth is not an empirical rate to be sampled; it is
+`frame_bytes × 1 Hz` — about 4 994 B per frame at 80×24 and 17 395 B at 200×60
+(≈2.6 and ≈1.45 bytes per cell, the difference being ANSI colour runs amortised
+over more cells).
+
+A short run that happens to align with the redraw clock shows this with no noise
+at all — min, median, p95 and max all identical:
+
+```
+$ node scripts/bw-probe.mjs <pi> 2324 80 24 3 8
+{"steadyBytesPerSec":4994,"medianBytesPerSec":4994,
+ "minBytesPerSec":4994,"maxBytesPerSec":4994,"zeroSeconds":0}
+```
+
+Zero variance across eight seconds is not a smooth average of a bursty stream;
+it is one constant-size frame per second.
+
+Against the 32-session policy cap that is ~550 KB/s worst case, ≈4.4 Mbit/s.
+This was never a capacity question, and re-measuring it was about **correcting a
+published number**, not about finding a limit.
+
+> Reproduce: `scripts/bw-probe.mjs <host> 2324 <cols> <rows> <warm-s> <meas-s>`.
+> It negotiates NAWS, discards the warm-up window, and prints the per-second
+> series so the 2× peaks are visible rather than asserted.
 
 ---
 
@@ -235,15 +335,13 @@ no, so it is recorded as a known gap rather than carried as pending work.
 
 **Worth measuring if the cost is ever felt:**
 
-- **Where the harness's 836 s goes** — baseline, 542 typechecks, targeted runs,
-  full-suite fallbacks. This is the one item with a real ongoing cost: the
-  harness gates every release and was run ~15 times in a single working session.
-  A per-phase breakdown is what an optimisation attempt would start from.
-  Without `sys` time it also means "startup-bound" stays a hypothesis (§3).
-- **Per-session bandwidth.** The one attempt produced a 0 KB/s reading at 80×24
-  that the code contradicts, and it was withdrawn (§5). Re-measuring is about
-  correcting a published claim rather than about capacity — 17 KB/s at 200×60
-  against a 32-session policy cap is not a limit anyone will meet.
+- ~~**Where the harness's 836 s goes.**~~ **MEASURED in v0.64.0 — see §3.**
+  `--profile` now reports the phase breakdown on any run. The result overturned
+  the standing guess: the harness is CPU-bound on `tsx` transpilation (69 % of
+  the run), not startup-bound (~9 % by two independent measurements).
+- ~~**Per-session bandwidth.**~~ **MEASURED in v0.64.0 — see §5a.** 4.96 KB/s at
+  80×24 and 17.22 KB/s at 200×60. The withdrawn zero is refuted and its cause
+  identified; the 17 KB/s figure this document already carried is confirmed.
 
 **Known, and deliberately not measured** — the figure would not change anything
 at these magnitudes:

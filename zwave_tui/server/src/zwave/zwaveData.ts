@@ -30,6 +30,7 @@
  * (the latter rejects with `invalid_format`).
  */
 
+import type { IdentityChoice, IdentityDecision } from './homeTag';
 import type { HaWsClient, HaSubscription } from '../ha/haWsClient';
 import { subsumptionLabel, firstSentence } from '../telnet/ledgerText';
 import {
@@ -383,6 +384,10 @@ export interface ZwaveData {
   symptoms(): Symptom[];
   /** Engine enabled + graduated-baseline count (M3 Remedy empty state). */
   engineStatus(): EngineStatus;
+  /** The mesh-identity decision waiting on the operator, or null (v0.64.0). */
+  pendingIdentity(): IdentityDecision | null;
+  /** Answer it: `keep` re-adopts the old learning, `fresh` archives it. */
+  resolveIdentityDecision(choice: IdentityChoice): boolean;
   /** M5: fold an operator action's outcome into the learning ledger. */
   recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin): void;
   /** Register the probe-pending hook the auto-ping runner owns (v0.47.0), so a
@@ -729,6 +734,8 @@ class ZwaveDataImpl implements ZwaveData {
   /** Controller home_id from the last poll — a change means a different Z-Wave
    *  network (stick swap / different NVM backup), so node-keyed caches alias. */
   private lastHomeId: number | null = null;
+  /** Latch so the pending-decision announcement is made once, not per poll. */
+  private identityAsked = false;
   /** Epoch ms the current rebuild-routes began (null = idle) — set on the
    *  is_rebuilding_routes false→true edge so the UI can show elapsed time. */
   private rebuildStartedAt: number | null = null;
@@ -1628,6 +1635,48 @@ class ZwaveDataImpl implements ZwaveData {
   /** Honest engine state for the Remedy screen: whether the engine is enabled,
    *  and how many nodes have a graduated timeout baseline vs total — so the
    *  screen can distinguish "off" / "still learning" / "all healthy". */
+  /**
+   * The identity decision waiting on the operator, or null.
+   *
+   * Aggregated across the three learned stores, which always agree: they are
+   * bound from one call site with one id. Read from `outcomes` first because it
+   * holds the longest-lived learning and is the reason to hesitate at all.
+   */
+  pendingIdentity(): IdentityDecision | null {
+    return this.outcomes?.pendingIdentity()
+      ?? this.baselines?.pendingIdentity()
+      ?? this.historyStore?.pendingIdentity()
+      ?? null;
+  }
+
+  /**
+   * Answer it. `keep` re-adopts the previous network's learning under the live
+   * identity; `fresh` archives it and starts over. False = a store refused —
+   * today that means an archive that could not be written, and the decision
+   * stays pending rather than being reported as done.
+   */
+  resolveIdentityDecision(choice: IdentityChoice): boolean {
+    if (!this.pendingIdentity()) return false;
+    let ok = true;
+    if (this.outcomes && !this.outcomes.resolveIdentity(choice)) ok = false;
+    if (this.baselines && !this.baselines.resolveIdentity(choice)) ok = false;
+    if (this.historyStore && !this.historyStore.resolveIdentity(choice)) ok = false;
+    // historyStore holds no state of its own — on `keep` the rings come back
+    // only by re-reading the file here (and its 1h age gate may refuse, which
+    // is honest: those are cosmetic sparklines, not learned state).
+    if (ok && choice === 'keep' && this.historyStore) {
+      for (const [id, h] of this.historyStore.load()) this.histByNode.set(id, h);
+    }
+    if (ok) {
+      this.identityAsked = false;
+      this.pushEvent('engine', 'info', 'system', null,
+        choice === 'keep'
+          ? 'mesh identity: existing learning KEPT under the new controller'
+          : "mesh identity: started fresh — the previous network's files were archived");
+    }
+    return ok;
+  }
+
   engineStatus(): EngineStatus {
     const now = Date.now();
     const band = bandOf(now);
@@ -1992,6 +2041,46 @@ class ZwaveDataImpl implements ZwaveData {
     // is stable (that's what lets v0.5 persistence survive an HA-Core restart).
     const homeId = this.lastController.homeId;
     if (homeId != null) {
+      // BIND BEFORE THE WIPE BRANCH — the order is load-bearing. The branch
+      // below calls `outcomes.reset(); outcomes.save();`, which writes the
+      // EMPTY ledger through to /data. Binding afterwards would archive a file
+      // that had already been emptied, so the feature meant to preserve the
+      // previous network's learning would have preserved nothing. Each bind
+      // archives the old file and resets its own store; the branch's own
+      // resets below are then redundant but harmless.
+      //
+      // These fire on the FIRST known id too, which is the case the in-memory
+      // `lastHomeId` guard structurally cannot catch: a stick swapped while the
+      // add-on was STOPPED reaches this line with lastHomeId still null, and
+      // only the persisted tag can tell the two networks apart.
+      //
+      // Count the in-flight episodes BEFORE binding, for the same reason the
+      // count exists at all (v0.44.0): bindHomeId resets the ledger, so reading
+      // it afterwards reports 0 and the operator watches experiments vanish
+      // with nothing saying they existed. The bind moved the wipe earlier; the
+      // count has to move with it.
+      const lostOpen = this.outcomes?.openEpisodes().length ?? 0;
+      this.evidenceStore?.bindHomeId(homeId);
+      this.baselines?.bindHomeId(homeId);
+      this.outcomes?.bindHomeId(homeId);
+      if (this.historyStore?.bindHomeId(homeId)) {
+        // The rings are this store's state, not the file's — drop them here.
+        this.histByNode.clear();
+        this.histLongByNode.clear();
+        this.histDirty = true;
+      }
+      // Announce the question ONCE per pending decision. Without the latch this
+      // is a controller poll, so it would repeat the same line every few
+      // seconds and bury the Log it is trying to reach the operator through.
+      const pend = this.pendingIdentity();
+      if (pend && !this.identityAsked) {
+        this.identityAsked = true;
+        this.log(`controller identity ${pend.previous} → ${pend.live}: learned state is HELD pending a decision — nothing has been written or discarded`);
+        this.pushEvent('engine', 'warn', 'system', null,
+          'mesh identity changed — choose Keep or Start fresh in the Actions menu');
+      } else if (!pend) {
+        this.identityAsked = false;
+      }
       if (this.lastHomeId != null && homeId !== this.lastHomeId) {
         this.log(`controller home_id ${this.lastHomeId} → ${homeId} (network changed) — resetting caches + registries`);
         this.statsByNode.clear();
@@ -2035,7 +2124,6 @@ class ZwaveDataImpl implements ZwaveData {
         // (v0.44.0). In-flight episodes died silently here: an operator could
         // watch three experiments vanish with nothing on any screen or in the
         // log saying they had ever existed, let alone why.
-        const lostOpen = this.outcomes?.openEpisodes().length ?? 0;
         this.outcomes?.reset();
         this.outcomes?.save();
         this.pendingResolve.clear();
@@ -2063,12 +2151,6 @@ class ZwaveDataImpl implements ZwaveData {
         this.client.reconnect();
       }
       this.lastHomeId = homeId;
-      // Bind the live network identity to the evidence store: on the FIRST
-      // known home id this validates any restored evidence against it (a stick
-      // swapped while the add-on was stopped must not resurrect the previous
-      // network's history under new node ids); on a live change it resets +
-      // rewrites disk. No-op when unchanged.
-      this.evidenceStore?.bindHomeId(homeId);
     }
     this.lastErr = null;
     this.isReady = true;
@@ -3314,4 +3396,6 @@ export function createZwaveData(opts: ZwaveDataOptions): ZwaveData {
   const impl = new ZwaveDataImpl(opts);
   impl.start();
   return impl;
+
+
 }

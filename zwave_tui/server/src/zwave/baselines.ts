@@ -39,7 +39,9 @@
  * future refinement, not needed for correctness.
  */
 
+import type { IdentityChoice, IdentityDecision } from './homeTag';
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { readHomeTag, tagToWrite, archiveLiveFile, hasArchiveFor, restoreArchive } from './homeTag';
 import type { LogSink } from '../logger';
 import { uptime as osUptime } from 'node:os';
 import type { EvidenceSample } from './evidenceStore';
@@ -159,11 +161,25 @@ export interface BaselineStore {
   reset(): void;
   load(): void;
   save(): void;
+  /** Bind the live controller identity. The first known id validates what was
+   *  restored; a CHANGE parks the store (memory wiped, saves latched off, file
+   *  untouched) and waits for `resolveIdentity`. */
+  bindHomeId(id: number): void;
+  /** The identity decision waiting on the operator, or null. */
+  pendingIdentity(): IdentityDecision | null;
+  /** Answer it. `fresh` archives the previous network's file and starts over;
+   *  `keep` re-adopts it under the live identity. False = still pending (the
+   *  archive failed, so saves stay latched rather than overwrite it). */
+  resolveIdentity(choice: IdentityChoice): boolean;
 }
 
 interface Persisted {
   v: number;
   savedAt: number;
+  /** Controller these normals were learned on. OPTIONAL, and NOT a schema bump
+   *  — the gate below is a strict `!== SCHEMA_V`, so bumping would discard
+   *  every install's baselines. Absent reads as UNKNOWN ⇒ adopted. */
+  homeId?: number | null;
   nodes: Record<string, NodeBaseline>;
 }
 
@@ -262,6 +278,15 @@ export function createBaselineStore(opts: BaselineStoreOptions): BaselineStore {
 
   const map = new Map<number, NodeBaseline>();
   let dirty = false;
+  /** Set even when the payload is rejected below — see homeTag.ts. */
+  let loadedHomeId: number | null = null;
+  let boundHomeId: number | null = null;
+  let persistBlocked = false;
+  /** The foreign id awaiting an operator decision (null = none pending). */
+  let pendingPrevious: number | null = null;
+  /** A decision is open. Separate from pendingPrevious, which is legitimately
+   *  null for a returning stick with nothing live to conflict with. */
+  let pendingAsked = false;
 
   const nodeOf = (id: number): NodeBaseline => {
     let n = map.get(id);
@@ -375,6 +400,9 @@ export function createBaselineStore(opts: BaselineStoreOptions): BaselineStore {
       try {
         if (!existsSync(path)) return;
         const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<Persisted>;
+        // IDENTITY FIRST — the schema gate and the 30-day age gate below both
+        // `return`, and the age gate is reachable on a swap-while-stopped.
+        loadedHomeId = readHomeTag(parsed);
         if (!parsed || typeof parsed !== 'object' || parsed.v !== SCHEMA_V) {
           if (parsed && parsed.v !== SCHEMA_V) log(`baselines: schema ${String(parsed.v)} unsupported — starting fresh`);
           return;
@@ -405,15 +433,76 @@ export function createBaselineStore(opts: BaselineStoreOptions): BaselineStore {
       dirty = false;
     },
 
+    bindHomeId(id: number): void {
+      if (boundHomeId === id) return;
+      // ASK when the live state is not already this controller's — which covers
+      // TWO cases, not one. The obvious one is a conflicting tag. The other is
+      // a RETURNING stick with nothing live to conflict with: swap A→B, never
+      // save on B, swap back to A. `loadedHomeId` is null there, so a
+      // conflict-only test finds nothing and A's own archived learning is never
+      // offered — the archive exists and the operator is never told.
+      const conflict = loadedHomeId != null && loadedHomeId !== id;
+      const returning = loadedHomeId !== id && hasArchiveFor(path, id);
+      boundHomeId = id;
+      if (!conflict && !returning) { loadedHomeId = id; return; }
+      // DECIDE NOTHING. Park: wipe memory so the engine cannot act on another
+      // network's learning, latch saves so nothing overwrites the file, and
+      // wait to be asked.
+      pendingPrevious = loadedHomeId;
+      pendingAsked = true;
+      persistBlocked = true;
+      // Foreign normals describe different hardware in different rooms; keeping
+      // them would have the engine invent symptoms against a stranger.
+      this.reset();
+    },
+
+    pendingIdentity(): IdentityDecision | null {
+      if (!pendingAsked || boundHomeId == null) return null;
+      return {
+        previous: pendingPrevious,
+        live: boundHomeId,
+        resumable: hasArchiveFor(path, boundHomeId),
+      };
+    },
+
+    resolveIdentity(choice: 'fresh' | 'keep' | 'resume'): boolean {
+      if (!pendingAsked || boundHomeId == null) return false;
+      if (choice === 'fresh') {
+        // Archive FIRST: if the previous network's file cannot be moved to
+        // safety, stay latched rather than resume saving over it.
+        if (!archiveLiveFile(path, pendingPrevious, (m) => log(m))) return false;
+        this.reset();
+      } else if (choice === 'resume') {
+        // The returning stick's own learning. restoreArchive parks what is live
+        // before moving the archive in, so a failure changes nothing.
+        if (!restoreArchive(path, boundHomeId, pendingPrevious, (m) => log(m))) return false;
+        this.load();
+      } else {
+        // KEEP: the operator says this is the same mesh under a new identity
+        // (the NVM-restore case). Re-read, then RE-STAMP below — load() puts
+        // the OLD id back, and without the re-stamp the next swap would archive
+        // this file under the wrong controller.
+        this.load();
+      }
+      loadedHomeId = boundHomeId;
+      pendingPrevious = null;
+      pendingAsked = false;
+      persistBlocked = false;
+      dirty = true; // the re-stamp (or the fresh/resumed state) must reach disk
+      return true;
+    },
+
     save(): void {
       if (!dirty) return;
+      // The foreign file we could not move is still there — leave it be.
+      if (persistBlocked) return;
       try {
         const nodes: Persisted['nodes'] = {};
         for (const [id, n] of map) {
           if (!Number.isInteger(id) || id <= 0) continue;
           nodes[String(id)] = n;
         }
-        const payload: Persisted = { v: SCHEMA_V, savedAt: now(), nodes };
+        const payload: Persisted = { v: SCHEMA_V, savedAt: now(), homeId: tagToWrite(boundHomeId, loadedHomeId), nodes };
         writeFileSync(tmp, JSON.stringify(payload), 'utf8');
         renameSync(tmp, path);
         dirty = false;
