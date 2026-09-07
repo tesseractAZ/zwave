@@ -481,6 +481,8 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       symptoms: () => [], engineStatus: () => null, efficacyFor: () => null,
       interference: () => null, entityStates: () => [], configParams: () => [],
       requestConfigParams: () => {},
+      pendingIdentity: () => null,
+      resolveIdentityDecision: () => false,
       ackEvent: (seq: number) => seq === 42,
       routeStability: (n: number) => ({ changes: n, hours: 48 }),
       // v0.35 additions — each one an exemplar from the SAME family the hole

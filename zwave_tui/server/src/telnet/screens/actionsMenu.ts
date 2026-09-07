@@ -106,9 +106,18 @@ export function renderActionsMenu(view: ViewState, opts: ActionsMenuOpts): strin
 
   // Footer — with a scroll position hint when the menu overflows.
   const key = (k: string, label: string) => c.cyanB(k) + ' ' + c.grey(label);
-  const left = [key('↑↓', 'move'), key('⏎', locked ? 'locked' : 'select'), key('Esc', 'close')].join(c.grey(' · '));
+  // The identity rows are answerable in read-only — they act on the add-on's
+  // own persisted state, not the mesh. Saying "locked" over a row the operator
+  // CAN press is the same class of defect as a screen claiming all-clear while
+  // a detector is starved: the footer would be describing a rule the code below
+  // it does not apply.
+  const cursorRow = items[index];
+  const cursorActionable = !locked
+    || (cursorRow?.payload.type === 'catalog'
+        && (cursorRow.payload.kind === 'identityKeep' || cursorRow.payload.kind === 'identityFresh'));
+  const left = [key('↑↓', 'move'), key('⏎', cursorActionable ? 'select' : 'locked'), key('Esc', 'close')].join(c.grey(' · '));
   const more = entries.length > bodyCap ? c.cyan(`${start > 0 ? '▲' : ' '}${start + bodyCap < entries.length ? '▼' : ' '} `) : '';
-  const right = locked
+  const right = locked && !cursorActionable
     ? c.yellow('enable write_actions_enabled to unlock')
     : more + c.grey(`${items.length} action${items.length === 1 ? '' : 's'}`);
   out.push(truncate(lr(left, right, W), W));

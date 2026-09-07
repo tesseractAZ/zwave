@@ -203,7 +203,20 @@ something talks to it). It is restricted to ping because ping is idempotent and
 has nothing to undo; battery/sleeping devices are never probed; a boot window,
 a rebuild suppressor, and a mesh-storm guard (≥25 % dead ⇒ stand down) bound it.
 Off by default; every decision is traced to the log and every outcome feeds the
-learning ledger. If you expose the LAN telnet port on an
+learning ledger.
+
+**Swapping the controller — you are asked, nothing is discarded (v0.64.0).** The
+learned stores (efficacy ledger, per-node baselines, history) are tagged with the
+controller that taught them. Attach a different stick — or restore an NVM backup,
+which gives a new home id on the same physical mesh — and the add-on **stops
+using** that learning immediately (it describes other hardware) but **writes
+nothing and deletes nothing**. It asks: *keep* the existing learning under the new
+identity, *resume* this controller's own learning if it has been here before, or
+*start fresh*. "Start fresh" renames the old files aside in `/data` as
+`<name>.home-<id>.json`, so they can always be inspected or put back by hand. The
+decision is answerable even in read-only mode, since it touches nothing on the
+mesh, and it raises `binary_sensor.zwave_tui_degraded` so you hear about it
+without having the console open. If you expose the LAN telnet port on an
 untrusted network, enable the optional **login gate** (plaintext or `scrypt:`
 passwords, with a per-peer backoff). The sidebar console is **restricted to Home
 Assistant administrators** — the same position the official Z-Wave JS add-on
@@ -217,11 +230,16 @@ has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
 Headlines, each stated as narrowly as it was measured: the slowest screen
 redraw is **412 µs** against a 1 000 ms frame budget; the container holds
 **93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
-RSS) and sampled **0.02 % CPU** once, not as an average; **1 061 tests in 11.4 s**
-and **541 mutants in ~14 min** gate every release.
+RSS) and sampled **0.02 % CPU** once, not as an average; **1 098 tests in 12.5 s**
+and **559 mutants in ~14 min** gate every release. A TUI session costs
+**4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
+rate but one whole-frame redraw per second.
 
 That document also carries what is *not* measured, and why most of it does not
-need to be.
+need to be — and, for the two items that did earn measuring, what the numbers
+overturned. The mutation harness is **not** startup-bound, as had been guessed:
+sys is 9 % and the measured spawn floor 10 %, against 70 % spent re-transpiling
+TypeScript on every one of 558 invocations.
 
 ## The machine-readable boundary
 

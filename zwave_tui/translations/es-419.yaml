@@ -1,0 +1,174 @@
+# Etiquetas y ayuda en línea de la página de Configuración del complemento
+# Z-Wave TUI (español latinoamericano).
+#
+# Home Assistant muestra `name` como la etiqueta del campo y `description` como
+# el texto de ayuda debajo. Las CLAVES deben coincidir EXACTAMENTE con las de
+# config.yaml: un error de escritura no genera ninguna advertencia — HA muestra
+# la clave cruda en su lugar. Las etiquetas de los puertos viven en
+# `ports_description:` dentro de config.yaml, así que aquí no hay bloque
+# `network:`.
+#
+# ★ LA ESTRUCTURA LA LLEVA EL PREFIJO DE LA ETIQUETA ("Pantalla · ",
+#   "Seguridad · ", "Acceso · ", "Inicio de sesión · ", "Avanzado · "), NO el
+#   anidamiento de las claves. Es una decisión deliberada y permanente, no un
+#   atajo — y es la misma regla que en en.yaml, por el mismo motivo:
+#
+#   un complemento NO tiene un mecanismo de migración de opciones, así que
+#   anidar una clave equivale a RENOMBRARLA. El valor del operador queda en la
+#   ruta ANTIGUA, que ya no existe en el nuevo esquema, mientras que la ruta
+#   nueva nunca se escribió y por lo tanto toma su valor predeterminado. En una
+#   instalación con `auth_enabled: true` y `write_actions_enabled: true`, eso
+#   devolvería silenciosamente la puerta de inicio de sesión a `false` mientras
+#   las acciones de escritura siguen ACTIVAS: un puerto telnet sin autenticar
+#   con bloqueo/desbloqueo de cerraduras disponible.
+#
+#   Por eso: NUNCA anide ni renombre una clave existente para ordenar este
+#   formulario. Traducir el TEXTO es seguro; tocar las CLAVES no lo es.
+#
+# Nota de traducción: los valores literales de configuración ("margin", "dbm"),
+# la palabra que se escribe para confirmar (CONFIRM) y las letras de las teclas
+# (A, T) NO se traducen — son lo que el operador debe escribir o ver en
+# pantalla. Los estados del controlador Z-Wave (Alive / Dead) se dejan en
+# inglés entre paréntesis porque así aparecen en la interfaz.
+configuration:
+  # ── Pantalla y seguridad ────────────────────────────────────────────────────
+  signal_display:
+    name: Pantalla · Unidad de señal
+    description: >-
+      Unidad predeterminada para la calidad del enlace en la TUI. "margin"
+      muestra el margen de señal sobre el piso de ruido medido en vivo
+      (recomendado); "dbm" muestra el RSSI crudo. Puede cambiarla en cualquier
+      momento dentro de la TUI: presione T (aparece como [T] UNITS en la barra
+      de comandos).
+  write_actions_enabled:
+    name: Seguridad · Habilitar acciones de escritura
+    description: >-
+      Desbloquea el menú de acciones (presione A en la TUI): ping, actualizar
+      valores, volver a entrevistar, reconstruir rutas y eliminar un nodo
+      fallido. Desactivado, el complemento es un monitor de solo lectura. Es
+      seguro dejarlo activado: cada comando debe armarse escribiendo la palabra
+      CONFIRM antes de ejecutarse.
+  # ── Autorreparación (auto-ping) ─────────────────────────────────────────────
+  auto_ping_enabled:
+    name: Seguridad · Hacer ping automático a un nodo caído
+    description: >-
+      DESACTIVADO de forma predeterminada. Cuando un nodo ALIMENTADO POR RED
+      lleva caído (Dead) el tiempo de espera indicado abajo, el motor le envía
+      un ping para intentar despertarlo. Los dispositivos a batería o dormidos
+      nunca se tocan: dormido no es lo mismo que caído, y un ping no puede
+      alcanzarlos antes de su propio despertar. Requiere "Habilitar acciones de
+      escritura". Se suspende durante una reconstrucción de rutas, en la ventana
+      de reinicio y cuando una cuarta parte de la malla está caída a la vez (eso
+      es un problema del controlador, no de un dispositivo). Cada intento queda
+      registrado, así que la pantalla REMEDY muestra si realmente funciona.
+  auto_ping_after_min:
+    name: Seguridad · Ping automático después de (minutos caído)
+    description: >-
+      Cuánto tiempo debe llevar un nodo caído (Dead) de forma continua antes del
+      primer ping automático.
+  auto_ping_max_attempts:
+    name: Seguridad · Intentos de ping automático por caída
+    description: >-
+      Intentos por episodio de caída, espaciados 10/30/60 minutos (con el valor
+      predeterminado de 3 solo se alcanzan las esperas de 10 y 30 minutos: unos
+      50 minutos desde la caída hasta el aviso). Después de eso el motor se
+      detiene y le deja el nodo a usted. Una recuperación reinicia la cuenta.
+  auto_ping_stale_min:
+    name: Seguridad · Sondeo de vida después de (minutos en silencio)
+    description: >-
+      Sondea un nodo alimentado por red este tiempo después de SU PROPIO último
+      contacto (0 lo desactiva). Z-Wave marca un nodo como caído (Dead) solo
+      cuando un envío hacia él FALLA, de modo que un dispositivo al que nadie le
+      habla nunca se comprueba: un tomacorriente desenchufado puede figurar como
+      Alive indefinidamente. Se mide desde la última vez que se vio a cada nodo,
+      así que un dispositivo conversador reinicia su reloj y nunca se sondea. Un
+      sondeo por ciclo, empezando por el más antiguo, con las mismas
+      suspensiones que el ping automático.
+  # ── Acceso por telnet ───────────────────────────────────────────────────────
+  telnet_enabled:
+    name: Acceso · Habilitar la TUI por telnet
+    description: >-
+      Publica la TUI de pantalla completa en el puerto telnet para terminales de
+      su red local. Telnet no está cifrado: en una red que no sea de confianza,
+      active la puerta de inicio de sesión de abajo, o deje esto desactivado y
+      use solamente la consola web de la barra lateral de Home Assistant.
+  # ── Puerta de inicio de sesión ──────────────────────────────────────────────
+  auth_enabled:
+    name: Inicio de sesión · Exigir inicio de sesión (acceso directo)
+    description: >-
+      Exige usuario y contraseña para el acceso DIRECTO: por telnet o entrando
+      al puerto directamente. El acceso por la barra lateral de Home Assistant
+      ya está autenticado por HA y no se restringe (salvo que active también la
+      opción siguiente). Agregue al menos un usuario abajo primero: sin ninguno
+      configurado, el acceso directo se deniega.
+  auth_require_on_ingress:
+    name: Inicio de sesión · Exigirlo también en la barra lateral de HA
+    description: >-
+      Muestra también la puerta de inicio de sesión al abrir la consola desde la
+      barra lateral de Home Assistant. Desactivado de forma predeterminada (HA
+      ya lo autenticó allí); actívelo solo si quiere un segundo aviso delante de
+      los controles de la malla.
+  users:
+    name: Inicio de sesión · Usuarios
+    description: >-
+      Cuentas permitidas para la TUI: agregue una fila por usuario. La
+      contraseña puede ir en texto plano (se oculta aquí, pero se guarda en las
+      opciones del complemento) o como una cadena scrypt:<salt>:<hash> para no
+      almacenar texto plano. Consulte la pestaña Documentación para generar un
+      hash.
+  auth_max_attempts:
+    name: Inicio de sesión · Intentos máximos
+    description: >-
+      Intentos de contraseña fallidos permitidos antes de cerrar la conexión.
+      Predeterminado 3.
+  auth_idle_lock_min:
+    name: Inicio de sesión · Bloqueo por inactividad (minutos)
+    description: >-
+      Vuelve a exigir el inicio de sesión tras estos minutos sin pulsaciones de
+      teclas en una sesión ya iniciada. 0 lo desactiva. Se aplica solo a las
+      sesiones que pasaron por la puerta de inicio de sesión, no a las de la
+      barra lateral de HA.
+  # ── Avanzado ────────────────────────────────────────────────────────────────
+  refresh_interval:
+    name: Avanzado · Intervalo de actualización (segundos)
+    description: >-
+      Segundos entre cada redibujado en vivo y el sondeo ligero del listado de
+      nodos (network_status). El valor predeterminado de 2 s es un buen
+      equilibrio: menos es más ágil, más es más liviano. Rango 1–30.
+  route_poll_interval:
+    name: Avanzado · Intervalo de sondeo de rutas (segundos)
+    description: >-
+      Segundos entre los sondeos más pesados de rutas y estadísticas del
+      controlador, mantenidos fuera del ciclo rápido de dibujado para que no
+      castiguen la malla. Predeterminado 10 s. Rango 5–120.
+  log_level:
+    name: Avanzado · Nivel de registro
+    description: >-
+      Detalle del registro del complemento. "info" es el valor predeterminado;
+      use debug o trace para diagnosticar, o warning/error para silenciar la
+      salida de rutina.
+  zwave_entry_id:
+    name: Avanzado · ID de entrada de Z-Wave JS
+    description: >-
+      Déjelo en blanco para detectar automáticamente la integración zwave_js
+      (recomendado: sobrevive a que se vuelva a agregar la integración).
+      Especifique un id de entrada de configuración explícito solo si tiene más
+      de una entrada zwave_js.
+  ha_ws_url:
+    name: Avanzado · URL del WebSocket de Home Assistant
+    description: >-
+      Déjelo en el valor predeterminado ws://supervisor/core/websocket para una
+      instalación normal. Cámbielo solo para apuntar la capa de datos a otro
+      Home Assistant Core o a otro WebSocket del controlador.
+  driver_ws_url:
+    name: Avanzado · URL del WebSocket del controlador Z-Wave JS (telemetría de solo lectura)
+    description: >-
+      Conexión directa de SOLO LECTURA al controlador Z-Wave JS para
+      diagnósticos que Home Assistant no reenvía: el piso de ruido de fondo por
+      canal (márgenes de señal reales y detección de interferencias), las horas
+      verdaderas de último contacto y los indicadores de capacidad de los
+      dispositivos. El valor predeterminado ws://core-zwave-js:3000 corresponde
+      al complemento oficial de Z-Wave JS; quienes usen Z-Wave JS UI deben
+      apuntarlo al puerto WS de su servidor. Déjelo VACÍO para desactivarlo:
+      todo lo demás sigue funcionando, y esta conexión nunca se usa para
+      controlar la malla.

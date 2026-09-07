@@ -31,7 +31,7 @@ test('renderActionsMenu honours the width/height contract across sizes + states'
           // BOTH scopes: the network menu has a different header and a much
           // shorter item list, so the device sweep alone would not exercise it.
           for (const scope of ['device', 'network'] as const) {
-          const items = buildMenu({ scope, hasNode, rebuilding });
+          const items = buildMenu({ scope, hasNode, rebuilding, identityPending: false, identityResumable: false });
           for (const index of [0, Math.floor(items.length / 2), items.length - 1]) {
             const lines = renderActionsMenu(view(cols, rows), {
               scope,
@@ -54,11 +54,11 @@ test('the menu header always states its blast radius, at every width', () => {
   // exists to remove — and the header is the first thing truncation eats.
   for (const [cols, rows] of SIZES) {
     const dev = renderActionsMenu(view(cols, rows), {
-      scope: 'device', items: buildMenu({ scope: 'device', hasNode: true, rebuilding: false }),
+      scope: 'device', items: buildMenu({ scope: 'device', hasNode: true, rebuilding: false, identityPending: false, identityResumable: false }),
       index: 0, targetLabel: '#16 Kitchen', locked: false,
     }).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
     const net = renderActionsMenu(view(cols, rows), {
-      scope: 'network', items: buildMenu({ scope: 'network', hasNode: false, rebuilding: false }),
+      scope: 'network', items: buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false }),
       index: 0, targetLabel: null, locked: false,
     }).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
 
@@ -76,7 +76,7 @@ test('the menu header always states its blast radius, at every width', () => {
     // A DEVICE menu with no node must SAY so — rendering a bare "· target "
     // with nothing after it reads as a target the operator cannot make out.
     const noNode = renderActionsMenu(view(cols, rows), {
-      scope: 'device', items: buildMenu({ scope: 'device', hasNode: false, rebuilding: false }),
+      scope: 'device', items: buildMenu({ scope: 'device', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false }),
       index: 0, targetLabel: null, locked: false,
     }).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
     if (cols >= 40) {
@@ -116,7 +116,7 @@ const manyParams: ConfigParam[] = Array.from({ length: 8 }, (_, i) =>
   ({ key: `5-112-0-${i}`, label: `Parameter ${i}`, value: i, valueLabel: null, unit: null, writeable: true, min: 0, max: 99, property: i, propertyKey: null, endpoint: 0, states: null }));
 
 test('renderActionsMenu holds the contract with a LONG menu (control + config rows) at every size + cursor', () => {
-  const items = [...buildMenu({ scope: 'device', hasNode: true, rebuilding: false }), ...buildEntityRows(manyEntities), ...buildConfigRows(manyParams)];
+  const items = [...buildMenu({ scope: 'device', hasNode: true, rebuilding: false, identityPending: false, identityResumable: false }), ...buildEntityRows(manyEntities), ...buildConfigRows(manyParams)];
   for (const [cols, rows] of SIZES) {
     for (const index of [0, 6, Math.floor(items.length / 2), items.length - 1]) {
       const lines = renderActionsMenu(view(cols, rows), { scope: 'device', items, index, targetLabel: '#16 Kitchen', locked: false });

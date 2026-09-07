@@ -11,6 +11,7 @@ const SIZES = [40, 60, 80, 100, 120, 160, 200];
 function mockData(over: Partial<DataProvider> = {}): DataProvider {
   const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
   return {
+    pendingIdentity: () => null, resolveIdentityDecision: () => false,
     nodes: () => [], nodeById: () => undefined, controller: () => ctrl, events: () => [],
     scoreFor: () => ({ score: 0, grade: 'F', state: 'unknown', flags: [] }),
     noiseFloor: () => -92, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }),

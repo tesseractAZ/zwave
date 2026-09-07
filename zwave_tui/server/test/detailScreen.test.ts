@@ -65,6 +65,8 @@ function mkData(o: DataOver = {}): { data: DataProvider; nodes: NodeSnapshot[] }
     controlArm: () => null,
     autoPingState: () => null,
     requestConfigParams: (id) => o.onRequestConfig?.(id),
+    pendingIdentity: () => null,
+    resolveIdentityDecision: () => false,
   };
   return { data, nodes };
 }

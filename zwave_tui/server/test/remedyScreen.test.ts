@@ -20,6 +20,8 @@ const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
 type Eff = ReturnType<DataProvider['efficacyFor']>;
 function data(symptoms: Symptom[], efficacyFor: DataProvider['efficacyFor'] = () => null): DataProvider {
   return {
+    pendingIdentity: () => null,
+    resolveIdentityDecision: () => false,
     nodes: () => nodes, nodeById: (id) => nodes.find((n) => n.nodeId === id), controller: () => ctrl, events: () => [],
     scoreFor: () => ({ score: 90, grade: 'A', state: 'ok', flags: [] }),
     noiseFloor: () => -100, hasRealNoise: () => true, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),

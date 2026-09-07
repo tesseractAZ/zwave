@@ -18,6 +18,7 @@
  * underlying `zwaveData` layer is stopped separately by its owner.
  */
 
+import type { IdentityChoice, IdentityDecision } from '../zwave/homeTag';
 import type {
   ActionKind,
   ConfigParamsResult,
@@ -100,6 +101,10 @@ export interface ZwaveDataSource {
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   /** Auto-ping runtime state (v0.41), null when off. REQUIRED — see ackEvent. */
   autoPingState(): AutoPingSnapshot | null;
+  /** The mesh-identity decision awaiting an operator answer, or null (v0.64.0). */
+  pendingIdentity(): IdentityDecision | null;
+  /** Answer it: `keep` re-adopts the old learning, `fresh` archives it. */
+  resolveIdentityDecision(choice: IdentityChoice): boolean;
   /** Driver-WS lifecycle line (v0.43.0). REQUIRED — see ackEvent. */
   driverWsStatus(): string;
   /** Structured link state (v0.43.0). REQUIRED — see ackEvent. */
@@ -235,6 +240,8 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     openEpisodes: () => zd.openEpisodes(),
     controlArm: (k) => zd.controlArm(k),
     autoPingState: () => zd.autoPingState(),
+    pendingIdentity: () => zd.pendingIdentity(),
+    resolveIdentityDecision: (c: 'fresh' | 'keep') => zd.resolveIdentityDecision(c),
     driverWsStatus: () => zd.driverWsStatus(),
     driverWsState: () => zd.driverWsState(),
     s2LaneFault: () => zd.s2LaneFault(),
@@ -356,6 +363,8 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     openEpisodes: () => zwaveData.openEpisodes(),
     controlArm: (kind) => zwaveData.controlArm(kind),
     autoPingState: () => zwaveData.autoPingState(),
+    pendingIdentity: () => zwaveData.pendingIdentity(),
+    resolveIdentityDecision: (c: 'fresh' | 'keep') => zwaveData.resolveIdentityDecision(c),
     driverWsStatus: () => zwaveData.driverWsStatus(),
     driverWsState: () => zwaveData.driverWsState(),
     s2LaneFault: () => zwaveData.s2LaneFault(),
