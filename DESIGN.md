@@ -143,14 +143,14 @@ for no-RTC clocks) — plus the disciplines the design review proved necessary:
 
 | field | source | why *(ref)* |
 | --- | --- | --- |
-| `dTx dTimeout dDropTx dRx` | counter deltas w/ guards | rate math; dTimeout is the primary signal *(§0)* |
 | `dFlaps` | **event-driven accumulator** from `zwave_js/subscribe_node_status`, drained per sample | the hard RF-failure event — level-sampling misses sub-window flaps *(DR)* |
 | `dRouteChanges` | accumulator from the existing route-change diff | route churn *(§2.1)* |
+| `dTx dTimeout dDropTx dRx` | counter deltas w/ guards | rate math; dTimeout is the primary signal *(§0)* |
 | `fresh` | did a stats event arrive since the previous sample? | pseudo-replication guard: EMAs re-sampled without new events carry no information *(DR)* |
-| `rtt`, `rssi` | node stats (EMA; sentinels ≥125 ⇒ null) | trend — **meaningful only when `fresh`** *(§1.11, DR)* |
-| `rateKbps`, `routeKey` | LWR | rate-fallback + churn *(§2.2)* |
-| `status` | roster level at capture | dwell context only — **never diffed for flaps** *(DR)* |
 | `lastSeen`, `bgRssi[ch]`, `isListening` | **reserved** (null until v0.13) | schema stability *(§2.1)* |
+| `rateKbps`, `routeKey` | LWR | rate-fallback + churn *(§2.2)* |
+| `rtt`, `rssi` | node stats (EMA; sentinels ≥125 ⇒ null) | trend — **meaningful only when `fresh`** *(§1.11, DR)* |
+| `status` | roster level at capture | dwell context only — **never diffed for flaps** *(DR)* |
 
 Separately, a small per-node **route-failure ring** captures
 `routeFailedBetween` event-driven at the moment it appears (it is transient —
@@ -226,8 +226,8 @@ fine ring's 1 h staleness cap does NOT apply to them.
 
 | series class | statistic | degenerate-case rule |
 | --- | --- | --- |
-| counting (dTimeout, dDropTx, flaps, route changes) | **rate over an aggregation window with a minimum-traffic denominator** (Σd/ΣdTx over ≥T min, ΣdTx ≥ D), tested with a Poisson/binomial tail | mostly-zero series ⇒ MAD is 0 by construction — never use location/scale on counts |
 | continuous (rssi, rtt) | median + MAD over **fresh samples only** | **MAD floor tied to instrument precision** (≥3 dB rssi, ≥1 EMA step rtt — §1.11); MAD below floor ⇒ "insufficient dispersion evidence", never infinite precision |
+| counting (dTimeout, dDropTx, flaps, route changes) | **rate over an aggregation window with a minimum-traffic denominator** (Σd/ΣdTx over ≥T min, ΣdTx ≥ D), tested with a Poisson/binomial tail | mostly-zero series ⇒ MAD is 0 by construction — never use location/scale on counts |
 | discrete (rateKbps, routeKey) | categorical change/dwell detection | never location/scale |
 
 **Honest learning units** *(DR)*: minimum-evidence counts **independent
@@ -277,20 +277,20 @@ verbatim where one exists — §3.5):
 
 | kind | fires when (sketch) | confound it must reject *(ref)* |
 | --- | --- | --- |
-| `return-path-degraded` | windowed per-command timeout **rate** (ΣdTimeout/ΣdTx, min denominator) ≫ own baseline, dwell ≥ D | tiny samples; traffic-volume shifts (rate not count — DR); SET-only nodes *(§0)*; carries a Get-mix caveat until the Supervision question is resolved *(RESEARCH §7)* |
+| `chatty-device` | dRx rate ≫ mesh median (orders of magnitude) | normal reporter; S0 3×-airtime *(§4.7)* |
 | `chronic-return-path` | per-command timeout rate above the **absolute** health-check-rubric threshold, sustained D days — baseline-independent | the bad-since-inclusion node invisible to relative detectors *(DR)* |
+| `controller-degraded` | rising controller NAK/CAN/timeoutACK (serial link) | one node's RF problem *(§2.11)* |
 | `dead-flap` | ≥ K transitions/window from the **`dFlaps` event counter** — never from diffing the status column | driver restart (reset guard); silent node ≠ healthy *(§0, DR)* |
+| `diurnal-degradation` **(SPECIFIED, NOT BUILT — M6 shipped the diurnal *view* only)** | a node's band median vs its own other-band medians AND vs the mesh same-band norm — persistent night-vs-day asymmetry | time-of-day banding otherwise makes recurring diurnal interference *permanently invisible* — the banding rationale, inverted *(DR)* |
+| `edge-cluster` | a **small correlated subset** with shared-signature evidence: shared repeater/`routeFailedBetween` hop, same-band co-movement, co-onset — the explicit tier between per-node and mesh-level | coincidence (two nodes breaching different metrics at unrelated hours) *(§6, DR)* |
+| `ghost-suspect` | requires **proven coverage**: store recording the node ≥N days with live subscriptions, zero successful comms AND zero non-dead status in that span; a young/empty store yields `insufficient history (n/N days)`, never a ghost verdict | rarely-woken battery node; store just wiped; subscription failure *(DR blocker)* |
+| `mesh-correlated` **(SPECIFIED, NOT BUILT)** | breadth over **nodes-with-observable-traffic-in-window** (≥30–40% of active nodes, never an absolute K), sustained ≥2–3 consecutive windows, or corroborating controller-stats degradation | pipeline artifacts: post-gap windows are invalid for correlation (queued deltas aren't time-attributable); single-window unanimity after silence is evidence about the pipeline, not the mesh *(DR)* |
 | `quiet-node` | mains **listening** node whose last-activity age ≫ its own learned reporting cadence — emits honest "unreachability unknown, no traffic attempted" (state ≠ healthy) | battery/FLiRS within wake interval; nodes with no learned cadence yet *(DR; §3.7)* |
 | `rate-fallback` | the **same routeKey** that previously sustained 100k now persistently below 100k — same-route regression needs no capability data *(fail-closed: cross-route comparison excluded until driver-WS capability data exists — DR)* | legacy/FLiRS capability cap; single-exchange retry *(§2.2)* |
+| `return-path-degraded` | windowed per-command timeout **rate** (ΣdTimeout/ΣdTx, min denominator) ≫ own baseline, dwell ≥ D | tiny samples; traffic-volume shifts (rate not count — DR); SET-only nodes *(§0)*; carries a Get-mix caveat until the Supervision question is resolved *(RESEARCH §7)* |
 | `route-churn` | routeKey churn ≫ baseline + rate/RTT corroboration (**routeSchemeState does not exist on either WS — dropped**; explorer detection only ever as a labelled best-effort log parse) | one legit re-route after topology change *(§2.1, DR)* |
 | `rtt-degraded` | RTT median over **fresh** samples ≫ route-stratified baseline, dwell | route change (settle window); EMA lag; wake latency *(§1.11, DR)* |
 | `weak-signal` | low RSSI **on a direct (non-routed) node** + timeout corroboration | routed node (RSSI = last hop, not the device) *(§1.3)* |
-| `diurnal-degradation` **(SPECIFIED, NOT BUILT — M6 shipped the diurnal *view* only)** | a node's band median vs its own other-band medians AND vs the mesh same-band norm — persistent night-vs-day asymmetry | time-of-day banding otherwise makes recurring diurnal interference *permanently invisible* — the banding rationale, inverted *(DR)* |
-| `chatty-device` | dRx rate ≫ mesh median (orders of magnitude) | normal reporter; S0 3×-airtime *(§4.7)* |
-| `ghost-suspect` | requires **proven coverage**: store recording the node ≥N days with live subscriptions, zero successful comms AND zero non-dead status in that span; a young/empty store yields `insufficient history (n/N days)`, never a ghost verdict | rarely-woken battery node; store just wiped; subscription failure *(DR blocker)* |
-| `controller-degraded` | rising controller NAK/CAN/timeoutACK (serial link) | one node's RF problem *(§2.11)* |
-| `mesh-correlated` **(SPECIFIED, NOT BUILT)** | breadth over **nodes-with-observable-traffic-in-window** (≥30–40% of active nodes, never an absolute K), sustained ≥2–3 consecutive windows, or corroborating controller-stats degradation | pipeline artifacts: post-gap windows are invalid for correlation (queued deltas aren't time-attributable); single-window unanimity after silence is evidence about the pipeline, not the mesh *(DR)* |
-| `edge-cluster` | a **small correlated subset** with shared-signature evidence: shared repeater/`routeFailedBetween` hop, same-band co-movement, co-onset — the explicit tier between per-node and mesh-level | coincidence (two nodes breaching different metrics at unrelated hours) *(§6, DR)* |
 
 **Detection vs advice — two layers, never conflated** *(DR)*:
 
@@ -358,16 +358,16 @@ machine-readable and keyed to RESEARCH sections.
 
 | symptom | first-line recommendation | explicitly NOT | why *(ref)* |
 | --- | --- | --- | --- |
-| return-path-degraded, good RSSI, edge-wall | **repeater placement** (interior path) — basis: lore | rebuild | rebuild can't fix a physically bad link *(§4.1, §6)* |
-| rate-fallback (same-route regression) | repeater / relocate | rebuild-first | 9k6 = degraded route, not a routing-table bug *(§2.2)* |
-| route-churn **with topology-change evidence** | targeted `rebuild_node_routes` | scheduled/mesh-wide rebuild | rebuild helps *only* on topology change *(§4.1, §4.2)* |
-| ghost-suspect (coverage-proven) | `remove_failed_node` — **advise-only, always type-CONFIRM** | rebuild a dead node; any auto path | destructive; the removal attempt is itself the only in-band verification *(§4.4, DR)* |
 | chatty-device / flooding | tune reporting / re-include S2 | any RF remedy | traffic floods the mesh; fix the cause *(§4.7)* |
-| edge-cluster | shared-path diagnosis: repeater/placement for the cluster | treating as N independent faults, or as mesh-wide | the patio-pair case *(§6, DR)* |
 | controller-degraded | USB-2 extension, relocate stick | per-node action | serial-link symptom ⇒ controller side *(§4.5)* |
+| dead-flap | reachability runbook (ping→power-cycle→re-include) | rebuild | a dead node can't be repaired *(§4.4)* |
+| edge-cluster | shared-path diagnosis: repeater/placement for the cluster | treating as N independent faults, or as mesh-wide | the patio-pair case *(§6, DR)* |
+| ghost-suspect (coverage-proven) | `remove_failed_node` — **advise-only, always type-CONFIRM** | rebuild a dead node; any auto path | destructive; the removal attempt is itself the only in-band verification *(§4.4, DR)* |
 | mesh-correlated (interference residual) | environment survey; driver-WS noise floor when available | per-node actions | inferred-by-exclusion until measured *(DR)* |
 | quiet-node | consented, rate-limited ping (never background) | marking unhealthy outright | absence of traffic ≠ absence of node *(§3.4, DR)* |
-| dead-flap | reachability runbook (ping→power-cycle→re-include) | rebuild | a dead node can't be repaired *(§4.4)* |
+| rate-fallback (same-route regression) | repeater / relocate | rebuild-first | 9k6 = degraded route, not a routing-table bug *(§2.2)* |
+| return-path-degraded, good RSSI, edge-wall | **repeater placement** (interior path) — basis: lore | rebuild | rebuild can't fix a physically bad link *(§4.1, §6)* |
+| route-churn **with topology-change evidence** | targeted `rebuild_node_routes` | scheduled/mesh-wide rebuild | rebuild helps *only* on topology change *(§4.1, §4.2)* |
 
 **Hard gates in the planner**: protocol predicate removes route/repeater/
 priority candidates for **LR nodes** (rebuild *throws*); rebuild candidates
@@ -570,14 +570,14 @@ options only for knobs a stranger genuinely needs.
 
 | | ships | proves |
 | --- | --- | --- |
+| ~~executor~~ | `executor.ts` gate-stack + `auto_remediation` (off/advise/auto_safe) — **DEFERRED, not built** (owner chose advisory-only); design of record kept in §3.5 for a future opt-in | — |
 | M2 (v0.12) | reworked evidence substrate: fine+coarse tiers, event-driven flaps/route accumulators, freshness, homeId binding, coverage metadata, controller ring, columnar persistence w/ size test | evidence is trustworthy across restarts/resets/wedges — every DR substrate finding closed |
-| v0.13 | read-only driver-WS evidence client (§2.1) | noise floor + last_seen + capability flags feed the reserved schema before baselines learn |
 | M3 (v0.14) | baselines (per-series statistics) + detectors + REMEDY advisory | symptoms are right — detectors arm only after their bands graduate (days × active windows) |
 | M4 (v0.15) | planner (pure, always-on) + advisory REMEDY surface — severity-sorted, cost/basis-tagged candidates, honest overflow; `advise` runs via the existing type-CONFIRM Actions Menu (no new execution path) | recommendations grounded + auditable, with `basis` labels; rebuild never offered as a runnable candidate |
 | M5 (v0.16) | episode ledger (`outcomes.ts`) + learned efficacy on the Remedy screen — **advisory-only**: the action arm is populated by operator type-CONFIRM actions; the spontaneous-recovery control arm accrues from untouched recoveries | the loop learns honestly against a no-action control arm; an action is credited only when it beats self-healing by a real margin with comparable traffic |
-| ~~executor~~ | `executor.ts` gate-stack + `auto_remediation` (off/advise/auto_safe) — **DEFERRED, not built** (owner chose advisory-only); design of record kept in §3.5 for a future opt-in | — |
 | M6 (v0.17) | interference-watch screen (key `8`/`f`): measured noise floor + trend, controller serial-link health, diurnal raw-timeout-rate heatmap, correlated-degradation state | correlated/diurnal interference visible; measured (driver-WS noise floor), not inferred; heatmap raw not baseline-relative |
 | M7 (v0.18) | complete `DOCS.md` system & engine reference (12 chapters) + `SECURITY.md` + a printable `.docx`/`.pdf` manual built in CI (`scripts/build-docs-docx.py`). The no-dB-numbers guard already ships as a planner test (`no candidate fabricates a numeric dB claim`); defaults are safe-defaulted for strangers' meshes (read-only, driver-WS empty=disabled) | the whole system is documented from source; the offline manual stays current; safe for other users' meshes |
+| v0.13 | read-only driver-WS evidence client (§2.1) | noise floor + last_seen + capability flags feed the reserved schema before baselines learn |
 
 Each lands as its own `vX.Y`, typecheck+tests+adversarial review, same
 pipeline as v0.5–v0.11. The repository is **public**, and each version is cut
@@ -596,12 +596,12 @@ what each run proved, rather than listed per release.
 
 | | ships | proves |
 | --- | --- | --- |
-| the ledger's voice (v0.41–v0.44) | ENGINE screen; `worse` tallied apart from `no-change`; harm gated on the control arm's own regression rate; provenance (`n` + node count) beside every rate | a learned claim carries the evidence behind it, and an idle ledger is distinguishable from an absent one |
-| nothing clips into a lie (v0.45, v0.51, v0.55–v0.56) | whole-token shedding (`shedLine`/`fieldStrip`/`fitBits`), then `clipWords` for prose; ladders that shed whole *forms* | degradation is disclosed, never silent — a row that runs out of room says so rather than ending mid-claim |
 | coverage is not health (v0.46–v0.48) | partial-coverage empty state; the route-change baseline wipe fixed; dossier yardsticks bridged | "no symptoms" is separated from "no detector could fire" |
-| the log can be read (v0.50, v0.53) | severity written to the sink; `LogSink` for silent subsystems; `fatal` for the bootstrap catch; descriptor reclaim; session teardown on both transports | an operator grepping the container log can find the one line that matters |
-| measurements are measurements (v0.54, v0.59, v0.61) | RSSI domain rule applied at the store; fail-closed on an unknown route; a floored reliability denominator; one spelling per reading; the score declares how much of itself is assumption | a number on screen is a measurement or is labelled as not one |
 | fleet verdicts agree with their own screen (v0.52, v0.58, v0.60) | empty-state token keyed to the branch that rendered; the mesh meter counts what the scorer failed; symptoms on the roster; ordering claims that match the sort | the summary line and the detail beneath it cannot contradict each other |
+| measurements are measurements (v0.54, v0.59, v0.61) | RSSI domain rule applied at the store; fail-closed on an unknown route; a floored reliability denominator; one spelling per reading; the score declares how much of itself is assumption | a number on screen is a measurement or is labelled as not one |
+| nothing clips into a lie (v0.45, v0.51, v0.55–v0.56) | whole-token shedding (`shedLine`/`fieldStrip`/`fitBits`), then `clipWords` for prose; ladders that shed whole *forms* | degradation is disclosed, never silent — a row that runs out of room says so rather than ending mid-claim |
+| the ledger's voice (v0.41–v0.44) | ENGINE screen; `worse` tallied apart from `no-change`; harm gated on the control arm's own regression rate; provenance (`n` + node count) beside every rate | a learned claim carries the evidence behind it, and an idle ledger is distinguishable from an absent one |
+| the log can be read (v0.50, v0.53) | severity written to the sink; `LogSink` for silent subsystems; `fatal` for the bootstrap catch; descriptor reclaim; session teardown on both transports | an operator grepping the container log can find the one line that matters |
 | the machine-readable boundary (v0.57) | engine conclusions as HA entities + enriched `/api/health`, from one shared builder | what the engine concludes is reachable by something other than a person at a terminal |
 
 The verification gate grew with them: **mutation coverage** (`scripts/mutation-check.mjs`)

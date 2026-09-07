@@ -47,6 +47,15 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** @type {Mutant[]} */
 const MUTANTS = [
+  { id: 'menu-label-fits-column', file: 'src/telnet/screens/actionsMenu.ts', tests: ['actionsCatalog', 'sessionActions'],
+    // Widening the budget is the tempting "fix" for an over-long label, and it
+    // is wrong: LABEL_W is the column the ROWS are laid out against, so raising
+    // it silently shifts every impact badge and description off their grid.
+    // v0.64.0 shipped a 48-char label into a 28-col cell and `padEnd` cut it
+    // mid-word — invisibly, because that row only renders while a decision is
+    // pending. The guard belongs on the LABEL, not on the column.
+    find: 'export const MENU_LABEL_W = 28;', repl: 'export const MENU_LABEL_W = 64;',
+    what: 'catalog labels are checked against the real menu column width' },
   /* ── home-id tag: identity, and never a purge ──────────────────────── */
   { id: 'hometag-returning-stick-asks', file: 'src/zwave/outcomes.ts', tests: ['homeTag'],
     // A conflict-only test cannot see the returning stick that has nothing live

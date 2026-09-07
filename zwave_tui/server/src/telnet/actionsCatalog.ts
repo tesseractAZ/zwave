@@ -123,7 +123,7 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
   },
   {
     kind: 'identityKeep',
-    label: 'Mesh identity: KEEP existing learning',
+    label: 'Identity: KEEP learning',
     scope: 'system',
     impact: 'caution',
     desc: 'Treat the learning from the previous controller as belonging to this one.',
@@ -132,7 +132,7 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
   },
   {
     kind: 'identityResume',
-    label: 'Mesh identity: RESUME this controller\u2019s learning',
+    label: 'Identity: RESUME archived',
     scope: 'system',
     impact: 'caution',
     desc: 'Put back the learning this controller built during a previous stint.',
@@ -141,7 +141,7 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
   },
   {
     kind: 'identityFresh',
-    label: 'Mesh identity: START FRESH',
+    label: 'Identity: START FRESH',
     scope: 'system',
     impact: 'caution',
     desc: 'Archive the previous controller\u2019s learned state and begin learning again.',

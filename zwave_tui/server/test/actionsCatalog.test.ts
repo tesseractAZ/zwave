@@ -10,6 +10,7 @@ import {
   CONFIRM_WORD,
   type ActionImpact,
 } from '../src/telnet/actionsCatalog';
+import { MENU_LABEL_W } from '../src/telnet/screens/actionsMenu';
 import type { ConfigParam, EntityLiveState } from '../src/types';
 import type { ActionKind } from '../src/types';
 
@@ -200,5 +201,39 @@ test('a route rebuild names the priority routes it DESTROYS (v0.45.0)', () => {
   for (const note of [heal.impactNote, all.impactNote]) {
     const rows = Math.ceil(note.length / 64);
     assert.ok(rows <= 5, `${rows} wrapped rows is too many for the confirm box: "${note}"`);
+  }
+});
+
+test('every catalog label fits the menu column — padEnd truncates BLIND', () => {
+  // `padEnd(label, LABEL_W)` in screens/actionsMenu.ts falls through to
+  // `truncate` with no ellipsis and no whole-token shed, so an over-long label
+  // is cut mid-word with nothing on screen to say so. v0.64.0 shipped
+  // "Mesh identity: RESUME this controller's learning" -> "Mesh identity: RESUME this c",
+  // and it was invisible because that row only renders while a decision is
+  // pending. This is the guard that makes the next one fail here instead.
+  // Pin the WIDTH ITSELF. Without this the check is relative to the constant,
+  // so "fixing" an over-long label by widening the column passes vacuously —
+  // and that fix is the worse one: LABEL_W is the grid every impact badge and
+  // description aligns to, so raising it shifts the whole menu. The mutation
+  // harness caught exactly this hole in the first version of this guard.
+  assert.equal(MENU_LABEL_W, 28, 'the menu label column is 28 — widen it only deliberately');
+  for (const d of ACTION_CATALOG) {
+    assert.ok(d.label.length <= MENU_LABEL_W,
+      `${d.kind}: label is ${d.label.length} chars, budget is ${MENU_LABEL_W} — ` +
+      `would render as "${d.label.slice(0, MENU_LABEL_W)}"`);
+  }
+});
+
+test('entity-control rows also fit the menu column', () => {
+  // The budget's stated reason is "Turn Off · <entity>", so the row type it was
+  // sized for must actually be checked, not assumed.
+  const rows = buildEntityRows([
+    ent({ entityId: 'light.kitchen', name: 'Kitchen', domain: 'light', state: 'on' }),
+    ent({ entityId: 'lock.front', name: 'Front Door Deadbolt', domain: 'lock', state: 'locked' }),
+    ent({ entityId: 'cover.garage', name: 'Garage Door', domain: 'cover', state: 'closed' }),
+  ]);
+  for (const r of rows) {
+    assert.ok(r.desc.label.length <= MENU_LABEL_W,
+      `entity row label ${r.desc.label.length} > ${MENU_LABEL_W}: "${r.desc.label}"`);
   }
 });

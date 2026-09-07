@@ -254,9 +254,9 @@ re-asserted every 30 seconds:
 | entity | state | notable attributes |
 | --- | --- | --- |
 | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason` |
+| `sensor.zwave_tui_engine` | `running` / `suppressed:<why>` / `disabled` | `detectors_ready`, `detectors_total` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
-| `sensor.zwave_tui_engine` | `running` / `suppressed:<why>` / `disabled` | `detectors_ready`, `detectors_total` |
 
 `GET /api/health` carries the same values — built from the same function, so a
 monitor polling HTTP and an automation triggering on state cannot disagree about

@@ -352,7 +352,7 @@ test('the decision is reachable from the network menu and resolves through CONFI
   // Scoped to the ROW LABEL, not /identity/i: the Controller screen has its own
   // "IDENTITY" section header, and matching that passed while the menu was
   // still closed — a green assertion proving nothing.
-  assert.match(strip(last), /Mesh identity: KEEP/i, 'the pending decision is offered in the menu');
+  assert.match(strip(last), /Identity: KEEP/i, 'the pending decision is offered in the menu');
 
   // Navigate deterministically: ask the catalog where the row is rather than
   // hunting for it, so a menu-order change fails loudly instead of silently
