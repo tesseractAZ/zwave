@@ -42,6 +42,22 @@ export type MenuGroup = 'maintenance' | 'control' | 'config' | 'system';
  */
 export type MenuActionKind = ActionKind | 'identityKeep' | 'identityFresh' | 'identityResume';
 
+/**
+ * The mesh-identity answers, as ONE predicate.
+ *
+ * This list lived in four places by v0.64.1 — the menu gate, the session
+ * dispatch, the read-only exemption and the menu footer — and adding
+ * `identityResume` updated only three of them. The footer kept saying
+ * "⏎ locked · enable write_actions_enabled" over a row Enter actually
+ * activates: the exact defect the footer fix existed to remove, reintroduced by
+ * a fourth kind the fix could not see.
+ */
+export type IdentityMenuKind = 'identityKeep' | 'identityFresh' | 'identityResume';
+
+export function isIdentityKind(kind: MenuActionKind): kind is IdentityMenuKind {
+  return kind === 'identityKeep' || kind === 'identityFresh' || kind === 'identityResume';
+}
+
 export type MenuPayload =
   | { type: 'catalog'; kind: MenuActionKind }
   | { type: 'entity'; entityId: string; entityName: string; domain: string; verb: EntityVerb }
@@ -235,7 +251,7 @@ export function buildMenu(ctx: MenuContext): MenuItem[] {
     if (d.kind === 'stopRebuild' && !ctx.rebuilding) continue;
     // Offered ONLY while a decision is actually pending — like stopRebuild,
     // an action with nothing to act on is a row that can only confuse.
-    if ((d.kind === 'identityKeep' || d.kind === 'identityFresh' || d.kind === 'identityResume') && !ctx.identityPending) continue;
+    if (isIdentityKind(d.kind) && !ctx.identityPending) continue;
     // RESUME needs more than a pending decision: it needs this controller to
     // actually have something archived. Offering it otherwise is a row that can
     // only fail, on the screen where the operator is least sure what to press.

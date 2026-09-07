@@ -397,6 +397,33 @@ test('read-only: the footer says SELECT on an identity row, LOCKED on a mesh act
   assert.match(onMesh, /enable write_actions_enabled/, 'and still says why');
 });
 
+test('read-only: EVERY identity row says select — not just the first two', () => {
+  // v0.64.0 added identityResume and updated three of the four places holding
+  // the identity-kind list. The footer kept its two-kind test, so hovering
+  // RESUME read "⏎ locked · enable write_actions_enabled" while Enter actually
+  // activated it. Testing only KEEP is what let that through, so this asserts
+  // the whole set and fails if a future kind is added to the catalog but not to
+  // the predicate.
+  const rows = buildMenu({ scope: 'network', hasNode: false, rebuilding: false,
+                           identityPending: true, identityResumable: true });
+  const strip = (x: string) => x.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const view = { cols: 110, rows: 34 } as ViewState;
+
+  const identityRows = rows
+    .map((r, i) => ({ r, i }))
+    .filter(({ r }) => r.payload.type === 'catalog' && String(r.payload.kind).startsWith('identity'));
+  assert.equal(identityRows.length, 3, 'all three identity rows are offered when resumable');
+
+  for (const { r, i } of identityRows) {
+    const frame = strip(renderActionsMenu(view, {
+      items: rows, index: i, targetLabel: 'whole mesh', locked: true, scope: 'network',
+    } as never).join('\n'));
+    const kind = String((r.payload as { kind: string }).kind);
+    assert.match(frame, /⏎ select/, `${kind} must be answerable in read-only`);
+    assert.doesNotMatch(frame, /enable write_actions_enabled/, `${kind} must not claim it is locked`);
+  }
+});
+
 test('a held decision reaches HOME ASSISTANT, not just the console', () => {
   // The console is not where an operator is at 3am. If the held decision does
   // not raise `degraded`, the only notice of a mesh that has stopped learning

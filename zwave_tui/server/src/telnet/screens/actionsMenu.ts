@@ -15,10 +15,10 @@
  *     CONFIRM before it will arm. Anything less cannot execute.
  */
 
-import { c, lr, padEnd, truncate, visLen } from '../ansi';
+import { clipWords, c, lr, padEnd, truncate, visLen } from '../ansi';
 import type { ViewState } from '../../types';
 import type { ActionImpact, MenuGroup, MenuItem, MenuScope } from '../actionsCatalog';
-import { CONFIRM_WORD } from '../actionsCatalog';
+import { isIdentityKind, CONFIRM_WORD } from '../actionsCatalog';
 import { centeredNotice } from './overview';
 
 /* ── impact styling ────────────────────────────────────────────────────── */
@@ -124,8 +124,7 @@ export function renderActionsMenu(view: ViewState, opts: ActionsMenuOpts): strin
   // it does not apply.
   const cursorRow = items[index];
   const cursorActionable = !locked
-    || (cursorRow?.payload.type === 'catalog'
-        && (cursorRow.payload.kind === 'identityKeep' || cursorRow.payload.kind === 'identityFresh'));
+    || (cursorRow?.payload.type === 'catalog' && isIdentityKind(cursorRow.payload.kind));
   const left = [key('↑↓', 'move'), key('⏎', cursorActionable ? 'select' : 'locked'), key('Esc', 'close')].join(c.grey(' · '));
   const more = entries.length > bodyCap ? c.cyan(`${start > 0 ? '▲' : ' '}${start + bodyCap < entries.length ? '▼' : ' '} `) : '';
   const right = locked && !cursorActionable
@@ -146,7 +145,12 @@ function menuRow(it: MenuItem, cursor: boolean, locked: boolean, W: number): str
   const note = it.disabled && it.reason ? `— ${it.reason}` : it.desc.desc;
   const prefix = `${arrow} ${label} ${badge} `;
   const textW = Math.max(0, W - visLen(prefix));
-  return prefix + c.grey(truncate(note, textW));
+  // clipWords, not truncate: this column is PROSE, and the repo's own rule
+  // (v0.51.0) is whole-token shedding for fields and clipWords for sentences.
+  // A bare truncate ends a description mid-word with nothing to mark it —
+  // "as belonging to t" — which is the same shape as the label defect one
+  // column to the left, on the row that explains what the action does.
+  return prefix + c.grey(clipWords(note, textW));
 }
 
 function badgeWord(impact: ActionImpact): string {
@@ -257,13 +261,22 @@ export function renderTypeConfirm(view: ViewState, o: TypeConfirmOpts): string[]
     ? c.greenB('▶ press Enter to execute')
     : c.grey('type ') + c.whiteB(CONFIRM_WORD) + c.grey(' to arm:  ') + field;
 
-  const wrapNote = wrap(o.impactNote, Math.min(64, Math.max(20, W - 8)));
+  const noteW = Math.min(64, Math.max(20, W - 8));
+  const wrapNote = wrap(o.impactNote, noteW);
+  // WRAP THE DESC TOO. `impactNote` has always been wrapped; `desc` went in as
+  // one line and `centeredNotice` -> `center()` falls to a BLIND truncate at
+  // `len >= width` (ansi.ts:194). At the 60-column floor that silently cut SIX
+  // of the ten catalog descriptions mid-sentence — on the CONFIRM screen, which
+  // is the one place the operator is deciding whether to do something
+  // destructive. Found by an adversarial review of a Spanish translation
+  // proposal, in English, in shipped code.
+  const wrapDesc = wrap(o.desc, noteW);
 
   const body: string[] = [
     impactColor(o.impact)(o.label),
     c.grey('target: ') + c.white(o.target),
     '',
-    c.grey(o.desc),
+    ...wrapDesc.map((l) => c.grey(l)),
     ...wrapNote.map((l) => impactColor(o.impact)(l)),
     '',
     prompt,
