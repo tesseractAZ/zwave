@@ -47,6 +47,20 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** @type {Mutant[]} */
 const MUTANTS = [
+  { id: 'identity-kinds-are-one-list', file: 'src/telnet/actionsCatalog.ts', tests: ['homeTag'],
+    // Drop RESUME from the predicate — the exact bug v0.64.0/.1 shipped, when
+    // the list lived in four places and adding a third kind updated three of
+    // them. The menu footer then said "locked · enable write_actions_enabled"
+    // over a row Enter actually activates. One predicate, or this recurs.
+    find: "  return kind === 'identityKeep' || kind === 'identityFresh' || kind === 'identityResume';",
+    repl: "  return kind === 'identityKeep' || kind === 'identityFresh';",
+    what: 'every identity kind is answerable in read-only, not just the first two' },
+  { id: 'confirm-desc-wrapped', file: 'src/telnet/screens/actionsMenu.ts', tests: ['actionsCatalog'],
+    // Reverting to the unwrapped desc: `center()` blind-truncates at
+    // len >= width, so at the 60-col floor six of ten descriptions lose their
+    // ending — silently, on the CONFIRM screen. Shipped that way until v0.64.2.
+    find: '    ...wrapDesc.map((l) => c.grey(l)),', repl: '    c.grey(o.desc),',
+    what: 'the confirm modal wraps the description instead of blind-truncating it' },
   { id: 'menu-label-fits-column', file: 'src/telnet/screens/actionsMenu.ts', tests: ['actionsCatalog', 'sessionActions'],
     // Widening the budget is the tempting "fix" for an over-long label, and it
     // is wrong: LABEL_W is the column the ROWS are laid out against, so raising
@@ -100,7 +114,7 @@ const MUTANTS = [
     repl: "        archiveLiveFile(opts.path ?? '', pendingPrevious, (m) => log(m));",
     what: 'an archive that failed leaves the decision pending, not "done"' },
   { id: 'hometag-rows-gated', file: 'src/telnet/actionsCatalog.ts', tests: ['actionsCatalog'],
-    find: "    if ((d.kind === 'identityKeep' || d.kind === 'identityFresh' || d.kind === 'identityResume') && !ctx.identityPending) continue;",
+    find: '    if (isIdentityKind(d.kind) && !ctx.identityPending) continue;',
     repl: '',
     what: 'the identity rows appear only while a decision is pending' },
   { id: 'hometag-answerable-readonly', file: 'src/telnet/session.ts', tests: ['homeTag'],

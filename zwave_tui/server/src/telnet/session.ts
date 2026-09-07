@@ -27,7 +27,7 @@ import { renderScreen } from './screens/index';
 import { renderLogin } from './screens/login';
 import { centeredNotice } from './screens/overview';
 import { sortedSymptoms, symptomKey } from './screens/remedy';
-import { buildMenu, buildEntityRows, buildConfigRows, clampMenuIndex, describeAction, CONFIRM_WORD, type MenuActionKind } from './actionsCatalog';
+import { buildMenu, isIdentityKind, buildEntityRows, buildConfigRows, clampMenuIndex, describeAction, CONFIRM_WORD, type MenuActionKind } from './actionsCatalog';
 import type { MenuScope } from './actionsCatalog';
 import type { MenuItem, ActionImpact } from './actionsCatalog';
 import { renderActionsMenu, renderTypeConfirm, renderParamEdit } from './screens/actionsMenu';
@@ -727,7 +727,7 @@ export class TuiSession {
   private selectMenuItem(item: MenuItem | undefined): void {
     if (!item) return;
     const ip = item.payload;
-    const isIdentity = ip.type === 'catalog' && (ip.kind === 'identityKeep' || ip.kind === 'identityFresh');
+    const isIdentity = ip.type === 'catalog' && isIdentityKind(ip.kind);
     // `write_actions_enabled` governs MESH mutations. An identity decision
     // mutates nothing on the mesh — it answers a question about the add-on's
     // OWN persisted state. Gating it here would leave a read-only install that
@@ -744,7 +744,7 @@ export class TuiSession {
     if (item.disabled) return; // the reason is shown inline on the row
     const node = this.menuTarget ?? undefined; // frozen at open time
     const p = item.payload;
-    if (p.type === 'catalog' && (p.kind === 'identityKeep' || p.kind === 'identityFresh' || p.kind === 'identityResume')) {
+    if (p.type === 'catalog' && isIdentityKind(p.kind)) {
       // Not a mesh action: this resolves the add-on's own held state, so it
       // does not go through ActionRunner and is never scored by the ledger.
       // It still takes the typed CONFIRM — it is the one decision that decides
@@ -758,7 +758,7 @@ export class TuiSession {
       // The two identity kinds are excluded by the branch above, but TS cannot
       // see that through a conjunction — so re-narrow here rather than cast.
       // A cast would silence the compiler on exactly the union it exists to check.
-      if (p.kind !== 'identityKeep' && p.kind !== 'identityFresh' && p.kind !== 'identityResume') {
+      if (!isIdentityKind(p.kind)) {
         this.beginAction(p.kind, false, node); // menu always requires the typed CONFIRM
       }
     } else if (p.type === 'entity' && node) {

@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.64.2
+
+### Fixed — the CONFIRM modal was cutting descriptions mid-sentence
+
+`centeredNotice` → `center()` falls to a **blind `truncate`** at `len >= width`
+(`ansi.ts:194`). `impactNote` has always been word-wrapped; `desc` went in as a
+single line. At the 60-column floor that silently cut **six of the ten catalog
+descriptions** — on the CONFIRM screen, the one place the operator is deciding
+whether to run something destructive. At 80 columns two sat at 73 against a
+74-column ceiling, one character from the same fate.
+
+Three of the six were pre-existing (`refreshValues`, `reInterview`, `healNode`);
+three arrived with v0.64.0's identity actions. `desc` is now wrapped exactly as
+`impactNote` is, and a test sweeps every catalog entry across the whole clamped
+width envelope (60 … 200) asserting the final word survives — with the note
+checked alongside it as a positive control.
+
+### Fixed — the identity-kind list was in four places and one was stale
+
+v0.64.0 added `identityResume` and updated three of them. The menu footer kept
+its two-kind test, so hovering RESUME in a read-only install read
+`⏎ locked · enable write_actions_enabled to unlock` **over a row Enter actually
+activates** — the exact defect the footer fix existed to remove, reintroduced by
+a third kind that fix could not see.
+
+There is now one `isIdentityKind` **type predicate**, used by the menu gate, the
+session dispatch, the read-only exemption and the footer. Being a type predicate
+rather than a boolean is load-bearing: `!isIdentityKind(k)` narrows to
+`ActionKind`, so the compiler keeps checking the union instead of a cast
+silencing it. The footer test now asserts **all three** rows rather than the
+first, and a mutant drops RESUME from the predicate to prove it.
+
+### Changed — the menu row description sheds words instead of clipping letters
+
+`menuRow` ended in `truncate(note, textW)`. That column is prose, and the repo's
+own rule since v0.51.0 is whole-token shedding for fields and `clipWords` for
+sentences. It now uses `clipWords`.
+
+### Note on how these were found
+
+All three are the same defect class — **a budget enforced by a blind `truncate`
+with no marker** — and none was found by looking at the screen. The label came
+from a string survey, the predicate hole from the mutation harness finding a
+gap in the guard written for the previous fix, and the modal from an adversarial
+review of a *Spanish translation proposal*, which measured the English render
+path and found six live truncations.
+
 ## 0.64.1
 
 ### Fixed — v0.64.0 shipped a menu label that renders cut mid-word

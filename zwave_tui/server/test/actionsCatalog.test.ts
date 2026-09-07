@@ -10,7 +10,8 @@ import {
   CONFIRM_WORD,
   type ActionImpact,
 } from '../src/telnet/actionsCatalog';
-import { MENU_LABEL_W } from '../src/telnet/screens/actionsMenu';
+import { MENU_LABEL_W, renderTypeConfirm } from '../src/telnet/screens/actionsMenu';
+import type { ViewState } from '../src/types';
 import type { ConfigParam, EntityLiveState } from '../src/types';
 import type { ActionKind } from '../src/types';
 
@@ -235,5 +236,29 @@ test('entity-control rows also fit the menu column', () => {
   for (const r of rows) {
     assert.ok(r.desc.label.length <= MENU_LABEL_W,
       `entity row label ${r.desc.label.length} > ${MENU_LABEL_W}: "${r.desc.label}"`);
+  }
+});
+
+test('the CONFIRM modal never cuts a description, at any width', () => {
+  // `centeredNotice` -> `center()` falls to a BLIND truncate at len >= width
+  // (ansi.ts:194). `impactNote` was always wrapped; `desc` was not, so at the
+  // 60-column floor SIX of ten descriptions were silently cut mid-sentence —
+  // on the screen where the operator decides whether to run something
+  // destructive. Widths span the clamped envelope (session.ts:200 → [60,200]).
+  const strip = (x: string) => x.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  for (const cols of [60, 74, 80, 104, 140, 200]) {
+    for (const d of ACTION_CATALOG) {
+      const frame = renderTypeConfirm({ cols, rows: 30 } as ViewState, {
+        label: d.label, target: 'whole mesh', impact: d.impact,
+        desc: d.desc, impactNote: d.impactNote, buffer: '',
+      } as never).map(strip).join('\n');
+      const lastWord = d.desc.replace(/[.…]$/, '').split(' ').pop()!;
+      assert.ok(frame.includes(lastWord),
+        `${cols} cols: ${d.kind} desc loses its final word ("${lastWord}") — ` +
+        `${d.desc.length} chars with no wrap`);
+      // Positive control: the note is wrapped too, and must survive as well.
+      const noteLast = d.impactNote.replace(/[.…]$/, '').split(' ').pop()!;
+      assert.ok(frame.includes(noteLast), `${cols} cols: ${d.kind} impactNote truncated`);
+    }
   }
 });
