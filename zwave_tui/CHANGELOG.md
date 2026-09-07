@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.64.1
+
+### Fixed — v0.64.0 shipped a menu label that renders cut mid-word
+
+`screens/actionsMenu.ts` lays action rows out against a 28-column label cell and
+pads with `padEnd`, which falls through to a **blind `truncate`** — no ellipsis,
+no whole-token shed. Two of the three identity labels overran it, and one badly:
+
+    'Mesh identity: RESUME this controller's learning'  (48)
+      -> rendered as  'Mesh identity: RESUME this c'
+
+It survived the v0.64.0 live check because **that row only renders while a
+decision is pending**: the deployed instance is healthy, so the one mangled row
+was structurally unreachable at the moment it was verified. Verifying a
+conditional surface only exercises the branch that happens to be live.
+
+Labels are now `Identity: KEEP learning` / `Identity: RESUME archived` /
+`Identity: START FRESH`, all inside the budget.
+
+The fix that matters is the guard: `MENU_LABEL_W` is exported and
+`actionsCatalog.test.ts` checks every catalog label against it, plus the
+entity-control rows the budget was originally sized for. It also **pins the
+width itself** — without that the check is relative to the constant, so
+"fixing" an over-long label by widening the column passes vacuously, and that is
+the worse fix since the column is the grid every impact badge aligns to. The
+mutation harness found that hole in the first version of the guard, which is
+also why the mutant now names `sessionActions` as a catcher.
+
+### Changed — every table in the docs sorts for lookup
+
+Rows sort naturally by their first column, or newest-first where a date column
+exists. Eight tables keep their order, each for a stated reason: the harness
+phase table (execution order plus a total row), the cold-start milestones
+(chronological), the numbered screen/boot-stage tables (the number IS the key),
+the `NodeStatus` enum, and the loop table (ordered by cadence).
+
+Three pre-existing rows were silently dropping content to an unescaped `|` —
+including `Source | … · Tests | 18 614 lines` in PERFORMANCE.md §3, where the
+test line-count was not rendering at all.
+
+### Added — PERFORMANCE.md now describes the mesh, not only the add-on
+
+New §4a and §4b, read live at 200×70 so nothing sheds, as distributions rather
+than a roster (a public document should not carry a floor plan):
+
+- **§4a**: 39 nodes, 38 alive; grades A 32 / B 6, mean 96; 24 direct / 14
+  routed; hops 24/11/2/1; SNR margin min 10 · p50 29 · max 61 dB; 32 nodes at
+  100 kbit, 5 at 40 k, 1 at 9.6 k. A first parse that disagreed with the
+  screen's own `24 DIRECT` header was discarded, and the document says so.
+- **§4b**: controller frames 7 008 TX / 10 180 RX at **0.10 %** lifetime error,
+  all per-hour fault rates flat zero; noise floor −98/−99/−99 dBm on ch0–ch2 but
+  **−87 dBm on ch3** — ~11 dB hotter, persistently. Not a fault and it arms no
+  detector, but it is a standing asymmetry, so a node that later degrades on ch3
+  has a candidate explanation waiting.
+
+§8 gained the three release rows it had been missing (v0.63.6 → v0.64.0).
+
 ## 0.64.0
 
 ### Added — learned state is bound to the controller that taught it, and a change is ASKED

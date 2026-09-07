@@ -49,7 +49,18 @@ export interface ActionsMenuOpts {
   locked: boolean;
 }
 
-const LABEL_W = 28; // action-label column (wide enough for "Turn Off · <entity>" rows)
+/**
+ * Action-label column. Wide enough for "Turn Off · <entity>" rows.
+ *
+ * EXPORTED so `actionsCatalog.test.ts` can assert every catalog label fits.
+ * `padEnd` falls through to a blind `truncate` — no ellipsis, no whole-token
+ * shed — so an over-long label is cut MID-WORD with nothing to say it happened.
+ * v0.64.0 shipped exactly that: "Mesh identity: RESUME this controller's
+ * learning" rendered as "Mesh identity: RESUME this c", and it was invisible
+ * because that row only appears while a decision is pending.
+ */
+export const MENU_LABEL_W = 28;
+const LABEL_W = MENU_LABEL_W;
 
 export function renderActionsMenu(view: ViewState, opts: ActionsMenuOpts): string[] {
   const W = view.cols;

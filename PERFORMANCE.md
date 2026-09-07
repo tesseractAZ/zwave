@@ -46,22 +46,22 @@ iteration**, on a synthetic 39-node roster:
 
 | screen | 80×24 | 80×60 | 200×24 | 200×60 |
 | --- | --- | --- | --- | --- |
-| Overview | 385 µs | **412 µs** | 234 µs | 375 µs |
-| Topology | 197 µs | 250 µs | 154 µs | 211 µs |
 | Detail | 91 µs | 81 µs | 65 µs | 61 µs |
+| Engine | 25 µs | 24 µs | 13 µs | 17 µs |
 | Heatmap | 83 µs | 53 µs | 52 µs | 51 µs |
 | Log | 31 µs | 30 µs | 19 µs | 16 µs |
-| Engine | 25 µs | 24 µs | 13 µs | 17 µs |
+| Overview | 385 µs | **412 µs** | 234 µs | 375 µs |
 | Remedy | 18 µs | 15 µs | 13 µs | 15 µs |
+| Topology | 197 µs | 250 µs | 154 µs | 211 µs |
 
 Under load — 24 live symptoms, 12 open episodes, a populated efficacy arm, 8
 nodes on the auto-ping ladder — the two engine screens grow and the rest do not:
 
 | screen | clean 200×60 | loaded 200×60 |
 | --- | --- | --- |
-| Remedy | 15 µs | **356 µs** |
 | Engine | 17 µs | **217 µs** |
 | Overview | 375 µs | 391 µs |
+| Remedy | 15 µs | **356 µs** |
 
 **Worst case measured: ~412 µs, about 0.04 % of the frame budget.** Height moves
 Overview more than width does: `renderOverview` caps its window at `H − 5` rows
@@ -103,9 +103,9 @@ session and transport layers. That means:
 
 | | measured |
 | --- | --- |
-| Test suite | **1 098 tests, 12.5 s** (`npm test`) |
 | Mutation harness | **559 mutants, 821 s wall · 689 s user · 78 s sys** |
-| Source | 24 457 lines TypeScript · Tests | 18 614 lines |
+| Source | 24 457 lines TypeScript · 18 614 lines of tests |
+| Test suite | **1 098 tests, 12.5 s** (`npm test`) |
 
 Latest full run: **551 killed · 0 survived · 8 equivalent · 0 missing ·
 0 ambiguous · 0 invalid · 0 relabel.**
@@ -171,10 +171,10 @@ found it as a testing problem.
 
 ## 4. What the engine has learned
 
-Live readings, 2026-09-06.
+Live readings, 2026-09-07 (§4a/§4b describe the mesh these were learned on).
 
 **Baseline coverage**, for the four-hour band current at the time of reading:
-`timeouts 38/38 · rtt 22/38 · rssi 22/38`. Counts are per node, per series, per
+`timeouts 38/38 · rtt 21/38 · rssi 21/38` (12:00–16:00 band). Counts are per node, per series, per
 band — not a fleet-wide constant. Only `timeoutNormal` and `rttNormal` arm
 detectors; **`rssi` is a dossier yardstick and arms none**, so detector coverage
 is the first two figures. REMEDY reports this as *partial coverage*, which is a
@@ -184,9 +184,9 @@ statement about the instrument, not about health.
 
 | symptom kind | action arm | control (self-heal) |
 | --- | --- | --- |
-| `rtt-degraded` | ping — not distinguishable (n≈17.8, 4 nodes) | 82 % (n≈17.3, 18 nodes, n≈0.8 worse) |
 | `rate-fallback` | ping — not distinguishable (n≈12.9, 3 nodes) | 67 % (n≈16.8, 11 nodes) |
 | `route-churn` | — | still learning (n≈1.0 of 4) |
+| `rtt-degraded` | ping — not distinguishable (n≈17.8, 4 nodes) | 84 % (n≈18.2, 19 nodes, n≈0.7 worse) |
 
 The ledger withholds a benefit claim until the action's Wilson 95 % lower bound
 clears the control arm's rate by the minimum effect, on at least `minEpisodes`
@@ -195,21 +195,115 @@ the ≥2-node rule gates the *harm* finding. That is why every arm prints its no
 count rather than relying on one.
 
 For `rtt-degraded` the verdict is currently arithmetically forced: against an
-82 % control arm the bar sits near 87 %, and at n≈17.8 the Wilson lower bound
+84 % control arm the bar sits near 87 %, and at n≈17.8 the Wilson lower bound
 cannot reach it even on a perfect record. "Not distinguishable" there means the
 evidence *cannot* separate the two at this sample size — a stronger and more
 useful statement than "the ping did not help".
 
-**Evidence quality**, `rtt-degraded`: 28 unscoreable (thin evidence) · 1
+**Evidence quality**, `rtt-degraded`: 29 unscoreable (thin evidence) · 1
 transient blink · 4 undersampled · 11 unprobeable · 1 confounded — counted and
 shown rather than folded into a denominator.
 
 **Auto-ping** at the time of reading: `running · candidates 35 · dead 0 ·
-sweep-due 0 · verify-owed 0`; dwell 10 min, max 3 per outage, 120 min sweep.
+sweep-due 0 · verify-owed 0`; dwell 10 min, max 3 per outage, 120 min sweep. No
+node is in a dead episode, a miss streak or a launch failure, and **no episodes
+are open** — which is the healthy steady state, not an absence of instrument.
 
-**Noise floor:** −99 dBm measured, 14-day span, peak −94 dBm, quietest −100 dBm.
-Worst diurnal hour 22:00: 0.9 % of 451 tx — about 4 timeouts, which at that
-sample size is not distinguishable from the neighbouring hours.
+**`node-down` is deliberately unscored**: an outage episode ends when the node
+returns, so there is no control arm to compare an action against. Reporting a
+rate there would be inventing one.
+
+**Noise floor** is in §4b. Worst diurnal hour 22:00: 0.9 % of 451 tx — about 4
+timeouts, which at that sample size is not distinguishable from the neighbouring
+hours.
+
+---
+
+## 4a. The mesh under measurement
+
+Everything above is the add-on's own cost. This is the network it watches —
+read live from the running instance on 2026-09-07, at 200×70 so nothing sheds.
+
+Node names are room names, so what follows is **distributions rather than a
+roster**: a public document should not carry a floor plan, and a distribution
+answers "is this mesh healthy" better than a list does.
+
+### Composition
+
+| | |
+| --- | --- |
+| Activity | 328 events in 3 h 48 m (~86/h) |
+| Grades | **A 32 (84 %) · B 6 (16 %)** · C/D/F 0 · mean score **96** |
+| Links | **24 direct · 14 routed · 0 long-range** |
+| Nodes | **39** (controller + 38 end devices) |
+| Reroutes | 2 in 3 h 48 m |
+| State | 38 alive · 0 dead · 0 asleep · 0 flaky |
+
+Hop distribution, controller-relative:
+
+| hops | 0 | 1 | 2 | 3+ |
+| --- | ---: | ---: | ---: | ---: |
+| nodes | **24** | 11 | 2 | 1 |
+
+### Link quality, all 38 end devices
+
+| | min | p10 | p50 | p90 | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SNR margin (dB) | 10 | 14 | **29** | 50 | 61 |
+
+| negotiated rate | 100 kbit | 40 kbit | 9.6 kbit |
+| --- | ---: | ---: | ---: |
+| nodes | **32** | 5 | 1 |
+
+**4 nodes sit below 15 dB of margin; 24 are at 25 dB or better.** The single
+9.6 kbit node and the low-margin tail are the mesh's real edges — a node at
+9.6 kbit is not merely slower, it occupies the air far longer per frame, which
+is why the topology screen shows rate beside margin rather than either alone.
+
+> **A parse that disagreed with the screen was discarded, not published.** A
+> first pass over the Overview roster produced hops `0:4, 1:22` and a different
+> rate split. The Topology screen's own header says `24 DIRECT`, and the second
+> parse reproduces that exactly — so the first was mis-columned and reading a
+> subset. The figures above are the ones that agree with the add-on's own
+> computed summary.
+
+---
+
+## 4b. The controller link, and the RF floor
+
+These are the two failure modes that **mimic mesh-wide device trouble** and are
+therefore reported apart from it: a sick serial link and a noisy band both look
+like "every node got worse at once".
+
+### Host ↔ stick (Zooz ZST39 LR · FW 1.70 · SDK 7.24.2 · USA Long Range · primary/SUC/SIS)
+
+| lifetime | | recent (1 h) | |
+| --- | ---: | --- | ---: |
+| dropped RX | **18** | node reply timeout | 0.0/h |
+| dropped TX | 0 | timeout-ACK | 0.0/h |
+| messages RX | 10 180 | CAN | 0.0/h |
+| messages TX | 7 008 | NAK | 0.0/h |
+| NAK · CAN · timeout-ACK · timeout-cb | 0 · 0 · 0 · 0 | | |
+
+**0.10 % lifetime error rate**, entirely the 18 dropped RX frames. Lifetime
+totals cannot say whether a fault is *current*, which is why the per-hour rates
+are shown beside them rather than instead of them — all four are flat zero.
+
+### Background noise floor (driver-measured, 900 MHz)
+
+| ch0 | ch1 | ch2 | ch3 | median |
+| ---: | ---: | ---: | ---: | ---: |
+| −98 dBm | −99 dBm | −99 dBm | **−87 dBm** | −98 dBm · *clean* |
+
+14-day span, peak −96 dBm, quietest −100 dBm, from persisted 30-minute buckets
+that survive restarts.
+
+**ch3 runs ~11 dB hotter than the other three, persistently.** That is the one
+genuinely interesting number on this page: it is not a fault — the median is
+clean and no detector is armed by it — but it is a standing asymmetry in the
+band, and a node that later degrades on ch3 has a candidate explanation waiting.
+The margin reference is the *measured* floor (−98 dBm), not the −95 dBm assumed
+fallback, so every margin in §4a is relative to real conditions.
 
 ---
 
@@ -376,6 +470,8 @@ previously listed here, which wrongly implied open work.
 
 | date | version | what changed |
 | --- | --- | --- |
+| 2026-09-07 | v0.64.0 | §3 phase profile measured (`--profile` + `time -l`) — **"startup-bound" refuted**: 70 % is `tsx` re-transpilation, ~10 % is spawn; §5a added — per-session bandwidth measured and the withdrawn 0 KB/s refuted, with its cause identified; §4a/§4b added — the mesh itself: composition, links, margins, controller frames, RF floor; §4 refreshed; every table sorted for lookup |
+| 2026-09-06 | v0.63.6 | README's summary contradicted this document — the retracted 249 µs and "93 MB resident" were still quoted there |
 | 2026-09-06 | v0.63.5 | interference fold miss measured (0.87 ms, 0.09 % of budget) and time-to-useful-frame measured (no gap after listening); §7 triaged from 10 items to 2 worth measuring, 5 deliberately not, and 1 that was never a gap |
 | 2026-09-06 | v0.63.4 | **substantial correction after an adversarial audit** — render figures re-measured with a fresh `ViewState` (Overview 80×24 was understated 3.5×), Interference/Controller withdrawn as unmeasured, two cold-start figures and the bandwidth row retracted with their causes, §1/§3 claims scoped to what the samples support, §7 expanded from 4 items to 10 |
 | 2026-09-06 | v0.63.3 | first record: runtime footprint, render benchmark, verification cost, live engine figures |

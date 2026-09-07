@@ -146,11 +146,11 @@ DRIVER_SCHEMA_MIN = 32   DRIVER_SCHEMA_MAX = 41
 
 | | HA Core WS (Surface A) | Driver WS (Surface B) |
 | --- | --- | --- |
-| File | `ha/haWsClient.ts` | `zwave/driverWsClient.ts` |
 | Auth | `SUPERVISOR_TOKEN` bearer | none (privileged, read-only) |
-| Direction | read **and write** | read only (2-command allowlist) |
 | Carries | roster, registries, node/ctrl stats, activity, **all actions** | background RSSI, `lastSeen`, `isListening`/FLiRS |
+| Direction | read **and write** | read only (2-command allowlist) |
 | Failure mode | reconnect w/ backoff; blocks readiness | dormant, dependent detectors go quiet |
+| File | `ha/haWsClient.ts` | `zwave/driverWsClient.ts` |
 | Liveness | WS ping/pong every 30 s | WS ping at ½·`livenessMs`, terminate at `livenessMs` (5 min) |
 | Reconnect | `1s·2^n`, cap 30 s, ±20% jitter | `5s·2^n`, cap ~5 min |
 
@@ -451,15 +451,15 @@ The join builds these maps in one pass over the device + entity registries:
 
 | Map | Key → Value | Used by |
 | --- | --- | --- |
+| `batteryEntityToNode` | `sensor.*battery*` → node id | `get_states` battery poll |
+| `configByNode` | node id → `ConfigParamsResult` | Detail **CONFIG PARAMETERS** (lazy, v0.22) |
 | `deviceByNodeId` | node id → `{id, name, area, manufacturer, model}` | `deviceIdOf()`, node names |
 | `deviceIdToNodeId` | HA device_id → node id | route-repeater resolution |
 | `entitiesByDeviceId` | device_id → `NodeEntity[]` | Detail screen entity list |
 | `entityIndex` | entity_id → `{nodeId, name, domain}` | activity-log `state_changed` mapping |
 | `pingEntityByNode` | node id → `button.*_ping` entity_id | the **ping** action |
-| `batteryEntityToNode` | `sensor.*battery*` → node id | `get_states` battery poll |
-| `updateEntitiesByNode` / `updateEntityToNode` | node id ↔ `update.*` entity_ids | firmware-update status |
 | `stateByEntityId` | entity_id → `{state, attrs}` | Detail **LIVE ENTITIES** state (v0.22) |
-| `configByNode` | node id → `ConfigParamsResult` | Detail **CONFIG PARAMETERS** (lazy, v0.22) |
+| `updateEntitiesByNode` / `updateEntityToNode` | node id ↔ `update.*` entity_ids | firmware-update status |
 
 Only `platform === 'zwave_js'` entities that are **not** `disabled_by` and whose `device_id` resolves to a known node are indexed. Names come from `name_by_user || name` (device) and `original_name ?? name` (entity), and every externally-sourced string is run through `sanitizeLabel()` (zwaveData.ts:353), which strips C0/C1 control bytes (including ESC `0x1b`, so a crafted device name cannot inject ANSI into a TUI frame), folds wide/astral code points to `?`, and caps length at 48. The join is rebuilt fresh on every (re)auth so a removed node leaves no stale mapping.
 
@@ -635,10 +635,10 @@ The integration boundary is tuned by these options (each falls back to an env va
 
 | Option | Env | Default | Effect |
 | --- | --- | --- | --- |
+| `driverWsUrl` | `DRIVER_WS_URL` | `null` (disabled) | Read-only driver-WS client for real background RSSI, node `lastSeen`, and listening/FLiRS flags; guarded by a `home_id` cross-check (`driverHomeGuard`) that purges telemetry the moment a mismatch is proven |
 | `entryId` | `ZWAVE_ENTRY_ID` | `null` → auto-discover | Seed the config-entry id; when set, disables self-heal re-discovery |
 | `refreshMs` | `REFRESH_INTERVAL_MS` | `2000` | `network_status` roster poll cadence; also the flap-fallback resolution |
 | `routePollMs` | `ROUTE_POLL_INTERVAL_MS` | `10000` | Evidence sample cadence default (statistics themselves are push-driven, not polled) |
-| `driverWsUrl` | `DRIVER_WS_URL` | `null` (disabled) | Read-only driver-WS client for real background RSSI, node `lastSeen`, and listening/FLiRS flags; guarded by a `home_id` cross-check (`driverHomeGuard`) that purges telemetry the moment a mismatch is proven |
 
 Statistics subscriptions are not on a timer at all — they are opened once per connection and re-opened via `onReady` after any (re)auth. The only periodic HA calls are the `refreshMs` roster poll and the slow `get_states` pass (`fetchEntityStates`) that reads battery levels and firmware-update status after each registry (re)load.
 
@@ -710,21 +710,21 @@ The telnet parser (`server.ts`, `parseInput`) strips IAC framing, decodes NAWS w
 | Key(s) | Action |
 |---|---|
 | `1`–`9` | `view.screen = SCREENS[n-1]` when `n-1 < SCREENS.length`; `9` is ENGINE (v0.41.0) |
-| `c` | jump to **controller** · `e` → **log** · `y` → **remedy** · `f` → **interference** |
+| `⏎` (Enter) | drill into **detail** for the selected node (no-op if the list is empty); resets the dossier scroll to the top |
+| `/` | hand control to the session's filter-capture loop (`{filter:'start'}`). **Overview only, and only once the roster has loaded** (v0.24): the loading card has no prompt to echo into, so a capture there would swallow keys invisibly |
+| `↑↓`/`j`/`k` on **Remedy** | move the symptom cursor (v0.24) — **this cursor is what `a`/`p` target on that screen** |
+| `↑↓`/`j`/`k` on **Topology** | scroll the route tree (v0.24); `space`/`b` page, `g`/`G` top/end |
 | `↑`/`k` | move selection cursor up · `↓`/`j` down (`moveSelection`, clamped to the visible list) — **on Detail these scroll the dossier instead**, see below |
 | `←`/`→` | reserved (no-op) |
-| `⏎` (Enter) | drill into **detail** for the selected node (no-op if the list is empty); resets the dossier scroll to the top |
+| `a`/`A` | open the Actions Menu (intercepted by the session, not `applyKey`). **Scoped by screen (v0.24):** on Overview / Detail / Remedy / Log it opens **DEVICE ACTIONS** for the node under the cursor (maintenance + DEVICE CONTROLS + CONFIGURATION); on Controller it opens **NETWORK ACTIONS** (mesh-wide). Anywhere else it names where the actions live rather than opening a mis-scoped menu |
+| `c` | jump to **controller** · `e` → **log** · `y` → **remedy** · `f` → **interference** |
+| `d`/`D` | cycle the log's date-range filter (Log screen only) |
 | `Esc` | dismiss any overlay back to **overview**; on the overview home, **clear a committed filter** (v0.24) — no-op only when there is neither |
+| `o`/`O` | toggle the log's `errorsOnly` filter — **Log screen only** (v0.24), and it resets the cursor/anchor to newest |
+| `p` `i` `h` `R` `x` | mutating actions — **no-op with a hint** unless `write_actions_enabled` (see below) |
 | `q`/`Q` | on an overlay → back to overview; on the overview home → **quit** (`{quit:true}`) |
-| `/` | hand control to the session's filter-capture loop (`{filter:'start'}`). **Overview only, and only once the roster has loaded** (v0.24): the loading card has no prompt to echo into, so a capture there would swallow keys invisibly |
 | `s`/`S` | cycle sort key through `SORT_ORDER` and reset selection/scroll to top |
 | `t`/`T` | toggle `signalDisplay` between `'margin'` and `'dbm'` |
-| `o`/`O` | toggle the log's `errorsOnly` filter — **Log screen only** (v0.24), and it resets the cursor/anchor to newest |
-| `d`/`D` | cycle the log's date-range filter (Log screen only) |
-| `↑↓`/`j`/`k` on **Topology** | scroll the route tree (v0.24); `space`/`b` page, `g`/`G` top/end |
-| `↑↓`/`j`/`k` on **Remedy** | move the symptom cursor (v0.24) — **this cursor is what `a`/`p` target on that screen** |
-| `p` `i` `h` `R` `x` | mutating actions — **no-op with a hint** unless `write_actions_enabled` (see below) |
-| `a`/`A` | open the Actions Menu (intercepted by the session, not `applyKey`). **Scoped by screen (v0.24):** on Overview / Detail / Remedy / Log it opens **DEVICE ACTIONS** for the node under the cursor (maintenance + DEVICE CONTROLS + CONFIGURATION); on Controller it opens **NETWORK ACTIONS** (mesh-wide). Anywhere else it names where the actions live rather than opening a mis-scoped menu |
 
 `SORT_ORDER = ['health', 'id', 'name', 'rssi', 'seen']`. `visibleNodes()` applies the substring filter (over name / id / manufacturer / model / status label) first, then sorts: `health` worst-first by `data.scoreFor().score`, `rssi` weakest-first, `seen` most-stale-first, each with a `nodeId` tiebreak. RSSI sorting/scoring skips the driver sentinels `{127, 126, 125}` — `effectiveRssi()` maps a null or sentinel reading to `-999` so unknown-signal nodes surface at the "weakest" end rather than being treated as strong.
 
@@ -777,11 +777,11 @@ The colour palette is `c.*` — atomic SGR spans that **must not be nested** (an
 
 | Helper | SGR | Semantic use |
 |---|---|---|
-| `c.red` 91 / `c.green` 92 / `c.yellow` 93 | | fault / ok / warn |
 | `c.blue` 94 / `c.cyan` 96 / `c.white` 97 / `c.grey` 90 | | LR / info-structure / value / chrome |
-| `c.redB/greenB/yellowB/cyanB/whiteB` | `1,9x` | bold emphasis |
-| `c.invert` | 7 | selected menu tab / node row |
 | `c.dim` 2 / `c.bold` 1 / `c.label` 96 | | — |
+| `c.invert` | 7 | selected menu tab / node row |
+| `c.red` 91 / `c.green` 92 / `c.yellow` 93 | | fault / ok / warn |
+| `c.redB/greenB/yellowB/cyanB/whiteB` | `1,9x` | bold emphasis |
 
 `BOX` supplies the double-line control-room border (`╔╗╚╝║═╠╣`) plus light internal rules (`─│`). The module also defines the terminal-lifecycle escapes the draw loop relies on: `ENTER_ALT_BUFFER`/`EXIT_ALT_BUFFER` (`?1049h/l` — redraws can't smear into scrollback), `BEGIN_SYNC`/`END_SYNC` (`?2026h/l` — synchronized atomic frames; no-ops on terminals that don't recognize them), and `HIDE_CURSOR`, `CURSOR_HOME`, `CLEAR_EOL`, `CLEAR_BELOW`.
 
@@ -1010,8 +1010,8 @@ const updateAvail = node.firmware?.updateAvailable === true;               // �
 |------|-----------|--------|
 | **1 · Dead** | `status === Dead` | `score 0`, `grade F`, `state 'dead'`, flag `D` (+`B`/`U` if applicable). Nothing else is meaningful once the node is unreachable. |
 | **2a · No stats** | `!stats` | `score 10` (≤ `UNKNOWN_SCORE_CAP` by construction), `state 'unknown'`. Flags: `I` if `!node.ready`, plus `B`/`U`. `grade F`. |
-| **Controller** | `node.isController && (status Alive \|\| Awake)` | `score 100`, `grade A`, `state 'ok'` (+`B`/`U`). Node 1 has no upstream link/route to score; its health lives on the Controller screen. |
 | **2b · Unknown** | `status === Unknown` | Lane math runs, then `score = Math.min(score, UNKNOWN_SCORE_CAP)` (15). `state` forced to `'unknown'`. |
+| **Controller** | `node.isController && (status Alive \|\| Awake)` | `score 100`, `grade A`, `state 'ok'` (+`B`/`U`). Node 1 has no upstream link/route to score; its health lives on the Controller screen. |
 
 Two important design choices sit inside these gates:
 
@@ -1159,15 +1159,15 @@ const FLAG_ORDER = ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B', 'U'] as const;
 
 | Glyph | Name | Fires when | Lane / source | Affects score? |
 |-------|------|-----------|---------------|:--------------:|
-| **D** | dead | `status === Dead` | Gate 1 | Yes → score 0 |
-| **S** | stale | reachability `age > STALE_FLAG_MS` (2 h) on a not-alive node | Reachability | Yes (via reach decay) |
-| **W** | weak signal | SNR `margin < WEAK_MARGIN_DB` (7 dB), direct/LR nodes only | Signal | Yes |
-| **F** | flaky | timeout `errRate > TX_ERR_THRESHOLD` (0.15) | Response Reliability | Yes |
-| **R** | route failed | LWR or NLWR reports a `routeFailedBetween` pair | Route | Yes (base × 0.4) |
-| **L** | latency | `rtt > RTT_HI_MS` (1000 ms) | advisory (post-route) | No (surfacing only) |
-| **I** | interview incomplete | `!node.ready` | Interview | Yes → lane 0 |
 | **B** | battery low | `level <= 25` or `isLow === true` | advisory | **No** |
+| **D** | dead | `status === Dead` | Gate 1 | Yes → score 0 |
+| **F** | flaky | timeout `errRate > TX_ERR_THRESHOLD` (0.15) | Response Reliability | Yes |
+| **I** | interview incomplete | `!node.ready` | Interview | Yes → lane 0 |
+| **L** | latency | `rtt > RTT_HI_MS` (1000 ms) | advisory (post-route) | No (surfacing only) |
+| **R** | route failed | LWR or NLWR reports a `routeFailedBetween` pair | Route | Yes (base × 0.4) |
+| **S** | stale | reachability `age > STALE_FLAG_MS` (2 h) on a not-alive node | Reachability | Yes (via reach decay) |
 | **U** | firmware update | `firmware.updateAvailable === true` | advisory | **No** |
+| **W** | weak signal | SNR `margin < WEAK_MARGIN_DB` (7 dB), direct/LR nodes only | Signal | Yes |
 
 `D`, `S`, `W`, `F`, `R`, and `I` are the six lane flags that reflect the score. `L` is a pure advisory: high latency already pulls `rttFrac` down inside the route lane, so `L` exists only to surface a multi-second round-trip that the weighted lane alone might not drag below a grade boundary — it adds no additional penalty. `B` and `U` are the two truly score-independent advisories (§4.8).
 
@@ -1259,20 +1259,20 @@ Every threshold lives at the top of `health.ts`. Those marked *tunable default* 
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `DEFAULT_NOISE_FLOOR` | `-95` dBm | Fallback noise floor (exported, shared with `dataProvider`) — *tunable default* |
-| `RSSI_SENTINELS` | `{125, 126, 127}` | Driver RSSI sentinels excluded from math |
-| `WEAK_MARGIN_DB` | `7` | SNR margin below which `W` fires — *tunable default* |
-| `SIGNAL_MARGIN_LO` / `_HI` | `0` / `14` | Margin window mapped to `[0,1]` (W at midpoint) — *tunable default* |
-| `TX_ERR_THRESHOLD` | `0.15` | Timeout fraction above which `F` fires — *tunable default* |
-| `TX_ERR_FLOOR` | `0.30` | Timeout fraction that zeroes the reliability lane — *tunable default* |
 | `BATTERY_LOW_PCT` | `25` | Battery % at/under which `B` fires — *tunable default* |
+| `DEFAULT_NOISE_FLOOR` | `-95` dBm | Fallback noise floor (exported, shared with `dataProvider`) — *tunable default* |
+| `FLAG_ORDER` | `[D,S,W,F,R,L,I,B,U]` | Canonical flag render order |
+| `LR_NODE_ID` | `256` | Long-Range node-id threshold (structural) |
 | `REACH_FRESH_MS` | `1,800,000` (30 min) | Full reachability credit up to this age — *tunable default* |
 | `REACH_STALE_MS` | `21,600,000` (6 h) | Reachability decays to 0 by this age — *tunable default* |
-| `STALE_FLAG_MS` | `7,200,000` (2 h) | Age past which `S` fires — *tunable default* |
+| `RSSI_SENTINELS` | `{125, 126, 127}` | Driver RSSI sentinels excluded from math |
 | `RTT_LO_MS` / `_HI_MS` | `100` / `1000` | RTT window; `L` fires above `_HI` — *tunable default* |
+| `SIGNAL_MARGIN_LO` / `_HI` | `0` / `14` | Margin window mapped to `[0,1]` (W at midpoint) — *tunable default* |
+| `STALE_FLAG_MS` | `7,200,000` (2 h) | Age past which `S` fires — *tunable default* |
+| `TX_ERR_FLOOR` | `0.30` | Timeout fraction that zeroes the reliability lane — *tunable default* |
+| `TX_ERR_THRESHOLD` | `0.15` | Timeout fraction above which `F` fires — *tunable default* |
 | `UNKNOWN_SCORE_CAP` | `15` | Score ceiling for UNKNOWN status |
-| `LR_NODE_ID` | `256` | Long-Range node-id threshold (structural) |
-| `FLAG_ORDER` | `[D,S,W,F,R,L,I,B,U]` | Canonical flag render order |
+| `WEAK_MARGIN_DB` | `7` | SNR margin below which `W` fires — *tunable default* |
 
 These are module-level `const`s, not runtime config options — tuning them is a code change, not an add-on setting.
 
@@ -1365,8 +1365,8 @@ The store keeps two independent time horizons per node, and — critically — *
 
 | Tier | Structure | Horizon | Cap constant | Feeds |
 | --- | --- | --- | --- | --- |
-| **Fine ring** | one `EvidenceSample` per node per sample tick | ~40 min | `DEFAULT_MAX_SAMPLES = 240` (at the 10 s cadence) | recent-window detectors + the outcome after-window verifier |
 | **Coarse tier** | 30-min `CoarseBucket`s per node | 14 days | `DEFAULT_COARSE_HORIZON_MS = 14·24·60·60·1000` | the baseline substrate (bands are multi-hour) |
+| **Fine ring** | one `EvidenceSample` per node per sample tick | ~40 min | `DEFAULT_MAX_SAMPLES = 240` (at the 10 s cadence) | recent-window detectors + the outcome after-window verifier |
 
 The two are held in separate maps: `const fine: EvidenceMap = new Map()` and `const coarse = new Map<number, CoarseBucket[]>()`. The fine ring has a **1 h staleness gate** (`DEFAULT_MAX_AGE_MS = 60·60·1000`) that applies *only* to it on load; coarse buckets are pruned individually to the 14-day horizon. A 3-day-old coarse bucket is valid history, not stale state. The load-time reasoning is explicit in the header: *"a daily power blip cannot wipe two weeks of baseline history."* `COARSE_BUCKET_MS = 30·60·1000` is exported because the baseline layer needs the same bucket alignment.
 
@@ -1426,10 +1426,10 @@ function guardedDeltas(prev, cur) {
 
 | Guard | Rule | Constant | Rationale |
 | --- | --- | --- | --- |
-| **Whole-window invalidation** | if **any** of the four counters moved backward, **all** deltas for that sample are null | — | One driver, one restart, one shared lifetime. Per-field nulling let a cross-lifetime delta on one field masquerade as valid. |
 | **Max-window bound** | a gap `> 3× cadence` (or `≤ 0`) nulls all deltas and re-baselines | `MAX_WINDOW_CADENCES = 3` → `maxWindowMs = cadenceMs·3` (30 s at 10 s cadence) | Long gaps are not time-attributable. |
-| **Plausibility cap** | a delta exceeding `(windowMs/1000)·maxDeltaPerSec` is nulled + logged once | `DEFAULT_MAX_DELTA_PER_SEC = 40` msg/s | Z-Wave's shared bandwidth is ~10–20 msg/s mesh-wide, so 40/s per node is safely impossible. This is the backstop against a fabricated full-lifetime delta. |
 | **No baseline** | the first sample after start/reset has no `prev` → null + invalid | — | Nothing to difference against. |
+| **Plausibility cap** | a delta exceeding `(windowMs/1000)·maxDeltaPerSec` is nulled + logged once | `DEFAULT_MAX_DELTA_PER_SEC = 40` msg/s | Z-Wave's shared bandwidth is ~10–20 msg/s mesh-wide, so 40/s per node is safely impossible. This is the backstop against a fabricated full-lifetime delta. |
+| **Whole-window invalidation** | if **any** of the four counters moved backward, **all** deltas for that sample are null | — | One driver, one restart, one shared lifetime. Per-field nulling let a cross-lifetime delta on one field masquerade as valid. |
 
 There is a fifth guard **upstream, at the source.** `onNodeStats` (`zwaveData.ts:1702`) runs `statsCounters(e)` and, if any counter field is missing or non-finite, **rejects the whole event** rather than coercing it to 0 — the previous cached stats stay authoritative. The comment names the exact failure this prevents: a coerced-0 snapshot re-baselines the deltas at zero, and the next real cumulative value then lands as "one giant fabricated 'valid' delta." The store's plausibility cap is the second line of defense should such a value ever reach `record()`.
 
@@ -1537,14 +1537,14 @@ Under grace or when the fine ring is too old, the store **still loads the coarse
 
 | Env / option | Default | Effect |
 | --- | --- | --- |
+| `bootGraceMs` | `DEFAULT_BOOT_GRACE_MS = 180_000` | distrust recency while host uptime is below this; `0` = off |
+| `coarseHorizonMs` | `DEFAULT_COARSE_HORIZON_MS = 14 d` | coarse prune horizon |
+| `EVIDENCE_FLUSH_MS` → `evidenceFlushMs` | `900_000` (15 min, v0.26) | dirty-flush interval |
 | `EVIDENCE_PATH` → `path` | `null` (in-memory, engine dormant) | on-disk location, e.g. `/data/evidence.json` |
 | `EVIDENCE_SAMPLE_MS` → `cadenceMs` | `routePollMs` (falls back to ~2 s `REFRESH_INTERVAL_MS`) | sample cadence; **drives `maxWindowMs = cadenceMs·3`** |
-| `EVIDENCE_FLUSH_MS` → `evidenceFlushMs` | `900_000` (15 min, v0.26) | dirty-flush interval |
-| `maxSamples` | `DEFAULT_MAX_SAMPLES = 240` | fine-ring cap per node |
 | `maxAgeMs` | `DEFAULT_MAX_AGE_MS = 3_600_000` | **fine-tier-only** staleness; `0` = never |
-| `coarseHorizonMs` | `DEFAULT_COARSE_HORIZON_MS = 14 d` | coarse prune horizon |
-| `bootGraceMs` | `DEFAULT_BOOT_GRACE_MS = 180_000` | distrust recency while host uptime is below this; `0` = off |
 | `maxDeltaPerSec` | `DEFAULT_MAX_DELTA_PER_SEC = 40` | plausibility cap (msg/s) |
+| `maxSamples` | `DEFAULT_MAX_SAMPLES = 240` | fine-ring cap per node |
 
 Note that `DEFAULT_CADENCE_MS = 10_000` inside the store is the fallback if the caller supplies nothing; in production the caller passes `cadenceMs = evidenceSampleMs`, which resolves to `routePollMs`.
 
@@ -1644,10 +1644,10 @@ Handshake outcomes:
 
 | condition | result | rationale |
 | --- | --- | --- |
-| `serverMax <= 0` (no usable range / garbage handshake) | `dormant`, socket torn down | wrong endpoint or malformed peer — not a zwave-js-server we understand |
 | `min(serverMax, 41) < 32` | `dormant` | server too old — the renamed commands land at 32, our floor |
-| `serverMin > negotiated` | `dormant` | server refuses everything ≤ our ceiling — outside the tested band |
 | otherwise | `set_api_schema` + `start_listening`, then `live` | negotiate `min(serverMax, 41)`, refuse below 32 |
+| `serverMax <= 0` (no usable range / garbage handshake) | `dormant`, socket torn down | wrong endpoint or malformed peer — not a zwave-js-server we understand |
+| `serverMin > negotiated` | `dormant` | server refuses everything ≤ our ceiling — outside the tested band |
 
 Crucially, schema mismatch is **permanent dormancy, not a retried failure**: a running server does not change its schema range mid-life, so retrying would only churn. The `'dormant'` state is a latch — `scheduleReconnect` and `connect` both early-return on it — so a mismatched server is left alone until an explicit fresh `start()` (which clears the latch, e.g. after a config fix + restart). Connection *loss*, by contrast, is transient and *is* retried (§6.5). Dormancy is never fatal to the add-on: the negotiated schema is logged, the dependent telemetry stays `null`, and the interference/quiet-node/capability-dependent detectors report their own dormancy honestly.
 
@@ -1703,11 +1703,11 @@ The socket is privileged and unauthenticated, so a hostile or buggy server must 
 
 | helper | guards against | behavior |
 | --- | --- | --- |
+| `cleanDbm(v)` (internal) | RSSI sentinels | rejects non-finite values and anything `≥ RSSI_SENTINEL_MIN (125)` → `null` (the "no reading" sentinel) |
+| `parseLastSeen(v)` | mixed serializations | accepts a positive epoch number, or `Date.parse()`'s an ISO string; else `null` |
 | `redactUrl(url)` | leaking `ws://user:pass@host` credentials to logs | regex-replaces userinfo with `***@` before any URL is logged |
 | `safeTag(v, max=40)` | log flooding / forged log lines via attacker-controlled strings | strips control chars `\x00-\x1f\x7f`, truncates to 40; non-strings render as a number or `?` |
 | `saneNodeId(v)` | a buggy/hostile server growing the driver maps with junk ids | accepts only an integer in `[1, 4000]`, else `null` — the callback is skipped |
-| `cleanDbm(v)` (internal) | RSSI sentinels | rejects non-finite values and anything `≥ RSSI_SENTINEL_MIN (125)` → `null` (the "no reading" sentinel) |
-| `parseLastSeen(v)` | mixed serializations | accepts a positive epoch number, or `Date.parse()`'s an ISO string; else `null` |
 
 The connection's `message` handler wraps `JSON.parse` in a try/catch that logs only `'driver-ws: unparseable frame ignored'` — never the payload. Unknown frame types fall through the `onMessage` switch's `default` and are silently ignored, never logged verbatim. `driverVersion`/`serverVersion` reach the log only through `safeTag`. This is the "log types/counts, never payloads" rule made literal.
 
@@ -1833,9 +1833,9 @@ direction, and — decisively — by **log level**:
 
 | Direction | Message | Level | Node-attributed |
 |---|---|---|---|
+| Incoming (we could not decrypt the device) | `Message authentication failed` / `No SPAN is established yet`, `…cannot decode command. Requesting a nonce...` | **`verbose`** | yes |
 | Outgoing (device could not decrypt us) | `failed to decode the message, retrying with SPAN extension...` | `info` | yes |
 | Outgoing, terminal | `failed to decode the message after re-transmission with SPAN extension, dropping the message.` | `warn` | yes |
-| Incoming (we could not decrypt the device) | `Message authentication failed` / `No SPAN is established yet`, `…cannot decode command. Requesting a nonce...` | **`verbose`** | yes |
 
 **Only the outgoing pair is visible at the stock `info` level.** The incoming
 family requires the Z-Wave JS add-on's log level to be raised to `verbose`, so
@@ -1935,8 +1935,8 @@ The module header states the design-review rule verbatim: **ONE statistic does n
 
 | Series class | Signals | Statistic kept | Why not the others |
 | --- | --- | --- | --- |
-| **Counting** | `timeoutResponse` rate (`dTimeout`/`dTx`) | Decayed Poisson rate λ = Σevents / Σtrials | A mostly-zero series has MAD = 0 by construction; median/MAD would make *any* nonzero reading look infinitely anomalous |
 | **Continuous** | `rssi`, `rtt` | Median + MAD from a decayed histogram, with a MAD **floor** tied to instrument precision | A degenerate low-dispersion band would otherwise produce an unbounded z-score |
+| **Counting** | `timeoutResponse` rate (`dTimeout`/`dTx`) | Decayed Poisson rate λ = Σevents / Σtrials | A mostly-zero series has MAD = 0 by construction; median/MAD would make *any* nonzero reading look infinitely anomalous |
 | **Discrete** | `routeKey`, `rateKbps` | *Not stored here* — handled categorically by the detectors (change/dwell) | Location/scale is meaningless on a category |
 
 Note the counting series measures `timeoutResponse`, not `commandsDroppedTX`. Per RESEARCH §0, `commandsDroppedTX` does **not** count RF ACK failures (those mark a node Dead while the counter stays 0); the real return-path signal is `timeoutResponse` — a Get whose reply never came while the node stays Alive. The TUI's reliability metric is `timeoutResponse/commandsTX`.
@@ -2387,27 +2387,27 @@ All `symptoms.ts` thresholds ship as documented compile-time constants (shareabi
 
 | Constant | Value | Governs |
 | --- | --- | --- |
-| `DWELL_MS` | 5 min | Continuous breach required before a symptom surfaces |
-| `WINDOW_MS` | 10 min | Windowed-rate / flap lookback |
-| `MIN_WINDOW_TX` | 20 | Minimum sends for a timeout rate to be meaningful |
-| `TIMEOUT_RATE_ABS` | 0.15 | Chronic / absolute timeout-rate threshold |
-| `TIMEOUT_RATE_MULT` | 3 | Relative multiplier over own baseline |
 | `CHRONIC_DAYS_MS` | 2 days | Sustained duration → chronic |
 | `CHRONIC_MIN_HITS` | 400 | Evaluable-bad observations before "chronic" |
-| `RTT_Z` | 4 | z-score over route-stratified RTT baseline |
-| `WEAK_MARGIN_DB` | 7 | Direct-node weak-signal SNR margin |
-| `FLAPS_WINDOW` | 3 | Alive↔Dead transitions/window → dead-flap |
-| `S2_WINDOW_MS` | 30 min | S2 SPAN-resync lookback (sparser than counter signals) |
-| `S2_ABS` | 12 | Resyncs in the window → `s2-desync` (absolute; see below) |
-| `S2_WARN_MULT` | 3 | ×`S2_ABS` escalates watch → warn |
-| `S2_RECENT_MS` | 10 min | Recency conjunct for `s2-desync` |
-| `RX_FLOOD_MULT` | 20 | dRx rate over the mesh median → chatty |
-| `GHOST_MIN_COVERAGE_MS` | 3 days | Observed-with-zero-comms before ghost-suspect |
 | `CTRL_DEGRADED_ABS` | 5 | Serial NAK+CAN+timeoutACK per window (×3 = crit) |
+| `DWELL_MS` | 5 min | Continuous breach required before a symptom surfaces |
+| `FLAPS_WINDOW` | 3 | Alive↔Dead transitions/window → dead-flap |
+| `GHOST_MIN_COVERAGE_MS` | 3 days | Observed-with-zero-comms before ghost-suspect |
 | `MESH_ACTIVE_FRACTION` | 0.35 | Mesh gate FIRE fraction |
-| `MESH_RELEASE_FRACTION` | 0.20 | Mesh gate RELEASE fraction (hysteresis) |
 | `MESH_MIN_ACTIVE` | 8 | Hard floor on active nodes for a mesh event |
 | `MESH_MIN_DEGRADED` | 3 | Hard floor on degraded nodes for a mesh event |
+| `MESH_RELEASE_FRACTION` | 0.20 | Mesh gate RELEASE fraction (hysteresis) |
+| `MIN_WINDOW_TX` | 20 | Minimum sends for a timeout rate to be meaningful |
+| `RTT_Z` | 4 | z-score over route-stratified RTT baseline |
+| `RX_FLOOD_MULT` | 20 | dRx rate over the mesh median → chatty |
+| `S2_ABS` | 12 | Resyncs in the window → `s2-desync` (absolute; see below) |
+| `S2_RECENT_MS` | 10 min | Recency conjunct for `s2-desync` |
+| `S2_WARN_MULT` | 3 | ×`S2_ABS` escalates watch → warn |
+| `S2_WINDOW_MS` | 30 min | S2 SPAN-resync lookback (sparser than counter signals) |
+| `TIMEOUT_RATE_ABS` | 0.15 | Chronic / absolute timeout-rate threshold |
+| `TIMEOUT_RATE_MULT` | 3 | Relative multiplier over own baseline |
+| `WEAK_MARGIN_DB` | 7 | Direct-node weak-signal SNR margin |
+| `WINDOW_MS` | 10 min | Windowed-rate / flap lookback |
 
 Baseline constants (`baselines.ts`): `N_BANDS = 6`, `MIN_OBS = 20`, `MIN_DAYS = 3`, `DECAY = 0.01`, `DAYS_RING = 10`, `RSSI_MAD_FLOOR = 3 dB`, `RTT_MAD_FLOOR = 8 ms`, RSSI bins 2 dB over [−120, −20] (50 bins), the RTT edge set of §7.1.3, `SCHEMA_V = 1`, `DEFAULT_MAX_AGE_MS = 30 days`, `DEFAULT_BOOT_GRACE_MS = 180 s`.
 
@@ -2492,12 +2492,12 @@ Every candidate is tagged on two orthogonal axes so the REMEDY row can tell the 
 
 | basis | meaning | example use in the table |
 | --- | --- | --- |
-| `spec` | Z-Wave protocol fact | LR-node physical-only advice ("LR talks directly to the controller, no routes") |
-| `source` | documented driver / Z-Wave JS behavior | `refreshValues` re-polls without touching routes; `healNode` deletes manual priority routes |
 | `empirical` | measured from this mesh | (reserved; not emitted by the M4 table) |
-| `lore` | community construction-class heuristic | repeater placement; "firm up the marginal repeater"; power-cycle-first |
 | `inference` | reasoned by exclusion, unconfirmed | the RF-survey lead for `mesh-interference` when no flooding cause exists |
 | `learned` | from the outcome ledger | (reserved for M5+ reweighting; M4 emits none) |
+| `lore` | community construction-class heuristic | repeater placement; "firm up the marginal repeater"; power-cycle-first |
+| `source` | documented driver / Z-Wave JS behavior | `refreshValues` re-polls without touching routes; `healNode` deletes manual priority routes |
+| `spec` | Z-Wave protocol fact | LR-node physical-only advice ("LR talks directly to the controller, no routes") |
 
 DESIGN §3.4 records the chaining rule as **worst-of when chained** (the "DR" note): if a recommendation's justification depends on several links, its `basis` is the weakest of them. In the as-built M4 table each candidate is a single grounded statement, so its `basis` is set literally at the call site.
 
@@ -2505,11 +2505,11 @@ DESIGN §3.4 records the chaining rule as **worst-of when chained** (the "DR" no
 
 | cost | meaning | render color (`costTag`) |
 | --- | --- | --- |
+| `caution` | a probe with a real side-effect risk (e.g. `ping` can mark a marginal node dead; `reInterview`) | `yellow` |
+| `destructive` | permanent, unrecoverable (`removeFailed`) | `redB` (bold red) |
+| `disruptive` | rewrites mesh state (a route rebuild / `healNode`) | `yellow` |
 | `physical` | a human hands-on action, no software mutation | `blue` |
 | `safe` | non-mutating software probe (e.g. `refreshValues`) | `green` |
-| `caution` | a probe with a real side-effect risk (e.g. `ping` can mark a marginal node dead; `reInterview`) | `yellow` |
-| `disruptive` | rewrites mesh state (a route rebuild / `healNode`) | `yellow` |
-| `destructive` | permanent, unrecoverable (`removeFailed`) | `redB` (bold red) |
 
 The two axes are independent: physical guidance is almost always `basis: lore` / `cost: physical`; the "rebuild — NOT recommended" anti-pattern candidate is `basis: source` (the driver behavior is documented) / `cost: disruptive` and is additionally `blocked`.
 
@@ -2524,18 +2524,18 @@ The full as-built table (LR variants noted separately in §8.5):
 
 | symptom kind | headline gist | candidate 1 | candidate 2 | candidate 3 |
 | --- | --- | --- | --- | --- |
-| `return-path-degraded`, `chronic-return-path`, `weak-signal`, `rtt-degraded` *(shared arm)* | "Improve the RF path — a repeater or relocation, not a rebuild" | `repeaterCandidate()` — lore / physical | `refreshValues` "Refresh values (re-poll, non-mutating)" — source / **safe**, gated | `healNode` "Rebuild routes — **NOT recommended here**" — source / disruptive, **blocked** `no topology change — won't help` |
-| `rate-fallback` | "Route regressed below 100k — repeater/placement" | `repeaterCandidate()` | `healNode` "Rebuild routes (only if a device moved)" — source / disruptive, **blocked** `no topology change` | — |
-| `route-churn` | "Route keeps changing — marginal repeater or intermittent interference" | `action: null` "Firm up the marginal repeater on that path" — lore / physical | `healNode` "Rebuild routes — **NOT recommended (will re-churn)**" — source / disruptive, **blocked** `physical-link symptom — won't settle it` | — |
-| `dead-flap` | "Reachability runbook — a rebuild cannot repair an unreachable node" | `ping` "Ping the node (confirm reachability)" — source / **safe**, gated w/ probes | `action: null` "Power-cycle the device, then exclude/re-include if it persists" — lore / physical | — |
-| `quiet-node` | "Node is quiet — confirm reachability before assuming a fault" | `ping` "Ping (consented reachability check)" — source / **caution**, gated w/ probes | `action: null` "Check it is powered and in range before assuming a fault" — lore / physical | — |
+| *default (unmapped kind)* | "No specific remediation — see the symptom detail" | `action: null` "Observe" — inference / physical | — | — |
 | `chatty-device` | "Tune the device's reporting — it is flooding the mesh" | `action: null` "Reduce its reporting … or re-include without S0" — source / physical | `reInterview` "Re-interview (after changing its config)" — source / **caution**, gated | — |
-| `ghost-suspect` | "Possible ghost — verify before the destructive removal" | `removeFailed` "Remove failed node (**DESTRUCTIVE — verify first**)" — source / **destructive**, gated | `action: null` "First confirm the device is truly gone" — lore / physical | — |
 | `controller-degraded` | "Controller serial link is struggling — fix the stick side" | `action: null` "USB-2 port + short passive extension, away from USB-3; relocate the stick" — source / physical | — | — |
+| `dead-flap` | "Reachability runbook — a rebuild cannot repair an unreachable node" | `ping` "Ping the node (confirm reachability)" — source / **safe**, gated w/ probes | `action: null` "Power-cycle the device, then exclude/re-include if it persists" — lore / physical | — |
 | `edge-cluster` | "Correlated cluster on a shared route — check the common relay, not each node" | `action: null` "Inspect the shared upstream node (#R Name)" — inference / physical | `ping` "Ping the shared node (confirm it is reachable)" — source / **safe**, gated w/ probes | — |
+| `ghost-suspect` | "Possible ghost — verify before the destructive removal" | `removeFailed` "Remove failed node (**DESTRUCTIVE — verify first**)" — source / **destructive**, gated | `action: null` "First confirm the device is truly gone" — lore / physical | — |
 | `mesh-interference` (`basis: 'inferred'`) | "Correlated mesh degradation — likely RF interference (unconfirmed)" | `action: null` "Survey the RF environment (900 MHz interferers) — measurement needed to confirm" — **inference** / physical | — | — |
 | `mesh-interference` (not inferred) | "Correlated mesh degradation — a flooding device is the likely cause" | `action: null` "Fix the flooding device first (see its chatty-device card)" — source / physical | — | — |
-| *default (unmapped kind)* | "No specific remediation — see the symptom detail" | `action: null` "Observe" — inference / physical | — | — |
+| `quiet-node` | "Node is quiet — confirm reachability before assuming a fault" | `ping` "Ping (consented reachability check)" — source / **caution**, gated w/ probes | `action: null` "Check it is powered and in range before assuming a fault" — lore / physical | — |
+| `rate-fallback` | "Route regressed below 100k — repeater/placement" | `repeaterCandidate()` | `healNode` "Rebuild routes (only if a device moved)" — source / disruptive, **blocked** `no topology change` | — |
+| `return-path-degraded`, `chronic-return-path`, `weak-signal`, `rtt-degraded` *(shared arm)* | "Improve the RF path — a repeater or relocation, not a rebuild" | `repeaterCandidate()` — lore / physical | `refreshValues` "Refresh values (re-poll, non-mutating)" — source / **safe**, gated | `healNode` "Rebuild routes — **NOT recommended here**" — source / disruptive, **blocked** `no topology change — won't help` |
+| `route-churn` | "Route keeps changing — marginal repeater or intermittent interference" | `action: null` "Firm up the marginal repeater on that path" — lore / physical | `healNode` "Rebuild routes — **NOT recommended (will re-churn)**" — source / disruptive, **blocked** `physical-link symptom — won't settle it` | — |
 
 Several load-bearing details of this table honor the RESEARCH ground truth:
 
@@ -2784,8 +2784,8 @@ The ledger keeps two decayed tallies per symptom kind, plus a false-positive cou
 
 | Structure | Key | Meaning |
 |---|---|---|
-| `control: Map<SymptomKind, Tally>` | `kind` | Spontaneous-recovery arm — episodes that resolved with **no** action |
 | `action: Map<string, Tally>` | `${kind}\|${act}` (`aKey`) | Action arm — episodes attributed to a given `(kind, action)` |
+| `control: Map<SymptomKind, Tally>` | `kind` | Spontaneous-recovery arm — episodes that resolved with **no** action |
 | `fp: Map<SymptomKind, number>` | `kind` | `refused-misdiagnosis` count (detector false positives) — **read by REMEDY from v0.35** via `OutcomeStore.falsePositives(kind)` → `zwaveData.falsePositives` → `DataProvider.falsePositives`; before that it was tallied and shown nowhere, which is a strange gap for an advisory engine, since it is the one number that argues *against* the card it belongs to. Rendered only above zero (`⚠ this detector has been refused as a misdiagnosis N× — weigh the evidence above before acting`): a clean detector says nothing rather than boasting, and a zero on every card trains the operator to stop reading the line. |
 
 **Populating the action arm.** Every mutating verb flows through the ActionRunner, so the action arm is fed by its structured `onOutcome` hook — operator actions from the type-CONFIRM menu, and (since v0.30) auto-ping's probes, which reuse the same ping verb (§11.12). The wiring is: `createActionRunner.run()` fires `o.onOutcome?.(kind, nodeId, true)` on success / `…, false)` on failure (zwaveActions.ts:56/61) → `index.ts:103` routes it to `zwaveData.recordActionOutcome(kind, nodeId, ok)` → `outcomes.recordAction(...)`. `recordActionOutcome` applies three conservative filters *before* the ledger sees it:
@@ -2831,14 +2831,14 @@ return scoreRecovery(metricOf(ep.kind), ep.before, ep.after, cfg.releaseRate, cf
 
 | Metric | Kinds | Recovery signal |
 |---|---|---|
-| `timeout` | `return-path-degraded`, `chronic-return-path`, `quiet-node` | reply-timeout rate falls |
 | `flap` | `dead-flap` | Alive↔Dead transitions stop |
+| `none` | `chatty-device`, `ghost-suspect`, `mesh-interference`, … | no per-node recovery window → always `unverifiable` |
+| `rate` | `rate-fallback` | negotiated PHY rate climbs back to ≥ 100k |
+| `route` | `route-churn` | LWR re-routes subside, **and a route stayed visible** (`routeKnown`) |
 | `rssi` | `weak-signal` | signal strength rises ≥ 4 dB |
 | `rtt` | `rtt-degraded` | round-trip time drops ≥ 25% AND ≥ 20 ms |
-| `rate` | `rate-fallback` | negotiated PHY rate climbs back to ≥ 100k |
 | `s2` | `s2-desync` | SPAN resyncs subside, **and the log lane was listening** (`s2Known`) |
-| `route` | `route-churn` | LWR re-routes subside, **and a route stayed visible** (`routeKnown`) |
-| `none` | `chatty-device`, `ghost-suspect`, `mesh-interference`, … | no per-node recovery window → always `unverifiable` |
+| `timeout` | `return-path-degraded`, `chronic-return-path`, `quiet-node` | reply-timeout rate falls |
 
 Two of these carry a **second** floor beyond "did the count fall", because for both the measurement itself can switch off. `s2Known` counts samples where the driver-WS log lane was actually listening; `routeKnown` counts samples where a route was actually on record. Without them, a lane that stopped listening or a node whose `lwr` went dark produces a clean run of zeros and scores as a cure the remedy never earned. Absence of evidence is not evidence of recovery — the same rule that makes `dS2Resync` nullable rather than zero.
 
@@ -3037,10 +3037,10 @@ The whole screen exists because of a load-bearing measurement fact: Home Assista
 
 | Panel | Source field | One-line meaning |
 | --- | --- | --- |
-| **NOISE FLOOR** | `iv.noise` | per-channel 900 MHz background RSSI + a fixed-scale ~40-min trend spark **and** a multi-day `days` spark (persisted coarse tier; driver-measured; lower = quieter) |
 | **CONTROLLER SERIAL LINK** | `iv.serial` | host↔stick NAK/CAN/timeout rates, shown *apart* because a serial fault mimics mesh-wide RF trouble |
-| **DIURNAL TIMEOUT-RATE HEATMAP** | `iv.diurnal`, `iv.coverageDays` | hour-of-day mesh-wide **raw** timeout rate — deliberately not baseline-relative |
 | **CORRELATED DEGRADATION** | `iv.correlated` | the current mesh-interference state from the detector (inferred-by-exclusion) |
+| **DIURNAL TIMEOUT-RATE HEATMAP** | `iv.diurnal`, `iv.coverageDays` | hour-of-day mesh-wide **raw** timeout rate — deliberately not baseline-relative |
+| **NOISE FLOOR** | `iv.noise` | per-channel 900 MHz background RSSI + a fixed-scale ~40-min trend spark **and** a multi-day `days` spark (persisted coarse tier; driver-measured; lower = quieter) |
 
 **Charts on a tall frame (v0.28).** Two of those series are multi-day and were each drawn as a **single** sparkline row — collected, persisted across restarts, and then shown at a resolution that cannot answer the question they are collected for. Where rows are genuinely spare the screen now draws them with `chartRows` (§3.5):
 
@@ -3163,9 +3163,9 @@ The `< 0` predicate is what rejects the RSSI sentinels (125 = no-signal, 126 = s
 
 | Condition | Band | Colour |
 | --- | --- | --- |
+| `-98 < floor <= -88` | `elevated` | yellow |
 | `!real \|\| floor == null` | `unknown` | grey |
 | `floor <= -98` | `clean` | green |
-| `-98 < floor <= -88` | `elevated` | yellow |
 | `floor > -88` | `noisy` | red (bold) |
 
 The interpretive rule-of-thumb (documented in the file header): near **−100 dBm is quiet**, and **≈ −110 dBm is the near-radio ideal**. On the live mesh this reads clean — the measured noise floor logged at **−102 dBm (RF clean)** once the driver-WS path came up in v0.13.
@@ -3312,20 +3312,20 @@ Every number the Interference Watch uses is a **fixed, tuned constant** — ther
 
 | Constant | Value | File | Governs |
 | --- | --- | --- | --- |
-| `noiseBand` clean threshold | `floor <= -98` dBm | interference.ts | green "clean" cutoff |
-| `noiseBand` elevated threshold | `-98 < floor <= -88` | interference.ts | yellow "elevated" band |
-| spark scale | fixed `min -110`, `max -80` dBm | interference.ts | trend spark axis (anti-jitter) |
-| `MIN_SERIAL_SAMPLES` | `2` | interference.ts | min fresh controller samples for any serial rate |
-| serial `strained` threshold | `worst >= 5` /h | interference.ts | NAK/CAN/tmo-ACK band cutoff |
-| `MIN_HOUR_TX` | `20` | interference.ts | min TX before an hour gets a rate (else null cell) |
-| `HOURS` | `24` | interference.ts | heatmap width |
+| building threshold | `coverageDays < 0.5` | screens/interference.ts | "building" vs. render heatmap |
+| `COARSE_BUCKET_MS` / horizon | `30 min` / `14 days` | evidenceStore.ts | heatmap bucket size + history depth |
+| `CTRL_MAX_SAMPLES` | `240` (~40 min @ 10 s) | evidenceStore.ts | controller ring depth (trend + serial) |
+| driver-WS freshness | `<= 90_000` ms | zwaveData.ts | bg reading counts as live |
 | `HEAT_MAX` | `0.05` (5 %) | screens/interference.ts | absolute heat-scale ceiling |
 | `heatColorFor` bands | 0.25 / 0.5 / 0.75 of HEAT_MAX | screens/interference.ts | green→yellow→yellowB→redB |
-| building threshold | `coverageDays < 0.5` | screens/interference.ts | "building" vs. render heatmap |
-| driver-WS freshness | `<= 90_000` ms | zwaveData.ts | bg reading counts as live |
+| `HOURS` | `24` | interference.ts | heatmap width |
+| `MIN_HOUR_TX` | `20` | interference.ts | min TX before an hour gets a rate (else null cell) |
+| `MIN_SERIAL_SAMPLES` | `2` | interference.ts | min fresh controller samples for any serial rate |
+| `noiseBand` clean threshold | `floor <= -98` dBm | interference.ts | green "clean" cutoff |
+| `noiseBand` elevated threshold | `-98 < floor <= -88` | interference.ts | yellow "elevated" band |
+| serial `strained` threshold | `worst >= 5` /h | interference.ts | NAK/CAN/tmo-ACK band cutoff |
+| spark scale | fixed `min -110`, `max -80` dBm | interference.ts | trend spark axis (anti-jitter) |
 | view memo TTL | `< 10_000` ms | zwaveData.ts | fold cadence |
-| `CTRL_MAX_SAMPLES` | `240` (~40 min @ 10 s) | evidenceStore.ts | controller ring depth (trend + serial) |
-| `COARSE_BUCKET_MS` / horizon | `30 min` / `14 days` | evidenceStore.ts | heatmap bucket size + history depth |
 
 ### 10.8 Edge-case guards — summary
 
@@ -3358,12 +3358,12 @@ The mutating surface is split across four pure-ish modules plus the session stat
 
 | Concern | File | Owns |
 |---|---|---|
-| Verb execution (WS command shapes) | `server/src/zwave/zwaveActions.ts` | `createActionRunner` → the `ActionRunner` |
 | Catalog + impact classification + menu model | `server/src/telnet/actionsCatalog.ts` | `ACTION_CATALOG`, `buildMenu`, `CONFIRM_WORD` |
-| Rendering (menu overlay + confirm modal) | `server/src/telnet/screens/actionsMenu.ts` | `renderActionsMenu`, `renderTypeConfirm` |
 | Confirm/menu **state machine** | `server/src/telnet/session.ts` | `TuiSession` — `beginAction`, `openMenu`, `handleTypeConfirmKey`, `executeAction` |
-| Login gate (who may connect) | `server/src/auth/loginPolicy.ts` | `createAuthPolicy` → the `AuthPolicy` |
 | HTTP/ws origin + write-token | `server/src/auth.ts` | `createAuth` → origin allow-list, `requireWriteAuth` |
+| Login gate (who may connect) | `server/src/auth/loginPolicy.ts` | `createAuthPolicy` → the `AuthPolicy` |
+| Rendering (menu overlay + confirm modal) | `server/src/telnet/screens/actionsMenu.ts` | `renderActionsMenu`, `renderTypeConfirm` |
+| Verb execution (WS command shapes) | `server/src/zwave/zwaveActions.ts` | `createActionRunner` → the `ActionRunner` |
 
 `actionsCatalog.ts` is deliberately a **pure module (no I/O, no session state)** — the menu contents, impact tiers, and context-gating are all unit-testable in isolation. The session owns the transient cursor and the type-`CONFIRM` buffer; the renderer only draws descriptors; the runner only executes a `kind`.
 
@@ -3449,9 +3449,9 @@ The three **impact tiers** drive both the UI colour/badge and the confirm postur
 
 | Tier | Colour | Meaning | Members |
 |---|---|---|---|
-| `safe` | green | harmless / idempotent | `ping` |
 | `caution` | yellow | mutating but recoverable | `refreshValues`, `reInterview`, `healNode`, `stopRebuild` |
 | `destructive` | red | disruptive or irreversible | `removeFailed`, `rebuildAll` |
+| `safe` | green | harmless / idempotent | `ping` |
 
 The `impactNote` strings are load-bearing operator guidance, quoted from the catalog:
 
@@ -3510,11 +3510,11 @@ Shortcut mapping (`handleActionKey`, only when `enabled`):
 
 | Key | Action | Path |
 |---|---|---|
-| `p` | `ping` | `immediate=true` → **runs immediately** (safe) |
-| `i` | `reInterview` | arms type-CONFIRM |
 | `h` | `healNode` | arms type-CONFIRM |
-| `x` | `removeFailed` | arms type-CONFIRM |
+| `i` | `reInterview` | arms type-CONFIRM |
+| `p` | `ping` | `immediate=true` → **runs immediately** (safe) |
 | `R` | `rebuildAll` | arms type-CONFIRM |
+| `x` | `removeFailed` | arms type-CONFIRM |
 
 Note there is **no shortcut for `refreshValues` or `stopRebuild`** — those are reachable only through the menu. And `p` is the *only* path that skips confirmation, because a ping is a harmless reachability probe.
 
@@ -3630,13 +3630,13 @@ All values are HA add-on options (`zwave_tui/config.yaml`), bridged to env by th
 
 | Option | Type / range | Default | Env var | Effect |
 |---|---|---|---|---|
-| `write_actions_enabled` | bool | `false` | `WRITE_ACTIONS_ENABLED` | Master gate for all seven verbs; off = read-only monitor |
-| `telnet_enabled` | bool | `true` | `TELNET_ENABLED` | Serve the telnet TUI on `:2324` |
 | `auth_enabled` | bool | `false` | `AUTH_ENABLED` | Require login on non-ingress (LAN) TUI access |
-| `auth_require_on_ingress` | bool | `false` | `AUTH_REQUIRE_ON_INGRESS` | Also require login over the HA sidebar |
-| `users` | list of `{username,password}` | `[]` | `ZWAVE_USERS` (compact JSON) | Login credentials; plaintext or `scrypt:salt:hash` |
-| `auth_max_attempts` | `int(1,10)` | `3` | `AUTH_MAX_ATTEMPTS` | Failures before backoff / session drop |
 | `auth_idle_lock_min` | `int(0,240)` | `0` | `AUTH_IDLE_LOCK_MIN` | Idle minutes before re-lock; `0` = never |
+| `auth_max_attempts` | `int(1,10)` | `3` | `AUTH_MAX_ATTEMPTS` | Failures before backoff / session drop |
+| `auth_require_on_ingress` | bool | `false` | `AUTH_REQUIRE_ON_INGRESS` | Also require login over the HA sidebar |
+| `telnet_enabled` | bool | `true` | `TELNET_ENABLED` | Serve the telnet TUI on `:2324` |
+| `users` | list of `{username,password}` | `[]` | `ZWAVE_USERS` (compact JSON) | Login credentials; plaintext or `scrypt:salt:hash` |
+| `write_actions_enabled` | bool | `false` | `WRITE_ACTIONS_ENABLED` | Master gate for all seven verbs; off = read-only monitor |
 
 Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEYLEN = 32`; backoff `BASE = 5_000 ms`, `CAP = 300_000 ms`; `MAX_THROTTLE_ENTRIES = 4096`; menu `LABEL_W = 20`, badge field 13 cells; view clamps `cols ∈ [60,200]`, `rows ∈ [16,80]`.
 
@@ -3645,19 +3645,19 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 | Guard | Where | Protects against |
 |---|---|---|
 | `!o.enabled` check inside `run()` | `zwaveActions.ts:51` | Runner executing even if called with write actions off |
-| `deviceCmd`/`entryCmd`/ping throw on missing id | `zwaveActions.ts:38–47, 71` | Sending a command with no device/entry/ping target |
-| Frozen `menuTarget` + `menuSnapshot` at open | `session.ts:523` | Streaming events / rebuild flips moving a row or target under the cursor |
-| `resetActionState()` on login & re-lock | `session.ts:214, 220` | A half-armed destructive action surviving the auth boundary |
 | Buffer capped at `CONFIRM_WORD.length`, `===` match | `session.ts:607, 589` | Overtyping past `CONFIRM`; partial/"almost" arming |
-| Keys swallowed while `actionInFlight` | `session.ts:380` | Double-submitting an action |
-| `rebuildAll`/`stopRebuild` mutual exclusion | `actionsCatalog.ts:145–146` | Offering a no-op action |
-| Explicit read-only notice on locked select | `session.ts:566–571` | A keypress being silently ignored |
+| `deviceCmd`/`entryCmd`/ping throw on missing id | `zwaveActions.ts:38–47, 71` | Sending a command with no device/entry/ping target |
 | `dummyHash` + `byName.has(...) && ok` | `loginPolicy.ts:138, 159` | Username enumeration by timing; collision auth |
-| Shared per-peer throttle, capped map | `loginPolicy.ts:167–179` | Reconnect resetting brute-force budget; map growth flood |
-| `mode='denied'` when enabled w/o users | `session.ts:190–199` | Silently allowing LAN access on misconfig |
-| `X-Ingress-Path` **and** the pinned Supervisor address | `index.ts`, `auth.ts` | Forged ingress header from the LAN port; a sibling add-on forging ingress trust |
-| Per-source-IP telnet cap (4) + idle reclaim + TCP keepalive | `telnet/server.ts` | One host taking every telnet slot; silent sockets holding slots forever |
+| Explicit read-only notice on locked select | `session.ts:566–571` | A keypress being silently ignored |
+| Frozen `menuTarget` + `menuSnapshot` at open | `session.ts:523` | Streaming events / rebuild flips moving a row or target under the cursor |
+| Keys swallowed while `actionInFlight` | `session.ts:380` | Double-submitting an action |
 | Login buffers length-bounded, input ignored while verifying | `session.ts:237, 262, 264` | Buffer abuse; keys racing an in-flight scrypt |
+| `mode='denied'` when enabled w/o users | `session.ts:190–199` | Silently allowing LAN access on misconfig |
+| Per-source-IP telnet cap (4) + idle reclaim + TCP keepalive | `telnet/server.ts` | One host taking every telnet slot; silent sockets holding slots forever |
+| `rebuildAll`/`stopRebuild` mutual exclusion | `actionsCatalog.ts:145–146` | Offering a no-op action |
+| `resetActionState()` on login & re-lock | `session.ts:214, 220` | A half-armed destructive action surviving the auth boundary |
+| Shared per-peer throttle, capped map | `loginPolicy.ts:167–179` | Reconnect resetting brute-force budget; map growth flood |
+| `X-Ingress-Path` **and** the pinned Supervisor address | `index.ts`, `auth.ts` | Forged ingress header from the LAN port; a sibling add-on forging ingress trust |
 
 ### 11.12 Auto-ping — the autonomous writes (v0.30, extended v0.36)
 
@@ -3717,15 +3717,15 @@ Everything else in this reference is advisory: the engine detects, explains, and
 
 | Gate | Value | Why |
 |---|---|---|
-| Own switch `auto_ping_enabled` | **`false`** — opt-in | An autonomous write must be a decision, not a surprise |
-| Master gate `write_actions_enabled` | must *also* be on | Auto-ping is a write and obeys the master switch like every other; "write actions off" stays a true statement |
-| Candidate rule | `!isController && isListening === true` | ASLEEP IS NOT DEAD: battery/FLiRS devices answer on their own wakeup interval; a ping spends their charge to fail. `isListening: null` (not interviewed) is left alone rather than probed on an assumption |
-| Dead dwell `auto_ping_after_min` | 10 m (2–120) | Measured on the reference mesh: self-healing episodes resolve inside ~5 m, stuck ones run 6–9 h — 10 m sits in the gap |
 | Attempt budget `auto_ping_max_attempts` | 3 per dead episode (1–10) | Then stop and leave it to a human; recovery clears the episode so a later failure gets a fresh budget |
 | Backoff between attempts | 10 / 30 / 60 m | A node that did not answer seconds ago will not answer now; avoid avoidable RF |
-| Liveness threshold `auto_ping_stale_min` | 120 m, `0` = off (0–1440) | Measured from each node's own `lastSeen`, so it is self-balancing: chatty devices are never probed |
-| Liveness rate cap | **one probe per tick**, stalest first | 36 nodes coming due together must trickle, not burst; per-node re-probe no sooner than the threshold |
 | Boot window | 5 m after start (or roster not ready) | Right after start every node can read Dead; without this the engine would ping the whole mesh on every restart |
+| Candidate rule | `!isController && isListening === true` | ASLEEP IS NOT DEAD: battery/FLiRS devices answer on their own wakeup interval; a ping spends their charge to fail. `isListening: null` (not interviewed) is left alone rather than probed on an assumption |
+| Dead dwell `auto_ping_after_min` | 10 m (2–120) | Measured on the reference mesh: self-healing episodes resolve inside ~5 m, stuck ones run 6–9 h — 10 m sits in the gap |
+| Liveness rate cap | **one probe per tick**, stalest first | 36 nodes coming due together must trickle, not burst; per-node re-probe no sooner than the threshold |
+| Liveness threshold `auto_ping_stale_min` | 120 m, `0` = off (0–1440) | Measured from each node's own `lastSeen`, so it is self-balancing: chatty devices are never probed |
+| Master gate `write_actions_enabled` | must *also* be on | Auto-ping is a write and obeys the master switch like every other; "write actions off" stays a true statement |
+| Own switch `auto_ping_enabled` | **`false`** — opt-in | An autonomous write must be a decision, not a surprise |
 | Rebuild suppression | `isRebuildingRoutes` ⇒ do nothing | A rebuild drops nodes in and out by design |
 | Storm guard | ≥ 25 % of listening nodes Dead (min 4) ⇒ do nothing, warn once | A quarter of the mesh dead is a controller-level event; probing adds traffic to a struggling controller |
 
@@ -3749,8 +3749,8 @@ mesh-identity guard that wiped the learned stores, but it is gated on
 
 | how the stick was swapped | before v0.64.0 |
 | --- | --- |
-| while the add-on was **running** | caught; all three wiped |
 | while it was **stopped**, or any restart after | **not caught**; adopted unvalidated |
+| while the add-on was **running** | caught; all three wiped |
 
 The second row is the more likely one — you power down, swap, power up.
 
@@ -3868,11 +3868,11 @@ three languages:
 
 | File | Role |
 | --- | --- |
+| `rootfs/etc/services.d/zwave-tui/run` | The s6/bashio **env-bridge**: turns each HA option into an environment variable. |
+| `server/src/config.ts` | The **typed consumer**: reads those env vars into the `config` object the rest of the server uses. |
 | `zwave_tui/config.yaml` | The HA add-on manifest: option **defaults** (`options:`) and their **types/validation** (`schema:`). |
 | `zwave_tui/translations/en.yaml` | The Configuration-page **labels** (`name`) and **help text** (`description`), keyed by option. |
 | `zwave_tui/translations/es-419.yaml` | The same, in Latin American Spanish (`es-419` is HA's code for it; plain `es` is Peninsular). Enforced against `config.yaml` by `test/translations.test.ts` — a key that does not match makes HA render the **raw key** as the field label, with no warning anywhere, in one language only. |
-| `rootfs/etc/services.d/zwave-tui/run` | The s6/bashio **env-bridge**: turns each HA option into an environment variable. |
-| `server/src/config.ts` | The **typed consumer**: reads those env vars into the `config` object the rest of the server uses. |
 
 A value is only "wired" when all four agree on it. The header of `config.ts`
 states the rule plainly: the boolean knobs follow the run script's *numeric*
@@ -3928,24 +3928,24 @@ advanced ones. Every option below is a **tunable default** unless noted.
 
 | Option (config.yaml) | Default | Schema | Env var (run script) | config.ts field | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `signal_display` | `margin` | `list(margin\|dbm)` | `SIGNAL_DISPLAY` | `config.signalDisplay` | Anything not exactly `"dbm"` ⇒ `'margin'`. Live-toggleable in the TUI (`T`). |
-| `write_actions_enabled` | `false` | `bool` | `WRITE_ACTIONS_ENABLED` (1/0) | `config.writeActions` | Master gate for all mutating actions. Off ⇒ pure monitor. |
-| `telnet_enabled` | `true` | `bool` | `TELNET_ENABLED` (1/0) | `config.telnet.enabled` | Fail-**open** (`!== '0'`). |
 | `auth_enabled` | `false` | `bool` | `AUTH_ENABLED` (1/0) | `config.auth.enabled` | Gates DIRECT (telnet/`:8788`) access only. |
-| `auth_require_on_ingress` | `false` | `bool` | `AUTH_REQUIRE_ON_INGRESS` (1/0) | `config.auth.requireOnIngress` | Also gate the HA-sidebar console. |
-| `users` | `[]` | repeatable `{username: str, password: password}` | `ZWAVE_USERS` (JSON) | `config.auth.users` | See §12.2.1 — lifted with `jq`, not `bashio::config`. |
-| `auth_max_attempts` | `3` | `int(1,10)` | `AUTH_MAX_ATTEMPTS` | `config.auth.maxAttempts` | Failures before the connection is dropped. |
 | `auth_idle_lock_min` | `0` | `int(0,240)` | `AUTH_IDLE_LOCK_MIN` | `config.auth.idleLockMin` | Minutes of no keystrokes ⇒ re-lock; `0` disables. |
-| `auto_ping_enabled` | `false` | `bool` | `AUTO_PING_ENABLED` (numeric-bool) | `config.autoPing.enabled` | The engine's ONE autonomous write (§11.12). Also requires `write_actions_enabled` — the master gate is never bypassed. |
+| `auth_max_attempts` | `3` | `int(1,10)` | `AUTH_MAX_ATTEMPTS` | `config.auth.maxAttempts` | Failures before the connection is dropped. |
+| `auth_require_on_ingress` | `false` | `bool` | `AUTH_REQUIRE_ON_INGRESS` (1/0) | `config.auth.requireOnIngress` | Also gate the HA-sidebar console. |
 | `auto_ping_after_min` | `10` | `int(2,120)` | `AUTO_PING_AFTER_MS` (run script ×60000) | `config.autoPing.afterMs` | Dwell before a Dead mains node's first probe; waits of 10/30/60 m BETWEEN attempts. At the default `max_attempts=3` only the first two waits are reached (10 m dwell + 10 m + 30 m ⇒ ~50 m to the give-up); the 60 m rung governs the third wait onward at `max_attempts ≥ 4`. |
+| `auto_ping_enabled` | `false` | `bool` | `AUTO_PING_ENABLED` (numeric-bool) | `config.autoPing.enabled` | The engine's ONE autonomous write (§11.12). Also requires `write_actions_enabled` — the master gate is never bypassed. |
 | `auto_ping_max_attempts` | `3` | `int(1,10)` | `AUTO_PING_MAX_ATTEMPTS` | `config.autoPing.maxAttempts` | Probes per dead episode, then the node is left to the human path. Recovery resets the budget. |
 | `auto_ping_stale_min` | `120` | `int(0,1440)` | `AUTO_PING_STALE_MS` (run script ×60000) | `config.autoPing.staleMs` | Liveness probe after this much per-node silence; `0` disables the liveness lane. One probe per tick, stalest first. |
+| `driver_ws_url` | `ws://core-zwave-js:3000` | `str?` | `DRIVER_WS_URL` | `config.driverWsUrl` (`\|\| null`) | **Empty ⇒ disabled.** Strictly read-only telemetry. |
+| `ha_ws_url` | `ws://supervisor/core/websocket` | `str?` | `HA_WS_URL` | `config.haWsUrl` | Override to point at a different Core/driver WS. |
+| `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. Since v0.50.0 lines at `warn` and above are prefixed with their level (see §12.9); `info` stays bare. |
 | `refresh_interval` | `2` | `int(1,30)` | `REFRESH_INTERVAL_MS` | `config.refreshMs` | **seconds → ms**: run script does `* 1000`. Cheap render/roster cadence. |
 | `route_poll_interval` | `10` | `int(5,120)` | `ROUTE_POLL_INTERVAL_MS` | `config.routePollMs` | **seconds → ms**. Expensive route/controller-stats cadence; also the evidence-sample tick. |
-| `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. Since v0.50.0 lines at `warn` and above are prefixed with their level (see §12.9); `info` stays bare. |
-| `zwave_entry_id` | `""` | `str?` | `ZWAVE_ENTRY_ID` | `config.entryId` (`|| null`) | Empty ⇒ auto-discover via `config_entries/get`. |
-| `ha_ws_url` | `ws://supervisor/core/websocket` | `str?` | `HA_WS_URL` | `config.haWsUrl` | Override to point at a different Core/driver WS. |
-| `driver_ws_url` | `ws://core-zwave-js:3000` | `str?` | `DRIVER_WS_URL` | `config.driverWsUrl` (`|| null`) | **Empty ⇒ disabled.** Strictly read-only telemetry. |
+| `signal_display` | `margin` | `list(margin\|dbm)` | `SIGNAL_DISPLAY` | `config.signalDisplay` | Anything not exactly `"dbm"` ⇒ `'margin'`. Live-toggleable in the TUI (`T`). |
+| `telnet_enabled` | `true` | `bool` | `TELNET_ENABLED` (1/0) | `config.telnet.enabled` | Fail-**open** (`!== '0'`). |
+| `users` | `[]` | repeatable `{username: str, password: password}` | `ZWAVE_USERS` (JSON) | `config.auth.users` | See §12.2.1 — lifted with `jq`, not `bashio::config`. |
+| `write_actions_enabled` | `false` | `bool` | `WRITE_ACTIONS_ENABLED` (1/0) | `config.writeActions` | Master gate for all mutating actions. Off ⇒ pure monitor. |
+| `zwave_entry_id` | `""` | `str?` | `ZWAVE_ENTRY_ID` | `config.entryId` (`\|\| null`) | Empty ⇒ auto-discover via `config_entries/get`. |
 
 Two schema choices are deliberate and marked "do not tidy" in `config.yaml`:
 
@@ -4343,9 +4343,9 @@ triggering on state can never disagree about the mesh:
   | entity | state | notable attributes |
   |---|---|---|
   | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason` |
+  | `sensor.zwave_tui_engine` | `running` / `suppressed:<why>` / `disabled` | `detectors_ready`, `detectors_total` |
   | `sensor.zwave_tui_summons` | count | `node_ids` |
   | `sensor.zwave_tui_symptoms` | count | `critical`, `warning`, `kinds` |
-  | `sensor.zwave_tui_engine` | `running` / `suppressed:<why>` / `disabled` | `detectors_ready`, `detectors_total` |
 
 **`degraded` is deliberately not "any symptom exists".** A warn-level symptom on
 one node is the resting state of a real mesh, and an alert that is always on is
