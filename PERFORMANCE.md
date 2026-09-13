@@ -103,14 +103,14 @@ session and transport layers. That means:
 
 | | measured |
 | --- | --- |
-| Mutation harness | **559 mutants, 821 s wall · 689 s user · 78 s sys** |
-| Source | 24 457 lines TypeScript · 18 614 lines of tests |
-| Test suite | **1 098 tests, 12.5 s** (`npm test`) |
+| Mutation harness | **565 mutants, 834 s wall · 713 s user · 76 s sys** |
+| Source | 25 273 lines TypeScript · 19 456 lines of tests |
+| Test suite | **1 106 tests, 11.9 s** (`npm test`) |
 
-Latest full run: **551 killed · 0 survived · 8 equivalent · 0 missing ·
+Latest full run: **557 killed · 0 survived · 8 equivalent · 0 missing ·
 0 ambiguous · 0 invalid · 0 relabel.**
 
-### Where the 821 seconds actually go
+### Where the 834 seconds actually go
 
 `node scripts/mutation-check.mjs --profile` reports a per-phase breakdown; the
 run below was taken under `/usr/bin/time -l` so the user/sys split is real
@@ -119,36 +119,36 @@ rather than inferred.
 | phase | wall | share | runs | each |
 | --- | ---: | ---: | ---: | ---: |
 | baseline typecheck | 0.2 s | 0.0 % | 1 | 0.20 s |
-| baseline full suite | 12.5 s | 1.5 % | 1 | 12.5 s |
-| per-mutant typecheck | 122.9 s | 15.1 % | 559 | 0.22 s |
-| **targeted test runs** | **571.9 s** | **70.2 %** | 558 | **1.02 s** |
-| full-suite fallbacks | 107.0 s | 13.1 % | 9 | 11.89 s |
-| total | 814.5 s | | | |
+| baseline full suite | 13.1 s | 1.6 % | 1 | 13.1 s |
+| per-mutant typecheck | 124.6 s | 15.1 % | 565 | 0.22 s |
+| **targeted test runs** | **581.8 s** | **70.4 %** | 564 | **1.03 s** |
+| full-suite fallbacks | 107.2 s | 13.0 % | 9 | 11.91 s |
+| total | 827.0 s | | | |
 
 ### The startup-bound hypothesis is REFUTED
 
 Earlier revisions of this document flagged "startup-bound" as an untested guess
 and declined to assert it. Measured, it is wrong:
 
-- **`sys` is 77.8 s — 9.5 % of 821.3 s real.** `user` is 688.8 s, **84 %**.
+- **`sys` is 76.4 s — 9.2 % of 833.8 s real.** `user` is 712.7 s, **85 %**.
 - The harness now measures its own **process-startup floor** directly, by timing
   one bare invocation of each subprocess: `tsc` 78 ms, `tsx` 70 ms. Against the
-  observed counts that is `78 ms × 559 + 70 ms × 567` = **83.3 s, 10.2 %** of the
+  observed counts that is `78 ms × 565 + 70 ms × 573` = **84.2 s, 10.2 %** of the
   run spent before any work begins. Two consecutive runs agreed to within half a
   point, so this is a stable property and not one run's weather.
 
 Two independent measurements agree at ~10 %. The harness is **CPU-bound on real
 work**, not on launching processes.
 
-The cost centre is the **targeted test runs: 70 % of the run**, at 1.02 s each
-across 558 invocations — of which only ~76 ms is startup. The other ~0.95 s is
+The cost centre is the **targeted test runs: 70 % of the run**, at 1.03 s each
+across 564 invocations — of which only ~76 ms is startup. The other ~0.95 s is
 `tsx` transpiling the TypeScript afresh **on every single invocation**. So the
 lever is not "spawn fewer processes", it is "stop re-transpiling the same
-sources 558 times": precompile once and run plain JS, or keep a warm worker.
+sources 564 times": precompile once and run plain JS, or keep a warm worker.
 
 Two smaller levers, for scale: the per-mutant typecheck is 15.1 % (30 % of which
 *is* startup, so an incremental/`--watch` tsc server would help there), and the
-full-suite fallbacks are 13.1 % from only **9** runs at 11.9 s each. Fallbacks
+full-suite fallbacks are 13.0 % from only **9** runs at 11.9 s each. Fallbacks
 are triggered by kill-fast mapping misses, so each one fixed is ~12 s saved;
 seven were harvested from the run's own report during v0.64.0, taking the miss
 count to **zero** — the fallbacks that remain are mutants no single test file
@@ -161,9 +161,10 @@ catches, not mapping errors.
 `SURVIVED`, `MISSING`, `AMBIGUOUS` and `INVALID` are all failures. An anchor
 pre-flight checks every mutant's target text against its file before any
 *mutant's* tests run — it runs after the baseline, so a stale entry costs the
-baseline (~12 s) rather than the full 14 minutes. It fired eight times during
-the v0.51–v0.64 work, each on an anchor one of my own edits had moved — most
-recently on an `AMBIGUOUS(2)`, where a copy-pasted path-splitting helper made
+baseline (~12 s) rather than the full 14 minutes. It fired nine times during
+the v0.51–v0.64.3 work, each on an anchor one of my own edits had moved — most
+recently in v0.64.3, `MISSING` on both outage-clock mutants after the dating
+line they target was rewritten, and before that on an `AMBIGUOUS(2)`, where a copy-pasted path-splitting helper made
 one anchor match two sites. The duplication was the real defect; the harness
 found it as a testing problem.
 

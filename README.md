@@ -230,8 +230,8 @@ has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
 Headlines, each stated as narrowly as it was measured: the slowest screen
 redraw is **412 µs** against a 1 000 ms frame budget; the container holds
 **93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
-RSS) and sampled **0.02 % CPU** once, not as an average; **1 098 tests in 12.5 s**
-and **559 mutants in ~14 min** gate every release. A TUI session costs
+RSS) and sampled **0.02 % CPU** once, not as an average; **1 106 tests in 11.9 s**
+and **565 mutants in ~14 min** gate every release. A TUI session costs
 **4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
 rate but one whole-frame redraw per second.
 
@@ -239,7 +239,7 @@ That document also carries what is *not* measured, and why most of it does not
 need to be — and, for the two items that did earn measuring, what the numbers
 overturned. The mutation harness is **not** startup-bound, as had been guessed:
 sys is 9 % and the measured spawn floor 10 %, against 70 % spent re-transpiling
-TypeScript on every one of 558 invocations.
+TypeScript on every one of 564 invocations.
 
 ## The machine-readable boundary
 
