@@ -83,6 +83,22 @@ export interface AutoPingState {
   lastPingAt: Map<number, number>;
   /** nodeId → epoch ms this node was first seen Dead (episode start). */
   deadSince: Map<number, number>;
+  /**
+   * Nodes THIS RUN has observed Alive (v0.64.3). Decides how a new Dead is dated.
+   *
+   * v0.50.0 dates a newly-seen Dead from the driver's `lastSeen`, because a node
+   * that is already Dead when we first look has been down at least since it was
+   * last heard, and dating it from boot restarted the outage clock on every
+   * deploy. That reasoning holds only when we did NOT watch it die. For a node we
+   * saw Alive, `lastSeen` is just the last time it spoke. The liveness sweep runs
+   * every two hours, so for a healthy node that is ~120 min old, and backdating a
+   * death we observed made the 10-minute dwell read as long expired: the ladder
+   * pinged 60 s after every such death.
+   *
+   * Only `Alive` counts. `trackEpisodes` runs on every tick, ready roster or not,
+   * and `Unknown` is not evidence the node was up.
+   */
+  seenAlive: Set<number>;
   /** nodeId → epoch ms of the last STALE (liveness) probe. */
   lastStaleAt: Map<number, number>;
   /**
@@ -280,7 +296,7 @@ export function unpendProbe(state: AutoPingState, nodeId: number, t: number): vo
 const ANSWER_GRACE_MS = 90_000;
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map(), launchFailures: new Map(), launchGaveUpAnnounced: new Set(), talkingAnnounced: new Set() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map(), launchFailures: new Map(), launchGaveUpAnnounced: new Set(), talkingAnnounced: new Set(), seenAlive: new Set() };
 }
 
 export interface AutoPingInput {
@@ -683,10 +699,16 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
         // A node already Dead the first time we look has been down at least
         // since it was last heard. Clamp to `now` so a future or absent
         // lastSeen can never invent an outage longer than our own uptime.
+        //
+        // …EXCEPT for a death this run watched happen (v0.64.3). See `seenAlive`:
+        // for a node we saw Alive, `lastSeen` is its last utterance, not the
+        // moment it died, and backdating to it skipped the whole dwell.
         const lastHeard = n.stats?.lastSeen ?? null;
-        state.deadSince.set(n.nodeId, lastHeard != null && lastHeard < now ? lastHeard : now);
+        const watchedDie = state.seenAlive.has(n.nodeId);
+        state.deadSince.set(n.nodeId, watchedDie ? now : (lastHeard != null && lastHeard < now ? lastHeard : now));
       }
     } else {
+      if (n.status === NodeStatus.Alive) state.seenAlive.add(n.nodeId);
       state.deadSince.delete(n.nodeId);
       state.attempts.delete(n.nodeId);
       state.lastPingAt.delete(n.nodeId);
@@ -717,6 +739,9 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
   for (const id of [...state.launchFailures.keys()]) if (!seen.has(id)) state.launchFailures.delete(id);
   for (const id of [...state.launchGaveUpAnnounced]) if (!seen.has(id)) state.launchGaveUpAnnounced.delete(id);
   for (const id of [...state.talkingAnnounced]) if (!seen.has(id)) state.talkingAnnounced.delete(id);
+  // …and the watched-alive mark (v0.64.3): a re-included device reusing the
+  // nodeId must not inherit the departed node's "we saw it alive".
+  for (const id of [...state.seenAlive]) if (!seen.has(id)) state.seenAlive.delete(id);
 }
 
 /** Record that a STALE liveness probe was issued. */

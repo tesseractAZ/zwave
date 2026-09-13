@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.64.3
+
+### Fixed — a node the runner watched die got no dwell at all
+
+Auto-ping waits a configured dwell (`auto_ping_after_min`, default 10) before it
+spends a remediation attempt on a Dead node, so a node that recovers by itself
+is left alone. That dwell did not run for a node the add-on **watched** die. On
+the live mesh, that was every death.
+
+v0.50.0 dates a newly-seen Dead from the driver's `lastSeen`, so a node already
+down at start-up is not credited with a fresh outage on every deploy. That is
+right only when the add-on did not see the node alive. For a node it did,
+`lastSeen` is just the last time the node spoke. The liveness sweep runs every
+two hours, so for a healthy node that was about two hours earlier. When a sweep
+ping missed and the driver marked the node Dead, the death was dated two hours in
+the past. The 10-minute dwell read as long expired, and the ladder pinged 60
+seconds later.
+
+Measured over 50 hours of add-on log: all six "Dead past the dwell" ladder pings
+fired one 60-second tick after the sweep ping that caused the death (nodes 30, 50
+and 57). All six nodes answered the first attempt and no Home Assistant entity
+went unavailable, so the harm was small. Each ping still spent one of the node's
+three attempts, inside the window the dwell exists to keep clear.
+
+The runner now remembers which nodes it has seen `Alive` during this run:
+
+- A death it watched is dated from when it happened.
+- A node first seen Dead is still dated from `lastSeen`, exactly as before.
+- Only `Alive` counts. `trackEpisodes` runs whether or not the roster is ready,
+  and `Unknown` is not evidence a node was up.
+- The mark is dropped when a node leaves the roster, so a re-included device
+  reusing the node id starts as a first sighting.
+
+Four tests pin the behaviour, and three new mutants in the mutation harness show
+that each guard is load-bearing.
+
 ## 0.64.2
 
 ### Fixed — the CONFIRM modal was cutting descriptions mid-sentence

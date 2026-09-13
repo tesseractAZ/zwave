@@ -502,6 +502,26 @@ const MUTANTS = [
     find: "      ws.on('error', () => { /* teardown: outcome irrelevant */ });",
     repl: '',
     what: 'tearing down a CONNECTING socket cannot crash the process' },
+  /* ── v0.64.3: a death the runner WATCHED gets the full dwell ───────── */
+  { id: 'autoping-watched-death-dwell', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Reverts to backdating EVERY new Dead to lastSeen — the state in which all
+    // six live "Dead past the dwell" ladder pings fired one 60 s tick after the
+    // sweep ping that caused the death, because lastSeen was ~120 min old.
+    find: "        state.deadSince.set(n.nodeId, watchedDie ? now : (lastHeard != null && lastHeard < now ? lastHeard : now));",
+    repl: "        state.deadSince.set(n.nodeId, (watchedDie && false) ? now : (lastHeard != null && lastHeard < now ? lastHeard : now));",
+    what: 'a node the runner saw Alive is dated from its observed death, not its last utterance' },
+  { id: 'autoping-seen-alive-requires-alive', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Lets ANY non-Dead status mark a node as watched. trackEpisodes runs on an
+    // unready roster too, so this would quietly undo v0.50.0 boot backdating.
+    find: "      if (n.status === NodeStatus.Alive) state.seenAlive.add(n.nodeId);",
+    repl: "      state.seenAlive.add(n.nodeId);",
+    what: 'Unknown is not evidence a node was up — a later Dead is still backdated' },
+  { id: 'autoping-seen-alive-hygiene', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Drops the roster cleanup, so a re-included device reusing a nodeId inherits
+    // the departed node's watched-alive mark and loses first-sight dating.
+    find: "  for (const id of [...state.seenAlive]) if (!seen.has(id)) state.seenAlive.delete(id);",
+    repl: '',
+    what: 'a departed node leaves no watched-alive mark for a reused nodeId' },
   { id: 'probe-silence-honest', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Reverts the probe log to printing the THRESHOLD as if it were the
     // measurement — the constant "240m" that hid the timezone skew for a day.
@@ -2977,13 +2997,18 @@ const MUTANTS = [
   { id: 'outage-clock-survives-a-restart', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // In-memory state re-seeded the clock at every boot, so each deploy pushed
     // the "needs a human" summons further out — measured live on node 49.
-    find: '        state.deadSince.set(n.nodeId, lastHeard != null && lastHeard < now ? lastHeard : now);',
-    repl: '        state.deadSince.set(n.nodeId, now);',
+    // Repointed v0.64.3: the dating line now branches on watchedDie. This reverts
+    // only the FIRST-SIGHT branch — the part v0.50.0 introduced — and keeps
+    // watchedDie referenced so the mutant still compiles.
+    find: '        state.deadSince.set(n.nodeId, watchedDie ? now : (lastHeard != null && lastHeard < now ? lastHeard : now));',
+    repl: '        state.deadSince.set(n.nodeId, watchedDie ? now : now);',
     what: 'a node already Dead at boot is dated from when it was last HEARD' },
   { id: 'outage-clock-cannot-exceed-uptime', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // A future or absent lastSeen must not invent an outage.
-    find: '        state.deadSince.set(n.nodeId, lastHeard != null && lastHeard < now ? lastHeard : now);',
-    repl: '        state.deadSince.set(n.nodeId, lastHeard ?? now);',
+    // Repointed v0.64.3 (see outage-clock-survives-a-restart): drops the clamp on
+    // the first-sight branch only.
+    find: '        state.deadSince.set(n.nodeId, watchedDie ? now : (lastHeard != null && lastHeard < now ? lastHeard : now));',
+    repl: '        state.deadSince.set(n.nodeId, watchedDie ? now : (lastHeard ?? now));',
     what: 'a future lastSeen cannot fabricate a negative-age outage' },
   { id: 'control-arm-respects-readiness', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     // `outcomes.baseRate()` returns null below minEpisodes; this printed the

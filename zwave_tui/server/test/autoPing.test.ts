@@ -1672,3 +1672,49 @@ test('an all-BATTERY mesh is genuinely nothing to sweep, not a monitoring gap (v
     'known-not-listening is a measurement, not a missing one');
   assert.equal(d.capabilityUnknown, 0);
 });
+
+/* ── v0.64.3: a death the runner WATCHED gets the full dwell ─────────── */
+
+test('a node the runner watched die gets the FULL dwell — its death is not backdated to lastSeen (v0.64.3)', () => {
+  // The live defect. The 2-hourly liveness sweep pings a healthy node whose
+  // lastSeen is its answer to the PREVIOUS sweep, ~120 min earlier. The ping
+  // misses, the driver marks the node Dead, and dating that death from lastSeen
+  // made the 10-minute dwell read as long expired: the ladder pinged 60 s later,
+  // six times out of six on the live mesh.
+  const s = createAutoPingState();
+  const heard = { stats: { lastSeen: T - 120 * MIN } as never };
+  tick(s, mesh(20, [node(7, heard)]), T);                       // seen Alive
+  const died = mesh(20, [dead(7, heard)]);
+  assert.deepEqual(tick(s, died, T + MIN).ping, [], 'not probed on the tick it is first seen dead');
+  assert.equal(s.deadSince.get(7), T + MIN, 'dated from the observed death, not from lastSeen');
+  assert.deepEqual(tick(s, died, T + MIN + 9 * MIN).ping, [], 'still inside the dwell');
+  assert.deepEqual(tick(s, died, T + MIN + 11 * MIN).ping, [7], 'past the dwell');
+});
+
+test('Unknown is not evidence a node was up: Unknown then Dead is still backdated (v0.64.3)', () => {
+  // trackEpisodes runs on every tick whether or not the roster is ready, so a
+  // status that proves nothing must not earn observed-death dating.
+  const s = createAutoPingState();
+  const heard = { stats: { lastSeen: T - 120 * MIN } as never };
+  tick(s, mesh(20, [node(7, { status: NodeStatus.Unknown, ...heard })]), T);
+  tick(s, mesh(20, [dead(7, heard)]), T + MIN);
+  assert.equal(s.deadSince.get(7), T - 120 * MIN, 'only an observed Alive changes how a death is dated');
+});
+
+test('recovering and dying again is dated from the second death, not from lastSeen (v0.64.3)', () => {
+  const s = createAutoPingState();
+  tick(s, mesh(20, [node(7, { stats: { lastSeen: T - 120 * MIN } as never })]), T);
+  tick(s, mesh(20, [dead(7, { stats: { lastSeen: T - 120 * MIN } as never })]), T + MIN);
+  tick(s, mesh(20, [node(7, { stats: { lastSeen: T + 20 * MIN } as never })]), T + 20 * MIN);   // recovered
+  tick(s, mesh(20, [dead(7, { stats: { lastSeen: T + 20 * MIN } as never })]), T + 30 * MIN);   // dies again
+  assert.equal(s.deadSince.get(7), T + 30 * MIN, 'the second watched death is dated from itself');
+});
+
+test('a departed node leaves no watched-alive mark for a re-included nodeId (v0.64.3)', () => {
+  const s = createAutoPingState();
+  const heard = { stats: { lastSeen: T - 120 * MIN } as never };
+  tick(s, mesh(20, [node(7, heard)]), T);            // seen Alive
+  tick(s, mesh(20), T + MIN);                        // removed from the roster
+  tick(s, mesh(20, [dead(7, heard)]), T + 2 * MIN);  // a new device reusing id 7, first seen Dead
+  assert.equal(s.deadSince.get(7), T - 120 * MIN, 'treated as a first sighting, so v0.50.0 dating applies');
+});
