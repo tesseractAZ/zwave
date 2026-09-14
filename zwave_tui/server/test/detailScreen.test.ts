@@ -900,3 +900,34 @@ test('the probe caveat RETIRES for a node with no pre-upgrade counts (v0.63.1)',
   assert.match(evidenceLines(legacy).join('\n'), /pre-v0\.40\.2|mixed probe lanes/,
     'no stamp ⇒ no claim ⇒ the caveat stays');
 });
+
+/* ── v0.64.4: revival credits are disclosed, and retire on their own stamp ─ */
+
+test('the REVIVAL-CREDIT caveat has its own stamp and retires on it (v0.64.4)', () => {
+  // v0.50.0–v0.64.2 counted a sweep probe that knocked a node Dead as ANSWERED
+  // whenever the ladder's retry revived it inside the answer grace.
+  const base = { samples: 100, freshSamples: 80, statusFeedLive: true, statsFeedLive: true,
+    probesAsked: 25, probesAnswered: 25, probesSelfProven: 0, probesEchoOnly: 0,
+    probesAttribUnknown: 0, probesUnheard: 0 };
+  const credit = /sweep that knocked the node Dead|probe that killed it/;
+  const lane = /pre-v0\.40\.2|mixed probe lanes/;
+  const before = evidenceLines(withProbes({ ...base, firstSeenAt: 500, laneEpoch: 100, creditEpoch: 1_000 } as never)).join('\n');
+  assert.match(before, credit, 'a node first seen before the stamp keeps it');
+  assert.doesNotMatch(before, lane, 'while the lane caveat retires on ITS stamp, independently');
+  const after = evidenceLines(withProbes({ ...base, firstSeenAt: 5_000, laneEpoch: 1_000, creditEpoch: 1_000 } as never)).join('\n');
+  assert.doesNotMatch(after, credit, 'a node first seen after it has no such credits');
+  const legacy = evidenceLines(withProbes({ ...base, firstSeenAt: 5_000, laneEpoch: 1_000, creditEpoch: null } as never)).join('\n');
+  assert.match(legacy, credit, 'no stamp ⇒ no claim ⇒ the caveat stays');
+});
+
+test('the revival-credit caveat is never cut mid-claim (v0.64.4)', () => {
+  const d = withProbes({ probesAsked: 25, probesAnswered: 25, firstSeenAt: 500, laneEpoch: 100, creditEpoch: 1_000 } as never);
+  // 60 is the browser console's floor (wsConsole.ts); 73 sits between the forms.
+  for (const cols of [60, 66, 73, 80, 87, 88, 100, 120, 160, 200]) {
+    const lines = renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip);
+    const row = lines.find((l) => /v0\.64\.4/.test(l));
+    assert.ok(row, `${cols} cols: the caveat must render`);
+    assert.ok(/answered\s*$/.test(row!), `${cols} cols: the caveat is cut mid-claim — "${row!.trim()}"`);
+    assert.ok(visLen(row!) <= cols, `${cols} cols: overflow`);
+  }
+});

@@ -522,6 +522,144 @@ const MUTANTS = [
     find: "  for (const id of [...state.seenAlive]) if (!seen.has(id)) state.seenAlive.delete(id);",
     repl: '',
     what: 'a departed node leaves no watched-alive mark for a reused nodeId' },
+  /* ── v0.64.4: a death on OUR OWN probe is not an outage ─────────────── */
+  { id: 'autoping-probe-death-skips-dwell', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores v0.64.3: a quiet mains node knocked Dead by the sweep's own NoOp
+    // serves the full dwell — 11 minutes Dead, a critical node-down and six
+    // minutes of `degraded`, about 2.5 times a day on the reference mesh.
+    find: '    if (started == null || (now - started < config.afterMs && !input.state.probeDeath.has(n.nodeId))) continue;',
+    repl: '    if (started == null || now - started < config.afterMs) continue;',
+    what: 'a death on our own unanswered probe is retried without the dwell' },
+  { id: 'autoping-probe-death-settled', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Never attributes the death: no retry, and the revival later reads as the
+    // ANSWER to the probe that killed the node (the v0.50.0–v0.64.2 credit).
+    find: '        if (watchedDie) settled.push(...settleProbeDeath(state, n.nodeId, lastHeard, now));',
+    repl: '        void settleProbeDeath;',
+    what: 'the probe a node went Dead on is booked as a miss when the death is seen' },
+  { id: 'autoping-probe-death-requires-unanswered', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Blames any pending probe, including one the node ANSWERED before dying.
+    find: '  const killed = pending.filter((p) => p.at <= now && (lastHeard == null || lastHeard < p.at));',
+    repl: '  const killed = pending.filter((p) => p.at <= now);',
+    what: 'a probe the node answered before dying is not what killed it' },
+  { id: 'autoping-probe-death-requires-watched', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // An unready roster's placeholder is not a transition this run observed.
+    find: '        if (watchedDie) settled.push(',
+    repl: '        if (true) settled.push(',
+    what: 'only a death the runner watched is put on its own probe' },
+  { id: 'autoping-probe-death-streak', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // A miss is a miss (v0.40.2): the settled probe moves the streak too.
+    find: '    const misses = (state.missStreak.get(nodeId) ?? 0) + 1;\n    state.missStreak.set(nodeId, misses);',
+    repl: '    const misses = (state.missStreak.get(nodeId) ?? 0) + 1;',
+    what: 'a probe settled on a death moves the consecutive-miss streak' },
+  { id: 'autoping-probe-death-cleared-on-recovery', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '      state.probeDeath.delete(n.nodeId);',
+    repl: '',
+    what: 'recovery clears the probe-death mark, so an unprovoked death keeps its dwell' },
+  { id: 'autoping-probe-death-hygiene', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '  for (const id of [...state.probeDeath]) if (!seen.has(id)) state.probeDeath.delete(id);',
+    repl: '',
+    what: 'a departed node leaves no probe-death mark for a reused nodeId' },
+  { id: 'autoping-probe-death-feeds-reply-rate', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: "      if (s.lane === 'sweep') o.onProbeResult?.(s.nodeId, false, s.cls);",
+    repl: '',
+    what: 'the sweep probe a node went Dead on reaches the reply rate as unanswered' },
+  { id: 'autoping-probe-death-reply-rate-sweep-only', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: "      if (s.lane === 'sweep') o.onProbeResult?.(s.nodeId, false, s.cls);",
+    repl: '      o.onProbeResult?.(s.nodeId, false, s.cls);',
+    what: 'a verification probe a node went Dead on stays out of the comparable rate' },
+  { id: 'autoping-probe-death-says-so', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // The ladder line claimed "past the dwell" for a node that skipped it.
+    find: '      const msg = state.probeDeath.has(nodeId)',
+    repl: '      const msg = false',
+    what: 'a retry without the dwell says why instead of claiming the dwell ran' },
+  /* ── v0.64.4 review ───────────────────────────────────────────────────── */
+  { id: 'autoping-probe-death-sweep-only', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Lets a verification-burst kill skip the dwell: the burst then kills the
+    // revived node again, and kill–revive–kill is a critical dead-flap.
+    find: "  if (killed[killed.length - 1].lane === 'sweep') state.probeDeath.add(nodeId);",
+    repl: '  state.probeDeath.add(nodeId);',
+    what: 'only a sweep kill exempts a node from the dwell' },
+  { id: 'autoping-probe-death-newest-decides', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // "Any sweep" lets an older pending sweep lend its exemption to a burst kill.
+    find: "  if (killed[killed.length - 1].lane === 'sweep') state.probeDeath.add(nodeId);",
+    repl: "  if (killed.some((p) => p.lane === 'sweep')) state.probeDeath.add(nodeId);",
+    what: 'the probe nearest the death decides the dwell exemption' },
+  { id: 'autoping-probe-death-rung-two-wording', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Every rung of a sweep kill claimed "probing without the dwell".
+    find: '        ? (attempt === 1',
+    repl: '        ? (true',
+    what: 'only the first retry after a sweep kill claims to skip the dwell' },
+  { id: 'autoping-probe-death-voice-before-kill', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Files a node heard minutes before the sweep killed it as "talking", so it
+    // waits out the dwell after all.
+    find: '    if (heard != null && now - heard < config.afterMs && !voiceBeforeKill) {',
+    repl: '    if (heard != null && now - heard < config.afterMs && !(voiceBeforeKill && false)) {',
+    what: 'traffic older than a sweep kill does not count as heard within the dwell' },
+  { id: 'autoping-probe-death-voice-after-death-talks', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Discounts ALL traffic on a killed node, including a voice newer than the
+    // death — which still outranks the flag (v0.42.0).
+    find: '      heard < (input.state.deadSince.get(n.nodeId) ?? Number.NEGATIVE_INFINITY);',
+    repl: '      true;',
+    what: 'a voice newer than the death is still trusted over the Dead flag' },
+  { id: 'autoping-probe-death-settles-only-sent', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '  const killed = pending.filter((p) => p.at <= now && (lastHeard == null || lastHeard < p.at));',
+    repl: '  const killed = pending.filter((p) => (lastHeard == null || lastHeard < p.at));',
+    what: 'settlement touches only probes already sent' },
+  { id: 'autoping-probe-death-keeps-unsettled', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '  if (rest.length > 0) state.awaitingAnswer.set(nodeId, rest);\n  else state.awaitingAnswer.delete(nodeId);',
+    repl: '  void rest;\n  state.awaitingAnswer.delete(nodeId);',
+    what: 'probes a death did not settle stay pending for the ordinary judgment' },
+  { id: 'autoping-boot-gates-report-window', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Releasing the ladder would also release storm / no-capability-data —
+    // both raise binary_sensor.zwave_tui_degraded — inside the boot window.
+    find: "  const gate = (why: AutoPingSuppression): AutoPingSuppression => (booting ? 'boot-window' : why);",
+    repl: "  const gate = (why: AutoPingSuppression): AutoPingSuppression => (booting && false ? 'boot-window' : why);",
+    what: 'inside the boot window every gate the ladder passes still reports boot-window' },
+  /* ── v0.64.4: the boot window holds the measurement lanes, not the ladder ─ */
+  { id: 'autoping-boot-dead-lane', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Holds the ladder for the whole wall-clock window — after the 09-13 host
+    // reboot, an outlet's light and switch stayed unavailable ~3 extra minutes.
+    find: "  if (booting && !input.bootDeadLane) return { ...base, suppressed: 'boot-window' };",
+    repl: "  if (booting) return { ...base, suppressed: 'boot-window' };",
+    what: 'a node already Dead at start is probed once the roster is ready' },
+  { id: 'autoping-boot-measurement-lanes-wait', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: "  if (booting) return { ...base, ping, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'boot-window' };",
+    repl: '',
+    what: 'the sweep and verification lanes still serve the whole boot window' },
+  { id: 'autoping-boot-dead-lane-needs-ready', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '      bootDeadLane: o.ready(),',
+    repl: '      bootDeadLane: true,',
+    what: 'the boot-window release waits for a ready roster' },
+  { id: 'autoping-boot-trace-says-ladder-open', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: "          (decision.ping.length > 0 ? ` (dead ladder open, probing ${decision.ping.length})` : '')}`;",
+    repl: "          ''}`;",
+    what: 'the trace does not read plain "suppressed" beside a probe going out' },
+  /* ── v0.64.4: revival credits are disclosed, and retire on their own stamp ─ */
+  { id: 'credit-caveat-can-retire', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    find: '        const preCredit = cov.creditEpoch == null || cov.firstSeenAt < cov.creditEpoch;',
+    repl: '        const preCredit = true;',
+    what: 'the revival-credit caveat retires for a node first seen after its stamp' },
+  { id: 'no-credit-epoch-keeps-the-caveat', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    // Absent is the CONSERVATIVE direction, exactly as for the lane stamp.
+    find: '        const preCredit = cov.creditEpoch == null || cov.firstSeenAt < cov.creditEpoch;',
+    repl: '        const preCredit = cov.creditEpoch != null && cov.firstSeenAt < cov.creditEpoch;',
+    what: 'a store with no credit stamp keeps the caveat for everyone' },
+  { id: 'credit-caveat-short-form', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
+    find: '(inner - KV_GUTTER >= creditLong.trim().length ? creditLong : creditShort)',
+    repl: '(creditLong)',
+    what: 'the revival-credit caveat sheds to its short form instead of clipping mid-claim' },
+  { id: 'credit-epoch-stamped-on-save', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    find: '          creditEpoch: creditEpoch ?? (creditEpoch = now()),',
+    repl: '          creditEpoch: creditEpoch ?? undefined,',
+    what: 'the first save after the upgrade stamps the credit epoch' },
+  { id: 'credit-epoch-survives-reload', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    find: "        creditEpoch = typeof obj.creditEpoch === 'number' ? obj.creditEpoch : null;",
+    repl: '        creditEpoch = null;',
+    what: 'a reload reads the credit stamp rather than taking a later one' },
+  { id: 'credit-epoch-reaches-coverage', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    find: '      return m ? { ...m, laneEpoch, creditEpoch } : null;',
+    repl: '      return m ? { ...m, laneEpoch } : null;',
+    what: 'coverage carries the credit stamp to the screen' },
   { id: 'probe-silence-honest', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Reverts the probe log to printing the THRESHOLD as if it were the
     // measurement — the constant "240m" that hid the timezone skew for a day.
@@ -586,16 +724,19 @@ const MUTANTS = [
     repl: '  return !n.isController;',
     what: 'auto-ping never touches a sleeping or battery node' },
   { id: 'autoping-storm-guard', file: 'src/zwave/autoPing.ts',
-    find: "  if (dead.length >= stormLimit) return { ...base, suppressed: 'storm' };",
+    // Repointed v0.64.4: the suppression now reads through gate().
+    find: "  if (dead.length >= stormLimit) return { ...base, suppressed: gate('storm') };",
     repl: '',
     what: 'a mesh-wide outage suppresses auto-ping instead of flooding the controller' },
   { id: 'autoping-boot-window', file: 'src/zwave/autoPing.ts',
     // Every node reads Dead until the first roster poll lands after a restart.
-    find: "  if (booting) return { ...base, suppressed: 'boot-window' };",
+    // Repointed v0.64.4: the gate now also consults `bootDeadLane`.
+    find: "  if (booting && !input.bootDeadLane) return { ...base, suppressed: 'boot-window' };",
     repl: '',
     what: 'auto-ping stays quiet in the post-restart window' },
   { id: 'autoping-dwell', file: 'src/zwave/autoPing.ts',
-    find: '    if (started == null || now - started < config.afterMs) continue;',
+    // Repointed v0.64.4: the gate now exempts a death on our own probe.
+    find: '    if (started == null || (now - started < config.afterMs && !input.state.probeDeath.has(n.nodeId))) continue;',
     repl: '    if (started == null) continue;',
     what: 'auto-ping waits its configured dwell before the first probe' },
   { id: 'autoping-attempt-cap', file: 'src/zwave/autoPing.ts',
@@ -1674,8 +1815,9 @@ const MUTANTS = [
     // Restores the world in which node 49 was declared node-down: the driver's
     // reactive Dead flag alone decides, so a node whose own traffic proves it
     // reachable still burns remediation budget and still summons a human.
-    find: '    if (heard != null && now - heard < config.afterMs) {',
-    repl: '    if (false) {',
+    // Repointed v0.64.4: the gate now also excludes voice older than a sweep kill.
+    find: '    if (heard != null && now - heard < config.afterMs && !voiceBeforeKill) {',
+    repl: '    if (false && !voiceBeforeKill) {',
     what: "a node heard from inside the dwell is reachable, whatever the flag says" },
   { id: 'silent-dead-node-still-probed', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // The guard must not swallow the case the ladder exists for — a genuinely

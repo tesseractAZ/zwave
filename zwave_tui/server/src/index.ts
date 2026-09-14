@@ -152,8 +152,10 @@ async function main(): Promise<void> {
     zwaveData.setAutoPingSnapshot(() => autoPing!.snapshot());
     zwaveData.setProbeNotePending((n) => autoPing?.notePending(n));
     log(
-      `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed ` +
-        `(max ${config.autoPing.maxAttempts}/outage, waits 10/30/60m between attempts — at the default 3 that is 10m dwell + 10m + 30m, so ~50m to "needs a human"; suppressed on storm, rebuild and restart)` +
+      `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed, ` +
+        `or at once if it went Dead with our sweep probe to it unanswered ` +
+        `(max ${config.autoPing.maxAttempts}/outage, waits 10/30/60m between attempts — at the default 3 that is 10m dwell + 10m + 30m, so ~50m to "needs a human", ~40m after a sweep kill; ` +
+        `suppressed on storm and rebuild, and for 5m after start — the dead ladder only until the roster is ready)` +
         (config.autoPing.staleMs > 0
           ? `; liveness probe after ${Math.round(config.autoPing.staleMs / 60_000)}m of silence`
           : '; liveness probe off'),

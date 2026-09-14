@@ -440,6 +440,10 @@ export interface DataProvider {
      *  null/absent on a store predating the stamp. Optional so a provider that
      *  predates it still type-checks; absent means the caveat stays. */
     laneEpoch?: number | null;
+    /** Store-level: when a probe that knocked its node Dead stopped counting as
+     *  answered (v0.64.4), or null/absent on a store predating the stamp.
+     *  Absent means the revival-credit caveat stays. */
+    creditEpoch?: number | null;
   } | null;
   /** Persisted long-horizon buckets for a node (v0.35) — the tier that outlives
    *  the fine ring, so the dossier can state the window behind its numbers. */

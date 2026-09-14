@@ -800,3 +800,24 @@ test('the lane epoch is stamped on SAVE, so nodes present at upgrade keep the ca
     `a node present at upgrade time is pre-epoch: seen ${cov!.firstSeenAt} vs epoch ${cov!.laneEpoch}`);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('the credit epoch is stamped on SAVE and READ back on reload, never re-taken (v0.64.4)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ev-credit-'));
+  const path = join(dir, 'e.json');
+  const legacy = mkStore(path);                          // a v0.64.3 store: no creditEpoch on disk
+  legacy.registerNode(6, FIXED - 1_000);
+  legacy.record(6, stats({ commandsTX: 100 }), NodeStatus.Alive, FRESH, FIXED);
+  legacy.save();
+  const onDisk = JSON.parse(readFileSync(path, 'utf8')) as { creditEpoch?: number };
+  assert.equal(typeof onDisk.creditEpoch, 'number', 'the first save stamps it');
+  const cov = legacy.coverage(6);
+  assert.ok(cov && cov.firstSeenAt < (cov.creditEpoch ?? 0),
+    `a node present at upgrade keeps the credit caveat: seen ${cov?.firstSeenAt} vs epoch ${cov?.creditEpoch}`);
+  // An hour later the stamp must be read, not re-taken: a later stamp would
+  // hand the caveat back to nodes registered between the upgrade and the boot.
+  const later = mkStore(path, { now: () => FIXED + 3_600_000 });
+  later.load();
+  later.save();
+  assert.equal(later.coverage(6)?.creditEpoch, onDisk.creditEpoch, 'the reload keeps the original stamp');
+  rmSync(dir, { recursive: true, force: true });
+});
