@@ -202,6 +202,56 @@ test('ping() still learns — the remediation lane is the one place attribution 
   assert.deepEqual(outcomes, [{ kind: 'ping', nodeId: 6, ok: true }]);
 });
 
+/* ── v0.64.5: the launch is stamped BEFORE the call is awaited ─────────────── */
+
+test('ping() stamps sentAt before the service call resolves — the answer lands inside the call (v0.64.5)', async () => {
+  // Home Assistant's ping button awaits the driver's ping, so a node's answer is
+  // on record before the WebSocket call returns. A stamp read after `await fn()`
+  // post-dates that answer, and the probe judge (`lastSeen >= at`) then books an
+  // answered manual ping as "did NOT answer".
+  let clock = 1_000;
+  let clockAtSend = -1;
+  const seen: Array<{ ok: boolean; sentAt?: number }> = [];
+  const runner = createActionRunner({
+    // The call takes 250 ms on the injected clock.
+    client: { send: async () => { clockAtSend = clock; clock += 250; return null; } } as unknown as HaWsClient,
+    entryId: () => 'entry-1',
+    deviceIdOf: (n) => `dev-${n}`,
+    pingEntityOf: (n) => `button.node${n}_ping`,
+    log: () => {},
+    onOutcome: (_kind, _n, ok, _refusal, _origin, sentAt) => { seen.push({ ok, sentAt }); },
+    now: () => clock,
+    enabled: true,
+  });
+  const r = await runner.ping(7);
+  assert.equal(r.ok, true);
+  assert.equal(clock, 1_250, 'precondition: the call consumed time on the injected clock');
+  assert.deepEqual(seen, [{ ok: true, sentAt: 1_000 }], 'stamped at launch, not at resolution (1250)');
+  assert.ok(seen[0].sentAt! <= clockAtSend, 'the stamp does not post-date the send');
+});
+
+test('the default launch clock is the WALL clock auto-ping judges with (v0.64.5)', async () => {
+  // Production passes no `now` to either module, so both must fall back to the
+  // same clock. A monotonic clock here would put every manual stamp decades
+  // before any `lastSeen`, and every manual ping would be credited as answered.
+  const seen: Array<number | undefined> = [];
+  const runner = createActionRunner({
+    client: { send: async () => null } as unknown as HaWsClient,
+    entryId: () => 'entry-1',
+    deviceIdOf: (n) => `dev-${n}`,
+    pingEntityOf: (n) => `button.node${n}_ping`,
+    log: () => {},
+    onOutcome: (_kind, _n, _ok, _refusal, _origin, sentAt) => { seen.push(sentAt); },
+    enabled: true,
+  });
+  const before = Date.now();
+  await runner.ping(7);
+  const after = Date.now();
+  assert.equal(seen.length, 1);
+  assert.ok(typeof seen[0] === 'number' && seen[0] >= before && seen[0] <= after,
+    `sentAt ${seen[0]} must be a Date.now reading between ${before} and ${after}`);
+});
+
 test('probe() obeys the master gate like every write', async () => {
   const { runner, sent } = mk(false);
   const r = await runner.probe(6);

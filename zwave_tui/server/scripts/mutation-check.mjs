@@ -2371,8 +2371,7 @@ const MUTANTS = [
     repl: '    if (fault) void fault;',
     what: 'the driver-link fault renders, and on a row that cannot be shed' },
   { id: 'manual-ping-is-judged', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
-    // `p` reports "sent" and then says nothing — HA returns before the node
-    // answers, so "sent" is not "answered".
+    // `p` reports "sent" and then says nothing — "sent" is not "answered".
     find: "    if (ok && actionKind === 'ping' && nodeId != null && origin === 'you') {",
     repl: "    if (ok && actionKind === 'healNode' && nodeId != null && origin === 'you') {",
     what: 'an operator ping is registered for the same judging the engine uses' },
@@ -2390,9 +2389,45 @@ const MUTANTS = [
     // Routing the manual lane into the persisted reply rate double-attributes a
     // ping that already reaches the ledger's ACTION arm, and reintroduces the
     // symptom-correlated skew v0.40.2 removed.
-    find: "  const notePending = (nodeId: number, lane: ProbeLane = 'manual'): void => {",
-    repl: "  const notePending = (nodeId: number, lane: ProbeLane = 'sweep'): void => {",
+    find: "  const notePending = (nodeId: number, lane: ProbeLane = 'manual', at?: number): void => {",
+    repl: "  const notePending = (nodeId: number, lane: ProbeLane = 'sweep', at?: number): void => {",
     what: "a manual probe is labelled 'manual', never 'sweep'" },
+  /* ── v0.64.5: a manual ping is dated from its launch, not from HA's return ── */
+  { id: 'manual-stamp-before-call', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // Reads the clock after the call again. HA's ping button awaits the
+    // driver's ping, so the answer is already on record: the stamp post-dates
+    // it and `lastSeen >= at` books an answered manual ping as a miss.
+    find: '      const sentAt = now();\n      await fn();',
+    repl: '      await fn();\n      const sentAt = now();',
+    what: 'a manual ping is stamped at launch, before the service call resolves' },
+  { id: 'manual-stamp-forwarded', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    find: '      if (learn) o.onOutcome?.(kind, nodeId, true, undefined, origin, sentAt);',
+    repl: '      if (learn) o.onOutcome?.(kind, nodeId, true, undefined, origin);\n      void sentAt;',
+    what: 'the launch stamp reaches the outcome hook' },
+  { id: 'manual-stamp-wall-clock', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
+    // A monotonic timer is the tempting "more correct" clock and the wrong one:
+    // `lastSeen` is wall-clock epoch ms, so every stamp would precede every
+    // answer and no manual ping could ever be judged a miss.
+    find: '  const now = o.now ?? (() => Date.now());',
+    repl: '  const now = o.now ?? (() => performance.now());',
+    what: "the runner's default clock is the wall clock auto-ping judges with" },
+  { id: 'manual-stamp-reaches-hook', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: '      this.probeNotePending?.(nodeId, sentAt);',
+    repl: '      this.probeNotePending?.(nodeId);',
+    what: 'the data layer hands the launch stamp to the probe hook' },
+  { id: 'manual-pended-at-launch', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores v0.47.0–v0.64.4: pended at registration, after HA returned.
+    find: '    pendProbe(state, nodeId, at ?? now(), lane);',
+    repl: '    pendProbe(state, nodeId, now(), lane);',
+    what: 'a manual probe is judged against its launch, so an answer inside the call counts' },
+  { id: 'manual-stamp-index-outcome', file: 'src/index.ts', tests: ['configContract'],
+    find: '    onOutcome: (kind, nodeId, ok, refusal, origin, sentAt) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin, sentAt),',
+    repl: '    onOutcome: (kind, nodeId, ok, refusal, origin) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin),',
+    what: 'index.ts forwards the launch stamp to the data layer (source assertion)' },
+  { id: 'manual-stamp-index-pending', file: 'src/index.ts', tests: ['configContract'],
+    find: "    zwaveData.setProbeNotePending((n, sentAt) => autoPing?.notePending(n, 'manual', sentAt));",
+    repl: '    zwaveData.setProbeNotePending((n) => autoPing?.notePending(n));',
+    what: 'index.ts pends the manual probe at the launch stamp (source assertion)' },
   { id: 'unprobeable-card-says-so', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     find: '    if (canProbe === false) {',
     repl: '    if (canProbe === null) {',

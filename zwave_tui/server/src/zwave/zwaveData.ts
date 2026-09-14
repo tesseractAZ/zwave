@@ -388,11 +388,13 @@ export interface ZwaveData {
   pendingIdentity(): IdentityDecision | null;
   /** Answer it: `keep` re-adopts the old learning, `fresh` archives it. */
   resolveIdentityDecision(choice: IdentityChoice): boolean;
-  /** M5: fold an operator action's outcome into the learning ledger. */
-  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin): void;
+  /** M5: fold an operator action's outcome into the learning ledger. `sentAt`
+   *  is when the runner launched the action (v0.64.5). */
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin, sentAt?: number): void;
   /** Register the probe-pending hook the auto-ping runner owns (v0.47.0), so a
-   *  MANUAL ping is judged by the same machinery as an engine one. */
-  setProbeNotePending(fn: ((nodeId: number) => void) | null): void;
+   *  MANUAL ping is judged by the same machinery as an engine one. It receives
+   *  the runner's launch stamp (v0.64.5). */
+  setProbeNotePending(fn: ((nodeId: number, sentAt?: number) => void) | null): void;
   /** M5: learned efficacy of an action against a symptom kind (null if off). */
   efficacyFor(kind: SymptomKind, action: ActionKind): Efficacy | null;
   falsePositives(kind: SymptomKind): number;
@@ -1346,23 +1348,28 @@ class ZwaveDataImpl implements ZwaveData {
    *  ActionRunner AFTER each action. A driver refusal of a diagnosis-verifying
    *  action (removeFailed on a live node) is `refused` → refused-misdiagnosis;
    *  a plain failed action (couldn't run) is NOT attributed as "taken". */
-  private probeNotePending: ((nodeId: number) => void) | null = null;
+  private probeNotePending: ((nodeId: number, sentAt?: number) => void) | null = null;
 
-  setProbeNotePending(fn: ((nodeId: number) => void) | null): void {
+  setProbeNotePending(fn: ((nodeId: number, sentAt?: number) => void) | null): void {
     this.probeNotePending = fn;
   }
 
-  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin): void {
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin, sentAt?: number): void {
     // A MANUAL ping is now JUDGED (v0.47.0). The engine has owned the exact
     // primitive for deciding whether a ping was answered since v0.36 and never
     // applied it to the one probe a human actually asked for — `p` reported
     // "sent" and then said nothing, which is the weakest claim on the screen
-    // (HA returns before the node answers, so "sent" is not "answered").
+    // ("sent" is not "answered").
     //
-    // Registered on the SEND succeeding, which is the moment the answer starts
-    // being owed. Only 'you' — an engine ping is already pended by its own lane.
+    // Registered once the send SUCCEEDS, but DATED from its launch (v0.64.5).
+    // This note used to say HA returns before the node answers. It does not:
+    // HA's ping button awaits the driver's ping, and the service call awaits the
+    // button, so by the time this runs the answer can already be on record.
+    // Pended at this hook's own "now", the entry post-dated that answer, and the
+    // judge (`lastSeen >= at`) booked an answered manual ping "did NOT answer".
+    // Only 'you' — an engine ping is already pended by its own lane.
     if (ok && actionKind === 'ping' && nodeId != null && origin === 'you') {
-      this.probeNotePending?.(nodeId);
+      this.probeNotePending?.(nodeId, sentAt);
     }
     // Mesh-wide actions (rebuildAll/stopRebuild, nodeId == null) are NOT
     // attributed: they can't be credited to any single node's episode without

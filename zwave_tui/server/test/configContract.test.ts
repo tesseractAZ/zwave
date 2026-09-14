@@ -381,3 +381,24 @@ test('the bootstrap crash cause is emitted at FATAL, not through the info sink (
     + 'all the operator has',
   );
 });
+
+test("index.ts carries the runner's launch stamp to the manual probe (v0.64.5)", () => {
+  // A source assertion, and labelled as one: these two lambdas are the only hops
+  // between the action runner and auto-ping that no unit test can drive, and
+  // TypeScript cannot pin them — `(n) => autoPing?.notePending(n)` still
+  // type-checks against a two-argument hook. Dropping `sentAt` at either hop
+  // silently restores the post-dated stamp that judged answered manual pings as
+  // misses. (The stamp's behaviour is pinned for real in the zwaveActions,
+  // zwaveDataChurn and autoPing tests.)
+  const index = read('server/src/index.ts');
+  assert.match(
+    index,
+    /onOutcome: \(kind, nodeId, ok, refusal, origin, sentAt\) => zwaveData\.recordActionOutcome\(kind, nodeId, ok, refusal, origin, sentAt\)/,
+    'onOutcome must forward the launch stamp to the data layer',
+  );
+  assert.match(
+    index,
+    /setProbeNotePending\(\(n, sentAt\) => autoPing\?\.notePending\(n, 'manual', sentAt\)\)/,
+    'the probe hook must pend a MANUAL probe at the launch stamp',
+  );
+});

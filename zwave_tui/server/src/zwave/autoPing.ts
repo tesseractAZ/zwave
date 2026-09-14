@@ -118,10 +118,22 @@ export interface AutoPingState {
    * SWEEP ONLY, deliberately. A verification burst keeps probing its node every
    * tick, so an immediate retry after a burst kill hands the burst a live node
    * to kill again — and kill, revive, kill is enough Dead crossings for a
-   * critical `dead-flap`, whose episode requests another burst. A manual ping's
-   * pending entry is stamped after the HA call returns, too loose a send time
-   * to pin a death on. Both lanes still have the miss booked when the death is
-   * seen (`settleProbeDeath`); both keep the dwell.
+   * critical `dead-flap`, whose episode requests another burst.
+   *
+   * A manual ping stays out too, though not for the reason v0.64.4 gave. Its
+   * pending entry used to be stamped after the HA call returned; since v0.64.5
+   * it carries the launch stamp, as exact as a sweep's. What remains is
+   * evidence and one interaction. The exemption was granted on measurement,
+   * and the 50.5 h of log reviewed for v0.64.5 holds no manual ping at all
+   * (1,081 ping-button presses, every one the engine's), so no manual kill has
+   * ever been seen. And the exemption discards traffic heard before the death,
+   * which after a manual ping is most likely the operator's own real command:
+   * the give-up notice tells them to operate the device and then ping it. For a
+   * device that ignores NOPs (v0.42.0), that trades its Dead-but-talking notice
+   * for an immediate retry of the very frame it ignores. The operator is at the
+   * keyboard, and pressing `p` again is the retry. Both lanes still have the
+   * miss booked when the death is seen (`settleProbeDeath`); both keep the
+   * dwell.
    *
    * `deadSince` still records the observed death, so every age an operator
    * sees stays true; the dwell gate and the traffic check read this set.
@@ -1003,7 +1015,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
   stop: () => void;
   tick: () => void;
   snapshot: () => AutoPingSnapshot;
-  notePending: (nodeId: number, lane?: ProbeLane) => void;
+  notePending: (nodeId: number, lane?: ProbeLane, at?: number) => void;
 } {
   const now = o.now ?? (() => Date.now());
   const startedAt = now();
@@ -1436,9 +1448,16 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
    * double-attribute it — and it would reintroduce the symptom-correlated skew
    * v0.40.2 removed, since an operator pings exactly the nodes they suspect.
    * Its only effects are the answered/unanswered log line and the miss streak.
+   *
+   * `at` is when the caller LAUNCHED the probe (v0.64.5), read from the clock
+   * this runner judges with — both are `Date.now` in production. The manual
+   * path can only register once Home Assistant's call has returned, and HA's
+   * ping button awaits the driver's ping, so the node's answer may already be
+   * on record. Stamped at `now()` instead, the entry post-dated that answer and
+   * `lastSeen >= at` judged an answered ping a miss. Omitted, it is `now()`.
    */
-  const notePending = (nodeId: number, lane: ProbeLane = 'manual'): void => {
-    pendProbe(state, nodeId, now(), lane);
+  const notePending = (nodeId: number, lane: ProbeLane = 'manual', at?: number): void => {
+    pendProbe(state, nodeId, at ?? now(), lane);
   };
 
   return { stop: () => clearInterval(timer), tick, snapshot, notePending };

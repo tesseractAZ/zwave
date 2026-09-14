@@ -1095,9 +1095,13 @@ test('a MANUAL ping is registered for judging; an engine one is not double-pende
   // The engine has owned the primitive for deciding whether a ping was answered
   // since v0.36 and never applied it to the one probe a human actually asked
   // for — `p` reported "sent" and then said nothing, which is the weakest claim
-  // on the screen: HA returns before the node answers, so "sent" is not
-  // "answered". An engine ping is already pended by its own lane; pending it
-  // again here would double-attribute it.
+  // on the screen: "sent" is not "answered". An engine ping is already pended
+  // by its own lane; pending it again here would double-attribute it.
+  //
+  // The runner's launch stamp travels with it (v0.64.5). HA's ping button
+  // awaits the driver's ping, so the answer can be on record before this hook
+  // runs; a probe pended at the hook's own clock post-dated it and was judged
+  // a miss.
   const ha = fakeHa();
   const dir = mkdtempSync(join(tmpdir(), 'zwtui-manual-'));
   const zd = await bootedZwaveData(ha, {
@@ -1106,22 +1110,22 @@ test('a MANUAL ping is registered for judging; an engine one is not double-pende
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
   try {
-    const pended: number[] = [];
-    zd.setProbeNotePending((n) => pended.push(n));
+    const pended: Array<[number, number | undefined]> = [];
+    zd.setProbeNotePending((n, sentAt) => pended.push([n, sentAt]));
 
-    zd.recordActionOutcome('ping', 7, true, undefined, 'you');
-    assert.deepEqual(pended, [7], 'an operator ping is owed an answer');
+    zd.recordActionOutcome('ping', 7, true, undefined, 'you', 1_234);
+    assert.deepEqual(pended, [[7, 1_234]], 'an operator ping is owed an answer, dated from its launch');
 
-    zd.recordActionOutcome('ping', 8, true, undefined, 'engine');
-    assert.deepEqual(pended, [7], 'an engine ping is pended by its OWN lane, never twice');
+    zd.recordActionOutcome('ping', 8, true, undefined, 'engine', 2_000);
+    assert.deepEqual(pended, [[7, 1_234]], 'an engine ping is pended by its OWN lane, never twice');
 
     // A ping that never left does not owe an answer.
     zd.recordActionOutcome('ping', 9, false, 'transport', 'you');
-    assert.deepEqual(pended, [7], 'a failed send is not an outstanding probe');
+    assert.deepEqual(pended, [[7, 1_234]], 'a failed send is not an outstanding probe');
 
     // And no other action is a probe.
-    zd.recordActionOutcome('healNode', 10, true, undefined, 'you');
-    assert.deepEqual(pended, [7], 'only a ping is a probe');
+    zd.recordActionOutcome('healNode', 10, true, undefined, 'you', 3_000);
+    assert.deepEqual(pended, [[7, 1_234]], 'only a ping is a probe');
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });
