@@ -504,6 +504,19 @@ export function renderDetail(ctx: ScreenCtx): string[] {
             c.grey(' — episode evidence is not yet confirmed for this node'), inner));
         }
         if (caveat) body.push(kv('', c.grey(caveat.trim()), inner));
+        // REVIVAL CREDITS (v0.64.4) — a second disclosure, on its own row because
+        // it retires on its own stamp. v0.50.0–v0.64.2 re-probed a node one tick
+        // after a sweep probe knocked it Dead; the revival advanced lastSeen
+        // inside the 90 s answer grace, so the probe that KILLED the node was
+        // counted as answered. Those credits land on exactly the weakest nodes:
+        // the reference mesh's worst outlet read 25/25 where it had answered
+        // about 22 — green where it should have read yellow.
+        const preCredit = cov.creditEpoch == null || cov.firstSeenAt < cov.creditEpoch;
+        const creditLong = ' — before v0.64.4 a sweep that knocked the node Dead could count as answered';
+        const creditShort = ' — pre-v0.64.4 a probe that killed it may read answered';
+        if (preCredit) {
+          body.push(kv('', c.grey((inner - KV_GUTTER >= creditLong.trim().length ? creditLong : creditShort).trim()), inner));
+        }
         // THE OTHER THREE ARMS (v0.49.0). The sweep's judgment is four-way and
         // only `self-proven` was ever recorded; the rest were computed,
         // described in a log line, and discarded every tick — so the difference

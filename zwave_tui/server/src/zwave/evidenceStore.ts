@@ -183,6 +183,10 @@ export interface NodeCoverage {
    *  store that predates the stamp. A node first seen at or after this has no
    *  pre-v0.40.2 counts to disclose. */
   laneEpoch?: number | null;
+  /** Store-level: when a probe that knocked its node Dead stopped being
+   *  countable as ANSWERED (v0.64.4), or null on a store that predates the
+   *  stamp. A node first seen at or after this has no such credits to disclose. */
+  creditEpoch?: number | null;
   /** Cumulative counts since firstSeenAt (not ring-bounded). */
   samples: number;
   freshSamples: number;
@@ -396,6 +400,14 @@ interface Persisted {
    * is the conservative direction.
    */
   laneEpoch?: number;
+  /**
+   * When this install stopped crediting a probe that knocked its node Dead
+   * (v0.64.4). v0.50.0–v0.64.2 retried such a node one tick later, the revival
+   * landed inside the answer grace, and the probe that killed it was counted
+   * answered. Same shape and same reasoning as `laneEpoch`: optional, stamped
+   * on save, absent keeps the caveat.
+   */
+  creditEpoch?: number;
   nodes: Record<string, FineCols>;
   coarse: Record<string, CoarseCols>;
   controller: CtrlCols | null;
@@ -576,6 +588,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   let loadedHomeId: number | null = null;
   let since: number | null = null;
   let laneEpoch: number | null = null;
+  let creditEpoch: number | null = null;
   let dirty = false;
   let implausibleLogged = false;
 
@@ -904,7 +917,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     },
     coverage: (nodeId) => {
       const m = meta.get(nodeId);
-      return m ? { ...m, laneEpoch } : null;
+      return m ? { ...m, laneEpoch, creditEpoch } : null;
     },
     recordingSince: () => since,
     all: () => fine,
@@ -981,6 +994,9 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         // Save-time is the more conservative of two correct answers, and an
         // entry asserting one over the other would be pinning taste as truth.
         laneEpoch = typeof obj.laneEpoch === 'number' ? obj.laneEpoch : null;
+        // Read, never re-taken (v0.64.4): a later stamp would bring the credit
+        // caveat back for nodes registered between the upgrade and this boot.
+        creditEpoch = typeof obj.creditEpoch === 'number' ? obj.creditEpoch : null;
         // Boot-grace: the coarse tier + coverage metadata are age-judgment-free
         // history — load them; drop only the recency-dependent fine ring.
         const fineTooOld = grace || (maxAgeMs > 0 && ageMs > maxAgeMs) || ageMs < 0;
@@ -1256,6 +1272,8 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           // on shed it. Stamping at load instead would retire it for nodes
           // whose counters really do blend lanes.
           laneEpoch: laneEpoch ?? (laneEpoch = now()),
+          // Same rule, same reason (v0.64.4).
+          creditEpoch: creditEpoch ?? (creditEpoch = now()),
           nodes,
           coarse: coarseOut,
           controller,
