@@ -114,9 +114,11 @@ export interface EvidenceSample {
  * arrives (Node.ts updateRouteStatistics: `protocolDataRate: txReport.routeSpeed`,
  * called under Driver.ts `if (hasTXReport(result))`), and record() copies that
  * cached value onto every sample. So a sample's rate is a READING only on a tick
- * where an acknowledged transmission landed (fresh, dTx > 0). A failed attempt
- * also rewrites the rate — both failures on the reference mesh read 100 kbit/s —
- * without moving commandsTX, so it is not a reading either.
+ * where an acknowledged transmission landed (fresh, dTx > 0). A transmission
+ * aborted by the node's own premature response reports NoAck yet still rewrites
+ * the rate — both such aborts on the reference mesh read 100 kbit/s — without
+ * moving commandsTX, so it is not a reading either. (A plain NoAck throws before
+ * the route statistics are touched at all.)
  */
 export interface RateRun {
   routeKey: string;
@@ -142,7 +144,7 @@ export const RATE_FALLBACK_MIN_GAP_MS = 30_000;
 export function foldRateRun(prev: RateRun | null, s: EvidenceSample): RateRun | null {
   if (s.routeKey == null) return prev; // a route we cannot see has not moved
   const transmitted = s.fresh && s.dTx != null && s.dTx > 0;
-  if (!transmitted || s.rateKbps == null) return prev; // a copied or failed-attempt rate is not a reading
+  if (!transmitted || s.rateKbps == null) return prev; // a copied or aborted-transmission rate is not a reading
   const onRoute = prev != null && prev.routeKey === s.routeKey ? prev : null;
   if (s.rateKbps >= 100) return { routeKey: s.routeKey, sawHundred: true, belowTx: 0, lastBelowTxAt: null, rateKbps: s.rateKbps };
   const separate = onRoute?.lastBelowTxAt == null || s.t - onRoute.lastBelowTxAt >= RATE_FALLBACK_MIN_GAP_MS;
@@ -337,8 +339,9 @@ export interface EvidenceStore {
   recordRouteFailure(nodeId: number, between: [number, number], at?: number): void;
   forNode(nodeId: number): EvidenceSample[];
   /** The node's per-route rate run (v0.64.6) — folded from every recorded
-   *  sample, so it outlives the fine window. In memory; re-folded from the
-   *  restored ring on load; dropped by evictNode and reset. */
+   *  sample, so it outlives the fine window. Saved with the snapshot and
+   *  restored on load even when the fine ring is not; re-folded from the ring
+   *  for a file written without it; dropped by evictNode and reset. */
   rateRun(nodeId: number): RateRun | null;
   coarseForNode(nodeId: number): CoarseBucket[];
   controllerSamples(): ControllerSample[];
@@ -469,6 +472,11 @@ interface Persisted {
   controllerCoarse?: CtrlCoarseCols | null;
   routeFails: Record<string, { t: number[]; a: number[]; b: number[] }>;
   meta: Record<string, { firstSeenAt: number; samples: number; fresh: number; pa?: number; pk?: number; ps?: number; pe?: number; pu?: number; pn?: number }>;
+  /** Per-node rate runs (v0.64.6 review). OPTIONAL, no schema bump: a sustained
+   *  same-route fallback's 100k proof is older than the fine ring, so a restart
+   *  that kept only the ring forgot the regression and could never re-arm while
+   *  it lasted. Absent in older files ⇒ re-folded from the restored ring. */
+  rateRuns?: Record<string, { rk: string; sh: number; bt: number; lb: number | null; r: number | null }>;
 }
 
 const SCHEMA_V = 2;
@@ -1214,6 +1222,18 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             if (seeded) rateRuns.set(id, seeded);
           }
         }
+        // Rate runs (v0.64.6 review) — restored whatever the fine tier's fate,
+        // overriding any run re-folded from the ring above: they exist precisely
+        // for evidence older than the ring. A file written before they were
+        // persisted keeps the re-fold.
+        if (obj.rateRuns && typeof obj.rateRuns === 'object') {
+          for (const [k, v] of Object.entries(obj.rateRuns)) {
+            const id = Number(k);
+            if (!Number.isInteger(id) || id <= 0 || !v || typeof v.rk !== 'string') continue;
+            const bt = typeof v.bt === 'number' && Number.isFinite(v.bt) && v.bt >= 0 ? v.bt : 0;
+            rateRuns.set(id, { routeKey: v.rk, sawHundred: v.sh === 1, belowTx: bt, lastBelowTxAt: numOrNull(v.lb), rateKbps: numOrNull(v.r) });
+          }
+        }
         log(`evidence: restored ${coarse.size} node(s) coarse${grace || fineTooOld ? '' : ` + ${fine.size} fine`} from ${path}`);
       } catch (e) {
         log(`evidence: load failed (${(e as Error).message}) — starting fresh`);
@@ -1327,6 +1347,10 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         for (const [id, m] of meta) {
           metaOut[String(id)] = { firstSeenAt: m.firstSeenAt, samples: m.samples, fresh: m.freshSamples, pa: m.probesAsked, pk: m.probesAnswered, ps: m.probesSelfProven, pe: m.probesEchoOnly, pu: m.probesAttribUnknown, pn: m.probesUnheard };
         }
+        const runsOut: NonNullable<Persisted['rateRuns']> = {};
+        for (const [id, run] of rateRuns) {
+          runsOut[String(id)] = { rk: run.routeKey, sh: run.sawHundred ? 1 : 0, bt: run.belowTx, lb: run.lastBelowTxAt, r: run.rateKbps };
+        }
         const payload: Persisted = {
           v: SCHEMA_V,
           savedAt: now(),
@@ -1345,6 +1369,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           controllerCoarse,
           routeFails: rf,
           meta: metaOut,
+          rateRuns: runsOut,
         };
         writeFileSync(tmp, JSON.stringify(payload), 'utf8');
         renameSync(tmp, path);

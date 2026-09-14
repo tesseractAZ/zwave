@@ -846,7 +846,11 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         const laneVisible = ep.before != null
           && (m === 'route' ? ep.before.routeKnown >= 1 : m === 's2' ? ep.before.s2Known >= 1 : true);
         if (laneVisible && !sideFloorMet(m, ep.before, 'before') && sideFloorMet(m, ep.after, 'after')) {
-          if (liveMs >= DWELL_MS + UNDERSAMPLED_AFTER_MS) {
+          // quiet-node's breach IS silence (v0.64.6 review): a transmission in
+          // its before-window would have ended the breach, so that window cannot
+          // reach the timeout floor however long it lasts, and a live-span label
+          // would only record how fast the verification probe landed.
+          if (kind === 'quiet-node' || liveMs >= DWELL_MS + UNDERSAMPLED_AFTER_MS) {
             // It had the time; it never had the readings.
             ep.undersampled = true;
             unverUndersampled.set(kind, (unverUndersampled.get(kind) ?? 0) + 1);

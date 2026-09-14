@@ -1441,3 +1441,15 @@ test('a ledger written before v0.64.6 restores everything EXCEPT the transient/u
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a starved quiet-node closure is UNDERSAMPLED whatever its live span — silence cannot fill a before-window (v0.64.6 review)', () => {
+  // With the sweep off, 6 h of silence matures quiet-node; the verification
+  // probe its episode requests is answered within a minute, so the symptom is
+  // live about 6 min. A transmission in its before-window would have ended the
+  // breach, so that window can never reach the timeout floor.
+  const o = store();
+  o.open(21, 'quiet-node', 0, W(0, 0, 0, { freshN: 0 }), { dwellStartMs: -5 * 60_000 });
+  o.resolve(21, 'quiet-node', 60_000 + 10 * 60_000, W(50, 0, 50), { absentSinceMs: 60_000 });
+  assert.equal(o.unverifiableUndersampled('quiet-node'), 1, 'six silent hours: it had the time, never the readings');
+  assert.equal(o.unverifiableTransient('quiet-node'), 0, 'not a blink');
+});

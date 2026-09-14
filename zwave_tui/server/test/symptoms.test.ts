@@ -822,9 +822,10 @@ test('the newest acknowledged reading decides — one 100k transmission clears i
   assert.equal(minutes.some((m) => m >= 9), false, 'gone on the tick the link is back at 100k, not 30 min later');
 });
 
-test('a FAILED attempt rewrites the cached rate but is not a reading — neither a reset nor the reported rate (v0.64.6)', () => {
-  // zwave-js updates the route rate on any transmit report, and a NoAck does
-  // not move commandsTX. Both failures on the reference mesh read 100 kbit/s.
+test('an ABORTED transmission rewrites the cached rate but is not a reading — neither a reset nor the reported rate (v0.64.6)', () => {
+  // A transmission aborted by the node's own premature response reports NoAck,
+  // still rewrites the route rate, and does not move commandsTX. Both such
+  // aborts on the reference mesh read 100 kbit/s.
   const samples = rateTimeline(T - 20 * MIN, T + 10 * MIN, [
     { at: T - 20 * MIN, rate: 100 }, { at: T, rate: 40 },
     { at: T + 1 * MIN, rate: 100, dTx: 0, dDropTx: 1 },
@@ -832,8 +833,8 @@ test('a FAILED attempt rewrites the cached rate but is not a reading — neither
     { at: T + 6 * MIN, rate: 100, dTx: 0, dDropTx: 1 },
   ]);
   const at8 = rateFallbackMinutes(samples, 0, 10).find((h) => h.minute === 8);
-  assert.ok(at8, 'the failed attempts neither reset nor cleared it');
-  assert.equal(at8!.sym.evidence[0].value, '40k', "it reports the counted reading, not the failed attempt's 100k");
+  assert.ok(at8, 'the aborted transmissions neither reset nor cleared it');
+  assert.equal(at8!.sym.evidence[0].value, '40k', "it reports the run's newest reading, not the aborted transmission's 100k");
   assert.equal(at8!.sym.severity, 'watch');
 });
 
@@ -852,4 +853,15 @@ test('a route the driver no longer reports is not asserted as regressed (v0.64.6
   const minutes = rateFallbackMinutes(samples, 0, 12).map((h) => h.minute);
   assert.ok(minutes.includes(8), `live while the route was visible: ${JSON.stringify(minutes)}`);
   assert.equal(minutes.some((m) => m >= 9), false, 'fail-closed once it is not');
+});
+
+test('a 9.6k same-route regression is a WARNING — even after an aborted transmission rewrites the cached rate to 100k (v0.64.6 review)', () => {
+  const samples = rateTimeline(T - 20 * MIN, T + 10 * MIN, [
+    { at: T - 20 * MIN, rate: 100 }, { at: T, rate: 9.6 }, { at: T + 2 * MIN, rate: 9.6 },
+    { at: T + 6 * MIN, rate: 100, dTx: 0, dDropTx: 1 },
+  ]);
+  const at8 = rateFallbackMinutes(samples, 0, 10).find((h) => h.minute === 8);
+  assert.ok(at8, 'live at T+8');
+  assert.equal(at8!.sym.severity, 'warn', 'severity follows the run\'s reading, not the newest sample');
+  assert.equal(at8!.sym.evidence[0].value, '9.6k');
 });

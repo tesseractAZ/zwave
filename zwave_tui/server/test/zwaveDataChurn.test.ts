@@ -1244,8 +1244,8 @@ test('a departed node discarding its learning is visible IN THE TUI (v0.53.0)', 
 test('displayed lastSeen: only a counter that proves the node was HEARD stamps arrival — timeout and dropped-TX do not (v0.64.6)', async () => {
   // zwave-js moves timeoutResponse when the node did NOT answer a command that
   // expected a reply (one report timeout after its acknowledgement, in its own
-  // statistics event), and commandsDroppedTX when a send was never acknowledged.
-  // Stamping either as "heard" credited silence as an answer.
+  // statistics event); stamping that as "heard" credited silence as an answer.
+  // commandsDroppedTX is excluded defensively (see the onNodeStats comment).
   const ha = fakeHa();
   const zd = await bootedZwaveData(ha, { refreshMs: 80, routePollMs: 160 });
   const S = () => zd.snapshot().find((n: NodeSnapshot) => n.nodeId === 7)?.stats;
@@ -1260,7 +1260,7 @@ test('displayed lastSeen: only a counter that proves the node was HEARD stamps a
     await waitFor(() => S()?.timeoutResponse === 2);
     assert.equal(S()!.lastSeen, stamp, 'a response timeout is the node NOT answering');
     await sleep(25);
-    pushStats(ha, statsEvent({ commands_tx: 11, timeout_response: 2, commands_dropped_tx: 1 }));   // a send never acknowledged
+    pushStats(ha, statsEvent({ commands_tx: 11, timeout_response: 2, commands_dropped_tx: 1 }));   // the dropped-TX counter moved
     await waitFor(() => S()?.commandsDroppedTX === 1);
     assert.equal(S()!.lastSeen, stamp, 'a failed send is not hearing from the node');
     await sleep(25);
@@ -1391,6 +1391,67 @@ test("the engine reads the STORE's rate run — a persistent same-route fallback
     priv.runEngine(t0);                // past it
     assert.ok(zd.symptoms().some((x) => x.kind === 'rate-fallback' && x.nodeId === 7),
       `the production detector must read the store's rate run: ${JSON.stringify(zd.symptoms())}`);
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a node is not sampled inside zwave-js\'s statistics throttle window — once, never twice in a row (v0.64.6 review)', async () => {
+  // zwave-js emits a transmission's commandsTX in the leading edge of its 250 ms
+  // statistics throttle and the route rate that transmission produced in a
+  // trailing event; a sample between them reads the previous frame's rate.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-settle-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 60_000,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const priv = zd as unknown as {
+      lastOkAt: number | null; sampleEvidence: () => void;
+      statsByNode: Map<number, { commandsTX: number }>; evidenceStore: { forNode: (id: number) => unknown[] };
+    };
+    const sample = () => { priv.lastOkAt = Date.now(); priv.sampleEvidence(); };
+    pushStats(ha, statsEvent());
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7 && n.stats.commandsTX === 10));
+    await sleep(350);                                       // well past the throttle window
+    sample();
+    const n0 = priv.evidenceStore.forNode(7).length;
+    assert.ok(n0 >= 1, 'precondition: a settled node is sampled');
+    pushStats(ha, statsEvent({ commands_tx: 11 }));         // a transmission's leading statistics event
+    await waitFor(() => priv.statsByNode.get(7)?.commandsTX === 11);
+    sample();
+    assert.equal(priv.evidenceStore.forNode(7).length, n0, 'sampled inside the throttle window: deferred to the next tick');
+    sample();
+    assert.equal(priv.evidenceStore.forNode(7).length, n0 + 1, 'but only one tick — the next sample is taken');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a pre-v0.64.6 ledger RESUMED from its archive announces the discarded split in the Log ring too (v0.64.6 review)", async () => {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-resume-split-'));
+  // The live ledger belongs to another controller; this controller's own ledger,
+  // written before v0.64.6, is archived beside it.
+  writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({ v: 1, homeId: 12345, control: [] }));
+  writeFileSync(join(dir, `outcomes.home-${HOME}.json`), JSON.stringify({ v: 1, homeId: HOME, control: [],
+    unverTransient: [['rtt-degraded', 2]], unverUndersampled: [['rtt-degraded', 3]] }));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.pendingIdentity() != null);
+    assert.equal(zd.events().some((e) => /tallies reset/.test(e.text)), false, 'precondition: nothing was discarded at boot');
+    zd.resolveIdentityDecision('resume');
+    const note = zd.events().find((e) => /transient\/undersampled tallies reset/.test(e.text));
+    assert.ok(note, `the resume's discard must reach the Log: ${JSON.stringify(zd.events().slice(0, 8).map((e) => e.text))}`);
+    assert.match(note!.text, /^5 /);
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });

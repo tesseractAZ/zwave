@@ -672,6 +672,11 @@ class ZwaveDataImpl implements ZwaveData {
    *  (re)subscribe redelivers the current snapshot with a fresh lastSeen but
    *  unchanged counters, which must NOT count as an observation (review). */
   private prevSampleSig = new Map<number, SampleSig>();
+  /** Wall-clock arrival of each node's latest statistics event (v0.64.6 review),
+   *  so a sample is not taken inside zwave-js's statistics throttle window. */
+  private readonly statsArrivedAt = new Map<number, number>();
+  /** Nodes whose sample was deferred on the previous tick — never twice in a row. */
+  private readonly sampleDeferred = new Set<number>();
   /** Nodes with a live node-STATISTICS subscription (per-feed retry tracking). */
   private statsSubbedNodes = new Set<number>();
   /** Roster ids currently absent → first-absent timestamp (eviction timer). */
@@ -1068,6 +1073,22 @@ class ZwaveDataImpl implements ZwaveData {
       // stay accumulated and drain into its FIRST real sample — attributed to
       // a longer-than-usual window, whose length is visible via the t gap.
       if (!stats) continue;
+      // SETTLE (v0.64.6 review). zwave-js throttles statistics to one event per
+      // 250 ms and emits the FIRST change at once, and it increments commandsTX
+      // before it rewrites the route statistics the transmission produced
+      // (Driver.ts handleSerialAPICommandResult). So the counter can arrive in a
+      // leading event while the new rate follows in a trailing one, and a
+      // sample between them reads the PREVIOUS frame's rate as this
+      // transmission's — which the rate run counts. A node whose latest event is
+      // younger than that window is sampled on the next tick instead; its
+      // counter deltas carry into that sample. At most one tick in a row, so a
+      // node that talks continuously cannot starve its own evidence.
+      const arrived = this.statsArrivedAt.get(n.nodeId);
+      if (arrived != null && now - arrived < STATS_SETTLE_MS && !this.sampleDeferred.has(n.nodeId)) {
+        this.sampleDeferred.add(n.nodeId);
+        continue;
+      }
+      this.sampleDeferred.delete(n.nodeId);
       const prev = this.prevSampleSig.get(n.nodeId);
       const fresh = isFreshSample(prev, stats);
       this.prevSampleSig.set(n.nodeId, {
@@ -1682,6 +1703,11 @@ class ZwaveDataImpl implements ZwaveData {
     if (this.outcomes && !this.outcomes.resolveIdentity(choice)) ok = false;
     if (this.baselines && !this.baselines.resolveIdentity(choice)) ok = false;
     if (this.historyStore && !this.historyStore.resolveIdentity(choice)) ok = false;
+    // Keep and resume reload the ledger, and a pre-v0.64.6 one has its
+    // transient/undersampled split discarded on that load too. Announce it the
+    // way the constructor does, whatever the other stores answered (v0.64.6 review).
+    const idNotice = this.outcomes?.takeLoadNotice?.() ?? null;
+    if (idNotice) this.pushEvent('engine', 'info', 'system', null, idNotice);
     // historyStore holds no state of its own — on `keep` the rings come back
     // only by re-reading the file here (and its 1h age gate may refuse, which
     // is honest: those are cosmetic sparklines, not learned state).
@@ -2871,6 +2897,7 @@ class ZwaveDataImpl implements ZwaveData {
       return;
     }
     this.lastStatsAt = Date.now();
+    this.statsArrivedAt.set(nodeId, this.lastStatsAt);
     const prev = this.statsByNode.get(nodeId);
     // DISPLAYED lastSeen (v0.26, assessment fix). Every (re)subscribe REPLAYS
     // each node's current snapshot, and stamping arrival time unconditionally
@@ -2884,10 +2911,12 @@ class ZwaveDataImpl implements ZwaveData {
     //    update (a send the node acknowledged, or a frame received from it).
     //    The response-timeout counter moves when the node did NOT answer a
     //    command expecting a reply, one report timeout after the acknowledgement
-    //    that already moved commands TX and in its own statistics event; the
-    //    dropped-TX counter is a send the node never acknowledged. Either one
-    //    moving alone stamped "heard" at the moment the node went silent, and
-    //    auto-ping reads this stamp as a probe's answer;
+    //    that already moved commands TX and in its own statistics event, so it
+    //    moving alone stamped "heard" at the moment the node went silent — and
+    //    auto-ping reads this stamp as a probe's answer. The dropped-TX counter
+    //    is excluded defensively: on zwave-js 15.27.1 a plain NoAck throws before
+    //    its only increment, which runs only after a transmission aborted by the
+    //    node's own premature response, when the node was just heard;
     //  · replay with no movement    → carry the previous stamp forward;
     //  · FIRST delivery (no cache)  → we cannot distinguish replay from real,
     //    so no arrival stamp at all — the driver's own lastSeen (driver-ws,
@@ -3179,6 +3208,11 @@ export interface SampleSig {
   to: number;
   dr: number;
 }
+
+/** How long after a node's statistics event its sample waits (v0.64.6 review):
+ *  past zwave-js's 250 ms statistics throttle, so a trailing route update has
+ *  landed. See the SETTLE comment in sampleEvidence. */
+const STATS_SETTLE_MS = 300;
 
 /**
  * Is this sample a genuine OBSERVATION? Requires BOTH conjuncts (review):
