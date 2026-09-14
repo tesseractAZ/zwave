@@ -100,22 +100,32 @@ export interface AutoPingState {
    */
   seenAlive: Set<number>;
   /**
-   * Nodes whose CURRENT Dead episode began while one of this add-on's own
-   * probes to them was still unanswered (v0.64.4). The dwell does not apply.
+   * Nodes whose CURRENT Dead episode began while a liveness-SWEEP probe of ours
+   * to them was still unanswered (v0.64.4). The dwell does not apply to them.
    *
    * The ping verb is a single-attempt NoOp with no route exploration, so on a
    * marginal hop the probe itself fails and the driver marks the node Dead on
-   * that frame. Measured over 49 h of live log: every Dead flag outside a host
-   * reboot (5 of 5) landed 0.26–1.74 s after a liveness-sweep probe, and the
-   * next ping reached the node in 30–50 ms. The dwell exists to leave a
-   * SELF-HEALING outage alone, and a quiet mains node that nothing else
-   * addresses cannot heal itself. v0.64.3, by correctly dating these deaths
-   * from observation, turned each ~60 s blip into 11 minutes Dead, a critical
-   * `node-down` symptom and six minutes of `degraded` — about 2.5 a day.
+   * that frame. Over 49 h of live log, 5 of the 6 Dead flags outside a host
+   * reboot landed 0.26–1.74 s after a sweep probe, and the next ping reached
+   * the node in 30–50 ms. (The sixth came 26 minutes after its sweep, from a
+   * node heard inside the dwell, and healed itself within two minutes — the
+   * case the dwell is for, and it still gets it.) A quiet mains node that
+   * nothing else addresses cannot heal itself, so for a sweep kill the dwell
+   * only held the node down: v0.64.3 turned each ~60 s blip into 11 minutes
+   * Dead, a critical `node-down` symptom and six minutes of `degraded`, about
+   * 2.5 times a day.
+   *
+   * SWEEP ONLY, deliberately. A verification burst keeps probing its node every
+   * tick, so an immediate retry after a burst kill hands the burst a live node
+   * to kill again — and kill, revive, kill is enough Dead crossings for a
+   * critical `dead-flap`, whose episode requests another burst. A manual ping's
+   * pending entry is stamped after the HA call returns, too loose a send time
+   * to pin a death on. Both lanes still have the miss booked when the death is
+   * seen (`settleProbeDeath`); both keep the dwell.
    *
    * `deadSince` still records the observed death, so every age an operator
-   * sees stays true; only the dwell gate reads this set. Cleared on recovery
-   * and on roster departure.
+   * sees stays true; the dwell gate and the traffic check read this set.
+   * Cleared on recovery and on roster departure.
    */
   probeDeath: Set<number>;
   /** nodeId → epoch ms of the last STALE (liveness) probe. */
@@ -359,9 +369,11 @@ export interface AutoPingInput {
    * the roster was in — and that probe revived it in 104 ms.
    *
    * Nothing else is released. Rebuild, capability data, storm and the dwell
-   * still gate the ladder, and the driver link is enforced by the candidate
-   * rule itself (`isListening` comes only from its flag dump). The sweep and
-   * verification lanes serve the whole window: they have no outage to end.
+   * still gate the ladder — and inside the window those gates still REPORT
+   * `boot-window`, so no start-up alarm is released with it. The driver link is
+   * enforced by the candidate rule itself (`isListening` comes only from its
+   * flag dump). The sweep and verification lanes serve the whole window: they
+   * have no outage to end.
    */
   bootDeadLane?: boolean;
 }
@@ -500,8 +512,14 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   // The dead ladder alone may pass once the roster is ready (v0.64.4) — see
   // `bootDeadLane`; it rejoins the window below, before the measurement lanes.
   if (booting && !input.bootDeadLane) return { ...base, suppressed: 'boot-window' };
+  // While the ladder runs inside the window, the gates below still REPORT
+  // `boot-window` (v0.64.4 review). `storm` and `no-capability-data` raise
+  // `binary_sensor.zwave_tui_degraded` (haStates.ts) and the storm WARN, and
+  // until v0.64.4 the window hid both for its whole length. Releasing the ladder
+  // must not also release a start-up alarm for a mesh that is still settling.
+  const gate = (why: AutoPingSuppression): AutoPingSuppression => (booting ? 'boot-window' : why);
   // A rebuild is already rewriting routes; nodes drop in and out by design.
-  if (controller?.isRebuildingRoutes) return { ...base, suppressed: 'rebuilding-routes' };
+  if (controller?.isRebuildingRoutes) return { ...base, suppressed: gate('rebuilding-routes') };
 
   // A PASS OVER AN EMPTY POPULATION IS NOT AN ALL-CLEAR (v0.52.0). With the
   // driver-WS link dark the engine reported `running · candidates 0 · dead 0 ·
@@ -510,11 +528,11 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   // Predicated on the UNKNOWN count, not on emptiness: an all-battery mesh has
   // capability data and is genuinely nothing to sweep.
   if (listeningNodes.length === 0 && capabilityUnknown > 0) {
-    return { ...base, suppressed: 'no-capability-data' };
+    return { ...base, suppressed: gate('no-capability-data') };
   }
 
   const stormLimit = Math.max(STORM_MIN_NODES, Math.ceil(listeningNodes.length * STORM_FRACTION));
-  if (dead.length >= stormLimit) return { ...base, suppressed: 'storm' };
+  if (dead.length >= stormLimit) return { ...base, suppressed: gate('storm') };
 
   const ping: number[] = [];
   const launchGaveUp: number[] = [];
@@ -540,7 +558,14 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
     // whose own traffic proves it alive. The dwell is the right window — it is
     // already the engine's definition of "long enough to mean something".
     const heard = n.stats?.lastSeen ?? null;
-    if (heard != null && now - heard < config.afterMs) {
+    // …but not traffic OLDER than a sweep kill (v0.64.4 review). That death was
+    // pinned on our probe only because nothing was heard after the probe went
+    // out, so the Dead flag is the newer evidence. Without this, a node heard a
+    // few minutes before the sweep knocked it Dead was filed as "talking" and
+    // waited out the dwell after all.
+    const voiceBeforeKill = heard != null && input.state.probeDeath.has(n.nodeId) &&
+      heard < (input.state.deadSince.get(n.nodeId) ?? Number.NEGATIVE_INFINITY);
+    if (heard != null && now - heard < config.afterMs && !voiceBeforeKill) {
       talkingWhileDead.push(n.nodeId);
       continue;
     }
@@ -737,7 +762,8 @@ export interface ProbeDeathMiss { nodeId: number; misses: number; cls: ProbeClas
  *
  * "Unanswered" is the judgment's own test, applied early: not heard since the
  * probe went out. A probe the node answered before dying did not kill it, and
- * stays pending for the ordinary judgment.
+ * stays pending for the ordinary judgment. Every lane's unanswered probe is
+ * booked; only a SWEEP kill exempts the node from the dwell (see `probeDeath`).
  */
 function settleProbeDeath(state: AutoPingState, nodeId: number, lastHeard: number | null, now: number): ProbeDeathMiss[] {
   const pending = state.awaitingAnswer.get(nodeId);
@@ -747,7 +773,7 @@ function settleProbeDeath(state: AutoPingState, nodeId: number, lastHeard: numbe
   const rest = pending.filter((p) => !killed.includes(p));
   if (rest.length > 0) state.awaitingAnswer.set(nodeId, rest);
   else state.awaitingAnswer.delete(nodeId);
-  state.probeDeath.add(nodeId);
+  if (killed.some((p) => p.lane === 'sweep')) state.probeDeath.add(nodeId);
   return killed.map(({ cls, lane }) => {
     const misses = (state.missStreak.get(nodeId) ?? 0) + 1;
     state.missStreak.set(nodeId, misses);
@@ -995,7 +1021,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // Only the fixed-cadence sweep feeds the persisted reply rate (v0.40.2).
       if (s.lane === 'sweep') o.onProbeResult?.(s.nodeId, false, s.cls);
       const m = `auto-ping: node ${s.nodeId} did NOT answer its probe ` +
-        `(${ordinal(s.misses)} consecutive miss — the driver marked it Dead on that frame)`;
+        `(${ordinal(s.misses)} consecutive miss — the node has since been marked Dead)`;
       o.log(s.misses >= 2 ? 'warn' : 'info', s.nodeId, m);
       (s.misses >= 2 ? (o.log2?.warn ?? o.log2) : o.log2)?.(m);
     }
@@ -1195,10 +1221,14 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       const priorTries = state.attempts.get(nodeId);
       const attempt = (state.attempts.get(nodeId) ?? 0) + 1;
       noteAttempt(state, nodeId, t);
-      // v0.64.4: a death on our own probe skipped the dwell — do not claim it ran.
+      // v0.64.4: a sweep kill skips the dwell, so do not claim the dwell ran —
+      // and say only what was measured (the node went Dead with our probe to it
+      // unanswered), which is a correlation, not a verdict on the cause.
       const msg = state.probeDeath.has(nodeId)
-        ? `auto-ping: node ${nodeId} went Dead on our own probe, so the dwell does not apply — ` +
-          `probing (attempt ${attempt}/${o.config.maxAttempts})`
+        ? (attempt === 1
+          ? `auto-ping: node ${nodeId} went Dead with our sweep probe to it unanswered — probing without the dwell `
+          : `auto-ping: node ${nodeId} is still Dead after the immediate retry — probing `) +
+          `(attempt ${attempt}/${o.config.maxAttempts})`
         : `auto-ping: node ${nodeId} has been Dead past the dwell — ` +
           `probing (attempt ${attempt}/${o.config.maxAttempts})`;
       o.log('info', nodeId, msg);

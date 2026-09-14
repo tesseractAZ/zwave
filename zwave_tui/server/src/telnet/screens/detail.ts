@@ -513,7 +513,9 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         // about 22 — green where it should have read yellow.
         const preCredit = cov.creditEpoch == null || cov.firstSeenAt < cov.creditEpoch;
         const creditLong = ' — before v0.64.4 a sweep that knocked the node Dead could count as answered';
-        const creditShort = ' — pre-v0.64.4 a probe that killed it may read answered';
+        // 47 wide, the lane caveat's short form: at the 60-column console floor kv()
+        // leaves exactly 47 (v0.64.4 review — the first cut was 54 and clipped).
+        const creditShort = ' — pre-v0.64.4 a killing probe may read answered';
         if (preCredit) {
           body.push(kv('', c.grey((inner - KV_GUTTER >= creditLong.trim().length ? creditLong : creditShort).trim()), inner));
         }

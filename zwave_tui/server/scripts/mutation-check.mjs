@@ -572,6 +572,39 @@ const MUTANTS = [
     find: '      const msg = state.probeDeath.has(nodeId)',
     repl: '      const msg = false',
     what: 'a retry without the dwell says why instead of claiming the dwell ran' },
+  /* ── v0.64.4 review ───────────────────────────────────────────────────── */
+  { id: 'autoping-probe-death-sweep-only', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Lets a verification-burst kill skip the dwell: the burst then kills the
+    // revived node again, and kill–revive–kill is a critical dead-flap.
+    find: "  if (killed.some((p) => p.lane === 'sweep')) state.probeDeath.add(nodeId);",
+    repl: '  state.probeDeath.add(nodeId);',
+    what: 'only a sweep kill exempts a node from the dwell' },
+  { id: 'autoping-probe-death-voice-before-kill', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Files a node heard minutes before the sweep killed it as "talking", so it
+    // waits out the dwell after all.
+    find: '    if (heard != null && now - heard < config.afterMs && !voiceBeforeKill) {',
+    repl: '    if (heard != null && now - heard < config.afterMs && !(voiceBeforeKill && false)) {',
+    what: 'traffic older than a sweep kill does not count as heard within the dwell' },
+  { id: 'autoping-probe-death-voice-after-death-talks', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Discounts ALL traffic on a killed node, including a voice newer than the
+    // death — which still outranks the flag (v0.42.0).
+    find: '      heard < (input.state.deadSince.get(n.nodeId) ?? Number.NEGATIVE_INFINITY);',
+    repl: '      true;',
+    what: 'a voice newer than the death is still trusted over the Dead flag' },
+  { id: 'autoping-probe-death-settles-only-sent', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '  const killed = pending.filter((p) => p.at <= now && (lastHeard == null || lastHeard < p.at));',
+    repl: '  const killed = pending.filter((p) => (lastHeard == null || lastHeard < p.at));',
+    what: 'settlement touches only probes already sent' },
+  { id: 'autoping-probe-death-keeps-unsettled', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    find: '  if (rest.length > 0) state.awaitingAnswer.set(nodeId, rest);\n  else state.awaitingAnswer.delete(nodeId);',
+    repl: '  void rest;\n  state.awaitingAnswer.delete(nodeId);',
+    what: 'probes a death did not settle stay pending for the ordinary judgment' },
+  { id: 'autoping-boot-gates-report-window', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Releasing the ladder would also release storm / no-capability-data —
+    // both raise binary_sensor.zwave_tui_degraded — inside the boot window.
+    find: "  const gate = (why: AutoPingSuppression): AutoPingSuppression => (booting ? 'boot-window' : why);",
+    repl: "  const gate = (why: AutoPingSuppression): AutoPingSuppression => (booting && false ? 'boot-window' : why);",
+    what: 'inside the boot window every gate the ladder passes still reports boot-window' },
   /* ── v0.64.4: the boot window holds the measurement lanes, not the ladder ─ */
   { id: 'autoping-boot-dead-lane', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Holds the ladder for the whole wall-clock window — after the 09-13 host
@@ -681,7 +714,8 @@ const MUTANTS = [
     repl: '  return !n.isController;',
     what: 'auto-ping never touches a sleeping or battery node' },
   { id: 'autoping-storm-guard', file: 'src/zwave/autoPing.ts',
-    find: "  if (dead.length >= stormLimit) return { ...base, suppressed: 'storm' };",
+    // Repointed v0.64.4: the suppression now reads through gate().
+    find: "  if (dead.length >= stormLimit) return { ...base, suppressed: gate('storm') };",
     repl: '',
     what: 'a mesh-wide outage suppresses auto-ping instead of flooding the controller' },
   { id: 'autoping-boot-window', file: 'src/zwave/autoPing.ts',
@@ -1771,8 +1805,9 @@ const MUTANTS = [
     // Restores the world in which node 49 was declared node-down: the driver's
     // reactive Dead flag alone decides, so a node whose own traffic proves it
     // reachable still burns remediation budget and still summons a human.
-    find: '    if (heard != null && now - heard < config.afterMs) {',
-    repl: '    if (false) {',
+    // Repointed v0.64.4: the gate now also excludes voice older than a sweep kill.
+    find: '    if (heard != null && now - heard < config.afterMs && !voiceBeforeKill) {',
+    repl: '    if (false && !voiceBeforeKill) {',
     what: "a node heard from inside the dwell is reachable, whatever the flag says" },
   { id: 'silent-dead-node-still-probed', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // The guard must not swallow the case the ladder exists for — a genuinely

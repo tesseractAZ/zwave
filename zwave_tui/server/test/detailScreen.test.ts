@@ -922,7 +922,8 @@ test('the REVIVAL-CREDIT caveat has its own stamp and retires on it (v0.64.4)', 
 
 test('the revival-credit caveat is never cut mid-claim (v0.64.4)', () => {
   const d = withProbes({ probesAsked: 25, probesAnswered: 25, firstSeenAt: 500, laneEpoch: 100, creditEpoch: 1_000 } as never);
-  for (const cols of [80, 100, 120, 160, 200]) {
+  // 60 is the browser console's floor (wsConsole.ts); 73 sits between the forms.
+  for (const cols of [60, 66, 73, 80, 87, 88, 100, 120, 160, 200]) {
     const lines = renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip);
     const row = lines.find((l) => /v0\.64\.4/.test(l));
     assert.ok(row, `${cols} cols: the caveat must render`);

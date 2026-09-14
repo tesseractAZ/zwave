@@ -2,19 +2,20 @@
 
 ## 0.64.4
 
-### Fixed — a death on the add-on's own probe was held for the full dwell
+### Fixed — a node the add-on's own sweep knocked Dead was held for the full dwell
 
 v0.64.3 stopped backdating a death the runner watched, so the ladder waited the
-full dwell before its first probe. A log review two days later showed that the
-premise did not hold on the live mesh. Every Dead flag outside a host reboot —
-five in 49 hours — was caused by the add-on's own liveness sweep. The ping verb
-is a single-attempt NoOp with no route exploration. On a marginal hop it fails,
-the driver marks the node Dead on that frame (0.26–1.74 s after the sweep), and
-the next ping reaches the node in 30–50 ms.
+full dwell before its first probe. A log review two days later showed what those
+deaths were. Of the six Dead flags the add-on saw outside a host reboot in 49
+hours, five landed 0.26–1.74 s after its own liveness-sweep probe. The ping verb
+is a single-attempt NoOp with no route exploration: on a marginal hop it fails,
+the driver marks the node Dead on that frame, and the next ping reached the node
+in 30–50 ms. The sixth came 26 minutes after its sweep, from a node heard inside
+the dwell, and healed itself within two minutes — exactly the case the dwell
+exists for.
 
-The dwell exists to leave an outage that is healing itself alone. A quiet mains
-node that nothing else addresses cannot heal itself, so for these deaths the
-dwell only held the node down:
+A quiet mains node that nothing else addresses cannot heal itself, so for a sweep
+kill the dwell only held the node down:
 
 | | v0.64.2 | v0.64.3 |
 |---|---|---|
@@ -22,19 +23,28 @@ dwell only held the node down:
 | Critical `node-down` symptom | no | yes |
 | `binary_sensor.zwave_tui_degraded` | never on | on for 6 min |
 
-About 2.5 of these a day. A node that goes Dead while one of the add-on's probes
-to it is still unanswered is now its own case:
+About 2.5 of these a day. A node that goes Dead while a sweep probe to it is
+still unanswered is now its own case:
 
-- The probe is booked as a miss on the tick the death is seen: logged, counted
-  in the miss streak, and — for a sweep probe — in the persisted reply rate.
-- The dwell does not apply, so the ladder probes on that same tick. Attempts,
-  backoff and the give-up are unchanged, and the ladder's log line says why the
-  dwell was skipped instead of claiming it ran.
+- The probe is booked as a miss on the tick the death is seen: logged, counted in
+  the miss streak and in the persisted reply rate.
+- The dwell does not apply, so the ladder probes on that same tick. Traffic heard
+  *before* the death no longer counts as "heard within the dwell" either — the
+  failed probe is the newer evidence. Attempts, backoff and the give-up are
+  unchanged.
 - `deadSince` still records the observed death, so every age on screen stays
   true.
-- A watched death with no unanswered probe behind it still serves the full dwell
-  (the v0.64.3 rule), and a node first seen Dead is still dated from `lastSeen`
-  (v0.50.0).
+- The log states what was measured — *went Dead with our sweep probe to it
+  unanswered* — rather than naming a cause.
+
+Only the sweep earns the exemption. A verification burst keeps probing its node
+every tick, so an immediate retry would hand the burst a live node to kill again,
+and kill–revive–kill is enough Dead crossings for a critical `dead-flap`, whose
+episode requests another burst. A manual ping's pending entry is stamped after
+the Home Assistant call returns, which is too loose to pin a death on. Both still
+have the unanswered probe booked as a miss when the death is seen, and both keep
+the dwell. So does a watched death with no unanswered probe behind it (the v0.64.3
+rule), and a node first seen Dead is still dated from `lastSeen` (v0.50.0).
 
 "Unanswered" is the answer judgment's own test, applied early: the node has not
 been heard since the probe went out. A probe it answered before dying did not
@@ -46,18 +56,18 @@ Booking the miss at the death, rather than at the 90-second answer grace, also
 closes a counting error present from v0.50.0 to v0.64.2. The ladder's retry
 revived the node inside the grace, `lastSeen` advanced past the sweep probe's
 send time, and the probe that had knocked the node Dead was booked **answered**.
-Those credits land on exactly the weakest nodes: in one 49-hour window the
-mesh's weakest outlet was credited 25 of 25 sweeps where it had answered about
-22. v0.64.3 booked these honestly only by accident, because its dwell outlasted
-the grace.
+Those credits land on exactly the weakest nodes: in one 49-hour window the mesh's
+weakest outlet was credited 25 of 25 sweeps where it had answered about 22.
+v0.64.3 booked these honestly only by accident, because its dwell outlasted the
+grace. One residual remains: a death that heals within a single 60-second tick is
+never seen, so its probe can still be credited.
 
 The persisted counters are not rewritten. NODE DETAIL instead carries a second
-caveat under **Probes** — *before v0.64.4 a sweep that knocked the node Dead
-could count as answered* — gated on a new store stamp, `creditEpoch`, which
-follows the `laneEpoch` rules: stamped on the first save after the upgrade, read
-back rather than re-taken on reload, and absent keeps the caveat. A node first
-seen after the stamp has nothing to disclose, and the two caveats retire
-independently.
+caveat under **Probes** — *before v0.64.4 a sweep that knocked the node Dead could
+count as answered* — gated on a new store stamp, `creditEpoch`, which follows the
+`laneEpoch` rules: stamped on the first save after the upgrade, read back rather
+than re-taken on reload, and absent keeps the caveat. The two caveats retire
+independently, and both fit the 60-column console floor.
 
 ### Changed — a node already Dead at start-up no longer waits out the boot window
 
@@ -69,10 +79,14 @@ Assistant until the ladder's first probe at start + 5 min exactly, about three
 minutes after the roster was in. That probe revived it in 104 ms.
 
 The dead-node ladder now acts as soon as the roster is ready. Rebuild, capability
-data, storm and the dwell still gate it, and the driver link is still required,
-because `isListening` comes only from its flag dump. The liveness sweep and the
-verification probes still wait out the whole window. While the ladder acts inside
-it, the decision trace reads `suppressed: boot-window (dead ladder open, probing N)`.
+data, storm and the dwell still gate it, and inside the window those gates still
+report `boot-window`, so no start-up `degraded` and no storm warning is released
+with it. The driver link is still required, because `isListening` comes only from
+its flag dump. The liveness sweep and the verification probes still wait out the
+whole window. While the ladder acts inside it, the decision trace reads
+`suppressed: boot-window (dead ladder open, probing N)`. The trade: a restart loop
+no longer rate-limits the ladder, which can probe each quiet Dead node once per
+start, no sooner than the first tick 60 s in.
 
 ### Corrected — the 0.64.3 notes overstated the harm they fixed
 
@@ -82,9 +96,7 @@ anything but Dead, so a node that answered the first attempt had its whole budge
 back. The measurable effect of the old behaviour was the false answered credits
 described above.
 
-Thirteen tests pin the behaviour. Twenty new mutants in the mutation harness show
-that each guard is load-bearing, and two existing mutants were repointed to the
-lines they guard.
+TESTS_AND_MUTANTS_LINE
 
 ## 0.64.3
 
