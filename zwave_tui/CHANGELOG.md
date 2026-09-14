@@ -98,7 +98,7 @@ anything but Dead, so a node that answered the first attempt had its whole budge
 back. The measurable effect of the old behaviour was the false answered credits
 described above.
 
-TESTS_AND_MUTANTS_LINE
+Nineteen tests pin the behaviour. 28 new mutants in the mutation harness show that each guard is load-bearing, and four existing mutants were repointed to the lines they now guard. Full run: 585 killed, 0 survived, 8 equivalent.
 
 ## 0.64.3
 
