@@ -1359,7 +1359,7 @@ class ZwaveDataImpl implements ZwaveData {
     // primitive for deciding whether a ping was answered since v0.36 and never
     // applied it to the one probe a human actually asked for — `p` reported
     // "sent" and then said nothing, which is the weakest claim on the screen
-    // (HA returns before the node answers, so "sent" is not "answered").
+    // (HA usually returns before the node answers, and "sent" is not "answered").
     //
     // Registered once the send SUCCEEDS, but DATED from its launch (v0.64.5).
     // HA's ping button starts the driver's ping in the background and returns,

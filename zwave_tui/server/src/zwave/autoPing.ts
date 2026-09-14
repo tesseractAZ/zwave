@@ -127,8 +127,9 @@ export interface AutoPingState {
    * reviewed for v0.64.5, HA recorded 1,081 ping-button presses and every one
    * was the engine's. And the exemption discards traffic heard before the
    * death. The give-up notice tells an operator to operate the device and then
-   * ping it; if that command clears the Dead flag, the ping's NOP makes a fresh
-   * watched death, and for a device that ignores NOPs (v0.42.0) the exemption
+   * ping it; if that command clears the Dead flag and a tick sees the node
+   * Alive before the ping, the ping's NOP makes a fresh watched death, and for
+   * a device that ignores NOPs (v0.42.0) the exemption
    * would trade its Dead-but-talking notice for an immediate retry of the very
    * frame it ignores. The operator is at the keyboard, and pressing `p` again
    * is the retry. Both lanes still have the miss booked when the death is seen
@@ -729,8 +730,9 @@ export function judgeProbeAnswers(
   for (const [nodeId, pending] of [...state.awaitingAnswer]) {
     // Judge EVERY matured probe, oldest first (v0.40) — the entries are
     // appended as registered, which is chronological except for a manual ping
-    // registered after an engine probe sent during its call (v0.64.5; the two
-    // are milliseconds apart), and a burst leaves several in flight at once.
+    // registered after an engine probe sent during its call (v0.64.5; normally
+    // milliseconds apart, up to ~10 s while the HA WebSocket re-authenticates),
+    // and a burst leaves several in flight at once.
     const mature = pending.filter((p) => now - p.at >= graceMs);
     if (mature.length === 0) continue;
     const young = pending.filter((p) => now - p.at < graceMs);
@@ -794,8 +796,9 @@ function settleProbeDeath(state: AutoPingState, nodeId: number, lastHeard: numbe
   // kill–revive–kill loop sweep-only exists to stop. A manual ping registers
   // after its call returns, so a sweep sent to the same node during that call
   // can sit before it though sent later (v0.64.5); the manual entry then
-  // decides and keeps the dwell — the conservative reading of two frames
-  // milliseconds apart.
+  // decides and keeps the dwell — the conservative reading of two frames sent
+  // close together (normally milliseconds apart, up to ~10 s while the HA
+  // WebSocket re-authenticates).
   if (killed[killed.length - 1].lane === 'sweep') state.probeDeath.add(nodeId);
   return killed.map(({ cls, lane }) => {
     const misses = (state.missStreak.get(nodeId) ?? 0) + 1;

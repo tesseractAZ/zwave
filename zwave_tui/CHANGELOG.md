@@ -9,8 +9,9 @@ grace the add-on checks whether the node's `lastSeen` moved past the moment the
 probe went out. The moment it recorded was when Home Assistant's `button.press`
 call returned, not when the ping was sent. Home Assistant's Z-Wave JS ping button
 starts the ping in the background and returns without waiting, so that is
-usually early enough: on the reference mesh a node's answer is logged 54–197 ms
-after the probe goes out. But the answer and Home Assistant's reply race. When
+usually early enough: in five dead-ladder probes on the reference mesh, the
+driver logged the revived node alive 54–197 ms after the add-on logged the probe.
+But the answer and Home Assistant's reply race. When
 the reply loses — a busy Home Assistant, or a node that answers in a few tens of
 milliseconds — the recorded send time came after the answer. The log then said
 *did NOT answer its probe* for a node that had answered, and its consecutive-miss
@@ -42,10 +43,11 @@ death on. That reason is gone. The exclusion stays, for two others:
   rests on five measured sweep kills.
 - The exemption also stops traffic heard *before* the death from counting as
   "heard within the dwell". The give-up notice tells an operator to operate the
-  device and then ping it. If that command clears the Dead flag, the ping makes a
-  fresh death, and for a device that ignores pings but obeys commands (v0.42.0)
-  the exemption would replace the Dead-but-talking notice with an immediate retry
-  of the one frame it ignores.
+  device and then ping it. If that command clears the Dead flag and the add-on
+  sees the node Alive before the ping, the ping makes a fresh death, and for a
+  device that ignores pings but obeys commands (v0.42.0) the exemption would
+  replace the Dead-but-talking notice with an immediate retry of the one frame
+  it ignores.
 
 The operator who pressed `p` is at the keyboard, and pressing it again is the
 retry.
