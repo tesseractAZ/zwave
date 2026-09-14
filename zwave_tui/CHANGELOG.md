@@ -63,7 +63,8 @@ Six new tests pin the behaviour — one runs the real action runner and auto-pin
 on a single clock, with the answer recorded before Home Assistant's reply
 arrives — and one existing test now checks the stamp is handed on. Seven new
 mutants in the mutation harness show that every hop is load-bearing, and one
-existing mutant was repointed to the changed signature.
+existing mutant was repointed to the changed signature. Full run: 592 killed,
+0 survived, 8 equivalent.
 
 ## 0.64.4
 
