@@ -93,7 +93,7 @@ next 10-second tick instead, so the run never reads the previous frame's rate.
 0.64.5 (a manual ping dated from its launch) was released but not deployed; it
 ships with this release.
 
-TESTS_AND_MUTANTS_LINE
+Twenty-eight new tests pin the three fixes and the review corrections, and 45 new mutants in the mutation harness show each guard is load-bearing; three existing mutants were repointed to the lines they now guard. Full run: 637 killed, 0 survived, 8 equivalent.
 
 ## 0.64.5
 

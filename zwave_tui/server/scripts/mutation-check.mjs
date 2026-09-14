@@ -674,8 +674,9 @@ const MUTANTS = [
     repl: '        const liveStart = ep.onsetMs - DWELL_MS;',
     what: 'the live span runs from the dwell start, so a late open tick cannot relabel an aged-out reading' },
   { id: 'undersampled-boundary-inclusive', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
-    find: '          if (liveMs >= DWELL_MS + UNDERSAMPLED_AFTER_MS) {',
-    repl: '          if (liveMs > DWELL_MS + UNDERSAMPLED_AFTER_MS) {',
+    // Repointed in the v0.64.6 review: the quiet-node guard joined this line.
+    find: "          if (kind === 'quiet-node' || liveMs >= DWELL_MS + UNDERSAMPLED_AFTER_MS) {",
+    repl: "          if (kind === 'quiet-node' || liveMs > DWELL_MS + UNDERSAMPLED_AFTER_MS) {",
     what: 'a symptom live exactly the dwell plus the burst span is undersampled' },
   { id: 'open-stores-dwell-start', file: 'src/zwave/outcomes.ts', tests: ['outcomes', 'zwaveDataChurn'],
     find: '        ...(openOpts?.dwellStartMs != null ? { dwellStartMs: openOpts.dwellStartMs } : {}),',
@@ -813,7 +814,9 @@ const MUTANTS = [
     // A sample between zwave-js's leading counter event and its trailing route
     // update reads the previous frame's rate as this transmission's reading.
     find: '      if (arrived != null && now - arrived < STATS_SETTLE_MS && !this.sampleDeferred.has(n.nodeId)) {',
-    repl: '      if (false && arrived != null && now - arrived < STATS_SETTLE_MS && !this.sampleDeferred.has(n.nodeId)) {',
+    // `false && …` does not compile (an always-falsy condition); an arrival
+    // can never be in the future, so this disables the rule and type-checks.
+    repl: '      if (arrived != null && now - arrived < 0 && !this.sampleDeferred.has(n.nodeId)) {',
     what: 'a node is not sampled inside the statistics throttle window' },
   { id: 'evidence-sample-defers-at-most-once', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     find: '      if (arrived != null && now - arrived < STATS_SETTLE_MS && !this.sampleDeferred.has(n.nodeId)) {',
@@ -1980,15 +1983,17 @@ const MUTANTS = [
     // transient branch, asserting "it ended quickly" about a symptom whose
     // duration the engine never measured.
     // Repointed v0.64.6: the split now reads the symptom's live span.
-    find: '          if (liveMs >= DWELL_MS + UNDERSAMPLED_AFTER_MS) {',
-    repl: '          if (liveMs >= Number.MAX_SAFE_INTEGER) {',
+    // Repointed in the v0.64.6 review: the quiet-node guard joined this line.
+    find: "          if (kind === 'quiet-node' || liveMs >= DWELL_MS + UNDERSAMPLED_AFTER_MS) {",
+    repl: "          if (kind === 'quiet-node' || liveMs >= Number.MAX_SAFE_INTEGER) {",
     what: 'a long episode with a starved before-window is undersampled, not transient' },
   { id: 'undersampled-needs-real-duration', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     // Calls every starved episode undersampled, erasing the genuinely brief
     // ones the v0.39 taxonomy was built for.
     // Repointed v0.64.6 (see undersampled-is-not-transient).
-    find: '          if (liveMs >= DWELL_MS + UNDERSAMPLED_AFTER_MS) {',
-    repl: '          if (liveMs >= 0) {',
+    // Repointed in the v0.64.6 review: the quiet-node guard joined this line.
+    find: "          if (kind === 'quiet-node' || liveMs >= DWELL_MS + UNDERSAMPLED_AFTER_MS) {",
+    repl: "          if (kind === 'quiet-node' || liveMs >= 0) {",
     what: 'a genuinely brief episode is still reported as a transient blink' },
   { id: 'undersampled-tag-renders', file: 'src/zwave/outcomes.ts', tests: ['outcomes'],
     find: "        ? ' (undersampled — this node reports too rarely to reach the floor, whatever the duration)'",
