@@ -51,7 +51,12 @@ export interface ActionRunnerOptions {
   /** `origin` carries WHO ran it (v0.47.0) — the data layer needs it to route a
    *  MANUAL ping into the probe-judging machinery, which the engine already
    *  owns and never applied to the one probe a human actually asked for. */
-  onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin) => void;
+  /** `sentAt` is when `run()` LAUNCHED the action, read before the call is
+   *  awaited (v0.64.5); passed on success. Home Assistant's ping button starts
+   *  the driver's ping in the background and returns, so the node's answer and
+   *  HA's reply race — a stamp read after the call resolves can post-date an
+   *  answer that won, and the probe judge (`lastSeen >= at`) books it a miss. */
+  onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin, sentAt?: number) => void;
   /** v0.23: invalidate a node's cached config parameters after a successful write,
    *  so the DETAIL screen re-fetches and shows the new value. */
   onConfigWritten?: (nodeId: number) => void;
@@ -60,6 +65,10 @@ export interface ActionRunnerOptions {
    *  node id is different hardware, and measuring it against the dead device's
    *  normals is how the engine manufactures symptoms out of a swap. */
   onNodeRemoved?: (nodeId: number) => void;
+  /** Clock for `sentAt` (v0.64.5). It must be the clock auto-ping judges with:
+   *  both default to `Date.now`, so production passes neither, and a test that
+   *  injects one injects the other. */
+  now?: () => number;
   enabled: boolean;
 }
 
@@ -152,6 +161,7 @@ export function isNotFailedRefusal(msg: string): boolean {
 }
 
 export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
+  const now = o.now ?? (() => Date.now());
   const deviceCmd = async (type: string, nodeId: number): Promise<void> => {
     const dev = o.deviceIdOf(nodeId);
     if (!dev) throw new Error(`node ${nodeId} has no device`);
@@ -180,9 +190,13 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     if (!o.enabled) return { ok: false, message: 'write actions are disabled' };
     o.log('info', nodeId, `${verb} …`, origin);
     try {
+      // Read BEFORE the call is awaited (v0.64.5) — see `onOutcome`. The node's
+      // answer can beat HA's reply, so a stamp read after `await fn()` can
+      // post-date it, and the judge books an answered ping as a miss.
+      const sentAt = now();
       await fn();
       o.log('info', nodeId, `${verb} → ok`, origin);
-      if (learn) o.onOutcome?.(kind, nodeId, true, undefined, origin);
+      if (learn) o.onOutcome?.(kind, nodeId, true, undefined, origin, sentAt);
       return { ok: true, message: `${verb}: ok` };
     } catch (e) {
       // SANITIZED: this is whatever an HA service call threw, and session.ts

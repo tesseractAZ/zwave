@@ -655,8 +655,8 @@ test('a storm suppresses verification along with everything else', () => {
 /* ── v0.36: a probe's ANSWER is judged from evidence, not from the call ────── */
 
 test('a probe whose node lastSeen advanced is judged ANSWERED', () => {
-  // The service call cannot tell us: HA's ping button awaits async_ping(), which
-  // returns a boolean and raises nothing on silence. lastSeen is the only
+  // The service call cannot tell us: HA's ping button starts async_ping() in the
+  // background and returns, and nothing is raised on silence. lastSeen is the only
   // observable that separates "the probe got through" from "we sent a packet
   // into the dark".
   const s = createAutoPingState();
@@ -1912,8 +1912,11 @@ test('traffic heard BEFORE a sweep kill does not make the node "talking" (v0.64.
 });
 
 test('a MANUAL ping pending at a death is booked a miss, but only a sweep kill skips the dwell (v0.64.4 review)', () => {
-  // A manual ping's entry is stamped after the HA call returns: too loose a
-  // send time to pin a death on.
+  // v0.64.4 kept manual kills out for their loose send stamp. v0.64.5 dates a
+  // manual ping from its launch, and they stay out anyway: no manual kill has
+  // been observed, and `probeDeath` would discard the traffic heard before the
+  // death — which can be the operator's own command, the v0.42.0 evidence that
+  // the flag is stale. See `probeDeath`.
   const s = createAutoPingState();
   const heard = { stats: { lastSeen: T - 120 * MIN } as never };
   tick(s, mesh(20, [node(7, heard)]), T);
@@ -1953,9 +1956,129 @@ test('settlement touches only probes already sent, and leaves the rest pending (
   const heard = { stats: { lastSeen: T - 120 * MIN } as never };
   tick(s, mesh(20, [node(7, heard)]), T);
   pendProbe(s, 7, T + 10_000, 'sweep', 'echo-only');          // sent and unanswered: settled
-  pendProbe(s, 7, T + 5 * MIN, 'manual');                      // stamped after this tick: not yet sent
+  pendProbe(s, 7, T + 5 * MIN, 'manual');                      // dated after this tick (only a clock step does that): not yet sent
   assert.deepEqual(trackEpisodes(s, mesh(20, [dead(7, heard)]), T + MIN).map((x) => x.lane), ['sweep']);
   assert.deepEqual(s.awaitingAnswer.get(7)?.map((p) => p.lane), ['manual'], 'the unsettled entry stays pending');
+});
+
+/* ── v0.64.5: a manual ping is dated from its launch, not from HA's return ── */
+
+test('a MANUAL ping answered before HA replied is judged answered — pended at its launch (v0.64.5)', async () => {
+  // HA's ping button starts the driver's ping and returns, so the node's answer
+  // and HA's reply race. This is the case the answer wins: it is on record
+  // before the operator's `p` can register the probe. Node 8 is the control: the
+  // same answer, pended at registration as v0.47.0–v0.64.4 did, is judged a
+  // miss — so the fixture discriminates, and the judgment provably ran.
+  const { startAutoPing } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const answeredBeforeReply = { stats: { lastSeen: T + 40 } as never };  // the ACK at 40 ms; HA's reply lands at 250 ms
+  const nodes = mesh(20, [node(7, answeredBeforeReply), node(8, answeredBeforeReply)]);
+  const h = startAutoPing({
+    nodes: () => nodes,
+    controller: () => null,
+    ready: () => true,
+    ping: async () => {},
+    log: (_sev, _n, text) => { lines.push(text); },
+    config: cfg(),
+    tickMs: 1_000_000,
+    now: () => clock,
+  });
+  try {
+    clock = T + 250;                     // Home Assistant's call has returned
+    h.notePending(7, 'manual', T);       // dated from its launch
+    h.notePending(8, 'manual');          // the old stamp: registration time
+    clock = T + 2 * MIN;                 // past the 90 s answer grace
+    h.tick();
+    assert.deepEqual(lines.filter((l) => /node 7 did NOT answer/.test(l)), [],
+      `an answer that beat the reply is an answer: ${JSON.stringify(lines)}`);
+    assert.equal(lines.filter((l) => /node 8 did NOT answer/.test(l)).length, 1,
+      `control: a post-return stamp books the same answer as a miss: ${JSON.stringify(lines)}`);
+  } finally { h.stop(); }
+});
+
+test('end to end: the runner stamps a manual ping at launch and auto-ping credits an answer that beat the reply (v0.64.5)', async () => {
+  // The real runner and the real auto-ping on one injected clock. The hook
+  // stands in for index.ts and zwaveData, each pinned on its own, and forwards
+  // the stamp exactly as they do.
+  const { startAutoPing } = await import('../src/zwave/autoPing');
+  const { createActionRunner } = await import('../src/zwave/zwaveActions');
+  let clock = T;
+  const lines: string[] = [];
+  const stats = { lastSeen: T - 120 * MIN };
+  const nodes = mesh(20, [node(7, { stats: stats as never })]);
+  const ap = startAutoPing({
+    nodes: () => nodes,
+    controller: () => null,
+    ready: () => true,
+    ping: async () => {},
+    log: (_sev, _n, text) => { lines.push(text); },
+    config: cfg(),
+    tickMs: 1_000_000,
+    now: () => clock,
+  });
+  const runner = createActionRunner({
+    client: {
+      send: async () => {
+        clock += 40;
+        stats.lastSeen = clock;          // the NoOp is ACKed 40 ms in…
+        clock += 210;                    // …and Home Assistant's reply arrives 250 ms after the press
+        return null;
+      },
+    } as never,
+    entryId: () => 'entry-1',
+    deviceIdOf: (n) => `dev-${n}`,
+    pingEntityOf: (n) => `button.node${n}_ping`,
+    log: () => {},
+    onOutcome: (kind, n, ok, _refusal, origin, sentAt) => {
+      if (ok && kind === 'ping' && n != null && origin === 'you') ap.notePending(n, 'manual', sentAt);
+    },
+    now: () => clock,
+    enabled: true,
+  });
+  try {
+    assert.equal((await runner.ping(7)).ok, true);
+    assert.equal(ap.snapshot().nodes.find((n) => n.nodeId === 7)?.pending, 1, 'the manual probe is owed an answer');
+    clock += 2 * MIN;
+    ap.tick();
+    assert.deepEqual(lines.filter((l) => /node 7 did NOT answer/.test(l)), [],
+      `answered before the reply: ${JSON.stringify(lines)}`);
+    assert.equal(ap.snapshot().nodes.find((n) => n.nodeId === 7), undefined,
+      'judged and cleared, with no miss on the streak');
+  } finally { ap.stop(); }
+});
+
+test('a manual ping answered before HA replied is not blamed for a LATER death (v0.64.5)', async () => {
+  // `settleProbeDeath` applies the judge's own test (`lastHeard < at`) at the
+  // death. With the post-return stamp, a node that answered the manual ping and
+  // then went Dead for some other reason inside the grace had that ping booked
+  // as the probe it died on.
+  const { startAutoPing } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  let nodes = mesh(20, [node(7, { stats: { lastSeen: T - 120 * MIN } as never })]);
+  const h = startAutoPing({
+    nodes: () => nodes,
+    controller: () => null,
+    ready: () => true,
+    ping: async () => {},
+    log: (_sev, _n, text) => { lines.push(text); },
+    config: cfg(),
+    tickMs: 1_000_000,
+    now: () => clock,
+  });
+  try {
+    h.tick();                                                     // T: watched Alive
+    clock = T + 250;
+    h.notePending(7, 'manual', T);                                // launched at T…
+    nodes = mesh(20, [dead(7, { stats: { lastSeen: T + 40 } as never })]); // …answered at T + 40, then Dead
+    clock = T + MIN;                                              // the death is seen inside the grace
+    h.tick();
+    assert.deepEqual(lines.filter((l) => /node 7 did NOT answer/.test(l)), [],
+      `an answered probe did not kill the node: ${JSON.stringify(lines)}`);
+    assert.equal(h.snapshot().nodes.find((n) => n.nodeId === 7)?.pending, 1,
+      'it waits for its ordinary judgment');
+  } finally { h.stop(); }
 });
 
 test('after a restart, a node ALREADY Dead is probed once the roster is ready — not at start + 5 min (v0.64.4)', async () => {

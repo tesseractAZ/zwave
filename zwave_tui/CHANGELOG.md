@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.64.5
+
+### Fixed — a race could log an answered manual ping as unanswered
+
+Since v0.47.0 an operator's `p` is judged like an engine probe: after a 90-second
+grace the add-on checks whether the node's `lastSeen` moved past the moment the
+probe went out. The moment it recorded was when Home Assistant's `button.press`
+call returned, not when the ping was sent. Home Assistant's Z-Wave JS ping button
+starts the ping in the background and returns without waiting, so that is
+usually early enough: in five dead-ladder probes on the reference mesh, the
+driver logged the revived node alive 54–197 ms after the add-on logged the probe.
+But the answer and Home Assistant's reply race. When
+the reply loses — a busy Home Assistant, or a node that answers in a few tens of
+milliseconds — the recorded send time came after the answer. The log then said
+*did NOT answer its probe* for a node that had answered, and its consecutive-miss
+streak went up by one. If the node went Dead for some other reason inside the
+grace, the same comparison could book that ping as the probe it died on.
+
+No instance has been observed, because no manual ping has been: over the
+50.5 hours of log reviewed for this release, Home Assistant recorded 1,081
+ping-button presses, and every one was the engine's.
+
+The action runner now reads the clock before it sends, and that launch time
+travels with the outcome to the probe's pending entry — the same wall clock
+`lastSeen` is compared against. The engine's own probes were never affected: each
+is registered before it is sent. Like theirs, the manual send time now precedes
+the transmission — by the Home Assistant round trip and the driver's queue, and
+by up to 10 seconds more while the Home Assistant connection re-authenticates —
+so a frame the node happens to send in that interval counts as its answer.
+
+Nothing else moves. The persisted reply rate never counted manual pings and still
+does not, and the outcome ledger records the ping exactly as before.
+
+### Unchanged, on purpose — a manual kill still waits out the dwell
+
+v0.64.4 lets a node knocked Dead by the add-on's own liveness sweep skip the
+dwell, and kept manual pings out because their send time was too loose to pin a
+death on. That reason is gone. The exclusion stays, for two others:
+
+- No manual kill has been observed (the same 1,081 presses). The sweep exemption
+  rests on five measured sweep kills.
+- The exemption also stops traffic heard *before* the death from counting as
+  "heard within the dwell". The give-up notice tells an operator to operate the
+  device and then ping it. If that command clears the Dead flag and the add-on
+  sees the node Alive before the ping, the ping makes a fresh death, and for a
+  device that ignores pings but obeys commands (v0.42.0) the exemption would
+  replace the Dead-but-talking notice with an immediate retry of the one frame
+  it ignores.
+
+The operator who pressed `p` is at the keyboard, and pressing it again is the
+retry.
+
+### Corrected — Home Assistant does not wait for the ping
+
+Since v0.36 the auto-ping source and DOCS §11.12 have said Home Assistant's ping
+button awaits the driver's ping. It schedules the ping and returns. The conclusion
+drawn from it — a resolved service call says nothing about whether the node
+answered — was right and is unchanged.
+
+Six new tests pin the behaviour — one runs the real action runner and auto-ping
+on a single clock, with the answer recorded before Home Assistant's reply
+arrives — and one existing test now checks the stamp is handed on. Seven new
+mutants in the mutation harness show that every hop is load-bearing, and one
+existing mutant was repointed to the changed signature. Full run: 592 killed,
+0 survived, 8 equivalent.
+
 ## 0.64.4
 
 ### Fixed — a node the add-on's own sweep knocked Dead was held for the full dwell

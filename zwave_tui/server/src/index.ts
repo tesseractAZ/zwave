@@ -98,7 +98,8 @@ async function main(): Promise<void> {
     // including the RED-latching "→ failed" line describing the write itself.
     log: (sev, nodeId, text, origin) => zwaveData.logByOrigin(sev, nodeId, text, origin),
     // M5: feed operator-action outcomes into the learning ledger.
-    onOutcome: (kind, nodeId, ok, refusal, origin) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin),
+    // v0.64.5: with the launch stamp, so a manual ping is judged from its send.
+    onOutcome: (kind, nodeId, ok, refusal, origin, sentAt) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin, sentAt),
     // v0.23: after a config write, drop the stale cache so DETAIL re-fetches.
     onConfigWritten: (nodeId) => zwaveData.invalidateConfigParams(nodeId),
     onNodeRemoved: (nodeId) => zwaveData.forgetNodeBaselines(nodeId),
@@ -150,7 +151,9 @@ async function main(): Promise<void> {
     // suppression, ladder position and probe debt instead of the operator
     // tailing the container log for them.
     zwaveData.setAutoPingSnapshot(() => autoPing!.snapshot());
-    zwaveData.setProbeNotePending((n) => autoPing?.notePending(n));
+    // v0.64.5: a manual probe is dated from the runner's launch stamp, not from
+    // when Home Assistant's call returned (the node's answer can beat HA's reply).
+    zwaveData.setProbeNotePending((n, sentAt) => autoPing?.notePending(n, 'manual', sentAt));
     log(
       `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed, ` +
         `or at once if it went Dead with our sweep probe to it unanswered ` +
