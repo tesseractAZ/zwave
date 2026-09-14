@@ -1820,6 +1820,8 @@ test('the sweep probe that knocked a node Dead is booked UNANSWERED, though the 
   assert.ok(ring.some((m) => /did NOT answer its probe \(1st consecutive miss — the node has since been marked Dead\)/.test(m)),
     `and the miss is on the record: ${ring.join(' | ')}`);
   const revived = clock + 40;
+  // (The retry lands here. When it does NOT, the next rung says so plainly —
+  // see "a sweep kill whose retry fails says so on the next rung".)
   clock += MIN; nodes = [node(1, { isController: true }), node(7, { stats: { lastSeen: revived } as never })];
   h.tick();                                                          // the retry landed
   clock += 5 * MIN; h.tick();                                        // every pending probe has matured
@@ -1922,6 +1924,30 @@ test('a MANUAL ping pending at a death is booked a miss, but only a sweep kill s
   assert.deepEqual(decideAutoPings({ now: T + MIN, state: s, nodes: died, controller: null, config: cfg(), booting: false }).ping, []);
 });
 
+test('the probe NEAREST the death decides the exemption — an older pending sweep lends none to a burst kill (v0.64.4 review)', () => {
+  const s = createAutoPingState();
+  const heard = { stats: { lastSeen: T - 120 * MIN } as never };
+  tick(s, mesh(20, [node(7, heard)]), T);
+  pendProbe(s, 7, T + 10_000, 'sweep', 'echo-only');          // an ordinary lost reply, still pending
+  pendProbe(s, 7, T + 70_000, 'verify');                       // the burst probe the node died on
+  const died = mesh(20, [dead(7, heard)]);
+  assert.deepEqual(trackEpisodes(s, died, T + 2 * MIN).map((x) => x.lane), ['sweep', 'verify'], 'both are misses');
+  assert.equal(s.probeDeath.has(7), false, 'but a burst kill keeps the dwell');
+  assert.deepEqual(decideAutoPings({ now: T + 2 * MIN, state: s, nodes: died, controller: null, config: cfg(), booting: false }).ping, []);
+});
+
+test('an ANSWERED older probe stays pending while the unanswered newer one is settled (v0.64.4 review)', () => {
+  const s = createAutoPingState();
+  tick(s, mesh(20, [node(7, { stats: { lastSeen: T - 120 * MIN } as never })]), T);
+  pendProbe(s, 7, T + 10_000, 'verify');                       // answered…
+  const answered = { stats: { lastSeen: T + 10_050 } as never };
+  pendProbe(s, 7, T + 70_000, 'sweep', 'echo-only');          // …then a sweep it never answered
+  const died = mesh(20, [dead(7, answered)]);
+  assert.deepEqual(trackEpisodes(s, died, T + 2 * MIN).map((x) => x.lane), ['sweep']);
+  assert.deepEqual(s.awaitingAnswer.get(7)?.map((p) => p.lane), ['verify'], 'the answered probe waits for its ordinary judgment');
+  assert.equal(s.probeDeath.has(7), true, 'and the sweep kill earns the exemption');
+});
+
 test('settlement touches only probes already sent, and leaves the rest pending (v0.64.4 review)', () => {
   const s = createAutoPingState();
   const heard = { stats: { lastSeen: T - 120 * MIN } as never };
@@ -1959,4 +1985,25 @@ test('after a restart, a node ALREADY Dead is probed once the roster is ready �
   assert.ok(ring.some((m) => /suppressed: boot-window \(dead ladder open, probing 1\)/.test(m)),
     `the trace must not read plain "suppressed" beside a probe going out: ${ring.join(' | ')}`);
   h.stop();
+});
+
+test('a sweep kill whose retry fails says so on the next rung — no second "without the dwell" (v0.64.4 review)', async () => {
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const ring: string[] = [];
+  const old = { stats: { lastSeen: T - 120 * MIN } as never };
+  let nodes = [node(1, { isController: true }), node(7, old)];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, probe: async () => {},
+    log: (_sev, _id, text) => { ring.push(text); },
+    config: cfg({ staleMs: 120 * MIN }), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN; h.tick();                        // the sweep
+  clock += MIN; nodes = [node(1, { isController: true }), dead(7, old)]; h.tick();   // killed; attempt 1
+  for (let i = 0; i < 10; i++) { clock += MIN; h.tick(); }            // stays Dead through the 10 m backoff
+  h.stop();
+  assert.equal(ring.filter((m) => /probing without the dwell/.test(m)).length, 1, `only the first retry skips the dwell: ${ring.join(' | ')}`);
+  assert.ok(ring.some((m) => /node 7 is still Dead after the immediate retry — probing \(attempt 2\/3\)/.test(m)),
+    `the second rung names itself: ${ring.join(' | ')}`);
 });

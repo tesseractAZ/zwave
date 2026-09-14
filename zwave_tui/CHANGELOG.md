@@ -43,8 +43,10 @@ and kill–revive–kill is enough Dead crossings for a critical `dead-flap`, wh
 episode requests another burst. A manual ping's pending entry is stamped after
 the Home Assistant call returns, which is too loose to pin a death on. Both still
 have the unanswered probe booked as a miss when the death is seen, and both keep
-the dwell. So does a watched death with no unanswered probe behind it (the v0.64.3
-rule), and a node first seen Dead is still dated from `lastSeen` (v0.50.0).
+the dwell. The probe nearest the death decides, so an older sweep still pending
+after an ordinary lost reply lends no exemption to a verification kill. A watched
+death with no unanswered probe behind it keeps the dwell too (the v0.64.3 rule),
+and a node first seen Dead is still dated from `lastSeen` (v0.50.0).
 
 "Unanswered" is the answer judgment's own test, applied early: the node has not
 been heard since the probe went out. A probe it answered before dying did not

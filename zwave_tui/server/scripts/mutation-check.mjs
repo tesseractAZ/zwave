@@ -576,9 +576,19 @@ const MUTANTS = [
   { id: 'autoping-probe-death-sweep-only', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Lets a verification-burst kill skip the dwell: the burst then kills the
     // revived node again, and kill–revive–kill is a critical dead-flap.
-    find: "  if (killed.some((p) => p.lane === 'sweep')) state.probeDeath.add(nodeId);",
+    find: "  if (killed[killed.length - 1].lane === 'sweep') state.probeDeath.add(nodeId);",
     repl: '  state.probeDeath.add(nodeId);',
     what: 'only a sweep kill exempts a node from the dwell' },
+  { id: 'autoping-probe-death-newest-decides', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // "Any sweep" lets an older pending sweep lend its exemption to a burst kill.
+    find: "  if (killed[killed.length - 1].lane === 'sweep') state.probeDeath.add(nodeId);",
+    repl: "  if (killed.some((p) => p.lane === 'sweep')) state.probeDeath.add(nodeId);",
+    what: 'the probe nearest the death decides the dwell exemption' },
+  { id: 'autoping-probe-death-rung-two-wording', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Every rung of a sweep kill claimed "probing without the dwell".
+    find: '        ? (attempt === 1',
+    repl: '        ? (true',
+    what: 'only the first retry after a sweep kill claims to skip the dwell' },
   { id: 'autoping-probe-death-voice-before-kill', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Files a node heard minutes before the sweep killed it as "talking", so it
     // waits out the dwell after all.

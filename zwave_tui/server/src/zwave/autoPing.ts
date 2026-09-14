@@ -773,7 +773,11 @@ function settleProbeDeath(state: AutoPingState, nodeId: number, lastHeard: numbe
   const rest = pending.filter((p) => !killed.includes(p));
   if (rest.length > 0) state.awaitingAnswer.set(nodeId, rest);
   else state.awaitingAnswer.delete(nodeId);
-  if (killed.some((p) => p.lane === 'sweep')) state.probeDeath.add(nodeId);
+  // The NEWEST settled probe decides (entries are appended in send order): the
+  // death followed it most closely. Deciding on "any sweep" let an older sweep
+  // entry, still pending after an ordinary lost reply, lend its exemption to a
+  // verification-burst kill — the kill–revive–kill loop sweep-only exists to stop.
+  if (killed[killed.length - 1].lane === 'sweep') state.probeDeath.add(nodeId);
   return killed.map(({ cls, lane }) => {
     const misses = (state.missStreak.get(nodeId) ?? 0) + 1;
     state.missStreak.set(nodeId, misses);
