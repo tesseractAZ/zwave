@@ -2394,9 +2394,9 @@ const MUTANTS = [
     what: "a manual probe is labelled 'manual', never 'sweep'" },
   /* ── v0.64.5: a manual ping is dated from its launch, not from HA's return ── */
   { id: 'manual-stamp-before-call', file: 'src/zwave/zwaveActions.ts', tests: ['zwaveActions'],
-    // Reads the clock after the call again. HA's ping button awaits the
-    // driver's ping, so the answer is already on record: the stamp post-dates
-    // it and `lastSeen >= at` books an answered manual ping as a miss.
+    // Reads the clock after the call again. HA's ping button returns without
+    // waiting for the driver's ping, so the answer races HA's reply; when it
+    // wins, the stamp post-dates it and `lastSeen >= at` books a miss.
     find: '      const sentAt = now();\n      await fn();',
     repl: '      await fn();\n      const sentAt = now();',
     what: 'a manual ping is stamped at launch, before the service call resolves' },
@@ -2419,7 +2419,7 @@ const MUTANTS = [
     // Restores v0.47.0–v0.64.4: pended at registration, after HA returned.
     find: '    pendProbe(state, nodeId, at ?? now(), lane);',
     repl: '    pendProbe(state, nodeId, now(), lane);',
-    what: 'a manual probe is judged against its launch, so an answer inside the call counts' },
+    what: 'a manual probe is judged against its launch, so an answer that beat the HA reply counts' },
   { id: 'manual-stamp-index-outcome', file: 'src/index.ts', tests: ['configContract'],
     find: '    onOutcome: (kind, nodeId, ok, refusal, origin, sentAt) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin, sentAt),',
     repl: '    onOutcome: (kind, nodeId, ok, refusal, origin) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin),',

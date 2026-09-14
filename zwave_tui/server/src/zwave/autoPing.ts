@@ -120,20 +120,19 @@ export interface AutoPingState {
    * to kill again — and kill, revive, kill is enough Dead crossings for a
    * critical `dead-flap`, whose episode requests another burst.
    *
-   * A manual ping stays out too, though not for the reason v0.64.4 gave. Its
-   * pending entry used to be stamped after the HA call returned; since v0.64.5
-   * it carries the launch stamp, as exact as a sweep's. What remains is
-   * evidence and one interaction. The exemption was granted on measurement,
-   * and the 50.5 h of log reviewed for v0.64.5 holds no manual ping at all
-   * (1,081 ping-button presses, every one the engine's), so no manual kill has
-   * ever been seen. And the exemption discards traffic heard before the death,
-   * which after a manual ping is most likely the operator's own real command:
-   * the give-up notice tells them to operate the device and then ping it. For a
-   * device that ignores NOPs (v0.42.0), that trades its Dead-but-talking notice
-   * for an immediate retry of the very frame it ignores. The operator is at the
-   * keyboard, and pressing `p` again is the retry. Both lanes still have the
-   * miss booked when the death is seen (`settleProbeDeath`); both keep the
-   * dwell.
+   * A manual ping stays out too. v0.64.4's reason — its entry was stamped after
+   * the HA call returned — is gone: since v0.64.5 it carries the launch stamp,
+   * as exact as a sweep's. Two reasons remain. The exemption was granted on
+   * measurement, and no manual kill has ever been seen: over the 50.5 h of log
+   * reviewed for v0.64.5, HA recorded 1,081 ping-button presses and every one
+   * was the engine's. And the exemption discards traffic heard before the
+   * death. The give-up notice tells an operator to operate the device and then
+   * ping it; if that command clears the Dead flag, the ping's NOP makes a fresh
+   * watched death, and for a device that ignores NOPs (v0.42.0) the exemption
+   * would trade its Dead-but-talking notice for an immediate retry of the very
+   * frame it ignores. The operator is at the keyboard, and pressing `p` again
+   * is the retry. Both lanes still have the miss booked when the death is seen
+   * (`settleProbeDeath`); both keep the dwell.
    *
    * `deadSince` still records the observed death, so every age an operator
    * sees stays true; the dwell gate and the traffic check read this set.
@@ -146,8 +145,9 @@ export interface AutoPingState {
    * nodeId → epoch ms of a probe whose ANSWER has not been checked yet (v0.36).
    *
    * The ping verb is an HA `button.press` service call, and HA's zwave_js ping
-   * button awaits `node.async_ping()`, which returns a boolean and raises
-   * nothing when the node stays silent. So the promise resolves either way and
+   * button starts `node.async_ping()` as a background task and returns without
+   * waiting for it (this said "awaits" until v0.64.5; it never did), and nothing
+   * is raised when the node stays silent. So the promise resolves either way and
    * the `.catch` around it can only ever fire on "this node has no ping button"
    * or a WebSocket transport fault — never on the outcome auto-ping exists to
    * detect. Whether the node ANSWERED is therefore not knowable from the call;
@@ -728,7 +728,9 @@ export function judgeProbeAnswers(
   const out: { nodeId: number; answered: boolean; misses: number; cls: ProbeClass; lane: ProbeLane }[] = [];
   for (const [nodeId, pending] of [...state.awaitingAnswer]) {
     // Judge EVERY matured probe, oldest first (v0.40) — the entries are
-    // appended chronologically, and a burst leaves several in flight at once.
+    // appended as registered, which is chronological except for a manual ping
+    // registered after an engine probe sent during its call (v0.64.5; the two
+    // are milliseconds apart), and a burst leaves several in flight at once.
     const mature = pending.filter((p) => now - p.at >= graceMs);
     if (mature.length === 0) continue;
     const young = pending.filter((p) => now - p.at < graceMs);
@@ -785,10 +787,15 @@ function settleProbeDeath(state: AutoPingState, nodeId: number, lastHeard: numbe
   const rest = pending.filter((p) => !killed.includes(p));
   if (rest.length > 0) state.awaitingAnswer.set(nodeId, rest);
   else state.awaitingAnswer.delete(nodeId);
-  // The NEWEST settled probe decides (entries are appended in send order): the
-  // death followed it most closely. Deciding on "any sweep" let an older sweep
-  // entry, still pending after an ordinary lost reply, lend its exemption to a
-  // verification-burst kill — the kill–revive–kill loop sweep-only exists to stop.
+  // The NEWEST settled probe decides (entries are appended as registered, which
+  // is send order for the engine's lanes): the death followed it most closely.
+  // Deciding on "any sweep" let an older sweep entry, still pending after an
+  // ordinary lost reply, lend its exemption to a verification-burst kill — the
+  // kill–revive–kill loop sweep-only exists to stop. A manual ping registers
+  // after its call returns, so a sweep sent to the same node during that call
+  // can sit before it though sent later (v0.64.5); the manual entry then
+  // decides and keeps the dwell — the conservative reading of two frames
+  // milliseconds apart.
   if (killed[killed.length - 1].lane === 'sweep') state.probeDeath.add(nodeId);
   return killed.map(({ cls, lane }) => {
     const misses = (state.missStreak.get(nodeId) ?? 0) + 1;
@@ -1451,8 +1458,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
    *
    * `at` is when the caller LAUNCHED the probe (v0.64.5), read from the clock
    * this runner judges with — both are `Date.now` in production. The manual
-   * path can only register once Home Assistant's call has returned, and HA's
-   * ping button awaits the driver's ping, so the node's answer may already be
+   * path can only register once Home Assistant's call has returned. HA's ping
+   * button starts the driver's ping in the background and returns, so the
+   * node's answer and HA's reply race, and when the answer wins it is already
    * on record. Stamped at `now()` instead, the entry post-dated that answer and
    * `lastSeen >= at` judged an answered ping a miss. Omitted, it is `now()`.
    */

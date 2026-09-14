@@ -152,7 +152,7 @@ async function main(): Promise<void> {
     // tailing the container log for them.
     zwaveData.setAutoPingSnapshot(() => autoPing!.snapshot());
     // v0.64.5: a manual probe is dated from the runner's launch stamp, not from
-    // when Home Assistant's call returned (the answer can land inside the call).
+    // when Home Assistant's call returned (the node's answer can beat HA's reply).
     zwaveData.setProbeNotePending((n, sentAt) => autoPing?.notePending(n, 'manual', sentAt));
     log(
       `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed, ` +

@@ -1099,9 +1099,9 @@ test('a MANUAL ping is registered for judging; an engine one is not double-pende
   // by its own lane; pending it again here would double-attribute it.
   //
   // The runner's launch stamp travels with it (v0.64.5). HA's ping button
-  // awaits the driver's ping, so the answer can be on record before this hook
-  // runs; a probe pended at the hook's own clock post-dated it and was judged
-  // a miss.
+  // starts the driver's ping and returns, so the answer can beat HA's reply;
+  // a probe pended at the hook's own clock then post-dated it and was judged a
+  // miss.
   const ha = fakeHa();
   const dir = mkdtempSync(join(tmpdir(), 'zwtui-manual-'));
   const zd = await bootedZwaveData(ha, {

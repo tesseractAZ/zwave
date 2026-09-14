@@ -52,10 +52,10 @@ export interface ActionRunnerOptions {
    *  MANUAL ping into the probe-judging machinery, which the engine already
    *  owns and never applied to the one probe a human actually asked for. */
   /** `sentAt` is when `run()` LAUNCHED the action, read before the call is
-   *  awaited (v0.64.5); passed on success. Home Assistant's ping button awaits
-   *  the driver's ping, so a node's answer can land while the call is still in
-   *  flight — a stamp read after it resolves post-dates that answer, and the
-   *  probe judge (`lastSeen >= at`) books an answered ping as a miss. */
+   *  awaited (v0.64.5); passed on success. Home Assistant's ping button starts
+   *  the driver's ping in the background and returns, so the node's answer and
+   *  HA's reply race — a stamp read after the call resolves can post-date an
+   *  answer that won, and the probe judge (`lastSeen >= at`) books it a miss. */
   onOutcome?: (kind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin, sentAt?: number) => void;
   /** v0.23: invalidate a node's cached config parameters after a successful write,
    *  so the DETAIL screen re-fetches and shows the new value. */
@@ -190,9 +190,9 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     if (!o.enabled) return { ok: false, message: 'write actions are disabled' };
     o.log('info', nodeId, `${verb} …`, origin);
     try {
-      // Read BEFORE the call is awaited (v0.64.5) — see `onOutcome`. HA's ping
-      // button awaits the driver's ping, so a stamp read after `await fn()`
-      // post-dates the node's answer and the judge books it as a miss.
+      // Read BEFORE the call is awaited (v0.64.5) — see `onOutcome`. The node's
+      // answer can beat HA's reply, so a stamp read after `await fn()` can
+      // post-date it, and the judge books an answered ping as a miss.
       const sentAt = now();
       await fn();
       o.log('info', nodeId, `${verb} → ok`, origin);

@@ -204,11 +204,11 @@ test('ping() still learns — the remediation lane is the one place attribution 
 
 /* ── v0.64.5: the launch is stamped BEFORE the call is awaited ─────────────── */
 
-test('ping() stamps sentAt before the service call resolves — the answer lands inside the call (v0.64.5)', async () => {
-  // Home Assistant's ping button awaits the driver's ping, so a node's answer is
-  // on record before the WebSocket call returns. A stamp read after `await fn()`
-  // post-dates that answer, and the probe judge (`lastSeen >= at`) then books an
-  // answered manual ping as "did NOT answer".
+test('ping() stamps sentAt before the service call resolves, not after (v0.64.5)', async () => {
+  // Home Assistant's ping button starts the driver's ping in the background and
+  // returns, so the node's answer and HA's reply race. A stamp read after
+  // `await fn()` post-dates an answer that won, and the probe judge
+  // (`lastSeen >= at`) then books an answered manual ping as "did NOT answer".
   let clock = 1_000;
   let clockAtSend = -1;
   const seen: Array<{ ok: boolean; sentAt?: number }> = [];

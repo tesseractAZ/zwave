@@ -1359,15 +1359,15 @@ class ZwaveDataImpl implements ZwaveData {
     // primitive for deciding whether a ping was answered since v0.36 and never
     // applied it to the one probe a human actually asked for — `p` reported
     // "sent" and then said nothing, which is the weakest claim on the screen
-    // ("sent" is not "answered").
+    // (HA returns before the node answers, so "sent" is not "answered").
     //
     // Registered once the send SUCCEEDS, but DATED from its launch (v0.64.5).
-    // This note used to say HA returns before the node answers. It does not:
-    // HA's ping button awaits the driver's ping, and the service call awaits the
-    // button, so by the time this runs the answer can already be on record.
-    // Pended at this hook's own "now", the entry post-dated that answer, and the
-    // judge (`lastSeen >= at`) booked an answered manual ping "did NOT answer".
-    // Only 'you' — an engine ping is already pended by its own lane.
+    // HA's ping button starts the driver's ping in the background and returns,
+    // so HA usually replies first — but the node's answer and that reply race,
+    // and when the answer won, a probe pended at this hook's own "now"
+    // post-dated it: the judge (`lastSeen >= at`) booked an answered manual
+    // ping "did NOT answer". Only 'you' — an engine ping is already pended by
+    // its own lane.
     if (ok && actionKind === 'ping' && nodeId != null && origin === 'you') {
       this.probeNotePending?.(nodeId, sentAt);
     }
