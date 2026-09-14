@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.64.6
+
+### Fixed — a brief symptom was blamed on the node's reporting rate
+
+An unverifiable episode whose degraded window never reached its evidence floor
+closes as one of two things: `transient` (the state ended before it could be
+measured) or `undersampled` (it lasted long enough, and the node still reported
+too rarely). The split measured the episode from open to resolve. Resolution
+waits out a 10-minute confirmation window, so every episode measured at least ten
+minutes, `transient` could never be assigned, and every brief blink closed as
+"this node reports too rarely to reach the floor, whatever the duration". In about
+50 hours of live log, 6 of 6 such closures were tagged `undersampled`, all on
+listening nodes; in each, the symptom first went absent within about two minutes
+of the verification burst starting.
+
+The split now measures how long the symptom was live: from its dwell start (the
+first breaching reading) to the first tick it was seen absent, against the dwell
+plus `UNDERSAMPLED_AFTER_MS` (10 minutes). Anchoring at the dwell start rather
+than at the episode's open tick keeps the case `undersampled` exists for — one
+reading that ages out of the 10-minute lookback on a node that answers only its
+two-hourly sweep — on the right side of the boundary whatever the tick timing.
+
+The transient and undersampled tallies persisted before this release were split
+under the old rule, and closed episodes are not kept, so they cannot be re-split.
+A ledger written before 0.64.6 restores everything else, resets both tallies to 0,
+logs the discarded totals, and puts a notice in the TUI's Log. Both tallies are
+display-only; no arm, planner or alarm reads them.
+
+### Fixed — a response timeout was recorded as hearing from the node
+
+Home Assistant's node statistics carry no `lastSeen`, so the add-on stamps the
+arrival of a statistics event in which a counter moved, and auto-ping reads that
+stamp as a probe's answer. Two of the five counters move when the node was not
+heard. `timeoutResponse` counts a command that expects a reply (a Get, or a
+supervised Set) that the node acknowledged but never answered; zwave-js increments
+it one report timeout after the acknowledgement (1.1 s on the reference mesh), in
+its own statistics event, so the stamp landed at the moment the node went silent.
+`commandsDroppedTX` counts a send the node never acknowledged. Either could have
+credited a failed probe as answered, and a sweep kill could have lost its dwell
+exemption.
+
+The stamp now moves only on `commandsTX`, `commandsRX` and `commandsDroppedRX` —
+the zwave-js increments that sit beside the driver's own `lastSeen` update (a send
+the node acknowledged, or a frame received from it). The counters are still
+recorded and displayed; an interval whose only movement is a timeout or a dropped
+send no longer counts as a fresh observation for RTT/RSSI or toward an
+after-window's liveness floor.
+
+### Fixed — one retried frame raised a rate fallback for 30 minutes
+
+`rate-fallback` is meant to fire when the route that sustained 100 kbit/s is
+persistently below it; a single-exchange retry is a named confound. zwave-js
+rewrites a node's cached route rate only when a transmit report arrives, and the
+evidence store copies that value onto every sample. The detector scanned 30
+minutes of samples for any sub-100k value, so one retried frame matured the
+symptom by itself and held it about 30 minutes after the next frame was back at
+100 kbit/s. All three onsets in 15.7 hours of live log were the node's own
+liveness-sweep ping going out at 40 kbit/s with 3 routing attempts; each cost 10
+verification probes and booked an `improved (no action)` recovery.
+
+The evidence store now keeps a per-route rate run folded from every sample, and
+only ticks where an acknowledged transmission landed move it: a copied rate is not
+a reading, and neither is a failed attempt, which also rewrites the rate. A reading
+at 100 kbit/s proves the route and clears the run; a reading below counts once,
+and only if it lands at least 30 seconds after the previous counted one, because
+one exchange can produce several transmit reports seconds apart. The detector
+fires on at least 2 counted readings below 100 kbit/s since the route's newest
+100 kbit/s reading and clears on the next one at 100 kbit/s. A route change starts
+over with no remembered capability, where the old scan remembered it for 30
+minutes.
+
+The trade: a real, sustained fallback on a node that only transmits for the
+two-hourly liveness sweep now surfaces at its second slow transmission plus the
+5-minute dwell — up to about two hours later — and then stays until the link
+recovers, where the old scan cleared it after about 25 minutes and never raised it
+again. The rate run lives in memory and is re-folded from the evidence restored at
+start-up.
+
+### Also in this release
+
+0.64.5 (a manual ping dated from its launch) was released but not deployed; it
+ships with this release.
+
+TESTS_AND_MUTANTS_LINE
+
 ## 0.64.5
 
 ### Fixed — a race could log an answered manual ping as unanswered

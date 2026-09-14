@@ -857,6 +857,11 @@ class ZwaveDataImpl implements ZwaveData {
     const ocPath = (opts.outcomesPath ?? process.env.OUTCOMES_PATH) || undefined;
     this.outcomes = this.baselines ? createOutcomeStore({ path: ocPath, log: this.log }) : null;
     this.outcomes?.load();
+    // A ledger from before v0.64.6 has its transient/undersampled split discarded
+    // (outcomes.loadJSON). Say so where an operator looks, not only on stdout —
+    // the ENGINE and REMEDY rows would otherwise just vanish.
+    const ocNotice = this.outcomes?.takeLoadNotice?.() ?? null;
+    if (ocNotice) this.pushEvent('engine', 'info', 'system', null, ocNotice);
     this.log(`M5 engine: ${this.outcomes ? `outcome learning enabled${ocPath ? ' (persisted)' : ' (in-memory)'}` : 'outcome learning off (no baselines)'}`);
     // v0.13: READ-ONLY driver-WS telemetry client (DESIGN §2.1). Dormant-not-
     // fatal by construction; its feeds are guarded by the homeId cross-check
@@ -990,8 +995,9 @@ class ZwaveDataImpl implements ZwaveData {
    *    within ~2× refreshMs) the whole tick is SKIPPED — a gap in the ring is
    *    honest; re-recording stale caches under fresh timestamps fabricates
    *    healthy-looking windows.
-   *  - FRESHNESS: `fresh` is true iff a stats event arrived since the previous
-   *    sample (stats.lastSeen advanced). rssi/rtt are driver EMAs — re-sampling
+   *  - FRESHNESS: `fresh` is true iff the node was HEARD since the previous
+   *    sample (the arrival stamp advanced — it moves only on commands TX, RX or
+   *    dropped-RX, see onNodeStats) and a counter moved. rssi/rtt are driver EMAs — re-sampling
    *    them without a new event is pseudo-replication, which downstream
    *    collapses MAD to 0. Baselines must ingest fresh samples only.
    *  - FLAPS/ROUTE CHANGES are drained from EVENT-driven accumulators — the
@@ -1128,6 +1134,7 @@ class ZwaveDataImpl implements ZwaveData {
         coarse: (id) => ev.coarseForNode(id),
         controllerSamples: () => ev.controllerSamples(),
         coverage: (id) => ev.coverage(id),
+        rateRun: (id) => ev.rateRun(id),
         // The CONFIGURED sweep cadence (v0.63.0) — quiet-node's dwell derives
         // from it rather than from the default its constant was written
         // against. 0/absent when the sweep is off, which floors the dwell at
@@ -1218,7 +1225,10 @@ class ZwaveDataImpl implements ZwaveData {
         if (!(node && isPingCandidate(node))) continue;
       }
       const since = sinceOf.get(`${s.nodeId ?? 'mesh'}:${s.kind}`) ?? now;
-      oc.open(s.nodeId, s.kind, now, this.degradedWindow(s.nodeId, since, now));
+      // The dwell start rides along (v0.64.6): the transient/undersampled split
+      // measures how long the symptom was live FROM it, so a late open tick
+      // cannot carry an aged-out reading back across the boundary.
+      oc.open(s.nodeId, s.kind, now, this.degradedWindow(s.nodeId, since, now), { dwellStartMs: since });
       // Ask for verification probes while the symptom is LIVE, so the degraded
       // window can reach the verifier's evidence floor before it is scored.
       this.requestVerification(s.nodeId);
@@ -1273,7 +1283,11 @@ class ZwaveDataImpl implements ZwaveData {
       // container stdout, which the TUI cannot read and which no operator sees.
       // The onset of a symptom was already a Log event (kind 'symptom'); its
       // closure is the other half of that sentence.
-      const ep = oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now), { unprobeable });
+      // `now` is CONFIRM_MS past the symptom's first absence; the ledger needs
+      // that first absence to tell a blink from a sampling limit (v0.64.6).
+      // Through v0.64.5 it saw only open-to-resolve, at least 10 minutes by
+      // construction, so every blink closed "undersampled".
+      const ep = oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now), { unprobeable, absentSinceMs: r.absentSinceMs });
       if (ep) {
         // `worse` lifts to warn. A regression logged at info is a regression
         // nobody sees. Deliberately NOT 'error': the errorsOnly filter is for
@@ -2286,7 +2300,8 @@ class ZwaveDataImpl implements ZwaveData {
   /** Cached stats with the DISPLAYED lastSeen upgraded by the driver's own
    *  reading (v0.26). The driver-ws lastSeen is the node's REAL last
    *  communication (monotonic, replay-safe); the HA-side stamp is an arrival
-   *  time that only advances on counter movement. Displaying the max of the
+   *  time that only advances when a counter proving the node was heard moved
+   *  (commands TX, RX or dropped-RX; v0.64.6). Displaying the max of the
    *  two means: precise when the driver-ws is live, honest (movement-gated)
    *  when it is dormant, and never fabricated by a subscribe replay. */
   private mergedStats(nodeId: number): NodeStats {
@@ -2863,7 +2878,16 @@ class ZwaveDataImpl implements ZwaveData {
     // when an operator is looking. The evidence path always had the replay
     // rule (isFreshSample requires counter movement); the display path now
     // gets the same discipline, three-way:
-    //  · counters MOVED vs our cache → real traffic happened → stamp arrival;
+    //  · a HEARING counter moved vs our cache → the node was heard → stamp
+    //    arrival. Only three qualify (v0.64.6): commands TX, RX and dropped-RX,
+    //    the zwave-js increments that sit beside the driver's own lastSeen
+    //    update (a send the node acknowledged, or a frame received from it).
+    //    The response-timeout counter moves when the node did NOT answer a
+    //    command expecting a reply, one report timeout after the acknowledgement
+    //    that already moved commands TX and in its own statistics event; the
+    //    dropped-TX counter is a send the node never acknowledged. Either one
+    //    moving alone stamped "heard" at the moment the node went silent, and
+    //    auto-ping reads this stamp as a probe's answer;
     //  · replay with no movement    → carry the previous stamp forward;
     //  · FIRST delivery (no cache)  → we cannot distinguish replay from real,
     //    so no arrival stamp at all — the driver's own lastSeen (driver-ws,
@@ -2873,9 +2897,7 @@ class ZwaveDataImpl implements ZwaveData {
       prev != null &&
       (prev.commandsTX !== counters.tx ||
         prev.commandsRX !== counters.rx ||
-        prev.commandsDroppedTX !== counters.dropTx ||
-        prev.commandsDroppedRX !== counters.dropRx ||
-        prev.timeoutResponse !== counters.timeout);
+        prev.commandsDroppedRX !== counters.dropRx);
     const stats: NodeStats = {
       rtt: num(e.rtt),
       rssi: num(e.rssi),
@@ -3160,10 +3182,14 @@ export interface SampleSig {
 
 /**
  * Is this sample a genuine OBSERVATION? Requires BOTH conjuncts (review):
- *  - a stats event arrived since the previous sample (lastSeen advanced), AND
+ *  - the node was HEARD since the previous sample (the arrival stamp advanced;
+ *    it moves only on commands TX, RX or dropped-RX — see onNodeStats), AND
  *  - at least one counter moved — a (re)subscribe redelivers the current
  *    snapshot under a fresh lastSeen with unchanged counters; treating that as
  *    an observation is the pseudo-replication leak that collapses MAD to 0.
+ *    Since v0.64.6 this conjunct also keeps out an interval whose only movement
+ *    was a dropped RX: that advances the stamp, but the signature does not carry
+ *    the dropped-RX counter.
  * First-ever sample (no signature) is NOT fresh — there is no baseline to
  * distinguish an observation from a replay.
  */

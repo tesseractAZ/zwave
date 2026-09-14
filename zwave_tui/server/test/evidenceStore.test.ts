@@ -821,3 +821,73 @@ test('the credit epoch is stamped on SAVE and READ back on reload, never re-take
   assert.equal(later.coverage(6)?.creditEpoch, onDisk.creditEpoch, 'the reload keeps the original stamp');
   rmSync(dir, { recursive: true, force: true });
 });
+
+/* ── v0.64.6: the per-route rate run behind rate-fallback ─────────────────── */
+
+const lwrAt = (protocolDataRate: number): RouteStat => ({ repeaters: [], protocolDataRate, rssi: -60, repeaterRSSI: [], routeFailedBetween: null });
+
+test('the rate run counts only ACKNOWLEDGED, separate transmissions — and outlives the fine window (v0.64.6)', () => {
+  const s = mkStore(freshPath(), { maxSamples: 3 });
+  let k = 0;
+  const at = () => FIXED + (k++) * TICK;
+  s.record(6, stats({ commandsTX: 0, lwr: lwrAt(3) }), NodeStatus.Alive, FRESH, at());   // counter baseline
+  s.record(6, stats({ commandsTX: 1, lwr: lwrAt(3) }), NodeStatus.Alive, FRESH, at());   // 100k, acknowledged
+  s.record(6, stats({ commandsTX: 2, lwr: lwrAt(2) }), NodeStatus.Alive, FRESH, at());   // 40k, acknowledged
+  s.record(6, stats({ commandsTX: 3, lwr: lwrAt(2) }), NodeStatus.Alive, FRESH, at());   // 10 s later: the same exchange
+  for (let i = 0; i < 10; i++) s.record(6, stats({ commandsTX: 3, lwr: lwrAt(2) }), NodeStatus.Alive, { fresh: false }, at());   // copies
+  s.record(6, stats({ commandsTX: 3, commandsDroppedTX: 1, lwr: lwrAt(3) }), NodeStatus.Alive, FRESH, at());   // a FAILED attempt rewrote the rate to 100k
+  s.record(6, stats({ commandsTX: 4, commandsDroppedTX: 1, lwr: lwrAt(2) }), NodeStatus.Alive, FRESH, at());   // a separate 40k exchange
+  assert.equal(s.forNode(6).length, 3, 'the fine ring has long since dropped the 100k reading');
+  assert.deepEqual(s.rateRun(6), { routeKey: 'direct', sawHundred: true, belowTx: 2, lastBelowTxAt: FIXED + 15 * TICK, rateKbps: 40 });
+});
+
+test('a tick with no route visibility leaves the rate run as it was (v0.64.6)', () => {
+  const s = mkStore(freshPath());
+  let k = 0;
+  const at = () => FIXED + (k++) * TICK;
+  s.record(6, stats({ commandsTX: 0, lwr: lwrAt(3) }), NodeStatus.Alive, FRESH, at());
+  s.record(6, stats({ commandsTX: 1, lwr: lwrAt(3) }), NodeStatus.Alive, FRESH, at());
+  s.record(6, stats({ commandsTX: 2, lwr: lwrAt(2) }), NodeStatus.Alive, FRESH, at());
+  for (let i = 0; i < 4; i++) s.record(6, stats({ commandsTX: 2, lwr: null }), NodeStatus.Alive, { fresh: false }, at());   // lwr blinked out
+  s.record(6, stats({ commandsTX: 3, lwr: lwrAt(2) }), NodeStatus.Alive, FRESH, at());
+  assert.equal(s.rateRun(6)?.belowTx, 2, 'the blink erased nothing');
+  assert.equal(s.rateRun(6)?.sawHundred, true);
+});
+
+test('evictNode and reset() drop the rate run; load() replaces it with one re-folded from the restored ring (v0.64.6)', () => {
+  const build = (st: ReturnType<typeof mkStore>, node = 6) => {
+    let k = 0;
+    const at = () => FIXED - 20 * TICK + (k++) * TICK;
+    st.record(node, stats({ commandsTX: 0, lwr: lwrAt(3) }), NodeStatus.Alive, FRESH, at());
+    st.record(node, stats({ commandsTX: 1, lwr: lwrAt(3) }), NodeStatus.Alive, FRESH, at());
+    st.record(node, stats({ commandsTX: 2, lwr: lwrAt(2) }), NodeStatus.Alive, FRESH, at());
+  };
+  const a = mkStore(freshPath());
+  build(a);
+  assert.ok(a.rateRun(6), 'precondition: a run exists');
+  a.evictNode(6);
+  assert.equal(a.rateRun(6), null, 'a reused node id inherits no capability');
+
+  const b = mkStore(freshPath());
+  build(b);
+  b.reset();
+  assert.equal(b.rateRun(6), null, 'a reset discards it');
+
+  const path = freshPath();
+  const c = mkStore(path);
+  build(c);
+  const before = c.rateRun(6);
+  c.save();
+  const d = mkStore(path);
+  d.load();
+  assert.deepEqual(d.rateRun(6), before, 're-folded from the restored fine ring');
+
+  const other = freshPath();
+  const e = mkStore(other);
+  build(e, 9);
+  e.save();
+  const f = mkStore(other);
+  build(f, 6);
+  f.load();
+  assert.equal(f.rateRun(6), null, 'a load replaces the memory — node 6 is not in that file');
+});

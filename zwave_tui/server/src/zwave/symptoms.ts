@@ -19,7 +19,7 @@
 
 import type { NodeSnapshot, ControllerSnapshot, NodeStatus } from '../types';
 import { NodeStatus as NS } from '../types';
-import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage } from './evidenceStore';
+import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage, RateRun } from './evidenceStore';
 import type { BaselineStore } from './baselines';
 
 export type SymptomKind =
@@ -117,6 +117,10 @@ export interface DetectInput {
   coarse: (nodeId: number) => CoarseBucket[];
   controllerSamples: () => ControllerSample[];
   coverage: (nodeId: number) => NodeCoverage | null;
+  /** The node's per-route rate run (v0.64.6) — what that route has carried in
+   *  acknowledged transmissions, kept by the store so it outlives the fine
+   *  window a sweep-only node's next transmission does not arrive inside. */
+  rateRun: (nodeId: number) => RateRun | null;
   /** The CONFIGURED liveness-sweep cadence in ms (v0.63.0), or undefined when
    *  the sweep is off. quiet-node's dwell is derived from this rather than from
    *  the default the constant was written against — on an install that
@@ -129,7 +133,15 @@ export interface DetectInput {
 }
 
 // ── Tunables (documented; ship as constants — shareability rule) ─────────────
-const DWELL_MS = 5 * 60_000; // a breach must persist 5 min to surface
+export const DWELL_MS = 5 * 60_000; // a breach must persist 5 min to surface
+/**
+ * Counted below-100k readings on one route before rate-fallback may arm
+ * (v0.64.6). One is a single-exchange retry, which DESIGN §3.3 names as a
+ * confound: on the reference mesh every onset through v0.64.5 was one sweep
+ * ping going out at 40 kbit/s with 3 routing attempts, and the next frame was
+ * back at 100k. What counts as a reading is decided in evidenceStore.foldRateRun.
+ */
+const RATE_FALLBACK_MIN_TX = 2;
 /**
  * Silence past which a MAINS node is a `quiet-node` (v0.38).
  *
@@ -215,22 +227,6 @@ function latestFresh<T>(samples: EvidenceSample[], now: number, pick: (s: Eviden
     if (v != null) return v;
   }
   return null;
-}
-
-/** Has the SAME route the node is on now ever been observed at 100k in its
- *  recent history? Only then is a sub-100k reading a REGRESSION rather than the
- *  device/route's capability ceiling (DESIGN §3.3 fail-closed; RESEARCH §2.2). */
-function sameRouteRegressed(samples: EvidenceSample[], routeKey: string | null, now: number): boolean {
-  if (routeKey == null) return false;
-  let sawHundred = false;
-  let recentBelow = false;
-  for (const s of samples) {
-    if (now - s.t > WINDOW_MS * 3) continue; // ~30 min of memory
-    if (s.routeKey !== routeKey) continue;
-    if (s.rateKbps != null && s.rateKbps >= 100) sawHundred = true;
-    if (s.rateKbps != null && s.rateKbps < 100) recentBelow = true;
-  }
-  return sawHundred && recentBelow;
 }
 
 /** Windowed timeout rate over a node's recent fine ring — Σtimeout/Σtx across
@@ -528,21 +524,33 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       }
     }
 
-    // rate-fallback — SAME-ROUTE REGRESSION below 100k (a device/route whose
-    // ceiling is 40k/9.6k must NOT fire — that's capability, not a fault). We
-    // require the current route to have been observed at 100k in recent history
-    // (DESIGN §3.3 fail-closed; RESEARCH §2.2). No route memory ⇒ no fire.
+    // rate-fallback — a SAME-ROUTE REGRESSION that PERSISTS (v0.64.6). The route
+    // the node is on now must have carried an acknowledged transmission at 100k,
+    // and at least RATE_FALLBACK_MIN_TX separate acknowledged transmissions since
+    // that route's newest 100k reading must have gone below it (DESIGN §3.3:
+    // "persistently below 100k"; a single-exchange retry is a confound). A route
+    // never seen at 100k is capability, not a fault, and cannot fire (fail-closed;
+    // RESEARCH §2.2); a route change starts over with no capability, and a route
+    // the driver no longer reports is not asserted as regressed. Through v0.64.5
+    // this scanned 30 min of samples for any sub-100k value — but the store copies
+    // the cached rate onto every sample, so ONE retried frame matured the symptom
+    // on its own and held it ~30 min after the link was back at 100k.
     {
-      const b = !node.isLongRange && sameRouteRegressed(samples, last?.routeKey ?? null, now);
+      const run = input.rateRun(id);
+      const b = !node.isLongRange && run != null && last?.routeKey === run.routeKey &&
+        run.sawHundred && run.belowTx >= RATE_FALLBACK_MIN_TX;
       markDegrading(id, b);
       const since = dwell(state, key(id, 'rate-fallback'), b, now);
       if (since != null) {
         breaching = true;
-        const proto = last?.rateKbps === 9.6 ? 1 : last?.rateKbps === 40 ? 2 : 0;
+        // The run's own counted reading, not the newest sample: a failed attempt
+        // also rewrites the cached rate, often to 100k.
+        const rate = run?.rateKbps ?? null;
+        const proto = rate === 9.6 ? 1 : rate === 40 ? 2 : 0;
         out.push({
-          kind: 'rate-fallback', nodeId: id, severity: last?.rateKbps === 9.6 ? 'warn' : 'watch',
+          kind: 'rate-fallback', nodeId: id, severity: rate === 9.6 ? 'warn' : 'watch',
           sinceMs: since, basis: 'measured',
-          evidence: [{ label: 'negotiated rate', value: RATE_LABEL[proto] ?? `${last?.rateKbps}k` }, { label: 'route', value: last?.routeKey ?? '—' }],
+          evidence: [{ label: 'negotiated rate', value: RATE_LABEL[proto] ?? `${rate}k` }, { label: 'route', value: last?.routeKey ?? '—' }],
           narrative: `${node.name} regressed below 100 kbps on a route that previously sustained it — a degraded link on that path (not a device whose ceiling is 40k/9.6k, which this detector excludes).`,
         });
       }

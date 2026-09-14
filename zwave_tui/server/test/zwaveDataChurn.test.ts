@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, statSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, statSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createZwaveData, type ZwaveData } from '../src/zwave/zwaveData';
@@ -1237,4 +1237,162 @@ test('a departed node discarding its learning is visible IN THE TUI (v0.53.0)', 
     // nodeId here would print the REPLACEMENT device's name.
     assert.equal(ev.nodeId, null, 'the row must not resolve against a future occupant of this id');
   } finally { zd.stop(); rosterNodes = [NODE7]; }
+});
+
+/* ── v0.64.6 ──────────────────────────────────────────────────────────────── */
+
+test('displayed lastSeen: only a counter that proves the node was HEARD stamps arrival — timeout and dropped-TX do not (v0.64.6)', async () => {
+  // zwave-js moves timeoutResponse when the node did NOT answer a command that
+  // expected a reply (one report timeout after its acknowledgement, in its own
+  // statistics event), and commandsDroppedTX when a send was never acknowledged.
+  // Stamping either as "heard" credited silence as an answer.
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha, { refreshMs: 80, routePollMs: 160 });
+  const S = () => zd.snapshot().find((n: NodeSnapshot) => n.nodeId === 7)?.stats;
+  try {
+    pushStats(ha, statsEvent());                                          // first delivery: cached, no stamp
+    await waitFor(() => S()?.commandsTX === 10);
+    pushStats(ha, statsEvent({ commands_tx: 11 }));                       // an acknowledged send: heard
+    await waitFor(() => S()?.lastSeen != null);
+    let stamp = S()!.lastSeen!;
+    await sleep(25);
+    pushStats(ha, statsEvent({ commands_tx: 11, timeout_response: 2 }));  // a reply that never came
+    await waitFor(() => S()?.timeoutResponse === 2);
+    assert.equal(S()!.lastSeen, stamp, 'a response timeout is the node NOT answering');
+    await sleep(25);
+    pushStats(ha, statsEvent({ commands_tx: 11, timeout_response: 2, commands_dropped_tx: 1 }));   // a send never acknowledged
+    await waitFor(() => S()?.commandsDroppedTX === 1);
+    assert.equal(S()!.lastSeen, stamp, 'a failed send is not hearing from the node');
+    await sleep(25);
+    pushStats(ha, statsEvent({ commands_tx: 11, timeout_response: 2, commands_dropped_tx: 1, commands_dropped_rx: 1 }));   // an undecodable frame FROM the node
+    await waitFor(() => (S()?.lastSeen ?? 0) > stamp);
+    stamp = S()!.lastSeen!;
+    await sleep(25);
+    pushStats(ha, statsEvent({ commands_tx: 11, timeout_response: 2, commands_dropped_tx: 1, commands_dropped_rx: 1, commands_rx: 10 }));   // a frame from the node
+    await waitFor(() => (S()?.lastSeen ?? 0) > stamp);
+  } finally {
+    zd.stop();
+  }
+});
+
+const THIN_RTT = { samples: 6, freshN: 1, tx: 5, rx: 5, timeouts: 0, rate: null, flaps: 0, s2: 0, s2Known: 6, routeChanges: 0, routeKnown: 6, rssiMedian: null, rssiN: 0, rttMedian: 400, rttN: 1, rateKbpsMin: 100 };
+const FULL_RTT = { ...THIN_RTT, freshN: 6, rttMedian: 30, rttN: 6 };
+
+/** Shadow the windows the ledger scores so only the LIFECYCLE timing decides
+ *  the transient/undersampled split: a before-window that never fills, an
+ *  after-window that does, and node 7 listening (the v0.38.1 episode gate). */
+function liveSpanShadow(zd: ZwaveData): { updateEpisodes: (s: unknown[], now: number) => void } {
+  const asListening = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+  const shadow = zd as unknown as { snapshot: () => NodeSnapshot[]; degradedWindow: () => unknown; nodeWindow: () => unknown; updateEpisodes: (s: unknown[], now: number) => void };
+  shadow.snapshot = () => asListening;
+  shadow.degradedWindow = () => ({ ...THIN_RTT });
+  shadow.nodeWindow = () => ({ ...FULL_RTT });
+  return shadow;
+}
+
+async function ledgerZd(prefix: string): Promise<{ zd: ZwaveData; dir: string }> {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  return { zd, dir };
+}
+
+test('a 30-second blink closes TRANSIENT through the real lifecycle — the confirmation window is not live time (v0.64.6)', async () => {
+  const { zd, dir } = await ledgerZd('zwtui-blink-');
+  try {
+    assert.notEqual(zd.openEpisodes(), null, 'precondition: this install has an outcome ledger');
+    assert.ok(zd.snapshot().some((n) => n.nodeId === 7), 'precondition: node 7 is on the roster');
+    const shadow = liveSpanShadow(zd);
+    const t0 = 1_800_000_000_000;
+    const symptom = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0 - 5 * 60_000, basis: 'measured', evidence: [], narrative: 'n' };
+    shadow.updateEpisodes([symptom], t0);                        // opens at dwell maturity
+    shadow.updateEpisodes([], t0 + 30_000);                      // first absence, 30 s later
+    shadow.updateEpisodes([], t0 + 30_000 + 10 * 60_000);        // the confirmation window elapses → resolves
+    assert.equal(zd.unverifiableTransientCount('rtt-degraded'), 1, 'a blink is transient');
+    assert.equal(zd.unverifiableUndersampledCount('rtt-degraded'), 0, 'not a reporting-rate problem');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a starved episode LIVE past the burst span still closes UNDERSAMPLED — measured from the dwell start, not the open tick (v0.64.6)', async () => {
+  const { zd, dir } = await ledgerZd('zwtui-starved-');
+  try {
+    assert.notEqual(zd.openEpisodes(), null, 'precondition: this install has an outcome ledger');
+    const shadow = liveSpanShadow(zd);
+    const t0 = 1_800_000_000_000;
+    // The dwell started 7 min before the open tick (the episode opened 2 min
+    // after maturity); the reading ages out 3.5 min after the open.
+    const symptom = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0 - 7 * 60_000, basis: 'measured', evidence: [], narrative: 'n' };
+    shadow.updateEpisodes([symptom], t0);
+    shadow.updateEpisodes([symptom], t0 + 3 * 60_000);
+    shadow.updateEpisodes([], t0 + 3.5 * 60_000);
+    shadow.updateEpisodes([], t0 + 13.5 * 60_000);
+    assert.equal(zd.unverifiableUndersampledCount('rtt-degraded'), 1, 'it had the time, never the readings');
+    assert.equal(zd.unverifiableTransientCount('rtt-degraded'), 0);
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a pre-v0.64.6 ledger's discarded split reaches the LOG RING, not only stdout (v0.64.6)", async () => {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-legacysplit-'));
+  writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({ v: 1, control: [], action: [], fp: [], unver: [], unverUnprobe: [],
+    unverTransient: [['rtt-degraded', 1]], unverUndersampled: [['rtt-degraded', 6]] }));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const note = zd.events().find((e) => /transient\/undersampled tallies reset/.test(e.text));
+    assert.ok(note, `the discard must be visible in the TUI: ${JSON.stringify(zd.events().slice(0, 8).map((e) => e.text))}`);
+    assert.match(note!.text, /^7 /, 'count first — the row clips at 80 columns');
+    assert.equal(note!.source, 'engine');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the engine reads the STORE's rate run — a persistent same-route fallback fires through the real detector pass (v0.64.6)", async () => {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-raterun-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 60_000,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const priv = zd as unknown as {
+      runEngine: (now: number) => void;
+      lastNodes: NodeSnapshot[];
+      evidenceStore: { record: (id: number, stats: unknown, status: NodeStatus, extras: unknown, at: number) => unknown };
+    };
+    priv.lastNodes = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+    const t0 = Date.now();
+    const st = (commandsTX: number, protocolDataRate: number) => ({
+      rtt: 30, rssi: -60, lwr: { repeaters: [], protocolDataRate, rssi: -60, repeaterRSSI: [], routeFailedBetween: null }, nlwr: null,
+      commandsTX, commandsRX: 0, commandsDroppedTX: 0, commandsDroppedRX: 0, timeoutResponse: 0, lastSeen: null,
+    });
+    const rec = (tx: number, rate: number, at: number) => priv.evidenceStore.record(7, st(tx, rate), NodeStatus.Alive, { fresh: true }, at);
+    rec(0, 3, t0 - 10 * 60_000);    // counter baseline
+    rec(1, 3, t0 - 9 * 60_000);     // an acknowledged transmission at 100k
+    rec(2, 2, t0 - 8 * 60_000);     // below 100k
+    rec(3, 2, t0 - 7 * 60_000);     // a second, separate one
+    priv.runEngine(t0 - 7 * 60_000);   // arms the dwell
+    priv.runEngine(t0);                // past it
+    assert.ok(zd.symptoms().some((x) => x.kind === 'rate-fallback' && x.nodeId === 7),
+      `the production detector must read the store's rate run: ${JSON.stringify(zd.symptoms())}`);
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

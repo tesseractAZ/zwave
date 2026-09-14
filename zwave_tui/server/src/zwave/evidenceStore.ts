@@ -106,6 +106,55 @@ export interface EvidenceSample {
   isFrequentListening: boolean | null;
 }
 
+/**
+ * Per-route rate memory behind rate-fallback (v0.64.6): what ONE route has
+ * carried in acknowledged transmissions, independent of the fine ring.
+ *
+ * zwave-js rewrites a node's cached lwr rate only when a transmit report
+ * arrives (Node.ts updateRouteStatistics: `protocolDataRate: txReport.routeSpeed`,
+ * called under Driver.ts `if (hasTXReport(result))`), and record() copies that
+ * cached value onto every sample. So a sample's rate is a READING only on a tick
+ * where an acknowledged transmission landed (fresh, dTx > 0). A failed attempt
+ * also rewrites the rate — both failures on the reference mesh read 100 kbit/s —
+ * without moving commandsTX, so it is not a reading either.
+ */
+export interface RateRun {
+  routeKey: string;
+  /** This route carried an acknowledged transmission at >= 100 kbit/s. */
+  sawHundred: boolean;
+  /** Separate below-100k readings since that route's newest 100k reading. */
+  belowTx: number;
+  /** When the newest counted below-100k reading landed. */
+  lastBelowTxAt: number | null;
+  /** The newest reading's rate. */
+  rateKbps: number | null;
+}
+
+/** One exchange can produce several transmit reports seconds apart; readings
+ *  closer than this to the previous counted one are the same exchange (v0.64.6). */
+export const RATE_FALLBACK_MIN_GAP_MS = 30_000;
+
+/** Fold one sample into a node's rate run (pure, v0.64.6). Only reading ticks
+ *  move it: a reading at >= 100 proves the route and clears the run; a reading
+ *  below counts once when separate from the previous counted one; a reading on
+ *  a different route starts a new run with no capability. A tick with no route
+ *  visibility, or no reading, leaves the run as it was. */
+export function foldRateRun(prev: RateRun | null, s: EvidenceSample): RateRun | null {
+  if (s.routeKey == null) return prev; // a route we cannot see has not moved
+  const transmitted = s.fresh && s.dTx != null && s.dTx > 0;
+  if (!transmitted || s.rateKbps == null) return prev; // a copied or failed-attempt rate is not a reading
+  const onRoute = prev != null && prev.routeKey === s.routeKey ? prev : null;
+  if (s.rateKbps >= 100) return { routeKey: s.routeKey, sawHundred: true, belowTx: 0, lastBelowTxAt: null, rateKbps: s.rateKbps };
+  const separate = onRoute?.lastBelowTxAt == null || s.t - onRoute.lastBelowTxAt >= RATE_FALLBACK_MIN_GAP_MS;
+  return {
+    routeKey: s.routeKey,
+    sawHundred: onRoute?.sawHundred === true,
+    belowTx: (onRoute?.belowTx ?? 0) + (separate ? 1 : 0),
+    lastBelowTxAt: separate ? s.t : (onRoute?.lastBelowTxAt ?? s.t),
+    rateKbps: s.rateKbps,
+  };
+}
+
 /** One controller-level sample (serial-link health), same delta discipline. */
 export interface ControllerSample {
   t: number;
@@ -287,6 +336,10 @@ export interface EvidenceStore {
   /** Latch a route failure the moment it appears (event-driven, deduped by caller). */
   recordRouteFailure(nodeId: number, between: [number, number], at?: number): void;
   forNode(nodeId: number): EvidenceSample[];
+  /** The node's per-route rate run (v0.64.6) — folded from every recorded
+   *  sample, so it outlives the fine window. In memory; re-folded from the
+   *  restored ring on load; dropped by evictNode and reset. */
+  rateRun(nodeId: number): RateRun | null;
   coarseForNode(nodeId: number): CoarseBucket[];
   controllerSamples(): ControllerSample[];
   /** The long-horizon (multi-day) controller noise-floor tier (30-min buckets). */
@@ -581,6 +634,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   const ctrlRing: ControllerSample[] = [];
   const ctrlCoarse: CtrlCoarseBucket[] = []; // long-horizon controller noise-floor tier
   const routeFails = new Map<number, RouteFailureEvent[]>();
+  const rateRuns = new Map<number, RateRun>();
   const meta = new Map<number, NodeCoverage>();
   const lastCounters = new Map<number, CounterSnapshot>();
   let lastCtrl: CtrlSnapshot | null = null;
@@ -783,6 +837,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       const had = fine.delete(nodeId);
       const hadC = coarse.delete(nodeId);
       routeFails.delete(nodeId);
+      rateRuns.delete(nodeId);
       meta.delete(nodeId);
       lastCounters.delete(nodeId);
       if (had || hadC) dirty = true;
@@ -826,6 +881,9 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       if (ring.length > maxSamples) ring.splice(0, ring.length - maxSamples);
       fine.set(nodeId, ring);
       foldCoarse(nodeId, sample, d.invalid);
+      const nextRun = foldRateRun(rateRuns.get(nodeId) ?? null, sample);
+      if (nextRun) rateRuns.set(nodeId, nextRun);
+      else rateRuns.delete(nodeId);
       const m = meta.get(nodeId) ?? emptyMeta(t);
       m.samples += 1;
       if (fresh) m.freshSamples += 1;
@@ -896,6 +954,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     },
 
     forNode: (nodeId) => fine.get(nodeId) ?? [],
+    rateRun: (nodeId) => rateRuns.get(nodeId) ?? null,
     coarseForNode: (nodeId) => coarse.get(nodeId) ?? [],
     controllerSamples: () => ctrlRing,
     controllerCoarse: () => ctrlCoarse,
@@ -942,6 +1001,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       meta.clear();
       lastCounters.clear();
       lastCtrl = null;
+      rateRuns.clear();
       try {
         if (!existsSync(path)) return fine;
         const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
@@ -1148,6 +1208,10 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             }
             const bounded = ring.length > maxSamples ? ring.slice(ring.length - maxSamples) : ring;
             if (bounded.length > 0) fine.set(id, bounded);
+            // Re-fold the rate run from the restored ring (v0.64.6), so a restart
+            // does not blind rate-fallback until the route is seen at 100k again.
+            const seeded = bounded.reduce<RateRun | null>(foldRateRun, null);
+            if (seeded) rateRuns.set(id, seeded);
           }
         }
         log(`evidence: restored ${coarse.size} node(s) coarse${grace || fineTooOld ? '' : ` + ${fine.size} fine`} from ${path}`);
@@ -1157,6 +1221,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         coarse.clear();
         meta.clear();
         routeFails.clear();
+        rateRuns.clear();
       }
       dirty = false;
       return fine;
@@ -1298,6 +1363,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       meta.clear();
       lastCounters.clear();
       lastCtrl = null;
+      rateRuns.clear();
       since = null;
       loadedHomeId = homeId;
       // Rewrite disk NOW — a crash between reset and the next flush must not

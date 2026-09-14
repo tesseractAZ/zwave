@@ -38,7 +38,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import { readHomeTag, tagToWrite, archiveLiveFile, hasArchiveFor, restoreArchive } from './homeTag';
 import type { LogSink } from '../logger';
 import type { ActionKind, Efficacy } from '../types';
-import type { SymptomKind } from './symptoms';
+import { DWELL_MS, type SymptomKind } from './symptoms';
 import type { EvidenceSample } from './evidenceStore';
 
 export type { Efficacy };
@@ -90,6 +90,11 @@ export interface Episode {
   kind: SymptomKind;
   nodeId: number | null;
   onsetMs: number;
+  /** When the symptom's evidence first breached — its dwell start (v0.64.6). The
+   *  transient/undersampled split measures the live span from here. Absent when
+   *  the caller did not say, which is read as "opened the moment the dwell
+   *  matured". */
+  dwellStartMs?: number;
   before: WindowMetrics | null; // degraded window at/around onset
   action: { kind: ActionKind; atMs: number; refused: boolean } | null;
   resolvedMs: number | null;
@@ -103,8 +108,9 @@ export interface Episode {
    *  degraded state simply ended before it could be measured. A transient
    *  blink, unscoreable by construction; not a fixable evidence gap. */
   transient?: boolean;
-  /** The before-window never reached its floor and the episode stayed open
-   *  LONG ENOUGH that it should have (v0.41.2) — so the limit was this node's
+  /** The before-window never reached its floor and the symptom stayed LIVE
+   *  long enough that it should have (v0.41.2; a live span since v0.64.6, not
+   *  open-to-resolve) — so the limit was this node's
    *  own sampling rate, not the symptom's brevity. Distinct from `transient`,
    *  which claims the state ended quickly; an audit showed that claim is
    *  arithmetically forced for an echo-only node and therefore unearned. */
@@ -157,8 +163,10 @@ export interface OutcomeStoreOptions {
 }
 
 export interface OutcomeStore {
-  /** Open an episode for a symptom that just appeared. Idempotent per key. */
-  open(nodeId: number | null, kind: SymptomKind, onsetMs: number, before: WindowMetrics | null): void;
+  /** Open an episode for a symptom that just appeared. Idempotent per key.
+   *  `dwellStartMs` is when the symptom's evidence first breached (v0.64.6); see
+   *  Episode.dwellStartMs. */
+  open(nodeId: number | null, kind: SymptomKind, onsetMs: number, before: WindowMetrics | null, opts?: { dwellStartMs?: number }): void;
   /** Attribute an operator action to EVERY open episode on this node (the
    *  operator picks an action for a node, not a specific symptom). First action
    *  per episode wins the attribution. `skip(key)` excludes episodes whose
@@ -184,8 +192,12 @@ export interface OutcomeStore {
      */
     onlyKinds?: ReadonlySet<SymptomKind>,
   ): void;
-  /** Close an episode: the symptom resolved. Computes + folds the verdict. */
-  resolve(nodeId: number | null, kind: SymptomKind, resolvedMs: number, after: WindowMetrics | null, opts?: { unprobeable?: boolean }): Episode | null;
+  /** Close an episode: the symptom resolved. Computes + folds the verdict.
+   *  `absentSinceMs` is when the caller first saw the symptom absent — the start
+   *  of its confirmation window (v0.64.6). The transient/undersampled split
+   *  measures the symptom's LIVE span, and the confirmation window is not live
+   *  time. Omitted means the symptom was live until `resolvedMs`. */
+  resolve(nodeId: number | null, kind: SymptomKind, resolvedMs: number, after: WindowMetrics | null, opts?: { unprobeable?: boolean; absentSinceMs?: number }): Episode | null;
   /** Drop an open episode without a verdict (e.g. node left the roster). */
   abandon(nodeId: number | null, kind: SymptomKind): void;
   /** Keys of currently-open episodes (`${nodeId}:${kind}`). */
@@ -235,7 +247,7 @@ export interface OutcomeStore {
    *  kind's floor while the after-window met its own (v0.39) — the degraded
    *  state ended before it could be measured. Unscoreable by construction. */
   unverifiableTransient(kind: SymptomKind): number;
-  /** Of the unverifiable, episodes that stayed open long enough to be measured
+  /** Of the unverifiable, episodes whose symptom stayed live long enough to be measured
    *  and still could not be (v0.41.2) — the node reports too rarely to score at
    *  all, which is a different fact from "it was over quickly". */
   unverifiableUndersampled(kind: SymptomKind): number;
@@ -267,6 +279,9 @@ export interface OutcomeStore {
   /** Pure serialize / restore (the fs wrappers above delegate to these). */
   toJSON(): unknown;
   loadJSON(raw: unknown): void;
+  /** One-shot (v0.64.6): a notice about state `load()` deliberately discarded,
+   *  for the caller to put where an operator looks — or null. Cleared once read. */
+  takeLoadNotice?(): string | null;
   /** Bind the live controller identity. The first known id validates what was
    *  restored; a CHANGE parks the store (memory wiped, saves latched off, file
    *  untouched) and waits for `resolveIdentity`. */
@@ -480,9 +495,9 @@ export function metricOf(kind: SymptomKind): RecoveryMetric {
 // rssi/rtt (no-signal sentinels), so freshN over-counts usable readings and a
 // median-of-one could otherwise pass as robust.
 /**
- * How long an episode must stay open before a starved before-window stops
- * meaning "it was over quickly" and starts meaning "we cannot sample this node
- * fast enough" (v0.41.2).
+ * How long a symptom must stay LIVE after its dwell matured before a starved
+ * before-window stops meaning "it was over quickly" and starts meaning "we
+ * cannot sample this node fast enough" (v0.41.2; a live span since v0.64.6).
  *
  * The verification burst is 5 probes at ~60 s of effective spacing, so an
  * episode that lives past ~5 minutes has had every opportunity the engine can
@@ -492,6 +507,15 @@ export function metricOf(kind: SymptomKind): RecoveryMetric {
  * its 120-minute sweep replies, `transient` was arithmetically guaranteed, so
  * the line "degraded state ended before its evidence floor" was asserted on
  * evidence that could not distinguish it from "we only ever got one look".
+ *
+ * v0.64.6: through v0.64.5 the span was open-to-resolve, and resolution waits
+ * out a 10-minute confirmation window, so every closure measured at least 10
+ * minutes and `transient` could not be assigned. The split now measures from
+ * the symptom's dwell start to the first tick it was seen absent, against
+ * DWELL_MS + this constant. The sum is deliberate: it equals rtt-degraded's
+ * 10-minute lookback, so one breaching reading that simply ages out (the
+ * echo-only case above) lands strictly past the boundary whatever the tick
+ * timing. Change any of the three constants knowingly.
  */
 const UNDERSAMPLED_AFTER_MS = 5 * 60_000;
 
@@ -643,6 +667,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
    *  claimed it had one — so it rewrote the whole file 288×/day regardless.
    *  baselines.ts and evidenceStore.ts both open save() with the same guard. */
   let dirty = false;
+  /** One-shot operator notice from load() (v0.64.6); see takeLoadNotice. */
+  let loadNotice: string | null = null;
   /** Read in load() from the RAW envelope — before loadJSON's `v !== 1` gate,
    *  which returns silently and would otherwise leave the tag unread. */
   let loadedHomeId: number | null = null;
@@ -717,10 +743,13 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   };
 
   return {
-    open(nodeId, kind, onsetMs, before): void {
+    open(nodeId, kind, onsetMs, before, openOpts): void {
       const k = key(nodeId, kind);
       if (open.has(k)) return; // one open episode per key (matches the detector lifecycle)
-      open.set(k, { kind, nodeId, onsetMs, before, action: null, resolvedMs: null, after: null, verdict: null });
+      open.set(k, {
+        kind, nodeId, onsetMs, before, action: null, resolvedMs: null, after: null, verdict: null,
+        ...(openOpts?.dwellStartMs != null ? { dwellStartMs: openOpts.dwellStartMs } : {}),
+      });
     },
 
     recordAction(nodeId, actionKind, refused, atMs, skip, onlyKinds): void {
@@ -802,13 +831,22 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         // fails the same way: with zero evidence there is no basis to claim
         // the state was brief.
         const m = metricOf(kind);
-        // How long the degraded state actually persisted. A starved before
-        // window on a LONG episode is a sampling limit, not brevity.
-        const openMs = ep.resolvedMs != null ? ep.resolvedMs - ep.onsetMs : 0;
+        // How long the degraded state was LIVE (v0.64.6): from the symptom's
+        // dwell start to the first tick it was seen absent, the only span in
+        // which refineBefore can fill the before-window. NOT open-to-resolve:
+        // the production caller resolves only after a 10-minute confirmation
+        // window, so that span was at least 10 minutes by construction and every
+        // blink closed "undersampled" (v0.41.2–v0.64.5). Anchored at the dwell
+        // START rather than the open tick, so a late or skipped engine tick
+        // cannot carry a reading that simply aged out back across the boundary.
+        // A caller that passes neither timestamp is taken to have opened at
+        // dwell maturity and to have seen the symptom live until it resolved.
+        const liveStart = ep.dwellStartMs ?? ep.onsetMs - DWELL_MS;
+        const liveMs = (resolveOpts?.absentSinceMs ?? resolvedMs) - liveStart;
         const laneVisible = ep.before != null
           && (m === 'route' ? ep.before.routeKnown >= 1 : m === 's2' ? ep.before.s2Known >= 1 : true);
         if (laneVisible && !sideFloorMet(m, ep.before, 'before') && sideFloorMet(m, ep.after, 'after')) {
-          if (openMs >= UNDERSAMPLED_AFTER_MS) {
+          if (liveMs >= DWELL_MS + UNDERSAMPLED_AFTER_MS) {
             // It had the time; it never had the readings.
             ep.undersampled = true;
             unverUndersampled.set(kind, (unverUndersampled.get(kind) ?? 0) + 1);
@@ -994,6 +1032,12 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       return unverUndersampled.get(kind) ?? 0;
     },
 
+    takeLoadNotice(): string | null {
+      const n = loadNotice;
+      loadNotice = null;
+      return n;
+    },
+
     confounded(kind): number {
       return confoundedTally.get(kind) ?? 0;
     },
@@ -1126,6 +1170,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         fp: [...fp.entries()],
         unver: [...unver.entries()],
         unverUnprobe: [...unverUnprobe.entries()],
+        // OPTIONAL marker, `v` stays 1 (same reason as homeId): the split tallies
+        // below were counted on the live-span rule (v0.64.6). Tallies written
+        // without it used open-to-resolve time and cannot be re-split.
+        splitRule: 'live-span',
         unverTransient: [...unverTransient.entries()],
         unverUndersampled: [...unverUndersampled.entries()],
         confounded: [...confoundedTally.entries()],
@@ -1138,7 +1186,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     loadJSON(raw): void {
-      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; unverTransient?: [SymptomKind, number][]; unverUndersampled?: [SymptomKind, number][]; confounded?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
+      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; unverTransient?: [SymptomKind, number][]; unverUndersampled?: [SymptomKind, number][]; splitRule?: string; confounded?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
       if (!o || o.v !== 1) return;
       control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); unverUndersampled.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
       for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, normalizeTally(t));
@@ -1147,8 +1195,25 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // Absent in pre-v0.36 files — an older ledger simply starts this counter at 0.
       for (const [k, v] of o.unver ?? []) if (Number.isFinite(v) && v >= 0) unver.set(k, v);
       for (const [k, v] of o.unverUnprobe ?? []) if (Number.isFinite(v) && v >= 0) unverUnprobe.set(k, v);
-      for (const [k, v] of o.unverTransient ?? []) if (Number.isFinite(v) && v >= 0) unverTransient.set(k, v);
-      for (const [k, v] of o.unverUndersampled ?? []) if (Number.isFinite(v) && v >= 0) unverUndersampled.set(k, v);
+      // The transient/undersampled split is restored only from a ledger that
+      // counted it on the live-span rule (v0.64.6). An older one split on
+      // open-to-resolve time, which filed every brief episode as undersampled,
+      // and closed episodes are not kept to re-split them — so both restart at
+      // 0, and the discard is announced rather than silent.
+      if (o.splitRule === 'live-span') {
+        for (const [k, v] of o.unverTransient ?? []) if (Number.isFinite(v) && v >= 0) unverTransient.set(k, v);
+        for (const [k, v] of o.unverUndersampled ?? []) if (Number.isFinite(v) && v >= 0) unverUndersampled.set(k, v);
+      } else {
+        let t = 0;
+        let u = 0;
+        for (const [, v] of o.unverTransient ?? []) if (Number.isFinite(v) && v >= 0) t += v;
+        for (const [, v] of o.unverUndersampled ?? []) if (Number.isFinite(v) && v >= 0) u += v;
+        if (t + u > 0) {
+          log(`outcomes: discarded ${t} transient + ${u} undersampled tallies written before v0.64.6 — they were split on open-to-resolve time, which filed every brief episode as undersampled, and closed episodes are not kept to re-split them; both counts restart at 0`);
+          loadNotice = `${Math.round(t + u)} transient/undersampled tallies reset — split rule changed (v0.64.6)`;
+          dirty = true; // the marker must reach disk, or the next load discards again
+        }
+      }
       for (const [k, v] of o.confounded ?? []) if (Number.isFinite(v) && v >= 0) confoundedTally.set(k, v);
       // Absent in pre-v0.36.5 files: an older ledger simply reports 0 nodes,
       // which the renderer treats as "provenance unknown" rather than as one.
@@ -1166,14 +1231,17 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
  *     fate belongs to its mesh event, so it opens no episode of its own);
  *   • an open episode whose symptom is present again → its pending timer is
  *     cleared (a blink of absence does not resolve it);
- *   • an open episode absent through the whole `confirmMs` window → RESOLVE. */
+ *   • an open episode absent through the whole `confirmMs` window → RESOLVE,
+ *     carrying `absentSinceMs` (the FIRST tick it was seen absent) so the ledger
+ *     can tell how long the symptom was live; the window itself is not live
+ *     time (v0.64.6). */
 export function planEpisodeLifecycle(
   symptoms: { nodeId: number | null; kind: SymptomKind; subsumedBy?: string | null }[],
   openEpisodes: { key: string; nodeId: number | null; kind: SymptomKind }[],
   pending: Map<string, number>,
   now: number,
   confirmMs: number,
-): { toOpen: { nodeId: number | null; kind: SymptomKind }[]; toResolve: { nodeId: number | null; kind: SymptomKind; key: string }[] } {
+): { toOpen: { nodeId: number | null; kind: SymptomKind }[]; toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number }[] } {
   const epKey = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
   // A symptom is "live" (must NOT resolve) whenever it is present — INCLUDING
   // when it is merely subsumed under a mesh event. Subsumption demotes the
@@ -1191,13 +1259,13 @@ export function planEpisodeLifecycle(
     if (s.subsumedBy != null) continue;
     if (!openSet.has(epKey(s.nodeId, s.kind))) toOpen.push({ nodeId: s.nodeId, kind: s.kind });
   }
-  const toResolve: { nodeId: number | null; kind: SymptomKind; key: string }[] = [];
+  const toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number }[] = [];
   for (const ep of openEpisodes) {
     if (live.has(ep.key)) continue;
     const since = pending.get(ep.key) ?? now;
     pending.set(ep.key, since);
     if (now - since >= confirmMs) {
-      toResolve.push({ nodeId: ep.nodeId, kind: ep.kind, key: ep.key });
+      toResolve.push({ nodeId: ep.nodeId, kind: ep.kind, key: ep.key, absentSinceMs: since });
       pending.delete(ep.key);
     }
   }
