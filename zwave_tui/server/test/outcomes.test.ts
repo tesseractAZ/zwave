@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, statSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, statSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { wilsonLower, createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
@@ -383,7 +383,8 @@ test('lifecycle: an absent symptom is NOT resolved until it stays gone through t
   assert.equal(r.toResolve.length, 0);
   // Tick 3: absent past the window → resolve, pending cleared.
   r = planEpisodeLifecycle([], open, pending, 1_000 + confirm, confirm);
-  assert.deepEqual(r.toResolve, [{ nodeId: 7, kind: 'dead-flap', key: '7:dead-flap' }]);
+  assert.deepEqual(r.toResolve, [{ nodeId: 7, kind: 'dead-flap', key: '7:dead-flap', absentSinceMs: 1_000 }],
+    'it carries the FIRST absent tick, not the resolve tick (v0.64.6)');
   assert.equal(pending.has('7:dead-flap'), false, 'pending cleared on resolve');
 });
 
@@ -1372,4 +1373,83 @@ test('a tally claiming more outcomes than episodes is rejected (v0.44.0)', () =>
   const ok = store();
   ok.loadJSON({ v: 1, control: [['rtt-degraded', { n: 10, ok: 7, bad: 3 }]] });
   assert.ok(ok.controlArm('rtt-degraded') != null);
+});
+
+// ── v0.64.6: the split measures how long the symptom was LIVE ───────────────
+
+test('a blink resolved after the 10-minute confirmation is TRANSIENT — the confirmation window is not live time (v0.64.6)', () => {
+  // Through v0.64.5 the split measured open-to-resolve, and the production
+  // caller resolves only after a 10-minute confirmation window: every closure
+  // measured >= 10 min, so `transient` was unreachable and every blink was
+  // blamed on the node reporting too rarely.
+  const logged: string[] = [];
+  const o = createOutcomeStore({ releaseRate: 0.075, minEffect: 0.05, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  o.open(13, 'rtt-degraded', 0, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }), { dwellStartMs: -5 * 60_000 });
+  o.resolve(13, 'rtt-degraded', 30_000 + 10 * 60_000, WT(30), { absentSinceMs: 30_000 });   // live 30 s after it opened
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 1, 'a blink is transient');
+  assert.equal(o.unverifiableUndersampled('rtt-degraded'), 0, 'not a reporting-rate problem');
+  const line = logged.find((l) => /episode 13:/.test(l));
+  assert.match(line!, /\(transient — degraded state ended before its evidence floor\)/, `the closure tag: ${line}`);
+});
+
+test('the live span is anchored at the DWELL START — an episode opened late cannot relabel a reading that aged out (v0.64.6)', () => {
+  // First breach 7 min before the open tick (the dwell matured 2 min before the
+  // episode opened); the reading aged out 3.5 min after the open — 10.5 min of
+  // degraded state, i.e. the echo-only case `undersampled` exists for.
+  const o = store();
+  o.open(7, 'rtt-degraded', 0, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }), { dwellStartMs: -7 * 60_000 });
+  o.resolve(7, 'rtt-degraded', 3.5 * 60_000 + 10 * 60_000, WT(30), { absentSinceMs: 3.5 * 60_000 });
+  assert.equal(o.unverifiableUndersampled('rtt-degraded'), 1, 'it had the time, never the readings');
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 0);
+});
+
+test('a symptom live EXACTLY dwell + UNDERSAMPLED_AFTER_MS is undersampled — an aged-out reading lands on the boundary (v0.64.6)', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 0, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }), { dwellStartMs: -5 * 60_000 });
+  o.resolve(7, 'rtt-degraded', 15 * 60_000, WT(30), { absentSinceMs: 5 * 60_000 });
+  assert.equal(o.unverifiableUndersampled('rtt-degraded'), 1);
+  assert.equal(o.unverifiableTransient('rtt-degraded'), 0);
+});
+
+test('a ledger written before v0.64.6 restores everything EXCEPT the transient/undersampled split — and says so, once (v0.64.6)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'outcomes-legacy-split-'));
+  const path = join(dir, 'o.json');
+  try {
+    writeFileSync(path, JSON.stringify({ v: 1, control: [], action: [], fp: [], unver: [['rtt-degraded', 1]], unverUnprobe: [],
+      unverTransient: [['rtt-degraded', 2]], unverUndersampled: [['rtt-degraded', 5]] }));
+    const logged: string[] = [];
+    const o = createOutcomeStore({ path, minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+    o.load();
+    assert.equal(o.unverifiable('rtt-degraded'), 1, 'the rest of the ledger is restored');
+    assert.equal(o.unverifiableTransient('rtt-degraded'), 0, 'split tallies filed under the old rule are not');
+    assert.equal(o.unverifiableUndersampled('rtt-degraded'), 0);
+    assert.ok(logged.some((l) => /discarded 2 transient \+ 5 undersampled/.test(l)), `stdout names the totals: ${logged.join(' | ')}`);
+    assert.match(o.takeLoadNotice?.() ?? '', /^7 transient\/undersampled tallies reset/, 'the discard is handed to the operator');
+    assert.equal(o.takeLoadNotice?.() ?? null, null, 'once');
+    o.save();
+    const mid = createOutcomeStore({ path, minEpisodes: 4, decay: 0 });
+    mid.load();
+    assert.equal(mid.takeLoadNotice?.() ?? null, null, 'the marker reached disk — a second load discards nothing');
+    // Counted under the new rule, a closure survives the next reload.
+    o.open(9, 'rtt-degraded', 0, W(50, 0, 50, { rttMedian: 400, rttN: 1, freshN: 1 }), { dwellStartMs: -5 * 60_000 });
+    o.resolve(9, 'rtt-degraded', 11 * 60_000, WT(30), { absentSinceMs: 60_000 });
+    o.save();
+    const again = createOutcomeStore({ path, minEpisodes: 4, decay: 0 });
+    again.load();
+    assert.equal(again.unverifiableTransient('rtt-degraded'), 1, 'a live-span tally is kept');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a starved quiet-node closure is UNDERSAMPLED whatever its live span — silence cannot fill a before-window (v0.64.6 review)', () => {
+  // With the sweep off, 6 h of silence matures quiet-node; the verification
+  // probe its episode requests is answered within a minute, so the symptom is
+  // live about 6 min. A transmission in its before-window would have ended the
+  // breach, so that window can never reach the timeout floor.
+  const o = store();
+  o.open(21, 'quiet-node', 0, W(0, 0, 0, { freshN: 0 }), { dwellStartMs: -5 * 60_000 });
+  o.resolve(21, 'quiet-node', 60_000 + 10 * 60_000, W(50, 0, 50), { absentSinceMs: 60_000 });
+  assert.equal(o.unverifiableUndersampled('quiet-node'), 1, 'six silent hours: it had the time, never the readings');
+  assert.equal(o.unverifiableTransient('quiet-node'), 0, 'not a blink');
 });

@@ -103,14 +103,14 @@ session and transport layers. That means:
 
 | | measured |
 | --- | --- |
-| Mutation harness | **600 mutants, 839 s wall · 710 s user · 70 s sys** |
-| Source | 25 514 lines TypeScript · 19 995 lines of tests |
-| Test suite | **1 131 tests, 12.3 s** (`npm test`) |
+| Mutation harness | **645 mutants, 955 s wall · 751 s user · 79 s sys** |
+| Source | 25 746 lines TypeScript · 20 551 lines of tests |
+| Test suite | **1 159 tests, 12.0 s** (`npm test`) |
 
-Latest full run: **592 killed · 0 survived · 8 equivalent · 0 missing ·
+Latest full run: **637 killed · 0 survived · 8 equivalent · 0 missing ·
 0 ambiguous · 0 invalid · 0 relabel.**
 
-### Where the 839 seconds actually go
+### Where the 955 seconds actually go
 
 `node scripts/mutation-check.mjs --profile` reports a per-phase breakdown; the
 run below was taken under `/usr/bin/time -l` so the user/sys split is real
@@ -119,36 +119,36 @@ rather than inferred.
 | phase | wall | share | runs | each |
 | --- | ---: | ---: | ---: | ---: |
 | baseline typecheck | 0.2 s | 0.0 % | 1 | 0.20 s |
-| baseline full suite | 11.9 s | 1.4 % | 1 | 11.9 s |
-| per-mutant typecheck | 125.6 s | 15.1 % | 600 | 0.21 s |
-| **targeted test runs** | **584.9 s** | **70.3 %** | 599 | **0.98 s** |
-| full-suite fallbacks | 109.1 s | 13.1 % | 9 | 12.12 s |
-| total | 831.7 s | | | |
+| baseline full suite | 12.0 s | 1.3 % | 1 | 12.0 s |
+| per-mutant typecheck | 135.8 s | 14.4 % | 645 | 0.21 s |
+| **targeted test runs** | **692.2 s** | **73.2 %** | 644 | **1.07 s** |
+| full-suite fallbacks | 105.7 s | 11.2 % | 9 | 11.75 s |
+| total | 946.0 s | | | |
 
 ### The startup-bound hypothesis is REFUTED
 
 Earlier revisions of this document flagged "startup-bound" as an untested guess
 and declined to assert it. Measured, it is wrong:
 
-- **`sys` is 70.2 s — 8.4 % of 839.2 s real.** `user` is 709.8 s, **85 %**.
+- **`sys` is 78.6 s — 8.2 % of 954.9 s real.** `user` is 751.3 s, **79 %**.
 - The harness now measures its own **process-startup floor** directly, by timing
-  one bare invocation of each subprocess: `tsc` 79 ms, `tsx` 68 ms. Against the
-  observed counts that is `79 ms × 600 + 68 ms × 608` = **88.7 s, 10.7 %** of the
+  one bare invocation of each subprocess: `tsc` 78 ms, `tsx` 67 ms. Against the
+  observed counts that is `78 ms × 645 + 67 ms × 653` = **94.1 s, 9.9 %** of the
   run spent before any work begins. Two consecutive runs agreed to within half a
   point, so this is a stable property and not one run's weather.
 
 Two independent measurements agree at ~10 %. The harness is **CPU-bound on real
 work**, not on launching processes.
 
-The cost centre is the **targeted test runs: 70 % of the run**, at 0.98 s each
-across 599 invocations — of which only ~68 ms is startup. The other ~0.91 s is
+The cost centre is the **targeted test runs: 73 % of the run**, at 1.07 s each
+across 644 invocations — of which only ~67 ms is startup. The other ~1.00 s is
 `tsx` transpiling the TypeScript afresh **on every single invocation**. So the
 lever is not "spawn fewer processes", it is "stop re-transpiling the same
-sources 599 times": precompile once and run plain JS, or keep a warm worker.
+sources 644 times": precompile once and run plain JS, or keep a warm worker.
 
-Two smaller levers, for scale: the per-mutant typecheck is 15.1 % (38 % of which
+Two smaller levers, for scale: the per-mutant typecheck is 14.4 % (37 % of which
 *is* startup, so an incremental/`--watch` tsc server would help there), and the
-full-suite fallbacks are 13.1 % from only **9** runs at 12.1 s each. Fallbacks
+full-suite fallbacks are 11.2 % from only **9** runs at 11.8 s each. Fallbacks
 are triggered by kill-fast mapping misses, so each one fixed is ~12 s saved;
 seven were harvested from the run's own report during v0.64.0, taking the miss
 count to **zero** — the fallbacks that remain are mutants no single test file

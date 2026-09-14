@@ -4,6 +4,7 @@ import { detectSymptoms, windowTimeoutRate, type DetectInput, type SymptomState 
 import type { RateNormal, ContNormal, BaselineStore } from '../src/zwave/baselines';
 import { NodeStatus, type NodeSnapshot, type ControllerSnapshot } from '../src/types';
 import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage } from '../src/zwave/evidenceStore';
+import { foldRateRun, type RateRun } from '../src/zwave/evidenceStore';
 
 const T = 1_000_000_000_000;
 const MIN = 60_000;
@@ -67,6 +68,7 @@ function input(f: Fixture): DetectInput {
     coarse: () => [] as CoarseBucket[],
     controllerSamples: () => f.ctrl ?? [],
     coverage: (id) => f.cov?.get(id) ?? null,
+    rateRun: (id) => (f.recent.get(id) ?? []).reduce<RateRun | null>(foldRateRun, null),
     recordingSince: () => T - 30 * 86_400_000,
     hasRealNoise: () => f.hasRealNoise ?? true,
   };
@@ -742,4 +744,124 @@ test('quiet-node\'s dwell follows the CONFIGURED sweep, not the default (v0.63.0
   // A 4-hour sweep means only two sweeps have asked in 8 h; the dwell is three.
   assert.equal(run(4 * 3600_000).filter((x) => x.kind === 'quiet-node').length, 0,
     'a lengthened sweep must lengthen the dwell — otherwise this fires before one sweep asked');
+});
+
+/* ── v0.64.6: rate-fallback needs a PERSISTENT regression, not one retried frame ── */
+
+type RateMark = { at: number; rate?: number; routeKey?: string | null; fresh?: boolean; dTx?: number; dDropTx?: number };
+/** Node 6's samples as the store records them: a mark is a tick where something
+ *  landed (by default an acknowledged transmission — fresh, dTx 1); every other
+ *  minute copies the cached rate and route with fresh false and dTx 0. */
+function rateTimeline(from: number, to: number, marks: RateMark[]): EvidenceSample[] {
+  const byT = new Map(marks.map((x) => [x.at, x]));
+  const times = new Set<number>(marks.map((x) => x.at));
+  for (let t = from; t <= to; t += MIN) times.add(t);
+  let rate: number | null = 100;
+  let routeKey: string | null = 'direct';
+  const out: EvidenceSample[] = [];
+  for (const t of [...times].sort((a, b) => a - b)) {
+    const x = byT.get(t);
+    if (x?.rate !== undefined) rate = x.rate;
+    if (x?.routeKey !== undefined) routeKey = x.routeKey;
+    out.push(ev({ t, rateKbps: routeKey == null ? null : rate, routeKey,
+      fresh: x ? (x.fresh ?? true) : false, dTx: x ? (x.dTx ?? 1) : 0, dDropTx: x?.dDropTx ?? 0, dRx: 0 }));
+  }
+  return out;
+}
+/** Drive the detector once a minute (minutes relative to T) with one carried
+ *  dwell state; return node 6's live rate-fallback at each minute it was live. */
+function rateFallbackMinutes(samples: EvidenceSample[], fromMin: number, toMin: number) {
+  const state: SymptomState = new Map();
+  const hits: { minute: number; sym: ReturnType<typeof detectSymptoms>[number] }[] = [];
+  for (let m = fromMin; m <= toMin; m++) {
+    const now = T + m * MIN;
+    const out = detectSymptoms(input({ nodes: [node(1), node(6)], recent: new Map([[6, samples.filter((s) => s.t <= now)]]), now }), state);
+    const sym = out.find((x) => x.kind === 'rate-fallback' && x.nodeId === 6);
+    if (sym) hits.push({ minute: m, sym });
+  }
+  return hits;
+}
+
+test('ONE retried frame is a single-exchange retry, not a regression — rate-fallback never arms (v0.64.6)', () => {
+  // The live shape (nodes 4, 13, 3): one sweep ping at 40 kbit/s with 3 routing
+  // attempts, then silence. Through v0.64.5 the store's copies of that one rate
+  // matured the symptom by themselves and held it ~30 min.
+  const samples = rateTimeline(T - 20 * MIN, T + 35 * MIN, [{ at: T - 20 * MIN, rate: 100 }, { at: T, rate: 40 }]);
+  assert.deepEqual(rateFallbackMinutes(samples, 0, 35).map((h) => h.minute), []);
+});
+
+test('a fresh tick that only RECEIVED re-reads the cached rate — it is not a second transmission (v0.64.6)', () => {
+  const samples = rateTimeline(T - 20 * MIN, T + 35 * MIN, [
+    { at: T - 20 * MIN, rate: 100 }, { at: T, rate: 40 },
+    ...[3, 6, 9, 12].map((m) => ({ at: T + m * MIN, fresh: true, dTx: 0 })),
+  ]);
+  assert.deepEqual(rateFallbackMinutes(samples, 0, 35).map((h) => h.minute), []);
+});
+
+test('a second SEPARATE acknowledged transmission below 100k confirms it — the dwell runs from there (v0.64.6)', () => {
+  const samples = rateTimeline(T - 20 * MIN, T + 12 * MIN, [{ at: T - 20 * MIN, rate: 100 }, { at: T, rate: 40 }, { at: T + 2 * MIN, rate: 40 }]);
+  const hits = rateFallbackMinutes(samples, 0, 12);
+  assert.equal(hits.some((h) => h.minute <= 6), false, `not before the dwell has run from the second reading: ${JSON.stringify(hits.map((h) => h.minute))}`);
+  const at8 = hits.find((h) => h.minute === 8);
+  assert.ok(at8, `live by T+8: ${JSON.stringify(hits.map((h) => h.minute))}`);
+  assert.equal(at8!.sym.severity, 'watch');
+  assert.equal(at8!.sym.evidence[0].value, '40k');
+});
+
+test('two transmit reports seconds apart are ONE exchange — they do not confirm each other (v0.64.6)', () => {
+  const samples = rateTimeline(T - 20 * MIN, T + 35 * MIN, [{ at: T - 20 * MIN, rate: 100 }, { at: T, rate: 40 }, { at: T + 10_000, rate: 40 }]);
+  assert.deepEqual(rateFallbackMinutes(samples, 0, 35).map((h) => h.minute), []);
+});
+
+test('the newest acknowledged reading decides — one 100k transmission clears it on that tick (v0.64.6)', () => {
+  const samples = rateTimeline(T - 20 * MIN, T + 12 * MIN, [
+    { at: T - 20 * MIN, rate: 100 }, { at: T, rate: 40 }, { at: T + 2 * MIN, rate: 40 }, { at: T + 9 * MIN, rate: 100 },
+  ]);
+  const minutes = rateFallbackMinutes(samples, 0, 12).map((h) => h.minute);
+  assert.ok(minutes.includes(8), `live before the 100k reading: ${JSON.stringify(minutes)}`);
+  assert.equal(minutes.some((m) => m >= 9), false, 'gone on the tick the link is back at 100k, not 30 min later');
+});
+
+test('an ABORTED transmission rewrites the cached rate but is not a reading — neither a reset nor the reported rate (v0.64.6)', () => {
+  // A transmission aborted by the node's own premature response reports NoAck,
+  // still rewrites the route rate, and does not move commandsTX. Both such
+  // aborts on the reference mesh read 100 kbit/s.
+  const samples = rateTimeline(T - 20 * MIN, T + 10 * MIN, [
+    { at: T - 20 * MIN, rate: 100 }, { at: T, rate: 40 },
+    { at: T + 1 * MIN, rate: 100, dTx: 0, dDropTx: 1 },
+    { at: T + 2 * MIN, rate: 40 },
+    { at: T + 6 * MIN, rate: 100, dTx: 0, dDropTx: 1 },
+  ]);
+  const at8 = rateFallbackMinutes(samples, 0, 10).find((h) => h.minute === 8);
+  assert.ok(at8, 'the aborted transmissions neither reset nor cleared it');
+  assert.equal(at8!.sym.evidence[0].value, '40k', "it reports the run's newest reading, not the aborted transmission's 100k");
+  assert.equal(at8!.sym.severity, 'watch');
+});
+
+test('a NEW route carries no 100k capability — a reroute onto a 40k path is not a same-route regression (v0.64.6)', () => {
+  const samples = rateTimeline(T - 20 * MIN, T + 20 * MIN, [
+    { at: T - 20 * MIN, rate: 100, routeKey: 'r7' }, { at: T, rate: 40, routeKey: 'r9' }, { at: T + 2 * MIN, rate: 40, routeKey: 'r9' },
+  ]);
+  assert.deepEqual(rateFallbackMinutes(samples, 0, 20).map((h) => h.minute), []);
+});
+
+test('a route the driver no longer reports is not asserted as regressed (v0.64.6)', () => {
+  const samples = rateTimeline(T - 20 * MIN, T + 12 * MIN, [
+    { at: T - 20 * MIN, rate: 100 }, { at: T, rate: 40 }, { at: T + 2 * MIN, rate: 40 },
+    { at: T + 9 * MIN, routeKey: null, fresh: false, dTx: 0 },
+  ]);
+  const minutes = rateFallbackMinutes(samples, 0, 12).map((h) => h.minute);
+  assert.ok(minutes.includes(8), `live while the route was visible: ${JSON.stringify(minutes)}`);
+  assert.equal(minutes.some((m) => m >= 9), false, 'fail-closed once it is not');
+});
+
+test('a 9.6k same-route regression is a WARNING — even after an aborted transmission rewrites the cached rate to 100k (v0.64.6 review)', () => {
+  const samples = rateTimeline(T - 20 * MIN, T + 10 * MIN, [
+    { at: T - 20 * MIN, rate: 100 }, { at: T, rate: 9.6 }, { at: T + 2 * MIN, rate: 9.6 },
+    { at: T + 6 * MIN, rate: 100, dTx: 0, dDropTx: 1 },
+  ]);
+  const at8 = rateFallbackMinutes(samples, 0, 10).find((h) => h.minute === 8);
+  assert.ok(at8, 'live at T+8');
+  assert.equal(at8!.sym.severity, 'warn', 'severity follows the run\'s reading, not the newest sample');
+  assert.equal(at8!.sym.evidence[0].value, '9.6k');
 });
