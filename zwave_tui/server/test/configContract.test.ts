@@ -161,6 +161,22 @@ test('server/package.json version tracks the add-on version', () => {
   assert.equal(pkg.version, cfg[1], 'server/package.json version has drifted from config.yaml');
 });
 
+test('server/package-lock.json version tracks server/package.json', () => {
+  // The lock carries the package version twice — top level and packages[""] —
+  // and nothing read either: it still said 0.63.5 when package.json shipped
+  // 0.64.6. `npm ci` does not compare them, so only a test notices, and it
+  // notices whether the release PR came from release.yml or was made by hand.
+  const pkg = JSON.parse(read('server/package.json')) as { version: string };
+  const lock = JSON.parse(read('server/package-lock.json')) as {
+    version: string;
+    packages: Record<string, { version?: string }>;
+  };
+  assert.equal(lock.version, pkg.version,
+    'server/package-lock.json version has drifted from server/package.json');
+  assert.equal(lock.packages['']?.version, pkg.version,
+    'server/package-lock.json packages[""].version has drifted from server/package.json');
+});
+
 test('the Node major is the same in dev, CI and the container', () => {
   // These had silently diverged: the container installs Node 22 (alpine 3.21 is
   // the newest Home Assistant base image, and it ships nodejs 22.x), CI pinned
@@ -259,13 +275,25 @@ test('tag-release dispatches a workflow that exists and takes a version', () => 
     `${m![1]} does not accept the version input tag-release.yml passes`);
 });
 
-test('release.yml bumps BOTH files the version contract pins together', () => {
+test('release.yml bumps and stages every file the version contract pins together', () => {
   // Bumping only config.yaml (which is all the power equivalent needs) would
-  // open a release PR that fails its own CI on the version-drift assertion above.
-  const r = wf('release.yml');
-  assert.match(r, /zwave_tui\/config\.yaml/);
-  assert.match(r, /zwave_tui\/server\/package\.json/,
+  // open a release PR that fails its own CI on the version-drift assertions
+  // above (package.json against config.yaml, the lock against package.json).
+  // Each check names the line that does the work: a bare path would also be
+  // satisfied by the header comment or the step that prints the bumped versions.
+  const r = wf('release.yml').split('\n').map((l) => l.replace(/^\s*#.*$/, '')).join('\n');
+  assert.match(r, /sed -i -E "s\/\^version:[^\n]*zwave_tui\/config\.yaml/,
+    'release.yml must bump version: in config.yaml');
+  assert.match(r, /bump\("zwave_tui\/server\/package\.json"/,
     'release.yml must bump server/package.json too — configContract pins it to config.yaml');
+  assert.match(r, /bump\("zwave_tui\/server\/package-lock\.json"/,
+    'release.yml must bump server/package-lock.json too — configContract pins it to package.json');
+  assert.match(r, /j\.packages\[""\]\.version = process\.env\.NEXT/,
+    'release.yml must bump the lock\'s packages[""].version as well as its top-level version');
+  const staged = /git add((?:[^\n]*\\\n)*[^\n]*)/.exec(r)?.[1] ?? '';
+  for (const f of ['zwave_tui/config.yaml', 'zwave_tui/server/package.json', 'zwave_tui/server/package-lock.json']) {
+    assert.ok(staged.includes(f), `release.yml does not git add ${f}, so its bump would not reach the release PR`);
+  }
 });
 
 test('config.yaml and the publisher agree on the image', () => {

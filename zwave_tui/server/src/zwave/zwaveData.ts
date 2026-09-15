@@ -2910,13 +2910,15 @@ class ZwaveDataImpl implements ZwaveData {
     //    the zwave-js increments that sit beside the driver's own lastSeen
     //    update (a send the node acknowledged, or a frame received from it).
     //    The response-timeout counter moves when the node did NOT answer a
-    //    command expecting a reply, one report timeout after the acknowledgement
-    //    that already moved commands TX and in its own statistics event, so it
-    //    moving alone stamped "heard" at the moment the node went silent — and
-    //    auto-ping reads this stamp as a probe's answer. The dropped-TX counter
-    //    is excluded defensively: on zwave-js 15.27.1 a plain NoAck throws before
-    //    its only increment, which runs only after a transmission aborted by the
-    //    node's own premature response, when the node was just heard;
+    //    command expecting a reply, the report timeout plus the command's
+    //    round-trip time after the acknowledgement that already moved commands
+    //    TX and in its own statistics event, so it moving alone stamped "heard"
+    //    at the moment the node went silent — and auto-ping reads this stamp as
+    //    a probe's answer. The dropped-TX counter is excluded defensively: on
+    //    zwave-js 15.27.1 a plain NoAck throws before its only increment, which
+    //    runs only after a send cut short because the node's S0 nonce report or
+    //    S2 SOS nonce report arrived before the ACK, when the node was just
+    //    heard;
     //  · replay with no movement    → carry the previous stamp forward;
     //  · FIRST delivery (no cache)  → we cannot distinguish replay from real,
     //    so no arrival stamp at all — the driver's own lastSeen (driver-ws,
@@ -3054,9 +3056,10 @@ export function mapControllerStats(ev: unknown): {
 }
 
 /**
- * Resolve the node id from a raw statistics event. ★ HA delivers the INITIAL
- * (on-subscribe) event with `nodeId` (camelCase) but every SUBSEQUENT live push
- * with `node_id` (snake_case) — accept both or the stats freeze at their
+ * Resolve the node id from a raw statistics event. ★ Through HA 2026.8.3 the
+ * INITIAL (on-subscribe) event carried `nodeId` (camelCase) while every
+ * SUBSEQUENT live push carried `node_id` (snake_case); from HA 2026.9.0 both use
+ * `node_id`. Accept both, or on the older releases the stats freeze at their
  * subscribe-time values. Exported so a test pins this exact behaviour.
  */
 export function statsNodeId(ev: Record<string, unknown> | null | undefined): number | null {

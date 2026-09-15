@@ -543,9 +543,9 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       const since = dwell(state, key(id, 'rate-fallback'), b, now);
       if (since != null) {
         breaching = true;
-        // The run's newest reading, not the newest sample: a transmission aborted
-        // by the node's premature response also rewrites the cached rate, often
-        // to 100k, without being a reading.
+        // The run's newest reading, not the newest sample: a send cut short by
+        // the node's S0 nonce report or S2 SOS nonce report also rewrites the
+        // cached rate without being a reading.
         const rate = run?.rateKbps ?? null;
         const proto = rate === 9.6 ? 1 : rate === 40 ? 2 : 0;
         out.push({

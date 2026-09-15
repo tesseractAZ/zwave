@@ -114,11 +114,12 @@ export interface EvidenceSample {
  * arrives (Node.ts updateRouteStatistics: `protocolDataRate: txReport.routeSpeed`,
  * called under Driver.ts `if (hasTXReport(result))`), and record() copies that
  * cached value onto every sample. So a sample's rate is a READING only on a tick
- * where an acknowledged transmission landed (fresh, dTx > 0). A transmission
- * aborted by the node's own premature response reports NoAck yet still rewrites
- * the rate — both such aborts on the reference mesh read 100 kbit/s — without
- * moving commandsTX, so it is not a reading either. (A plain NoAck throws before
- * the route statistics are touched at all.)
+ * where an acknowledged transmission landed (fresh, dTx > 0). A send cut short
+ * because the node's S0 nonce report or S2 SOS nonce report arrived before the
+ * ACK reports NoAck yet still rewrites the rate without moving commandsTX, so it
+ * is not a reading either. A plain NoAck throws first, and any other premature
+ * response (a Get's report, a Supervision Report) aborts the transaction, so
+ * neither reaches the route statistics (zwave-js 15.27.1).
  */
 export interface RateRun {
   routeKey: string;

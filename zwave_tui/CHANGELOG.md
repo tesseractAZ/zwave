@@ -1,5 +1,107 @@
 # Changelog
 
+## 0.64.7
+
+### Fixed — documentation that no longer matched the add-on
+
+A read of every tracked document against the code and the published v0.64.6
+release found text, figures and screenshots that no longer described the add-on.
+No runtime behaviour changes in this release.
+
+- **Engine status sensor.** `sensor.zwave_tui_engine` can also read
+  `awaiting-identity-decision` and `no-auto-ping`; the README and the manual
+  listed three of its five states. `no-auto-ping` is what a default install
+  shows.
+- **Auto-ping give-up.** At the default 3 attempts only the 10- and 30-minute
+  waits run, so the ladder gives up about 50 minutes after death; the README
+  implied all three waits.
+- **Response timeouts (corrects 0.64.6).** `timeoutResponse` counts any
+  acknowledged command that expects a reply: a Get, a Set sent with
+  Supervision, or the nonce Get an S0 or S2 send issues first when it holds no
+  usable nonce, in which case the command itself is never sent. That is traced
+  in the zwave-js 15.27.1 source; the nonce case is not reproduced. The manual,
+  RESEARCH and four code comments described it as Get-only, and DESIGN left the
+  question open. zwave-js increments it once the report timeout plus the
+  command's round-trip time has passed since the acknowledgement, not one report
+  timeout after it; the 0.64.6 entry below is corrected in place.
+- **Rate fallback.** The manual now measures the 30-second rule from the
+  previous counted reading, and describes the statistics settle delay as one
+  tick at most rather than a guarantee; the 0.64.6 entry below, which said the
+  delay guaranteed it, is corrected in place.
+- **Premature responses (corrects 0.64.6).** Only a send cut short by the
+  node's S0 nonce report or S2 SOS nonce report reaches `commandsDroppedTX` and
+  rewrites the route rate. Any other premature response, such as a Get's report
+  or a Supervision Report arriving before the acknowledgement, ends the
+  transaction before either happens; every premature response in the reference
+  mesh's saved logs was of that kind. The 0.64.6 notes, the manual, three code
+  comments and the rate-fallback tests' comments said any premature response
+  did both; the 0.64.6 entry below is corrected in place. The detector's rule,
+  that a reading needs an acknowledged transmission, was already right. On the
+  same source reading, RESEARCH now notes that a jammed channel never reaches
+  `commandsDroppedTX`.
+- **Driver refusals.** The manual still said a failed action never reaches the
+  outcome ledger and that `refused-misdiagnosis` is never detected. Since 0.43.1
+  a driver refusal of `removeFailed` is recorded against `ghost-suspect` only,
+  and yields that verdict.
+- **Release and CI.** The manual's release chapter described a source build and
+  manual tagging. It now describes the five workflows, the prebuilt GHCR images
+  and the automatic tag-and-publish relay, and says the CI and CodeQL checks run
+  on pushes to and pull requests into `main`.
+- **Reference tables.** The manual cites code by function name instead of line
+  numbers, which had drifted by hundreds of lines, and its `Episode` shape,
+  ledger key list and threshold table list the fields and constants the code
+  has. The `s2-desync` recency window is 5 minutes (`DWELL_MS`), not 10.
+- **Statistics event key.** The manual, RESEARCH, a code comment and a test
+  comment said Home Assistant's first statistics event after subscribing carries
+  `nodeId`. That held through Home Assistant 2026.8.3; from 2026.9.0 every
+  event carries `node_id`. The add-on accepts both.
+- **Screenshots.** The screenshot generator crashed on a mock that no longer
+  matched the interference screen's data, hidden by a type cast that is now
+  gone. Every screenshot is regenerated from the current screens. The Overview
+  shot now lists worst health first, as its caption says; the Controller and
+  Interference shots are tall enough to show the network-health roll-up and the
+  noise-peak chart; and the Interference shot's correlated-degradation line
+  comes from the detector itself instead of a hand-written all-clear.
+- **Performance.** Each measured section of `PERFORMANCE.md` states when it was
+  measured, as a version, a date or both, where one "measured at" line had
+  covered figures taken as late as v0.64.6. The mutation harness's cost is no
+  longer attributed to `tsx` re-transpiling TypeScript on every run, as that
+  document, the README and the 0.64.0 notes said: the harness times each
+  targeted test run whole, so how its time splits between transpiling, module
+  loading and running the tests is not measured. The 0.64.0 entry below is
+  corrected in place. The `rtt-degraded` efficacy bar is about 89 % (an 84 %
+  control arm plus the 0.05 minimum effect), not 87 %, and of the 9 full-suite
+  fallbacks, 8 are the equivalent mutants and the ninth names a test file that
+  does not exist.
+- **README.** The detector list includes node down and the quiet node. It no
+  longer says every detector clears once its burst ends: that holds for the
+  detectors that count events, while a rate fallback holds until a 100 kbit/s
+  reading or a reading on a different route, which can be hours. "Read-only by
+  default" now says the add-on still publishes its conclusions as Home Assistant
+  states, and the test and mutant headline names the release run it was
+  measured on.
+- **Spanish translation.** Three auto-ping option descriptions carry the
+  v0.64.4 wording the English already had.
+
+### Also in this release
+
+- `package-lock.json` did not follow the version: no release after 0.43.0
+  shipped a lock whose version matched `package.json`, and 0.64.6 shipped with
+  one that read 0.63.5. `release.yml` now bumps the lock's two version fields
+  with the others; contract tests keep both equal to `package.json` and check
+  that `release.yml` bumps and stages the lock.
+- Published images carry `org.opencontainers.image.version`.
+- `apparmor.txt` and `.gitignore` comments no longer describe SQLite storage the
+  add-on does not use.
+- The README, DESIGN and the mutation harness's failure message count
+  `AMBIGUOUS` and `RELABEL` as failures. DESIGN documents what `fresh` means
+  since 0.64.6 and the statistics settle delay. The `config.yaml` comment on
+  `image:` says the contract test pins the package name, not the whole
+  reference. Two workflow and repository comments date the end of on-device
+  builds to v0.29.4.
+
+One new test keeps `package-lock.json` at the `package.json` version, for 1 160 tests in all. The mutation harness holds the same 645 mutants; full run: 637 killed, 0 survived, 8 equivalent.
+
 ## 0.64.6
 
 ### Fixed — a brief symptom was blamed on the node's reporting rate
@@ -17,7 +119,7 @@ of the verification burst starting.
 
 The split now measures how long the symptom was live: from its dwell start (the
 first breaching reading) to the first tick it was seen absent, against the dwell
-plus `UNDERSAMPLED_AFTER_MS` (10 minutes). Anchoring at the dwell start rather
+plus `UNDERSAMPLED_AFTER_MS` (10 minutes in all). Anchoring at the dwell start rather
 than at the episode's open tick keeps the case `undersampled` exists for — one
 reading that ages out of the 10-minute lookback on a node that answers only its
 two-hourly sweep — on the right side of the boundary whatever the tick timing.
@@ -37,9 +139,10 @@ display-only; no arm, planner or alarm reads them.
 Home Assistant's node statistics carry no `lastSeen`, so the add-on stamps the
 arrival of a statistics event in which a counter moved, and auto-ping reads that
 stamp as a probe's answer. `timeoutResponse` moves when the node was not heard: it
-counts a command that expects a reply (a Get, or a supervised Set) that the node
-acknowledged but never answered, and zwave-js increments it one report timeout
-after the acknowledgement (1.1 s on the reference mesh), in its own statistics
+counts a command that expects a reply (a Get, a supervised Set, or a secure send's
+nonce Get) that the node acknowledged but never answered, and zwave-js increments
+it once the report timeout plus the command's round-trip time has passed since
+the acknowledgement (about 1.1 s on the reference mesh), in its own statistics
 event. The stamp therefore landed at the moment the node went silent, so a failed
 probe could have been credited as answered and a sweep kill could have lost its
 dwell exemption.
@@ -50,9 +153,10 @@ the node acknowledged, or a frame received from it). The counters are still
 recorded and displayed; an interval whose only movement is a timeout or a dropped
 send no longer counts as a fresh observation for RTT/RSSI or toward an
 after-window's liveness floor. `commandsDroppedTX` is removed defensively: on the
-running driver (zwave-js 15.27.1) a send the node never acknowledged throws before
-that counter's only increment, which runs only after a transmission aborted by the
-node's own premature response — when the node was just heard.
+running driver (zwave-js 15.27.1) a plain NoAck throws before that counter's only
+increment, which runs only after a send was cut short because the node's S0 nonce
+report or S2 SOS nonce report arrived before the acknowledgement — when the node
+was just heard.
 
 ### Fixed — one retried frame raised a rate fallback for 30 minutes
 
@@ -68,8 +172,8 @@ verification probes and booked an `improved (no action)` recovery.
 
 The evidence store now keeps a per-route rate run folded from every sample, and
 only ticks where an acknowledged transmission landed move it: a copied rate is not
-a reading, and neither is a transmission aborted by the node's own premature
-response, which reports NoAck yet still rewrites the rate. A reading
+a reading, and neither is a send cut short by the node's S0 nonce report or S2 SOS
+nonce report, which reports NoAck yet still rewrites the rate. A reading
 at 100 kbit/s proves the route and clears the run; a reading below counts once,
 and only if it lands at least 30 seconds after the previous counted one, because
 one exchange can produce several transmit reports seconds apart. The detector
@@ -86,7 +190,9 @@ again. The rate run is saved with the evidence and restored at start-up even whe
 the fine samples are too old to keep, so a restart does not forget a sustained
 fallback. And because zwave-js publishes a transmission's counter up to 250 ms
 before the rate it produced, a node whose statistics just changed is sampled on the
-next 10-second tick instead, so the run never reads the previous frame's rate.
+next 10-second tick instead, but only one tick in a row, so the run reads the
+previous frame's rate only if the node's statistics change again just before that
+tick, as on a node that talks continuously.
 
 ### Also in this release
 
@@ -493,9 +599,10 @@ than guessed at; measuring overturned one standing assumption.
   test runs are **70 %** of the 821 s, at 1.02 s each across 558 invocations.
   **"Startup-bound" is refuted**: sys is 78 s (9.5 %) and the directly measured
   spawn floor is 83.3 s (10.2 %), while user is 689 s (84 %); two consecutive
-  runs agreed to within half a point. The cost is `tsx`
-  re-transpiling the sources on every invocation, so the lever is precompiling,
-  not spawning less.
+  runs agreed to within half a point. The harness times each targeted run
+  whole, so how that time splits between transpiling, module loading and
+  running the tests is not measured; the lever is the test runs themselves, not
+  spawning less.
 - **Per-session bandwidth**: 4.96 KB/s at 80×24, 17.22 KB/s at 200×60. The
   200×60 figure confirms what the document already carried; the withdrawn
   "0 KB/s at 80×24" is refuted. Its cause is now understood and recorded — a

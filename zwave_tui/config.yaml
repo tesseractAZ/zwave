@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.64.6"
+version: "0.64.7"
 slug: zwave_tui
 description: "Control-room TUI for Z-Wave mesh health — telnet + sidebar console, a learned advisory engine, and its conclusions as HA entities"
 url: https://github.com/tesseractAZ/zwave
@@ -19,8 +19,9 @@ arch:
 # registry token, and only then was this key added. Declaring `image:` against a
 # package that is missing or private makes Supervisor pull a tag it cannot fetch,
 # and EVERY install and update fails — whereas publishing images nobody consumes
-# is harmless. configContract.test.ts pins the pair: if this key is present it
-# must name exactly what the workflow pushes.
+# is harmless. configContract.test.ts pins the pair: if this key is present, its
+# {arch}-<name> part must match a package name the workflow pushes (the
+# ghcr.io/<owner>/ prefix is not checked).
 image: ghcr.io/tesseractaz/{arch}-zwave-tui
 startup: services
 boot: auto

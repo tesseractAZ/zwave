@@ -29,16 +29,20 @@
  *     gate), and `commandsDroppedTX` stays 0. That near-silence was reproduced
  *     against zwave-js@15.25.3 (NoAck, controller-cannot-send, and Get-timeout
  *     each incremented it in none of the cases). It only ticks on a NOK transmit
- *     report fed back through the message generator, and — on documented but
- *     not-reproduced behavior — can false-positive on premature-response aborts
- *     that actually succeeded (real-world rate uncertain; any nonzero value is
- *     weak evidence at most). So it is near-silent for the failure it appears to
- *     name and noisy otherwise. The real, node-stays-Alive degradation signal is
- *     `timeoutResponse`: the node MAC-ACKed a Get (the RF link up to the ACK
- *     works) but the expected report never arrived — a return-path / responsiveness
- *     problem. The raw `commandsDroppedTX`/`commandsDroppedRX` counts are still
- *     shown on the Detail TRAFFIC row as honest context, just never folded into
- *     the score. (The hard RF-failure event — Alive↔Dead flapping — is the symptom
+ *     report fed back through the message generator, and can false-positive on a
+ *     premature-response abort that actually succeeded — on zwave-js 15.27.1
+ *     (source reading, not reproduced) only one triggered by the node's S0 nonce
+ *     report or S2 SOS nonce report; a Get's report or a Supervision Report
+ *     beating the ACK aborts the transaction before either send counter moves
+ *     (RESEARCH.md §2.2). Any nonzero value is weak evidence at most. So it is
+ *     near-silent for the failure it appears to name and noisy otherwise. The
+ *     real, node-stays-Alive degradation signal is `timeoutResponse`: the node
+ *     MAC-ACKed a reply-expecting command (a Get, a supervised Set, or a secure
+ *     send's nonce Get), so the RF link up to the ACK works, but the expected
+ *     report never arrived — a return-path / responsiveness problem. The raw
+ *     `commandsDroppedTX`/`commandsDroppedRX` counts are still shown on the
+ *     Detail TRAFFIC row as honest context, just never folded into the score.
+ *     (The hard RF-failure event — Alive↔Dead flapping — is the symptom
  *     engine's `dead-flap` detector; the SCORE still does not fold it in, and
  *     here a currently-DEAD node is the D gate.)
  *
@@ -134,14 +138,15 @@ const FLAG_ORDER = ['D', 'S', 'W', 'F', 'R', 'L', 'I', 'B', 'U'] as const;
  * Response-timeout rate (%) — the ONE definition shared by the Overview TMO
  * column and the Detail 'Timeouts' row so the same node never shows two figures.
  * It is `timeoutResponse / commandsTX`: the fraction of successfully-sent
- * commands that were response-expecting Gets whose reply never came back while
- * the node stayed reachable. `commandsDroppedTX` is deliberately EXCLUDED — it
- * does not measure RF loss and is noisy (RESEARCH.md §0). null when the node has
- * sent nothing yet.
+ * commands that were reply-expecting traffic (a Get, a supervised Set, or a
+ * secure send's nonce Get) whose reply never came back while the node stayed
+ * reachable. `commandsDroppedTX` is deliberately EXCLUDED — it does not measure
+ * RF loss and is noisy (RESEARCH.md §0). null when the node has sent nothing yet.
  *
- * Denominator caveat: `timeoutResponse` accrues only for Get-type traffic while
- * `commandsTX` counts all successful sends, so for a SET-heavy node this rate is
- * a conservative under-estimate of its true Get-failure rate — an honest floor,
+ * Denominator caveat: `timeoutResponse` accrues only for that reply-expecting
+ * traffic while `commandsTX` counts all successful sends, so for a node whose
+ * traffic is mostly unsupervised Sets that need no nonce this rate is a
+ * conservative under-estimate of its true reply-failure rate — an honest floor,
  * never an over-statement.
  */
 export function responseTimeoutPct(stats: NodeStats): number | null {
@@ -376,7 +381,9 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   // Uses timeoutResponse ONLY, not commandsDroppedTX (RESEARCH.md §0): the drop
   // counter is near-silent for RF failures (they mark the node DEAD → handled by
   // the DEAD gate) and noisy otherwise, so folding it in would both miss real
-  // trouble and false-alarm on premature-response aborts that actually succeeded.
+  // trouble and false-alarm on premature-response aborts that actually succeeded
+  // (on zwave-js 15.27.1 only those triggered by an S0 nonce report or S2 SOS
+  // nonce report).
   let txFrac: number;
   let flaky = false;
   if (stats.commandsTX <= 0) {

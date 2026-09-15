@@ -5,7 +5,7 @@
  * to `docs/screenshots/<screen>.svg`. The screenshots in the README and DOCS are
  * produced by this script, so they can be regenerated whenever a screen changes:
  *
- *   cd server && npx tsx scripts/gen-screenshots.mts
+ *   cd zwave_tui/server && npx tsx scripts/gen-screenshots.mts
  *
  * Two deliberate choices:
  *   • **Synthetic data.** The demo mesh below is fictional — no real home's
@@ -21,6 +21,8 @@ import { fileURLToPath } from 'node:url';
 import { renderScreen } from '../src/telnet/screens/index';
 import { renderActionsMenu } from '../src/telnet/screens/actionsMenu';
 import { buildMenu, buildEntityRows, buildConfigRows } from '../src/telnet/actionsCatalog';
+import { visibleNodes } from '../src/telnet/input';
+import { computeInterference } from '../src/zwave/interference';
 import { NodeStatus } from '../src/types';
 import type {
   ConfigParam,
@@ -230,13 +232,36 @@ const DATA: DataProvider = {
     // published screenshot has to show.
     : a === 'healNode' ? { expectedEfficacy: 0.64, n: 11, baseRate: 0.19, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 }
     : null,
-  interference: () => ({
-    noise: { channels: [-101, -103, -99, -102], floor: -101, real: true, trend: spark(-101, 40, 2), trendCoarse: spark(-100, 60, 3), trendCoarseDays: 12, band: 'clean' },
-    serial: { nakPerH: 0, canPerH: 0.4, tmoAckPerH: 0.1, tmoRespPerH: 2.1, band: 'healthy', spanH: 168 },
-    diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, rate: h >= 17 && h <= 20 ? 0.031 : 0.004 + (h % 5) * 0.0015, samples: 60 })),
-    coverageDays: 12,
-    correlated: { active: false, degradedNodes: 2, activeNodes: 10, narrative: 'No correlated mesh degradation.' },
-  }) as never,
+  // No `as never` here — the cast hid two drifts from tsconfig.test.json: the
+  // per-bucket max/min series the type gained (v0.49.0 / v0.62.0), whose
+  // absence crashed this script at `maxes.length` before it wrote a single
+  // file, and a diurnal `samples` field where the type (and the worst-hour
+  // line) reads `tx`. Max and min are derived FROM the coarse means, so they
+  // stay index-aligned and keep max ≥ mean ≥ min as the production fold does;
+  // one bucket carries a burst, so the peak callout has something to report.
+  interference: () => {
+    const trendCoarse = spark(-100, 60, 3);
+    return {
+      noise: {
+        channels: [-101, -103, -99, -102], floor: -101, real: true, trend: spark(-101, 40, 2), trendCoarse,
+        trendCoarseMax: trendCoarse.map((m, i) => (i === 41 ? -84 : m + 2)),
+        trendCoarseMin: trendCoarse.map((m) => m - 3),
+        trendCoarseDays: 12, band: 'clean',
+      },
+      serial: { nakPerH: 0, canPerH: 0.4, tmoAckPerH: 0.1, tmoRespPerH: 2.1, band: 'healthy', spanH: 168 },
+      // 400 tx an hour clears the 4 × MIN_HOUR_TX thin-hour bar, so the worst
+      // hour renders as a solid one rather than carrying the thin caveat.
+      diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, rate: h >= 17 && h <= 20 ? 0.031 : 0.004 + (h % 5) * 0.0015, tx: 400 })),
+      coverageDays: 12,
+      // FROM the production fold, not a literal: the demo roster carries three
+      // per-node symptoms and no mesh event, and a hand-typed block paired a
+      // count of 2 with the zero-count all-clear narrative — text the screen
+      // never renders beside a non-zero count.
+      correlated: computeInterference({
+        now: NOW, bgChannels: null, controllerSamples: [], controllerCoarse: [], coarseByNode: new Map(), symptoms: SYMPTOMS,
+      }).correlated,
+    };
+  },
   entityStates: () => ENTITIES,
   configParams: () => ({ status: 'ready', params: PARAMS }),
   openEpisodes: () => [],
@@ -341,7 +366,12 @@ ${body.join('\n')}
 /* ── render + write ───────────────────────────────────────────────────────── */
 
 const shots: Array<[string, string[], string]> = [
-  ['overview', renderScreen(ctx(view('overview'))), 'Overview — live node table, worst health first'],
+  // Sorted by the session's own `visibleNodes()`, not the shared `ctx` roster:
+  // the title, the README alt text and the screen all say worst health first,
+  // and a declaration-order table put the dead node mid-list. ONLY this shot —
+  // Detail reads `visibleNodes[view.selected]`, so sorting the shared roster
+  // would move that frame off #12 Kitchen Ceiling.
+  ['overview', renderScreen({ ...ctx(view('overview')), visibleNodes: visibleNodes(DATA, view('overview')) }), 'Overview — live node table, worst health first'],
   // Scrolled so the frame lands on the v0.22 sections that make Detail distinctive.
   // Tall AND scrolled to the end: EVIDENCE is the last section, and
   // `detailScroll` self-clamps to maxScroll, so an over-large value pins the
@@ -350,7 +380,9 @@ const shots: Array<[string, string[], string]> = [
   // is added above it — which is exactly how the v0.34 shot came to advertise
   // a panel it did not contain.
   ['detail', renderScreen(ctx(view('detail', { selected: 1, rows: 44, detailScroll: 9_999 }))), 'Detail — per-node dossier: live entity state, config parameters, and what the engine can see'],
-  ['controller', renderScreen(ctx(view('controller'))), 'Controller — radio health, noise floor, counters'],
+  // TALLER so the NETWORK HEALTH roll-up renders: at 22 rows the frame kept
+  // only the heading and its truncation notice.
+  ['controller', renderScreen(ctx(view('controller', { rows: 30 }))), 'Controller — radio health, noise floor, counters'],
   // TALLER than the 22-row default on purpose: the route tree alone fills a
   // 22-row frame, and the Route-stability panel spends only leftover rows —
   // so at the default size the published screenshot would show a topology
@@ -363,7 +395,10 @@ const shots: Array<[string, string[], string]> = [
   // both of which live on cards further down — would be documented in prose and
   // absent from the picture.
   ['remedy', renderScreen(ctx(view('remedy', { rows: 38 }))), 'Remedy — engine diagnoses, ranked recommendations, and the ledger\u2019s verdict'],
-  ['interference', renderScreen(ctx(view('interference'))), 'Interference — noise floor, serial health, diurnal heatmap'],
+  // TALLER to select the chart branch: at 22 rows the days line falls back to a
+  // sparkline with no room for the peak's reason, and would publish `peak -84
+  // dBm +3` with the burst callout shed.
+  ['interference', renderScreen(ctx(view('interference', { rows: 30 }))), 'Interference — noise floor, serial health, diurnal heatmap'],
 ];
 
 // The Actions Menu is a modal, not a screen — render it separately.

@@ -146,7 +146,7 @@ for no-RTC clocks) — plus the disciplines the design review proved necessary:
 | `dFlaps` | **event-driven accumulator** from `zwave_js/subscribe_node_status`, drained per sample | the hard RF-failure event — level-sampling misses sub-window flaps *(DR)* |
 | `dRouteChanges` | accumulator from the existing route-change diff | route churn *(§2.1)* |
 | `dTx dTimeout dDropTx dRx` | counter deltas w/ guards | rate math; dTimeout is the primary signal *(§0)* |
-| `fresh` | did a stats event arrive since the previous sample? | pseudo-replication guard: EMAs re-sampled without new events carry no information *(DR)* |
+| `fresh` | was the node **heard** since the previous sample (the HA-side arrival stamp advanced — since v0.64.6 only `commandsTX`, `commandsRX` or `commandsDroppedRX` moves it) AND did `commandsTX`, `commandsRX`, `timeoutResponse` or `commandsDroppedTX` move? A timeout-only, dropped-send-only or dropped-RX-only interval, a (re)subscribe replay with unchanged counters, and a node's first-ever sample are not fresh | pseudo-replication guard: EMAs re-sampled without new events carry no information *(DR)* |
 | `lastSeen`, `bgRssi[ch]`, `isListening` | **reserved** (null until v0.13) | schema stability *(§2.1)* |
 | `rateKbps`, `routeKey` | LWR | rate-fallback + churn *(§2.2)* |
 | `rtt`, `rssi` | node stats (EMA; sentinels ≥125 ⇒ null) | trend — **meaningful only when `fresh`** *(§1.11, DR)* |
@@ -190,6 +190,13 @@ overwritten on the next OK transmission, §2.3), never by polling.
   poll within ~2× the refresh cadence), sampling **skips the tick** — a gap in
   the ring is honest; a fabricated healthy window is not. The shutdown flush
   saves but does not synthesize a fresh-timestamped sample from stale caches.
+- **Settle deferral** (v0.64.6): a node whose newest statistics event is under
+  300 ms old (`STATS_SETTLE_MS`) is sampled on the next tick instead, at most
+  one tick in a row; its counter deltas carry into that sample. zwave-js emits
+  statistics through a 250 ms leading-and-trailing throttle and increments
+  `commandsTX` before it rewrites the route rate, so a sample taken between the
+  two events would pair this transmission's counter with the previous frame's
+  rate *(§1.11)*.
 - Per-node statistics subscriptions are **retried** on failure, not
   fire-and-forgotten; subscription state is part of coverage.
 
@@ -287,7 +294,7 @@ verbatim where one exists — §3.5):
 | `mesh-correlated` **(SPECIFIED, NOT BUILT)** | breadth over **nodes-with-observable-traffic-in-window** (≥30–40% of active nodes, never an absolute K), sustained ≥2–3 consecutive windows, or corroborating controller-stats degradation | pipeline artifacts: post-gap windows are invalid for correlation (queued deltas aren't time-attributable); single-window unanimity after silence is evidence about the pipeline, not the mesh *(DR)* |
 | `quiet-node` | mains **listening** node whose last-activity age ≫ its own learned reporting cadence — emits honest "unreachability unknown, no traffic attempted" (state ≠ healthy) | battery/FLiRS within wake interval; nodes with no learned cadence yet *(DR; §3.7)* |
 | `rate-fallback` | the **same routeKey** that previously sustained 100k now persistently below 100k (operationally, v0.64.6: at least 2 separate acknowledged transmissions on that routeKey since its newest 100k reading, the newest below 100k) — same-route regression needs no capability data *(fail-closed: cross-route comparison excluded until driver-WS capability data exists — DR)* | legacy/FLiRS capability cap; single-exchange retry *(§2.2)* |
-| `return-path-degraded` | windowed per-command timeout **rate** (ΣdTimeout/ΣdTx, min denominator) ≫ own baseline, dwell ≥ D | tiny samples; traffic-volume shifts (rate not count — DR); SET-only nodes *(§0)*; carries a Get-mix caveat until the Supervision question is resolved *(RESEARCH §7)* |
+| `return-path-degraded` | windowed per-command timeout **rate** (ΣdTimeout/ΣdTx, min denominator) ≫ own baseline, dwell ≥ D | tiny samples; traffic-volume shifts (rate not count — DR); unsupervised-SET-only nodes that need no nonce exchange, and traffic-mix shifts between reply-expecting commands and unsupervised Sets — either direction moves the rate (toward reply-expecting commands can inflate it, toward unsupervised Sets can mask a breach) *(§0)* — supervised Sets DO accrue timeouts, and so does a secure send whose nonce Get is acknowledged but never answered (source-traced on zwave-js 15.27.1; empirical repro still open — RESEARCH §7 item 11) |
 | `route-churn` | routeKey churn ≫ baseline + rate/RTT corroboration (**routeSchemeState does not exist on either WS — dropped**; explorer detection only ever as a labelled best-effort log parse) | one legit re-route after topology change *(§2.1, DR)* |
 | `rtt-degraded` | RTT median over **fresh** samples ≫ route-stratified baseline, dwell | route change (settle window); EMA lag; wake latency *(§1.11, DR)* |
 | `weak-signal` | low RSSI **on a direct (non-routed) node** + timeout corroboration | routed node (RSSI = last hop, not the device) *(§1.3)* |
@@ -605,5 +612,6 @@ what each run proved, rather than listed per release.
 | the machine-readable boundary (v0.57) | engine conclusions as HA entities + enriched `/api/health`, from one shared builder | what the engine concludes is reachable by something other than a person at a terminal |
 
 The verification gate grew with them: **mutation coverage** (`scripts/mutation-check.mjs`)
-is now the release gate, with `MISSING`, `AMBIGUOUS` and `INVALID` all counted
-as failures and an anchor pre-flight that refuses to run over a stale entry.
+is now the release gate, with `MISSING`, `AMBIGUOUS`, `INVALID` and `RELABEL`
+(a mutant still marked equivalent that the suite now kills) all counted as
+failures and an anchor pre-flight that refuses to run over a stale entry.

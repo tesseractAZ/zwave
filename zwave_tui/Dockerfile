@@ -60,7 +60,8 @@ RUN chmod a+x /etc/services.d/zwave-tui/run
 EXPOSE 8788 2324
 
 # Add-on metadata — re-declare the ARGs we need inside this stage so LABEL
-# can substitute them.
+# can substitute them. `org.opencontainers.image.version` is set explicitly:
+# left unset, the HA base image's own value (its base version) shows through.
 ARG BUILD_ARCH
 ARG BUILD_DATE
 ARG BUILD_DESCRIPTION
@@ -76,6 +77,7 @@ LABEL \
     io.hass.version="${BUILD_VERSION}" \
     org.opencontainers.image.title="${BUILD_NAME}" \
     org.opencontainers.image.description="${BUILD_DESCRIPTION}" \
+    org.opencontainers.image.version="${BUILD_VERSION}" \
     org.opencontainers.image.source="https://github.com/${BUILD_REPOSITORY}" \
     org.opencontainers.image.revision="${BUILD_REF}" \
     org.opencontainers.image.created="${BUILD_DATE}" \
