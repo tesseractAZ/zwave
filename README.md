@@ -248,8 +248,8 @@ has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
 Headlines, each stated as narrowly as it was measured: the slowest screen
 redraw is **412 µs** against a 1 000 ms frame budget; the container holds
 **93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
-RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.64.6 release
-run, **1 159 tests in 12.0 s** and **645 mutants in ~16 min** gated the release.
+RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.64.7 release
+run, **1 160 tests in 12.8 s** and **645 mutants in ~16 min** gated the release.
 A TUI session costs
 **4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
 rate but one whole-frame redraw per second.

@@ -100,7 +100,7 @@ No runtime behaviour changes in this release.
   reference. Two workflow and repository comments date the end of on-device
   builds to v0.29.4.
 
-TESTS_AND_MUTANTS_LINE_0647
+One new test keeps `package-lock.json` at the `package.json` version, for 1 160 tests in all. The mutation harness holds the same 645 mutants; full run: 637 killed, 0 survived, 8 equivalent.
 
 ## 0.64.6
 
