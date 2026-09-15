@@ -3700,7 +3700,7 @@ const TSC = join(ROOT, 'node_modules', '.bin', 'tsc');
 /**
  * PHASE PROFILE (--profile).
  *
- * The run is ~14 minutes and gates every release, so "where does it go" is the
+ * The run is ~16 minutes and gates every release, so "where does it go" is the
  * only question an optimisation attempt can start from. Wall time per phase and
  * a COUNT per phase are both needed: a phase that is slow because it runs 549
  * times is a different problem from one that is slow per call, and only the
@@ -3767,16 +3767,19 @@ const suiteFails = () => testsFail(allTestFiles()) != null;
 /**
  * KILL-FAST: the cheap test files that most plausibly cover a mutant.
  *
- * A kill is a kill no matter WHICH test catches it, so a red result from a
- * single file is already a final verdict and the other 36 files add nothing. A
- * GREEN result proves nothing, so survival still has to face the whole suite —
- * the `SURVIVED` verdict is never reached by a shortcut.
+ * A kill is a kill no matter WHICH test catches it, so a red result from the
+ * targeted files is already a final verdict and the rest of the suite adds
+ * nothing. A GREEN result proves nothing, so survival still has to face the
+ * whole suite — the `SURVIVED` verdict is never reached by a shortcut.
  *
  * This is a pure latency optimisation with no effect on any verdict. It matters
- * because the suite is startup-bound, not compute-bound: one file runs in
- * ~0.18s while all 37 take ~13s, since each pays the tsx/TypeScript loader cost
- * again. With 151 of 153 mutants killed, nearly every mutant takes the fast
- * path and the full run drops from ~33 minutes to ~2.
+ * because cost grows with the files run: in v0.64.6 a targeted run averaged
+ * ~1.07s against ~12s for the whole suite. The run is CPU-bound on those test
+ * runs, not startup-bound — the process-startup floor is ~10% of it, and how the
+ * rest splits between transpiling, module loading and running tests is not
+ * measured (PERFORMANCE.md §3). In that run 644 of 645 mutants took a targeted
+ * run and only 9 reached the full suite. When kill-fast arrived (#43: 151 of
+ * 153 mutants killed) it cut the full run from 32m28s to 3m23s.
  *
  * The mapping is a heuristic (source basename → same-named test file, or an
  * explicit `tests: [...]` on the mutant). A wrong guess costs only time, and
@@ -3789,8 +3792,9 @@ const suiteFails = () => testsFail(allTestFiles()) != null;
  * The default guess is "same basename", which holds for the engine modules
  * (evidenceStore.ts → evidenceStore.test.ts) but not for the TUI, whose tests
  * are named after what they assert rather than what they import — the screens
- * are covered by renderContract/renderHonesty plus a per-screen file. Without
- * this table 81 of 153 mutants fall straight through to the full suite.
+ * are covered by renderContract/renderHonesty plus a per-screen file. When this
+ * table was added, 81 of the then 153 mutants fell straight through to the full
+ * suite without it.
  *
  * A wrong or missing entry costs TIME, never correctness: the full suite still
  * runs whenever the targeted files come back green, and every miss is printed
@@ -4106,9 +4110,11 @@ if (PROFILE) {
 
 if (survived.length || missing.length || ambiguous.length || invalid.length || relabel.length) {
   console.log('\nA SURVIVED entry is a fix no test protects. A MISSING entry means this');
-  console.log('file has drifted from the code. An INVALID entry is a mutant that does not');
-  console.log('compile — it would be counted as killed while proving nothing. All three');
-  console.log('are failures, as is RELABEL (an `equivalent` entry that is now');
-  console.log('actually covered): do not claim the release is mutation-checked until clean.');
+  console.log('file has drifted from the code. An AMBIGUOUS entry is an anchor that matches');
+  console.log('more than one site, so its mutation would land on one nobody chose. An INVALID');
+  console.log('entry is a mutant that does not compile — it would be counted as killed');
+  console.log('while proving nothing. All four are failures, as is RELABEL (an `equivalent`');
+  console.log('entry that is now actually covered): do not claim the release is');
+  console.log('mutation-checked until clean.');
   process.exit(1);
 }

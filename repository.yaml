@@ -5,7 +5,7 @@
 # store add-on. Home Assistant manages it natively from there: the add-on's
 # `image:` key points at the prebuilt multi-arch GHCR images, so install and the
 # Update button PULL the published image for `version:` in zwave_tui/config.yaml
-# — no on-device build (since v0.29.2).
+# — no on-device build (since v0.29.4).
 name: tesseractAZ Z-Wave TUI
 url: https://github.com/tesseractAZ/zwave
 maintainer: Eric Paschal (https://github.com/tesseractAZ)

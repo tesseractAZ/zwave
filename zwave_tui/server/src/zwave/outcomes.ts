@@ -55,7 +55,7 @@ export interface WindowMetrics {
   // ── timeout family (return-path, chronic, quiet) ──
   tx: number; // Σ dTx  (successful commands the node was sent)
   rx: number; // Σ dRx
-  timeouts: number; // Σ dTimeout (Get replies that never came)
+  timeouts: number; // Σ dTimeout (replies to reply-expecting commands that never came)
   rate: number | null; // timeouts / tx, or null when tx is too small to be a rate
   // ── other recovery signals ──
   flaps: number; // Σ dFlaps (Alive↔Dead transitions) — dead-flap recovery
@@ -67,7 +67,7 @@ export interface WindowMetrics {
   rssiN: number; // COUNT of non-null fresh rssi readings behind rssiMedian (its evidence floor)
   rttMedian: number | null; // median of FRESH rtt readings — rtt-degraded recovery
   rttN: number; // COUNT of non-null fresh rtt readings behind rttMedian (its evidence floor)
-  rateKbpsMin: number | null; // worst FRESH negotiated rate seen — rate-fallback recovery (null = no fresh reading)
+  rateKbpsMin: number | null; // worst FRESH negotiated rate seen — rate-fallback recovery (null = no fresh sample carried a rate)
 }
 
 /** An open episode as a screen sees it (v0.41). */
@@ -625,9 +625,13 @@ function scoreRecovery(m: RecoveryMetric, before: WindowMetrics, after: WindowMe
         ? 'improved' : 'no-change';
     }
     case 'rate': {
-      // rateKbpsMin is fresh-only (windowMetrics), so a non-null value already
-      // means ≥1 fresh negotiated-rate reading; a purely-stale (quiet) window is
-      // null → unverifiable, matching the other signals' fail-closed rule.
+      // rateKbpsMin is folded from fresh samples only (windowMetrics), so a
+      // purely-stale (quiet) window is null → unverifiable, matching the other
+      // signals' fail-closed rule. A non-null value is NOT necessarily a reading
+      // in the rate run's sense (fresh && dTx > 0, evidenceStore RateRun): a
+      // fresh RX-only sample carries the cached route rate, and a send cut short
+      // by the node's S0 nonce report or S2 SOS nonce report rewrites it without
+      // moving commandsTX. This metric does not apply that rule (DOCS §9.4).
       if (before.rateKbpsMin == null || after.rateKbpsMin == null) return 'unverifiable';
       if (after.rateKbpsMin < before.rateKbpsMin) return 'worse';
       return before.rateKbpsMin < 100 && after.rateKbpsMin >= 100 ? 'improved' : 'no-change';

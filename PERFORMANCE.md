@@ -10,7 +10,9 @@ same rule the screens themselves keep.
 
 Reproduce any of it with the commands given; each section names its own method.
 
-- **Measured at:** v0.63.5, 2026-09-06
+- **Measured at:** each figure section states when it was measured — a
+  version, a date or both; the newest is §3, v0.64.6 (2026-09-14), and §8
+  lists every re-measurement
 - **Reference mesh:** 39 nodes (38 + controller), Zooz ZST39 LR 800-series,
   ~14 days of continuous evidence
 - **Host:** Raspberry Pi 5, Home Assistant OS, add-on container
@@ -20,8 +22,8 @@ Reproduce any of it with the commands given; each section names its own method.
 
 ## 1. Runtime footprint
 
-Single sample from `ha apps stats local_zwave_tui`, add-on running normally with
-both transports live:
+Single sample from `ha apps stats local_zwave_tui` at v0.63.2 (2026-09-06),
+add-on running normally with both transports live:
 
 | | measured | what it actually covers |
 | --- | --- | --- |
@@ -42,7 +44,7 @@ does not need at runtime — the server's own RSS is not instrumented (§7).
 The TUI repaints at 1 Hz, so the budget is ~1 000 ms per frame.
 
 Mean over 500 iterations per screen, **a fresh `ViewState` constructed for every
-iteration**, on a synthetic 39-node roster:
+iteration**, on a synthetic 39-node roster (v0.63.4, 2026-09-06):
 
 | screen | 80×24 | 80×60 | 200×24 | 200×60 |
 | --- | --- | --- | --- | --- |
@@ -54,8 +56,9 @@ iteration**, on a synthetic 39-node roster:
 | Remedy | 18 µs | 15 µs | 13 µs | 15 µs |
 | Topology | 197 µs | 250 µs | 154 µs | 211 µs |
 
-Under load — 24 live symptoms, 12 open episodes, a populated efficacy arm, 8
-nodes on the auto-ping ladder — the two engine screens grow and the rest do not:
+Under load (also v0.63.4) — 24 live symptoms, 12 open episodes, a populated
+efficacy arm, 8 nodes on the auto-ping ladder — the two engine screens grow and
+the rest do not:
 
 | screen | clean 200×60 | loaded 200×60 |
 | --- | --- | --- |
@@ -65,7 +68,7 @@ nodes on the auto-ping ladder — the two engine screens grow and the rest do no
 
 **Worst case measured: ~412 µs, about 0.04 % of the frame budget.** Height moves
 Overview more than width does: `renderOverview` caps its window at `H − 5` rows
-(`overview.ts:184`), so 80×24 lays out 19 rows and 80×60 all 39.
+(`telnet/screens/overview.ts`), so 80×24 lays out 19 rows and 80×60 all 39.
 
 **Method, and three things it does NOT measure.**
 
@@ -73,23 +76,25 @@ Overview more than width does: `renderOverview` caps its window at `H − 5` row
 session and transport layers. That means:
 
 1. **It is not a frame.** `TuiSession.draw()` also runs a roster sort whose
-   comparator calls `scoreFor()` twice per comparison (`input.ts:74`), assembles
-   the body, and hashes the entire body to decide whether to write at all
-   (`session.ts:1107`). At 200×60 that hash walks ~17 KB. Those costs are real,
-   per-frame, and excluded here.
+   comparator calls `scoreFor()` twice per comparison (`visibleNodes()` in
+   `telnet/input.ts`), assembles the body, and hashes the entire body to decide
+   whether to write at all (the FNV-1a hash compared against `lastFrameHash` in
+   `TuiSession.draw()`, `telnet/session.ts`). At 200×60 that hash walks ~17 KB.
+   Those costs are real, per-frame, and excluded here.
 2. **Interference and Controller are omitted from the tables above**, because
    both are dominated by `data.interference()` rather than by rendering. In
    production that is a **10-second TTL memo** over every node's coarse buckets
-   (`zwaveData.ts:1608`, whose own comment says the fold "must NOT run per render
-   frame"), and the benchmark's provider is a stub returning a literal — so those
-   two screens' render figures would measure neither the memo nor the fold.
+   (`lastInterference` in `ZwaveDataImpl.interference()`, `zwave/zwaveData.ts`,
+   whose own comment says the fold "must NOT run per render frame"), and the
+   benchmark's provider is a stub returning a literal — so those two screens'
+   render figures would measure neither the memo nor the fold.
 
-   The **fold itself is now measured** against a realistic bucket set (38 nodes ×
-   672 half-hour buckets over 14 days, plus the controller ring — 26 208
-   buckets): **0.87 ms per miss**, 30 iterations. At a 1 Hz redraw and a 10 s TTL
-   that is one frame in ten paying **0.09 % of the frame budget**. The memo is
-   justified caution rather than a live hazard, and the comment's warning holds
-   without the cost being operator-visible.
+   The **fold itself was measured in v0.63.5** against a realistic bucket set
+   (38 nodes × 672 half-hour buckets over 14 days, plus the controller ring —
+   26 208 buckets): **0.87 ms per miss**, 30 iterations. At a 1 Hz redraw and a
+   10 s TTL that is one frame in ten paying **0.09 % of the frame budget**. The
+   memo is justified caution rather than a live hazard, and the comment's
+   warning holds without the cost being operator-visible.
 3. **The draw path is not pure.** `renderOverview` writes `view.scroll`,
    `renderLog` writes `view.logCursor`. An earlier revision of this section reused
    one `ViewState` across all 500 iterations and so measured the already-converged
@@ -100,6 +105,8 @@ session and transport layers. That means:
 ---
 
 ## 3. Verification cost
+
+The tables and run figures below are from the v0.64.6 release run, 2026-09-14.
 
 | | measured |
 | --- | --- |
@@ -141,30 +148,42 @@ Two independent measurements agree at ~10 %. The harness is **CPU-bound on real
 work**, not on launching processes.
 
 The cost centre is the **targeted test runs: 73 % of the run**, at 1.07 s each
-across 644 invocations — of which only ~67 ms is startup. The other ~1.00 s is
-`tsx` transpiling the TypeScript afresh **on every single invocation**. So the
-lever is not "spawn fewer processes", it is "stop re-transpiling the same
-sources 644 times": precompile once and run plain JS, or keep a warm worker.
+across 644 invocations — of which only ~67 ms is startup. The harness times
+each run whole, so how the other ~1.00 s splits between transpiling, module
+loading and running the tests is not measured; `tsx` also keeps an on-disk
+transform cache, so an unchanged source is not necessarily transpiled again.
+So the lever is not "spawn fewer processes"; precompiling once and running
+plain JS, or keeping a warm worker, are candidates this profile has not tested.
 
 Two smaller levers, for scale: the per-mutant typecheck is 14.4 % (37 % of which
 *is* startup, so an incremental/`--watch` tsc server would help there), and the
-full-suite fallbacks are 11.2 % from only **9** runs at 11.8 s each. Fallbacks
-are triggered by kill-fast mapping misses, so each one fixed is ~12 s saved;
-seven were harvested from the run's own report during v0.64.0, taking the miss
-count to **zero** — the fallbacks that remain are mutants no single test file
-catches, not mapping errors.
+full-suite fallbacks are 11.2 % from only **9** runs at 11.8 s each. A mutant
+falls back to the full suite whenever its targeted files leave it alive, or when
+it has no targeted file to run (`fastTestsFor()` in `scripts/mutation-check.mjs`
+drops a named test file that does not exist). In this run 8 of the 9 are the 8
+`equivalent` mutants: none is killed by its targeted files (that would report
+`RELABEL`), so each must face the whole suite, and that cost is structural. The
+ninth is `rebuild-names-what-it-destroys`, whose `tests: ['actionsMenu']` names
+no existing test file, so its targeted set is empty and the full suite kills it.
+The kill-fast mapping-miss report lists only mutants whose targeted files ran
+and missed; it reported **zero** for this run (seven were harvested from it
+during v0.64.0) and cannot flag that ninth mutant. Pointing its `tests` at a
+file that catches it would save one ~12 s run; the eight equivalent fallbacks
+cannot be removed.
 
 > Caveat on the phase table: it is wall clock measured inside the parent, so a
 > child's CPU is charged to nobody. That is exactly why the `time -l` line above
 > is quoted beside it — the two together are what make the refutation safe.
 
-`SURVIVED`, `MISSING`, `AMBIGUOUS` and `INVALID` are all failures. An anchor
+`SURVIVED`, `MISSING`, `AMBIGUOUS`, `INVALID` and `RELABEL` (a mutant still
+marked `equivalent` that the suite now kills) are all failures. An anchor
 pre-flight checks every mutant's target text against its file before any
 *mutant's* tests run — it runs after the baseline, so a stale entry costs the
-baseline (~12 s) rather than the full 14 minutes. It fired nine times during
-the v0.51–v0.64.3 work, each on an anchor one of my own edits had moved — most
-recently in v0.64.3, `MISSING` on both outage-clock mutants after the dating
-line they target was rewritten, and before that on an `AMBIGUOUS(2)`, where a copy-pasted path-splitting helper made
+baseline (~12 s) rather than a full run (~16 minutes; 955 s in the v0.64.6
+run). It fired nine times during the v0.51–v0.64.3 work, each on an anchor one
+of my own edits had moved — most recently in v0.64.3, `MISSING` on both
+outage-clock mutants after the dating line they target was rewritten, and
+before that on an `AMBIGUOUS(2)`, where a copy-pasted path-splitting helper made
 one anchor match two sites. The duplication was the real defect; the harness
 found it as a testing problem.
 
@@ -195,11 +214,13 @@ decayed episodes. **There is no node-count requirement on the benefit claim** �
 the ≥2-node rule gates the *harm* finding. That is why every arm prints its node
 count rather than relying on one.
 
-For `rtt-degraded` the verdict is currently arithmetically forced: against an
-84 % control arm the bar sits near 87 %, and at n≈17.8 the Wilson lower bound
-cannot reach it even on a perfect record. "Not distinguishable" there means the
-evidence *cannot* separate the two at this sample size — a stronger and more
-useful statement than "the ping did not help".
+For `rtt-degraded` the verdict is currently arithmetically forced. The bar is
+`base + cfg.minEffect` in `efficacyFor()` (`zwave/outcomes.ts`), where `base` is
+the control arm's rate from `baseRate()` and `minEffect` is 0.05 in that file's
+`DEFAULTS`. Against an 84 % control arm the bar sits near 89 %, and at n≈17.8
+the Wilson lower bound cannot reach it even on a perfect record (≈82 %). "Not
+distinguishable" there means the evidence *cannot* separate the two at this
+sample size — a stronger and more useful statement than "the ping did not help".
 
 **Evidence quality**, `rtt-degraded`: 29 unscoreable (thin evidence) · 1
 transient blink · 4 undersampled · 11 unprobeable · 1 confounded — counted and
@@ -274,7 +295,7 @@ is why the topology screen shows rate beside margin rather than either alone.
 
 These are the two failure modes that **mimic mesh-wide device trouble** and are
 therefore reported apart from it: a sick serial link and a noisy band both look
-like "every node got worse at once".
+like "every node got worse at once". Read live on 2026-09-07, alongside §4a.
 
 ### Host ↔ stick (Zooz ZST39 LR · FW 1.70 · SDK 7.24.2 · USA Long Range · primary/SUC/SIS)
 
@@ -310,8 +331,9 @@ fallback, so every margin in §4a is relative to real conditions.
 
 ## 5. Cold start
 
-Measured by restarting the add-on and polling from a second machine, **n=1**,
-poll interval 250 ms:
+Measured by restarting the add-on and polling from a second machine, **n=1** per
+row — the first row at v0.63.4 and the second at v0.63.5, both on 2026-09-06;
+each row's poll interval is in its last column:
 
 | milestone | measured | poll granularity |
 | --- | --- | --- |
@@ -342,10 +364,11 @@ than probing the whole mesh on every restart.
 >
 > The same revision reported **0 KB/s of per-session bandwidth at 80×24**, and
 > explained it by the masthead shedding its clock at that width. The repo's own
-> test asserts the opposite — `test/chrome.test.ts:172`, *"80 cols keeps the
-> clock"* — and `chrome.ts:86` sheds the home id first. So the explanation was
-> false, built on a misread capture in which the command bar and masthead ran
-> together. The zero was withdrawn rather than published with a story attached.
+> test asserts the opposite — `test/chrome.test.ts`, *"80 cols keeps the
+> clock"* — and `masthead()` in `telnet/chrome.ts` sheds the home id first. So
+> the explanation was false, built on a misread capture in which the command bar
+> and masthead ran together. The zero was withdrawn rather than published with a
+> story attached.
 >
 > **Now measured, and the zero is refuted — see §5a.** The cause is also
 > understood, and it is instructive: the first re-measurement attempt used
@@ -375,8 +398,8 @@ the 80×24 zero was wrong.
 At both sizes the maximum second is **exactly twice the median**, with a
 scattering of zero-seconds. That is not burstiness: it is a whole-frame redraw
 on a 1 Hz timer, sampled by a 1 s clock that drifts against it, so occasionally
-two frames land in one bucket and occasionally none. `telnet/server.ts:419`
-confirms it in one line:
+two frames land in one bucket and occasionally none. The connection handler in
+`startTelnetServer()` (`telnet/server.ts`) confirms it in one line:
 
 ```js
 conn.timer = setInterval(() => session.draw(), 1000);
@@ -411,6 +434,8 @@ published number**, not about finding a limit.
 
 ## 6. Publishing cadence
 
+As of v0.63.2, 2026-09-06:
+
 | | measured |
 | --- | --- |
 | HA state re-publish | every **30 s** (four entities) |
@@ -432,8 +457,9 @@ no, so it is recorded as a known gap rather than carried as pending work.
 
 - ~~**Where the harness's 836 s goes.**~~ **MEASURED in v0.64.0 — see §3.**
   `--profile` now reports the phase breakdown on any run. The result overturned
-  the standing guess: the harness is CPU-bound on `tsx` transpilation (69 % of
-  the run), not startup-bound (~9 % by two independent measurements).
+  the standing guess: the harness is CPU-bound on real work, most of it in the
+  targeted test runs (70 % of the run when measured in v0.64.0; §3 carries the
+  current figure), not startup-bound (~10 % by two independent measurements).
 - ~~**Per-session bandwidth.**~~ **MEASURED in v0.64.0 — see §5a.** 4.96 KB/s at
   80×24 and 17.22 KB/s at 200×60. The withdrawn zero is refuted and its cause
   identified; the 17 KB/s figure this document already carried is confirmed.
@@ -471,7 +497,13 @@ previously listed here, which wrongly implied open work.
 
 | date | version | what changed |
 | --- | --- | --- |
-| 2026-09-07 | v0.64.0 | §3 phase profile measured (`--profile` + `time -l`) — **"startup-bound" refuted**: 70 % is `tsx` re-transpilation, ~10 % is spawn; §5a added — per-session bandwidth measured and the withdrawn 0 KB/s refuted, with its cause identified; §4a/§4b added — the mesh itself: composition, links, margins, controller frames, RF floor; §4 refreshed; every table sorted for lookup |
+| 2026-09-14 | v0.64.7 | no re-measurement; each figure section states when it was measured; §3, §7 and the README no longer attribute the targeted test runs' time to `tsx` re-transpilation (the harness times each run whole, and `tsx` keeps an on-disk transform cache); §3's fallback account corrected (8 of the 9 full-suite fallbacks are the equivalent mutants, the ninth names no existing test file); §4's `rtt-degraded` efficacy bar corrected from 87 % to 89 %; §5 gives each row's poll interval |
+| 2026-09-14 | v0.64.6 | §3 re-measured: 645 mutants (637 killed · 8 equivalent), 955 s wall · 751 s user · 79 s sys, 1 159 tests in 12.0 s; targeted test runs 73.2 % of the phase total (70.3 % at v0.64.5), process-startup floor 9.9 % |
+| 2026-09-13 | v0.64.5 | §3 re-measured: 600 mutants (592 killed · 8 equivalent), 839 s wall, 1 131 tests in 12.3 s |
+| 2026-09-13 | v0.64.4 | §3 re-measured: 593 mutants (585 killed · 8 equivalent), 824 s wall, 1 125 tests in 11.5 s |
+| 2026-09-12 | v0.64.3 | §3 re-measured for the first time since v0.64.0: 565 mutants (557 killed · 8 equivalent), 834 s wall, 1 106 tests in 11.9 s; the anchor pre-flight count went from eight to nine (`MISSING` on both outage-clock mutants) |
+| 2026-09-07 | v0.64.1 | §4a/§4b added — the mesh itself: composition, links, margins, controller frames, RF floor; §4 re-read (rtt/rssi coverage 22 → 21 of 38, `rtt-degraded` control arm 82 → 84 %, noise floor moved to §4b); every table sorted for lookup; §8 back-filled with the v0.63.6 and v0.64.0 rows |
+| 2026-09-07 | v0.64.0 | §3 phase profile measured (`--profile` + `time -l`) — **"startup-bound" refuted**: 70 % of the phase total is the targeted test runs (attributed then to `tsx` re-transpilation, a split withdrawn in v0.64.7 as never measured), ~10 % is spawn; §5a added — per-session bandwidth measured and the withdrawn 0 KB/s refuted, with its cause identified |
 | 2026-09-06 | v0.63.6 | README's summary contradicted this document — the retracted 249 µs and "93 MB resident" were still quoted there |
 | 2026-09-06 | v0.63.5 | interference fold miss measured (0.87 ms, 0.09 % of budget) and time-to-useful-frame measured (no gap after listening); §7 triaged from 10 items to 2 worth measuring, 5 deliberately not, and 1 that was never a gap |
 | 2026-09-06 | v0.63.4 | **substantial correction after an adversarial audit** — render figures re-measured with a fresh `ViewState` (Overview 80×24 was understated 3.5×), Interference/Controller withdrawn as unmeasured, two cold-start figures and the bandwidth row retracted with their causes, §1/§3 claims scoped to what the samples support, §7 expanded from 4 items to 10 |

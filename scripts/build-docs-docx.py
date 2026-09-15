@@ -4,7 +4,7 @@ build-docs-docx.py — assemble the project's Markdown docs into one printable
 manual: an editable Microsoft Word (.docx) and, with --pdf, a reader-friendly
 PDF alongside it (LibreOffice converts the .docx — no LaTeX needed).
 
-Used in CI (.github/workflows/ci.yml) on every push/PR: build the manual and
+Used in CI (.github/workflows/ci.yml) on push/PR to main: build the manual and
 upload it as an artifact, so a DOCS.md that no longer converts cleanly fails the
 PR — and reviewers get an offline copy of the branch's manual in both formats.
 (The repo is public and DOES publish releases — publish-release.yml attaches

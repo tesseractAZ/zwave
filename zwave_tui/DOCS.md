@@ -54,7 +54,7 @@ on the data layer's own timers, never inside `draw()`.
 ### 1.1 The seven-stage bootstrap
 
 `main()` wires the process in a fixed order, each stage depending on the one
-before it (source: `server/src/index.ts:39-205`):
+before it (source: `main()` in `server/src/index.ts`):
 
 | # | Stage | Constructor | What it establishes |
 | --- | --- | --- | --- |
@@ -161,7 +161,7 @@ purged the instant a mismatch becomes provable. `driverHomeOk()` compares the
 driver's handshake `homeId` against HA's `network_status` home id; on a proven
 mismatch it latches `driverHomeMismatch`, clears `driverBgRssi` /
 `driverLastSeen` / `driverListening`, and stops the client
-(`zwaveData.ts:720-734`). This guard gates *every* consumer of driver data — the
+(`zwaveData.ts`). This guard gates *every* consumer of driver data — the
 noise floor, the FLiRS flags, and the M6 interference view.
 
 ### 1.3 `zwaveData` — the roster / discovery / evidence hub
@@ -207,8 +207,9 @@ TUI's reliability metric **TMO = `timeoutResponse / commandsTX`**. Per RESEARCH
 **Dead** while the counter stays 0 — so the real RF-failure signals the pipeline
 watches are (a) Alive↔Dead status *flaps*, counted event-driven from
 `subscribe_node_status` into `flapAccum` (never level-sampled from the roster,
-which misses sub-window flaps), and (b) `timeoutResponse`, a Get whose reply never
-came while the node stays Alive.
+which misses sub-window flaps), and (b) `timeoutResponse`, a reply-expecting
+command (a Get, a supervised Set, or a secure send's nonce Get) whose reply
+never came while the node stays Alive.
 
 **Resilience & self-heal in the roster loop** (`tick()` / `refresh()`):
 
@@ -336,8 +337,8 @@ and — last — the telnet server binds. `main().catch()` logs `FATAL:` and exi
 on any bootstrap rejection.
 
 **Shutdown** is the reverse, ordered so no consumer reads a half-torn producer
-(`index.ts:190-202`). A `closing` guard makes it idempotent across `SIGTERM` /
-`SIGINT`:
+(`shutdown` in `index.ts`). A `closing` guard makes it idempotent across
+`SIGTERM` / `SIGINT`:
 
 ```
 telnet.stop()      // stop accepting/serving TCP sessions
@@ -399,7 +400,7 @@ The single public constructor is `createZwaveData(opts)` → `new ZwaveDataImpl(
 
 ### 2.1 Startup sequence
 
-`start()` (zwaveData.ts:635) registers an `onReady` handler on the HA WebSocket client and kicks the first `tick()`. The `onReady` handler is the spine of the whole integration's resilience: **every (re)authentication reloads the registry join and re-establishes the statistics subscriptions**, because those subscriptions are per-connection and die when the socket closes.
+`start()` in zwaveData.ts registers an `onReady` handler on the HA WebSocket client and kicks the first `tick()`. The `onReady` handler is the spine of the whole integration's resilience: **every (re)authentication reloads the registry join and re-establishes the statistics subscriptions**, because those subscriptions are per-connection and die when the socket closes.
 
 ```
 client.onReady(() => {
@@ -410,7 +411,7 @@ client.onReady(() => {
 void this.tick();
 ```
 
-The ordered pipeline, per `refresh()` (zwaveData.ts:1111):
+The ordered pipeline, per `refresh()` in zwaveData.ts:
 
 1. **`ensureEntryId()`** — resolve (or auto-discover) the `zwave_js` config-entry id.
 2. **`ensureRegistries()`** — join the device + entity registries once, building the `node_id ↔ device_id ↔ entities` maps.
@@ -421,7 +422,7 @@ The ordered pipeline, per `refresh()` (zwaveData.ts:1111):
 
 ### 2.2 Config-entry auto-discovery
 
-Most `zwave_js/*` commands need a config-entry id, and it is **not** stable across a re-add of the integration. `ensureEntryId()` (zwaveData.ts:1279) resolves it lazily:
+Most `zwave_js/*` commands need a config-entry id, and it is **not** stable across a re-add of the integration. `ensureEntryId()` in zwaveData.ts resolves it lazily:
 
 ```
 if (this.entryId) return this.entryId;
@@ -433,19 +434,19 @@ this.entryId = chosen?.entry_id ?? null;
 
 - The filter is on `domain === 'zwave_js'`; a **`state === 'loaded'`** entry is preferred, falling back to the first match.
 - A **seeded** id (from the `entryId` option or `ZWAVE_ENTRY_ID` env) sets `entrySeeded = true` and is used verbatim — never auto-discovered, never cleared.
-- **Self-heal** (zwaveData.ts:1085): after `errStreak >= 3` consecutive failures on an *auto-discovered* entry, the id is assumed stale (integration removed + re-added → new `entry_id` + `device_id`s). The layer nulls `entryId`, forces a registry reload, clears the frozen `statsByNode`/`batteryByNode`/`firmwareByNode`, and calls `client.reconnect()` so the old socket's subscriptions are released before re-subscribing. A seeded entry is left untouched by this path. Sparkline history (`histByNode`/`histLongByNode`) is deliberately **not** cleared — it is keyed by Z-Wave node id, which is stable across a config-entry re-discovery.
+- **Self-heal** (in `tick()`, zwaveData.ts): after `errStreak >= 3` consecutive failures on an *auto-discovered* entry, the id is assumed stale (integration removed + re-added → new `entry_id` + `device_id`s). The layer nulls `entryId`, forces a registry reload, clears the frozen `statsByNode`/`batteryByNode`/`firmwareByNode`, and calls `client.reconnect()` so the old socket's subscriptions are released before re-subscribing. A seeded entry is left untouched by this path. Sparkline history (`histByNode`/`histLongByNode`) is deliberately **not** cleared — it is keyed by Z-Wave node id, which is stable across a config-entry re-discovery.
 
 ### 2.3 The device + entity registry join
 
-`network_status` speaks only in numeric node ids. The registry join (`ensureRegistries` → `buildRegistryMaps`, zwaveData.ts:1300) supplies everything else — names, areas, and the entity ids the TUI needs to ping, read battery, and log activity.
+`network_status` speaks only in numeric node ids. The registry join (`ensureRegistries` → `buildRegistryMaps`, in zwaveData.ts) supplies everything else — names, areas, and the entity ids the TUI needs to ping, read battery, and log activity.
 
-**Identifier → node id.** Z-Wave JS device identifiers are tuples shaped `['zwave_js', '<home_id>-<node_id>...']`. `nodeIdOfDevice()` (zwaveData.ts:383) extracts the node id as:
+**Identifier → node id.** Z-Wave JS device identifiers are tuples shaped `['zwave_js', '<home_id>-<node_id>...']`. `nodeIdOfDevice()` in zwaveData.ts extracts the node id as:
 
 ```
 Number(identifier[1].split('-')[1])   // '<home_id>-<node_id>' → node_id
 ```
 
-The controller is **node 1** (`is_controller_node === true || nodeId === 1`; buildNode at zwaveData.ts:1371).
+The controller is **node 1** (`is_controller_node === true || nodeId === 1`; `buildNode()` in zwaveData.ts).
 
 The join builds these maps in one pass over the device + entity registries:
 
@@ -461,7 +462,7 @@ The join builds these maps in one pass over the device + entity registries:
 | `stateByEntityId` | entity_id → `{state, attrs}` | Detail **LIVE ENTITIES** state (v0.22) |
 | `updateEntitiesByNode` / `updateEntityToNode` | node id ↔ `update.*` entity_ids | firmware-update status |
 
-Only `platform === 'zwave_js'` entities that are **not** `disabled_by` and whose `device_id` resolves to a known node are indexed. Names come from `name_by_user || name` (device) and `original_name ?? name` (entity), and every externally-sourced string is run through `sanitizeLabel()` (zwaveData.ts:353), which strips C0/C1 control bytes (including ESC `0x1b`, so a crafted device name cannot inject ANSI into a TUI frame), folds wide/astral code points to `?`, and caps length at 48. The join is rebuilt fresh on every (re)auth so a removed node leaves no stale mapping.
+Only `platform === 'zwave_js'` entities that are **not** `disabled_by` and whose `device_id` resolves to a known node are indexed. Names come from `name_by_user || name` (device) and `original_name ?? name` (entity), and every externally-sourced string is run through `sanitizeLabel()` in zwaveData.ts, which strips C0/C1 control bytes (including ESC `0x1b`, so a crafted device name cannot inject ANSI into a TUI frame), folds wide/astral code points to `?`, and caps length at 48. The join is rebuilt fresh on every (re)auth so a removed node leaves no stale mapping.
 
 **Live entity state + config parameters (v0.22).** Two node-scoped caches feed the Detail dossier's new sections, both exposed on `DataProvider` as `entityStates(nodeId)`, `configParams(nodeId)`, and `requestConfigParams(nodeId)`:
 
@@ -472,7 +473,7 @@ Both caches are **node-id / entity-id keyed and must not alias across devices**.
 
 ### 2.4 The `network_status` roster poll
 
-The core poll (zwaveData.ts:1123) is the cheapest complete mesh snapshot:
+The core poll (in `refresh()`, zwaveData.ts) is the cheapest complete mesh snapshot:
 
 ```
 const net = await client.send({
@@ -483,7 +484,7 @@ const net = await client.send({
 
 > **ANTI-FOOTGUN.** `zwave_js/network_status` takes **`entry_id`**, not `config_entry_id`. The latter rejects with `invalid_format`. (HA also accepts `device_id` here, but the TUI always uses the entry-scoped form to get the whole roster in one call. Per RESEARCH.md §3.1, this command *force-refreshes controller state each call* — a real live poll — so it is polled on a cadence, never hammered.)
 
-Each raw node is mapped by `buildNode()` (zwaveData.ts:1367) into a `NodeSnapshot`. The status field is the Z-Wave JS `NodeStatus` enum (types.ts:15):
+Each raw node is mapped by `buildNode()` in zwaveData.ts into a `NodeSnapshot`. The status field is the Z-Wave JS `NodeStatus` enum (types.ts):
 
 | value | `NodeStatus` | `statusLabel` |
 | --- | --- | --- |
@@ -495,18 +496,18 @@ Each raw node is mapped by `buildNode()` (zwaveData.ts:1367) into a `NodeSnapsho
 
 `buildNode` reads `ready`, `is_routing`, `is_secure`, `highest_security_class` (mapped via `SECURITY_CLASS_LABEL`), and derives `isLongRange = nodeId >= 256`. Two fields are notably **not** in `network_status` and are filled from side channels: `isListening` (from the driver-WS state dump, else `null` — *not* "listening") and `stats` (from the live subscription cache, else `emptyStats()`).
 
-`buildController()` (zwaveData.ts:1401) constructs the `ControllerSnapshot` from the `controller` object: `home_id`, `sdk_version`, `firmware_version`, `rf_region` (via `RF_REGION_LABEL` — region 9/11 are the Long-Range variants), `is_primary`, `is_suc`, and `is_sis_present` (note the lowercase `sis` in the raw key). It also latches the rebuild-routes clock: on the `is_rebuilding_routes` false→true edge it stamps `rebuildStartedAt = Date.now()` so the UI shows honest elapsed time (HA exposes only the boolean — no per-node progress — so the UI never fabricates a percentage).
+`buildController()` in zwaveData.ts constructs the `ControllerSnapshot` from the `controller` object: `home_id`, `sdk_version`, `firmware_version`, `rf_region` (via `RF_REGION_LABEL` — region 9/11 are the Long-Range variants), `is_primary`, `is_suc`, and `is_sis_present` (note the lowercase `sis` in the raw key). It also latches the rebuild-routes clock: on the `is_rebuilding_routes` false→true edge it stamps `rebuildStartedAt = Date.now()` so the UI shows honest elapsed time (HA exposes only the boolean — no per-node progress — so the UI never fabricates a percentage).
 
 **Roster hygiene guards** applied on every poll:
 
 - **Empty/degenerate roster** (`nodes.length === 0` or missing controller) returns `false` (keeps the last-good view, surfaces `lastErr`) rather than wiping the display.
 - **Status diff** vs `prevStatus` logs alive/dead/asleep transitions and feeds the flap fallback (§2.6).
-- **Departed-node eviction** (zwaveData.ts:1155): a node absent from the roster for **5+ minutes** is treated as removed (excluded / `replace_failed_node`) and its evidence + all node-id-keyed caches are evicted, so node-id reuse can't merge two physical devices' histories.
-- **Network-identity guard** (zwaveData.ts:1210): if the controller's `home_id` changes (stick swap / different NVM restore), *every* node-id-keyed cache — stats, sparklines, evidence accumulators, baselines, outcomes, driver telemetry — is dropped and a full reconnect + re-discovery is forced. A plain reconnect keeps `home_id` stable, which is exactly what lets sparkline persistence survive an HA-Core restart.
+- **Departed-node eviction** (`evictAfterMs`, in `refresh()`, zwaveData.ts): a node absent from the roster for **5+ minutes** is treated as removed (excluded / `replace_failed_node`) and its evidence + all node-id-keyed caches are evicted, so node-id reuse can't merge two physical devices' histories.
+- **Network-identity guard** (in `refresh()`, zwaveData.ts): if the controller's `home_id` changes (stick swap / different NVM restore), *every* node-id-keyed cache — stats, sparklines, evidence accumulators, baselines, outcomes, driver telemetry — is dropped and a full reconnect + re-discovery is forced. A plain reconnect keeps `home_id` stable, which is exactly what lets sparkline persistence survive an HA-Core restart.
 
 ### 2.5 Live statistics subscriptions
 
-Polling gives the roster; the *statistics* arrive push-driven. `subscribeStatistics()` (zwaveData.ts:1463) is idempotent per connection (guarded by `statsSubscribed`) and opens three kinds of subscription. Subscribing delivers each node's **current** statistics immediately, so the roster fully populates within seconds without any pinging.
+Polling gives the roster; the *statistics* arrive push-driven. `subscribeStatistics()` in zwaveData.ts is idempotent per connection (guarded by `statsSubscribed`) and opens three kinds of subscription. Subscribing delivers each node's **current** statistics immediately, so the roster fully populates within seconds without any pinging.
 
 **Controller statistics** — one subscription, entry-scoped:
 
@@ -514,15 +515,15 @@ Polling gives the roster; the *statistics* arrive push-driven. `subscribeStatist
 zwave_js/subscribe_controller_statistics { entry_id } → onControllerStats
 ```
 
-`onControllerStats()` (zwaveData.ts:1771) reads the host↔stick serial-link counters. The raw keys are snake_case, and **one is misspelled by HA's dev source**: the response-timeout key arrives as `timout_response` (missing the second `e`). The handler accepts either spelling so an upstream fix can never silently zero the field:
+`onControllerStats()` in zwaveData.ts reads the host↔stick serial-link counters. The raw keys are snake_case, and **one is misspelled by HA's dev source**: the response-timeout key arrives as `timout_response` (missing the second `e`). The handler accepts either spelling so an upstream fix can never silently zero the field:
 
 ```
 const tRes = num(e.timout_response) ?? num(e.timeout_response);
 ```
 
-The controller counters cached into `ctrlStats` (types.ts:111): `messages_tx/rx`, `messages_dropped_tx/rx`, `nak`, `can`, `timeout_ack`, and `timout_response` → `messagesTX/RX`, `messagesDroppedTX/RX`, `NAK`, `CAN`, `timeoutACK`, `timeoutResponse`. Per RESEARCH.md §2.11 these are *host↔stick* counters, not per-node RF metrics — they measure the serial link, and the engine reads them only for serial-link health.
+The controller counters cached into `ctrlStats` (typed `ControllerSnapshot['statistics']`, types.ts): `messages_tx/rx`, `messages_dropped_tx/rx`, `nak`, `can`, `timeout_ack`, and `timout_response` → `messagesTX/RX`, `messagesDroppedTX/RX`, `NAK`, `CAN`, `timeoutACK`, `timeoutResponse`. Per RESEARCH.md §2.11 these are *host↔stick* counters, not per-node RF metrics — they measure the serial link, and the engine reads them only for serial-link health.
 
-**Per-node statistics + status** — two subscriptions per end node (node 1 excluded, covered by the controller feed). `subscribeNode()` (zwaveData.ts:1505) is *per-feed idempotent* — a retry re-attempts only the feed that failed, because re-subscribing a live feed leaks a duplicate subscription and double-counts every subsequent event:
+**Per-node statistics + status** — two subscriptions per end node (node 1 excluded, covered by the controller feed). `subscribeNode()` in zwaveData.ts is *per-feed idempotent* — a retry re-attempts only the feed that failed, because re-subscribing a live feed leaks a duplicate subscription and double-counts every subsequent event:
 
 ```
 zwave_js/subscribe_node_statistics { device_id } → onNodeStats
@@ -531,12 +532,12 @@ zwave_js/subscribe_node_status     { device_id } → onNodeStatusEvent
 
 Failed subscriptions queue in `pendingNodeSubs` and are retried every 60 s (`subRetryTimer`). A silent catch-and-forget hole in coverage is exactly what the symptom engine's ghost detector must never inherit, so which feeds are live is tracked (`statusSubbed`, `statsSubbedNodes`) and surfaced through `evidenceCoverage()`.
 
-`onNodeStats()` (zwaveData.ts:1702) maps the raw event into `NodeStats`. Two subtleties:
+`onNodeStats()` in zwaveData.ts maps the raw event into `NodeStats`. Two subtleties:
 
-- **Node-id key drift.** `statsNodeId()` (zwaveData.ts:1817) accepts **both** `nodeId` (camelCase) and `node_id` (snake_case). HA delivers the *initial* on-subscribe event with `nodeId` but every *subsequent* live push with `node_id`; accepting only one spelling would freeze every node's stats at their subscribe-time values.
-- **Counter validation.** `statsCounters()` (zwaveData.ts:1928) requires **all five** cumulative counters (`commands_tx`, `commands_rx`, `commands_dropped_tx`, `commands_dropped_rx`, `timeout_response`) to be finite numbers, else the event is rejected whole. Coercing a missing field to 0 would re-baseline the evidence deltas at zero, and the next real event's cumulative value would then land as one giant fabricated "valid" delta.
+- **Node-id key drift.** `statsNodeId()` in zwaveData.ts accepts **both** `nodeId` (camelCase) and `node_id` (snake_case). Through HA 2026.8.3 the *initial* on-subscribe event carried `nodeId` while every *subsequent* live push carried `node_id`; from HA 2026.9.0 both use `node_id`. Accepting both spellings covers either: on the older releases, reading only `nodeId` would freeze every node's stats at their subscribe-time values, and on 2026.9.0 or later it would drop every event.
+- **Counter validation.** `statsCounters()` in zwaveData.ts requires **all five** cumulative counters (`commands_tx`, `commands_rx`, `commands_dropped_tx`, `commands_dropped_rx`, `timeout_response`) to be finite numbers, else the event is rejected whole. Coercing a missing field to 0 would re-baseline the evidence deltas at zero, and the next real event's cumulative value would then land as one giant fabricated "valid" delta.
 
-The `NodeStats` shape (types.ts:49):
+The `NodeStats` shape (types.ts):
 
 ```
 interface NodeStats {
@@ -549,11 +550,11 @@ interface NodeStats {
   commandsDroppedTX: number;         // ← NOT an RF-loss counter (see §2.7)
   commandsDroppedRX: number;
   timeoutResponse: number;           // ← the real reliability signal
-  lastSeen: number | null;           // epoch ms: arrival of a stats event in which commandsTX/RX/DroppedRX moved; max-merged with driver-WS lastSeen
+  lastSeen: number | null;           // epoch ms: arrival of a stats event in which commandsTX/RX/DroppedRX moved; cached unmerged (see below)
 }
 ```
 
-**Which counters mean "heard" (v0.64.6).** Home Assistant's node statistics carry no `lastSeen`, so `onNodeStats` stamps the arrival of an event in which a counter moved. Only three counters qualify: `commandsTX`, `commandsRX` and `commandsDroppedRX` — the zwave-js increments that sit beside the driver's own `lastSeen` update (a send the node acknowledged, or a frame received from it, decodable or not). `timeoutResponse` moves when the node did NOT answer a command that expected a reply, one report timeout after the acknowledgement that already moved `commandsTX` and in its own throttled statistics event; Through v0.64.5 a timeout moving alone stamped "heard" at the moment the node went silent — and auto-ping reads this stamp as a probe's answer (§11.12). `commandsDroppedTX` is excluded defensively: on zwave-js 15.27.1 a plain NoAck throws before its only increment, which runs only after a transmission aborted by the node's own premature response, when the node was just heard. A replay with no movement carries the previous stamp; a first delivery stamps nothing.
+**Which counters mean "heard" (v0.64.6).** Home Assistant's node statistics carry no `lastSeen`, so `onNodeStats` stamps the arrival of an event in which a counter moved. Only three counters qualify: `commandsTX`, `commandsRX` and `commandsDroppedRX` — the zwave-js increments that sit beside the driver's own `lastSeen` update (a send the node acknowledged, or a frame received from it, decodable or not). `timeoutResponse` moves when the node did NOT answer a command that expected a reply, once the report timeout (1 s by default) plus the command's round-trip time — and a nonce exchange's, when a secure send fetched one first — has passed since the acknowledgement that already moved `commandsTX`, in its own throttled statistics event. Through v0.64.5 a timeout moving alone stamped "heard" at the moment the node went silent — and auto-ping reads this stamp as a probe's answer (§11.12). `commandsDroppedTX` is excluded defensively: on zwave-js 15.27.1 a plain NoAck throws before its only increment, which runs only after a send cut short because the node's S0 nonce report or S2 SOS nonce report arrived before the ACK (RESEARCH §2.2), when the node was just heard. A replay with no movement carries the previous stamp; a first delivery stamps nothing. The evidence sampler reads this cached stamp unmerged (`isFreshSample`, §5.4). `NodeSnapshot.stats` — built by `buildNode()` through `mergedStats()`, and what the screens, health scoring, the symptom detectors and auto-ping read — carries the later of this stamp and the driver-WS `lastSeen`.
 
 `onNodeStats` also latches `routeFailedBetween` into the evidence store the moment it changes (it is transient — overwritten on the next OK transmission), appends non-sentinel RSSI/RTT to the sparkline rings, and counts repeater-chain changes into `routeChangeAccum`.
 
@@ -561,7 +562,7 @@ interface NodeStats {
 
 `zwave_js/subscribe_node_status` is the **event-driven** flap source, and it is separate from the statistics feed for a reason: the 2-second roster poll only sees status transitions that survive a full poll interval, so a sub-2 s Alive→Dead→Alive flap is invisible to it by construction.
 
-`onNodeStatusEvent()` (zwaveData.ts:1562) maps the event name to a status and counts every crossing of the Dead boundary:
+`onNodeStatusEvent()` in zwaveData.ts maps the event name to a status and counts every crossing of the Dead boundary:
 
 ```
 name === 'dead'    → Dead      name === 'sleep'   → Asleep
@@ -571,20 +572,20 @@ const crossedDead = (prev === Dead) !== (next === Dead);
 if (crossedDead) flapAccum[nodeId]++;
 ```
 
-The event feed is seeded from the roster on subscribe, so the *first* real event (e.g. a genuine Alive→Dead) diffs against known status instead of being swallowed. Nodes **without** a live status feed (subscribe failed, retry pending) fall back to the roster-poll status diff (zwaveData.ts:1148), which counts a Dead-boundary crossing into the same `flapAccum` — the event feed is primary, and `statusSubbed` membership prevents feeding both and double-counting. `flapAccum` and `routeChangeAccum` are drained per evidence sample (§ the evidence chapter) so that sub-window flaps are attributed to the correct window.
+The event feed is seeded from the roster on subscribe, so the *first* real event (e.g. a genuine Alive→Dead) diffs against known status instead of being swallowed. Nodes **without** a live status feed (subscribe failed, retry pending) fall back to the roster-poll status diff (in `refresh()`, zwaveData.ts), which counts a Dead-boundary crossing into the same `flapAccum` — the event feed is primary, and `statusSubbed` membership prevents feeding both and double-counting. `flapAccum` and `routeChangeAccum` are drained per evidence sample (§ the evidence chapter) so that sub-window flaps are attributed to the correct window.
 
 ### 2.7 The load-bearing signal fact: TMO, not `commandsDroppedTX`
 
 This is the correction that overturns the naïve reliability metric, documented at RESEARCH.md §0 and in the `health.ts` header comment.
 
-**Why `commandsDroppedTX` is the wrong metric.** Reproduced against zwave-js@15.25.3: when a listening node stops ACKing, `SendData` returns `TransmitStatus.NoAck`; the driver retries `attempts.sendData` (default **3**) times, then marks the node **DEAD** (`NodeStatus 3`) and rejects the transaction. Through all of this **`commandsDroppedTX` stays 0** — the singlecast NoAck path *throws* the NOK rather than feeding it back through the message generator, so `onMessageSent` never sees it. NoAck, controller-cannot-send, and Get-timeout each incremented the counter in **none** of the reproduced cases. Worse, it *can* tick up on a premature-response abort that actually **succeeded** (a fast node whose report beats the MAC ACK). So the counter is **near-silent for the RF failure it appears to name, and noisy otherwise** — folding it into a score would both miss real trouble and false-alarm on successes.
+**Why `commandsDroppedTX` is the wrong metric.** Reproduced against zwave-js@15.25.3: when a listening node stops ACKing, `SendData` returns `TransmitStatus.NoAck`; the driver retries `attempts.sendData` (default **3**) times, then marks the node **DEAD** (`NodeStatus 3`) and rejects the transaction. Through all of this **`commandsDroppedTX` stays 0** — the singlecast NoAck path *throws* the NOK rather than feeding it back through the message generator, so `onMessageSent` never sees it. NoAck, controller-cannot-send, and Get-timeout each incremented the counter in **none** of the reproduced cases. Worse, it *can* tick up on a premature-response abort that actually **succeeded** — on zwave-js 15.27.1 (source reading, not reproduced) only when the node's S0 nonce report or S2 SOS nonce report beats the MAC ACK; a Get's report or a Supervision Report beating it aborts the transaction before either send counter moves (RESEARCH §0, §2.2). So the counter is **near-silent for the RF failure it appears to name, and noisy otherwise** — folding it into a score would both miss real trouble and false-alarm on successes.
 
 **The two signals that are right:**
 
 1. **Alive↔Dead status flaps** (`subscribe_node_status`, §2.6) — a listening node that fails all send retries goes DEAD. This is *the* hard link-failure event. Caveat: dead-marking happens only *when traffic is attempted* — a silent node never goes dead, so absence of dead events ≠ health. In `scoreNode` a currently-dead node is the `D` hard gate (score 0); the flap *rate* is a symptom-engine detector.
-2. **`timeoutResponse`** — the node MAC-ACKed a Get (so the RF link up to the ACK demonstrably works) but the expected report never arrived; zwave-js increments this and the node **stays Alive**. It is a return-path / responsiveness problem, and it accrues only for Get-type (response-expecting) traffic.
+2. **`timeoutResponse`** — the node MAC-ACKed a reply-expecting command (a Get, a supervised Set, or a secure send's nonce Get), so the RF link up to the ACK demonstrably works, but the expected report never arrived; zwave-js increments this and the node **stays Alive**. It is a return-path / responsiveness problem, and it accrues only for that reply-expecting traffic. On zwave-js 15.27.1 a supervised Set travels inside a Supervision Get (`SupervisionCCGet` declares `@expectedCCResponse(SupervisionCCReport)`), so the SendData message's `expectsNodeUpdate` is true (`SendDataRequest`, or `SendDataBridgeRequest` on a controller that supports bridge sends, as on the reference mesh; the two share the method body), a missing report makes `waitForNodeUpdate` throw `Controller_NodeTimeout`, and Driver.ts `sendMessage` increments `timeoutResponse`. An unsupervised Set expects no reply of its own, so a plain one never accrues it. A secure send that holds no usable nonce (S0 with no free nonce, S2 with no usable SPAN) first sends a nonce Get, which expects a Nonce Report: if the node acknowledges it and never answers, the same timeout increments `timeoutResponse` and the command itself is never sent, supervised or not (source reading, not reproduced; every nonce Get in the reference mesh's saved driver logs was answered).
 
-**The TMO metric.** The one shared definition lives in `responseTimeoutPct()` (health.ts:122):
+**The TMO metric.** The one shared definition lives in `responseTimeoutPct()` in health.ts:
 
 ```
 export function responseTimeoutPct(stats: NodeStats): number | null {
@@ -600,7 +601,7 @@ This is **`timeoutResponse / commandsTX`** as a percentage, and it is the single
 Two caveats the code encodes honestly:
 
 - **Denominator.** `commandsTX` increments *only on a successful (OK) send*, so this is timeouts-over-successes, not a true attempt-failure rate.
-- **Get-only numerator.** Because `timeoutResponse` accrues only for Get-type traffic while `commandsTX` counts all successful sends, TMO is a *conservative under-estimate* for a SET-heavy node — an honest floor, never an over-statement.
+- **Reply-expecting numerator.** Because `timeoutResponse` accrues only for reply-expecting traffic (a Get, a supervised Set, or a secure send's nonce Get) while `commandsTX` counts all successful sends, TMO is a *conservative under-estimate* for a node whose traffic is mostly unsupervised Sets that need no nonce — an honest floor, never an over-statement.
 
 `scoreNode()` (health.ts) consumes this as the **Response Reliability** lane (20% of the composite, 30% for Long-Range nodes where the Route weight is redistributed). It raises the `F` (flaky) flag above `TX_ERR_THRESHOLD = 0.15` and floors the lane to zero at `TX_ERR_FLOOR = 0.30`, both computed from `stats.timeoutResponse / stats.commandsTX` — never from the drop counter.
 
@@ -608,8 +609,8 @@ Two caveats the code encodes honestly:
 
 The mutating surface lives in `zwaveActions.ts` (`createActionRunner`) and is gated by `write_actions_enabled`; every call logs its outcome into the event ring and fires the M5 outcome hook. Two entries matter for this chapter's boundary:
 
-- **Ping** is not a `zwave_js/*` WS command — it is a **button entity press**. `pingEntityOf(nodeId)` resolves the node's discovered `button.*_ping` entity, and the action calls `call_service { domain: 'button', service: 'press', service_data: { entity_id } }` (zwaveActions.ts:68). It is treated as safe/idempotent. (The `zwave_js.ping` HA *service* is deprecated and returns nothing; the raw `invoke_cc_api` NOP-ping can mark a marginal node DEAD, so the button entity is the sanctioned path.)
-- **Heal / "rebuild routes"** is `zwave_js/rebuild_node_routes { device_id }` (zwaveActions.ts:76), with the network-wide `begin_rebuilding_routes { entry_id }` / `stop_rebuilding_routes { entry_id }` variants.
+- **Ping** is not a `zwave_js/*` WS command — it is a **button entity press**. `pingEntityOf(nodeId)` resolves the node's discovered `button.*_ping` entity, and the action calls `call_service { domain: 'button', service: 'press', service_data: { entity_id } }` (the `ping` verb in `createActionRunner()`, zwaveActions.ts). It is treated as safe/idempotent. (The `zwave_js.ping` HA *service* is deprecated and returns nothing; the raw `invoke_cc_api` NOP-ping can mark a marginal node DEAD, so the button entity is the sanctioned path.)
+- **Heal / "rebuild routes"** is `zwave_js/rebuild_node_routes { device_id }` (the `healNode` verb, zwaveActions.ts), with the network-wide `begin_rebuilding_routes { entry_id }` / `stop_rebuilding_routes { entry_id }` variants.
 
 Per RESEARCH.md §3.2, through today's HA-WS channel `rebuild_node_routes` and `begin_rebuilding_routes` are the *only* executable route remediations (active health checks, priority routes, neighbors, and background RSSI all require the driver-WS phase). Critically, **a route rebuild is never a runnable recommendation**: it cannot fix a physical link, it deletes manual priority routes, and it throws on Long-Range nodes — so the engine may *recommend* richly while its executable **remediation** actions stay limited to ping / refresh / re-interview / rebuild / remove-failed, all routed through the human type-CONFIRM Actions Menu — except the ping verb, which auto-ping (§11.12, opt-in) may also fire autonomously. Operator device control + config writes (below) are a separate, non-remediation surface — also human-gated, never engine-initiated.
 
@@ -953,7 +954,7 @@ no intermediate hop to report, so there is nothing honest to put there.
 
 ### 3.8 The anti-flicker 1 Hz draw loop
 
-Both transports drive the same cadence: `setInterval(() => session.draw(), 1000)` (telnet `server.ts:299`; xterm `wsConsole.ts:391`). Input events call `session.draw()` immediately on `redraw`; the 1 s tick catches live data changes (clocks, spinners, roster refreshes). `TuiSession.draw()` (`session.ts`) makes that repaint flicker-free through four mechanisms:
+Both transports drive the same cadence: `setInterval(() => session.draw(), 1000)` (telnet `startTelnetServer()` in `server.ts`; xterm `registerWsConsole()` in `wsConsole.ts`). Input events call `session.draw()` immediately on `redraw`; the 1 s tick catches live data changes (clocks, spinners, roster refreshes). `TuiSession.draw()` (`session.ts`) makes that repaint flicker-free through four mechanisms:
 
 1. **Frame-hash skip.** `draw()` builds the full frame body once (`HIDE_CURSOR + CURSOR_HOME`, then each line + `CLEAR_EOL`, then a trailing `CLEAR_BELOW`), hashes it with a stable 32-bit **FNV-1a** (`offset 2166136261`, `prime 16777619`, `>>> 0`, `.toString(36)`), and if the hash equals `lastFrameHash` **writes nothing at all** — no terminal work, no flicker. FNV-1a is chosen over `node:crypto` to stay off the hot path for a ~2–4 KB string.
 2. **Synchronized atomic frames.** When a write does happen, the body is wrapped in `BEGIN_SYNC … END_SYNC` (mode 2026) so supporting terminals buffer and flip the whole frame atomically; the per-line `CLEAR_EOL` + trailing `CLEAR_BELOW` cover every transition without a blank-and-repaint, and `CURSOR_HOME` avoids scrolling.
@@ -1119,7 +1120,7 @@ else {
 
 The reliability curve: `txFrac` is 1.0 at zero timeouts, ramps linearly to 0.0 by `TX_ERR_FLOOR = 0.3` (a 30% timeout rate zeroes the lane). The `F` (flaky) flag fires above `TX_ERR_THRESHOLD = 0.15` (15%), and also latches `flaky = true`, which promotes the node's `state` to `'flaky'` (§4.10).
 
-**Why `timeoutResponse`, not `commandsDroppedTX`** (`RESEARCH.md §0`, load-bearing): `commandsDroppedTX` does **not** track RF ACK failures. When a listening node stops acknowledging, the driver retries and marks it Dead (the `D` gate handles that) while the drop counter stays 0 — it was near-silent for `NoAck`, controller-cannot-send, and Get-timeout against zwave-js@15.25.3. It ticks only on a NOK transmit report and can even false-positive on premature-response aborts that actually succeeded. So it is silent for the failure it names and noisy otherwise. `timeoutResponse` is the honest, node-stays-Alive signal: the node MAC-ACKed a Get (the RF link up to the ACK works) but the expected report never arrived — a return-path / responsiveness problem. The raw `commandsDroppedTX` / `commandsDroppedRX` counters are still displayed on the Detail TRAFFIC row as honest context, but never folded into the score.
+**Why `timeoutResponse`, not `commandsDroppedTX`** (`RESEARCH.md §0`, load-bearing): `commandsDroppedTX` does **not** track RF ACK failures. When a listening node stops acknowledging, the driver retries and marks it Dead (the `D` gate handles that) while the drop counter stays 0 — it was near-silent for `NoAck`, controller-cannot-send, and Get-timeout against zwave-js@15.25.3. It ticks only on a NOK transmit report and can even false-positive on a premature-response abort that actually succeeded (on zwave-js 15.27.1, only one triggered by the node's S0 nonce report or S2 SOS nonce report — RESEARCH §2.2). So it is silent for the failure it names and noisy otherwise. `timeoutResponse` is the honest, node-stays-Alive signal: the node MAC-ACKed a reply-expecting command (a Get, a supervised Set, or a secure send's nonce Get), so the RF link up to the ACK works, but the expected report never arrived — a return-path / responsiveness problem. The raw `commandsDroppedTX` / `commandsDroppedRX` counters are still displayed on the Detail TRAFFIC row as honest context, but never folded into the score.
 
 #### Lane 5 — Interview (5%)
 
@@ -1149,7 +1150,7 @@ export function responseTimeoutPct(stats: NodeStats): number | null {
 }
 ```
 
-Two guards worth noting: it clamps `timeoutResponse` to `commandsTX` before dividing (a defensive cap the *lane* math in §4.4 doesn't apply, though `linstep`'s own `[0,1]` clamp makes the outcome equivalent), and it returns `null` — not 0 — when nothing has been sent, so the UI can distinguish "clean" from "no data." A documented caveat: `timeoutResponse` accrues only for Get-type traffic while `commandsTX` counts *all* successful sends, so for a SET-heavy node the rate is a conservative *under*-estimate of the true Get-failure rate — an honest floor, never an over-statement.
+Two guards worth noting: it clamps `timeoutResponse` to `commandsTX` before dividing (a defensive cap the *lane* math in §4.4 doesn't apply, though `linstep`'s own `[0,1]` clamp makes the outcome equivalent), and it returns `null` — not 0 — when nothing has been sent, so the UI can distinguish "clean" from "no data." A documented caveat: `timeoutResponse` accrues only for reply-expecting traffic (a Get, a supervised Set, or a secure send's nonce Get) while `commandsTX` counts *all* successful sends, so for a node whose traffic is mostly unsupervised Sets that need no nonce the rate is a conservative *under*-estimate of the true response-failure rate — an honest floor, never an over-statement.
 
 ### 4.7 Flag glyphs and render order
 
@@ -1351,7 +1352,7 @@ now go through `logEngineAction`, render as `engine (auto)`, and the kind word
 
 The evidence store is the trustworthy time-series substrate the entire remediation engine reads from. Everything downstream — the baseline learner (M3, `baselines.ts`), the symptom detectors (`symptoms.ts`), the interference watch (`interference.ts`), and the outcome verifier (`outcomes.ts`) — consumes rows from this store and nothing else. Its single job is to convert the noisy, cumulative, restart-scarred counters that `zwave-js` emits into a bounded, per-node, on-disk series in which **a number is either true or absent** — never fabricated, never silently zeroed. The implementation lives in `server/src/zwave/evidenceStore.ts`; `DESIGN.md §3.1` is its contract. The header comment states the discipline plainly: `null` means *"cannot know this window" — absence of evidence, never evidence of health.*
 
-The store is created by `createEvidenceStore(opts)` (a closure-based factory, not a class) and wired into the poller in `zwave/zwaveData.ts:577`:
+The store is created by `createEvidenceStore(opts)` (a closure-based factory, not a class) and wired into the poller by the constructor in `zwave/zwaveData.ts`:
 
 ```ts
 this.evidenceStore = evPath
@@ -1385,6 +1386,7 @@ interface EvidenceSample {
   dRx:      number | null;         // Δ commandsRX
   dFlaps:        number;           // Alive↔Dead transitions (event-accumulated, always concrete)
   dRouteChanges: number;           // LWR route changes     (event-accumulated, always concrete)
+  dS2Resync:     number | null;    // S2 SPAN resyncs (event-accumulated, v0.26); null when the S2 log lane is not listening (§6.11)
   fresh: boolean;                  // did a stats event actually arrive this window?
   rtt:      number | null;         // driver EMA, rounded to 0.1; meaningful ONLY when fresh
   rssi:     number | null;         // driver EMA, sentinels ≥125 → null; meaningful ONLY when fresh
@@ -1399,7 +1401,7 @@ interface EvidenceSample {
 
 Two field families carry the design's hardest-won lessons:
 
-- **`dTimeout` is the primary reliability signal, not `dDropTx`.** Per `RESEARCH.md §0`, `commandsDroppedTX` does **not** count RF ACK failures — an RF failure marks the node **DEAD** while that counter stays 0. The real RF-failure signals are (a) `dFlaps` (Alive↔Dead status transitions) and (b) `dTimeout` (a `Get` whose reply never arrived, with the node staying Alive). The TUI's reliability metric is therefore `timeoutResponse/commandsTX` (shown as **TMO**), and `dDropTx` is captured only for completeness.
+- **`dTimeout` is the primary reliability signal, not `dDropTx`.** Per `RESEARCH.md §0`, `commandsDroppedTX` does **not** count RF ACK failures — an RF failure marks the node **DEAD** while that counter stays 0. The real RF-failure signals are (a) `dFlaps` (Alive↔Dead status transitions) and (b) `dTimeout` (a reply-expecting command — a Get, a supervised Set, or a secure send's nonce Get — whose reply never arrived, with the node staying Alive). The TUI's reliability metric is therefore `timeoutResponse/commandsTX` (shown as **TMO**), and `dDropTx` is captured only for completeness.
 
 - **`dFlaps` / `dRouteChanges` are event-accumulated, never level-sampled.** The `status` column is *dwell context only.* Sub-window Alive↔Dead flaps are invisible to level-sampling by construction, so the caller accumulates them from `zwave_js/subscribe_node_status` events (`flapAccum` in `zwaveData.ts`) and from the route-change diff (`routeChangeAccum`, gated by `isRouteChange` — both endpoints known), then **drains** them into each sample. The header calls this "the design review's core catch." Because they are drains, `dFlaps` and `dRouteChanges` are always concrete integers, even when the counter deltas are `null`.
 
@@ -1433,13 +1435,13 @@ function guardedDeltas(prev, cur) {
 | **Plausibility cap** | a delta exceeding `(windowMs/1000)·maxDeltaPerSec` is nulled + logged once | `DEFAULT_MAX_DELTA_PER_SEC = 40` msg/s | Z-Wave's shared bandwidth is ~10–20 msg/s mesh-wide, so 40/s per node is safely impossible. This is the backstop against a fabricated full-lifetime delta. |
 | **Whole-window invalidation** | if **any** of the four counters moved backward, **all** deltas for that sample are null | — | One driver, one restart, one shared lifetime. Per-field nulling let a cross-lifetime delta on one field masquerade as valid. |
 
-There is a fifth guard **upstream, at the source.** `onNodeStats` (`zwaveData.ts:1702`) runs `statsCounters(e)` and, if any counter field is missing or non-finite, **rejects the whole event** rather than coercing it to 0 — the previous cached stats stay authoritative. The comment names the exact failure this prevents: a coerced-0 snapshot re-baselines the deltas at zero, and the next real cumulative value then lands as "one giant fabricated 'valid' delta." The store's plausibility cap is the second line of defense should such a value ever reach `record()`.
+There is a fifth guard **upstream, at the source.** `onNodeStats` (`zwaveData.ts`) runs `statsCounters(e)` and, if any counter field is missing or non-finite, **rejects the whole event** rather than coercing it to 0 — the previous cached stats stay authoritative. The comment names the exact failure this prevents: a coerced-0 snapshot re-baselines the deltas at zero, and the next real cumulative value then lands as "one giant fabricated 'valid' delta." The store's plausibility cap is the second line of defense should such a value ever reach `record()`.
 
 `implausibleLogged` is a process-lifetime latch so the implausibility warning is emitted at most once, not on every poll.
 
 ### 5.4 The `fresh` flag (pseudo-replication guard)
 
-`fresh` answers "did a real stats event arrive since the previous sample?" It is computed by the caller in `isFreshSample(prev, stats)` (`zwaveData.ts:1918`) and requires **both** conjuncts:
+`fresh` answers "did a real stats event arrive since the previous sample?" It is computed by the caller in `isFreshSample(prev, stats)` (`zwaveData.ts`) and requires **both** conjuncts:
 
 ```ts
 function isFreshSample(prev, stats) {
@@ -1451,9 +1453,9 @@ function isFreshSample(prev, stats) {
 }
 ```
 
-The AND is load-bearing: a **(re)subscribe** redelivers the current snapshot under a fresh `lastSeen` while every counter is unchanged. Treating that replay as an observation is the pseudo-replication leak that would drive downstream MAD to 0 and manufacture false confidence. Inside the store, `fresh` gates every re-sampled EMA aggregate — the coarse fold only counts `rssi`/`rtt`/`rate` into a bucket `if (s.fresh && …)`, and `NodeCoverage.freshSamples` counts only genuine observations.
+For a **(re)subscribe** replay the counter conjunct is defence in depth. Since v0.26 a replay with no counter movement carries the previous arrival stamp, and a first delivery stamps nothing (§2.5), so `seenAdvanced` alone keeps it out; the counter conjunct would still stop it if that stamping rule regressed. Treating a replay as an observation is the pseudo-replication leak that would drive downstream MAD to 0 and manufacture false confidence. Inside the store, `fresh` gates every re-sampled EMA aggregate — the coarse fold only counts `rssi`/`rtt`/`rate` into a bucket `if (s.fresh && …)`, and `NodeCoverage.freshSamples` counts only genuine observations.
 
-Since v0.64.6 `seenAdvanced` reads an arrival stamp that moves only on the three hearing counters (§2.5), so an interval whose only movement was a response timeout or a dropped send is not fresh: it no longer counts as an RTT/RSSI observation or toward an after-window's liveness floor (`freshN`, §9). The counter conjunct keeps one more case out: an interval whose only movement was a dropped RX advances the stamp, but the sample signature does not carry that counter.
+Since v0.64.6 `seenAdvanced` reads an arrival stamp that moves only on the three hearing counters (§2.5), so an interval whose only movement was a response timeout or a dropped send is not fresh: it no longer counts as an RTT/RSSI observation or toward an after-window's liveness floor (`freshN`, §9). The counter conjunct is load-bearing for one case: an interval whose only movement was a dropped RX advances the stamp, but the sample signature does not carry that counter, so that interval is not fresh either.
 
 ### 5.5 The coarse fold
 
@@ -1487,7 +1489,7 @@ The `bg0..bg3` fields hold the **per-channel background RSSI** (the mesh noise f
 
 `recordRouteFailure(nodeId, between, at)` latches a `routeFailedBetween` event the moment it appears — this datum is transient (overwritten on the next successful transmission), so it must be captured event-driven, never by polling. Each node keeps a small ring capped at `ROUTE_FAIL_RING = 20`; `between` is the `[last-functional, first-non-functional]` node-id pair. **Read path (v0.35):** `zwaveData.routeFailures(nodeId)` → `DataProvider.routeFailures` → TOPOLOGY's Route-failures panel (§3.7). Between v0.13 and v0.35 this ring was written and never read — the add-on knew precisely which hop each transmission had died on and told the operator only that a node was unhappy.
 
-**Rate run (v0.64.6).** `foldRateRun(prev, sample)` folds every recorded sample into a per-node `RateRun { routeKey, sawHundred, belowTx, lastBelowTxAt, rateKbps }`, read by rate-fallback (§7) through `rateRun(nodeId)`. It exists because the ~40-minute fine window cannot hold a sweep-only node's previous transmission, and its rules follow where zwave-js sets the rate (Node.ts `updateRouteStatistics`: `protocolDataRate: txReport.routeSpeed`, called only under Driver.ts `if (hasTXReport(result))`): only an acknowledged transmission is a reading; a reading on a different route starts a new run with no capability; a tick with no route visibility or no reading leaves the run as it was. The run is saved with the snapshot (`rateRuns`, optional) and restored on `load()` whatever the fine tier's fate — it exists for evidence older than the ring; a file written without it re-folds from the restored ring. `evictNode` and `reset()` drop it.
+**Rate run (v0.64.6).** `foldRateRun(prev, sample)` folds every recorded sample into a per-node `RateRun { routeKey, sawHundred, belowTx, lastBelowTxAt, rateKbps }`, read by rate-fallback (§7) through `rateRun(nodeId)`. It exists because the ~40-minute fine window cannot hold a sweep-only node's previous transmission, and its rules follow where zwave-js sets the rate (Node.ts `updateRouteStatistics`: `protocolDataRate: txReport.routeSpeed`, called only under Driver.ts `if (hasTXReport(result))`): only an acknowledged transmission is a reading; a 100k reading proves its route and clears the count; a below-100k reading counts once, unless it lands < 30 s (`RATE_FALLBACK_MIN_GAP_MS`) after the previous counted one; a reading on a different route starts a new run that remembers nothing of the old route (a 100k reading proves the new route at once, a below-100k one leaves it without capability); a tick with no route visibility or no reading leaves the run as it was. The run is saved with the snapshot (`rateRuns`, optional) and restored on `load()` whatever the fine tier's fate — it exists for evidence older than the ring; a file written without it re-folds from the restored ring. `evictNode` and `reset()` drop it.
 
 `NodeCoverage` is the metadata that **survives ring eviction and restarts** so that "no evidence rows" is distinguishable from "node never communicated" — the ghost detector depends on this distinction:
 
@@ -1499,7 +1501,7 @@ interface NodeCoverage { firstSeenAt: number; samples: number; freshSamples: num
 
 ### 5.8 homeId binding + reset-through-to-disk
 
-The persisted envelope carries the controller `homeId`. `bindHomeId(id)` is called on the first poll that reveals the live home id (`zwaveData.ts:1271`). On a mismatch with the loaded/live id it calls `reset()`:
+The persisted envelope carries the controller `homeId`. `bindHomeId(id)` is called on the first poll that reveals the live home id (in `refresh()`, `zwaveData.ts`). On a mismatch with the loaded/live id it calls `reset()`:
 
 ```ts
 bindHomeId(id) {
@@ -1528,16 +1530,16 @@ Flushes are driven on a **~15-minute cadence** (`EVIDENCE_FLUSH_MS`, default `90
 `load()` reconstructs state with a careful ordering the review flagged as "a data-destroyer" if gotten wrong. The pivotal variable is **boot grace**:
 
 ```ts
-const grace = bootGraceMs > 0 && uptimeMs() < bootGraceMs;   // DEFAULT_BOOT_GRACE_MS = 180_000
+const grace = bootGraceMs > 0 && uptimeMs() < bootGraceMs && !clockCarried;   // DEFAULT_BOOT_GRACE_MS = 180_000
 ```
 
-`uptimeMs()` is host uptime (`os.uptime()·1000`). On a no-RTC host, the clock restores *behind* the last flush's `savedAt` after a power blip, so `ageMs = now() - savedAt < 0` is the **normal** post-blip state — it means the clock is bogus *now*, not that the file is bad. Grace is evaluated first, so:
+`uptimeMs()` is host uptime (`os.uptime()·1000`). `clockCarried` (v0.40) is `ageMs > uptimeMs() + 60_000` — an age only a clock that kept running while the host was down can show — and lifts grace for such a clock (§7.1.7). On a no-RTC host, the clock restores *behind* the last flush's `savedAt` after a power blip, so `ageMs = now() - savedAt < 0` is the **normal** post-blip state — it means the clock is bogus *now*, not that the file is bad. Grace is evaluated first, so:
 
 - `savedAt <= 0` (bogus at *save* time) → start fresh unconditionally;
 - `!grace && ageMs < 0` (future-dated with a *trusted* clock) → start fresh;
 - `fineTooOld = grace || (maxAgeMs > 0 && ageMs > maxAgeMs) || ageMs < 0`.
 
-Under grace or when the fine ring is too old, the store **still loads the coarse tier, coverage metadata, controller ring, and route-failure rings** — dropping *only* the recency-dependent fine ring. Coarse pruning is even skipped under grace (`if (!grace && t0 < cutoff) continue`) because the clock can't be trusted to judge "old." The fine tier is loaded only when `!grace && !fineTooOld`. The controller ring restore was added by the review after it was found to be write-only and silently dropped on every restart. Each loaded field is validated (finite `t`, integer node id > 0, `status` clamped to `0..4` else `NodeStatus.Unknown`), the fine ring is re-bounded to `maxSamples`, and a top-level `try/catch` starts fresh on any parse failure.
+Under grace or when the fine ring is too old, the store **still loads the coarse tier, coverage metadata, controller ring, controller noise-floor coarse tier (`controllerCoarse`), route-failure rings, and (v0.64.6) the per-node rate runs (`rateRuns`)** — dropping *only* the recency-dependent fine ring. Coarse pruning is even skipped under grace (`if (!grace && t0 < cutoff) continue`) because the clock can't be trusted to judge "old." The fine tier is loaded only when `!grace && !fineTooOld`. Rate runs are re-folded from the fine ring inside that fine-only block; the persisted `rateRuns` are applied afterwards and override the re-fold, so a file written without `rateRuns` (before v0.64.6) rebuilds its runs only when the fine ring itself loads, and under grace or a stale ring starts with none. The controller ring restore was added by the review after it was found to be write-only and silently dropped on every restart. Each loaded field is validated (finite `t`, integer node id > 0, `status` clamped to `0..4` else `NodeStatus.Unknown`), the fine ring is re-bounded to `maxSamples`, and a top-level `try/catch` starts fresh on any parse failure.
 
 ### 5.11 Config knobs
 
@@ -1560,17 +1562,17 @@ The bounds are enforced by test, not asserted. Worst case per node: fine `240 ×
 
 ### 5.13 Data flow: how one tick becomes evidence
 
-The producer is `zwaveData.sampleEvidence()` (`zwaveData.ts:741`), fired on `evidenceSampleTimer` every `evidenceSampleMs`:
+The producer is `zwaveData.sampleEvidence()` (`zwaveData.ts`), fired on `evidenceSampleTimer` every `evidenceSampleMs`:
 
 1. **Wedge guard first.** `if (lastOkAt == null || now - lastOkAt > max(2·refreshMs, 10_000)) return;` — if the roster/stats feed is itself stale, the whole tick is skipped. A gap in the ring is honest; a fabricated healthy window is not.
 2. For each roster node: `registerNode(nodeId, now)` (coverage), then look up cached `statsByNode`. **A node with no cached stats is skipped** — fabricating zero counters would poison the delta guards; its flap/route events stay accumulated and drain into its first real sample. **A node whose latest statistics event is younger than `STATS_SETTLE_MS` (300 ms) is sampled on the next tick instead, at most one tick in a row (v0.64.6):** zwave-js throttles statistics to one event per 250 ms, emitting the first change at once, and it increments `commandsTX` before it rewrites the route statistics the transmission produced — so a sample between the two events would read the previous frame's rate as this transmission's reading. Counter deltas carry into the deferred sample.
-3. Compute `fresh = isFreshSample(prev, stats)`; update the freshness signature; drain and delete `flapAccum` / `routeChangeAccum`.
-4. Attach driver-WS telemetry (`lastSeen`, `isListening`, `isFrequentListening`) or `null`.
+3. Compute `fresh = isFreshSample(prev, stats)`; update the freshness signature; drain and delete `flapAccum` / `routeChangeAccum` / `s2Accum`. Flaps are also copied into `flapsThisTick` for the §9 confound guard.
+4. Attach `s2Resyncs` (the drained `s2Accum` count, stored as `dS2Resync`; `null`, never 0, when the driver-WS S2 log lane is not listening — §6.11), then the driver-WS telemetry (`lastSeen`, `isListening`, `isFrequentListening`) or `null`.
 5. `record(...)` → `guardedDeltas` → push to fine ring (bounded) → `foldCoarse` → bump coverage → `dirty = true`.
 6. Controller: `ctrlFresh = ctrlStats !== prevCtrlStatsRef`; attach `bg` RSSI only if `≤ 90 s` fresh and `driverHomeOk()`; `recordController(...)`.
-7. `runEngine(now)` — the just-recorded samples are read straight back out via `forNode` / `coarseForNode` / `controllerSamples` / `routeFailures` / `coverage` / `rateRun` by `detectSymptoms(...)`, then folded into baselines (quarantining symptomatic nodes so the baseline never chases the pathology).
+7. `runEngine(now)` — the just-recorded samples are read straight back out via `forNode` / `coarseForNode` / `controllerSamples` / `coverage` / `rateRun` / `recordingSince` by `detectSymptoms(...)`, then folded into baselines (quarantining symptomatic nodes so the baseline never chases the pathology). The route-failure ring (`routeFailures`) is not a detector input: its only reader is TOPOLOGY's Route-failures panel (§5.7, §3.7).
 
-On shutdown (`zwaveData.ts:1041`) the store is flushed once more. The reader side — `baselines.ts`, `symptoms.ts`, `interference.ts`, `outcomes.ts` — never mutates the store; it only queries the accessor methods, which return the live in-memory arrays (`forNode` returns `fine.get(nodeId) ?? []`).
+On shutdown (`stop()` in `zwaveData.ts`) the store is flushed once more. The reader side — `baselines.ts`, `symptoms.ts`, `interference.ts`, `outcomes.ts` — never mutates the store; it only queries the accessor methods, which return the live in-memory arrays (`forNode` returns `fine.get(nodeId) ?? []`).
 
 ## 6. Read-Only Driver-WS Evidence Client (v0.13)
 
@@ -1892,8 +1894,9 @@ log listening unsafe, all handled here:
    this add-on's control, which is the second reason the storm guard exists.
 
 Failure to start the log stream is, like everything else in §6, **degradation
-not fatality**: the S2 lane goes quiet, `dS2Resync` stays 0 for every sample,
-the `s2-desync` detector never fires, and every other signal is unaffected.
+not fatality**: the S2 lane goes quiet, `dS2Resync` is recorded as `null`
+(unknown, never 0) for every sample, the `s2-desync` detector never fires, and
+every other signal is unaffected.
 
 #### Into the evidence store
 
@@ -1901,9 +1904,10 @@ A matched event increments a per-node accumulator, `s2Accum`, which drains into
 the next evidence sample exactly as `flapAccum` does (§5) — the same
 event-accumulator discipline, for the same reason: level-sampling a rate this
 bursty would miss sub-window storms by construction. The sample field is
-`dS2Resync`, folded into the coarse tier as `s2`. Both are optional on disk and
-revive as `0` from pre-v0.26 snapshots, so the schema version does not change
-and an upgrade loses no history.
+`dS2Resync`, folded into the coarse tier as `s2` (a `null` adds nothing). Both
+are optional on disk: from a pre-v0.26 snapshot the fine `dS2Resync` revives as
+`null` (unknown) and the coarse `s2` as `0`, so the schema version does not
+change and an upgrade loses no history.
 
 The message text itself is **never stored or logged** — only matched. It is
 server-sent data, and §6.6's payload-safety rule applies unchanged.
@@ -1945,7 +1949,7 @@ The module header states the design-review rule verbatim: **ONE statistic does n
 | **Counting** | `timeoutResponse` rate (`dTimeout`/`dTx`) | Decayed Poisson rate λ = Σevents / Σtrials | A mostly-zero series has MAD = 0 by construction; median/MAD would make *any* nonzero reading look infinitely anomalous |
 | **Discrete** | `routeKey`, `rateKbps` | *Not stored here* — handled categorically by the detectors (change/dwell) | Location/scale is meaningless on a category |
 
-Note the counting series measures `timeoutResponse`, not `commandsDroppedTX`. Per RESEARCH §0, `commandsDroppedTX` does **not** count RF ACK failures (those mark a node Dead while the counter stays 0); the real return-path signal is `timeoutResponse` — a Get whose reply never came while the node stays Alive. The TUI's reliability metric is `timeoutResponse/commandsTX`.
+Note the counting series measures `timeoutResponse`, not `commandsDroppedTX`. Per RESEARCH §0, `commandsDroppedTX` does **not** count RF ACK failures (those mark a node Dead while the counter stays 0); the real return-path signal is `timeoutResponse` — a reply-expecting command (a Get, a supervised Set, or a secure send's nonce Get) whose reply never came while the node stays Alive. The TUI's reliability metric is `timeoutResponse/commandsTX`.
 
 #### 7.1.2 Time-of-day bands
 
@@ -2146,7 +2150,7 @@ therefore de-asserts and clears its dwell entry, and only a condition that is
 *still happening* can mature. `symptoms.test.ts` pins both directions — a stale
 burst must not fire, an active one must.
 
-#### 7.2.3 The 14 `SymptomKind`s
+#### 7.2.3 The 15 `SymptomKind`s
 
 The `SymptomKind` union declares **15** kinds, and as of v0.38 **all fifteen have live detector bodies** in `detectSymptoms`. `quiet-node` was the last reserved name — declared since the DESIGN table and unemitted for eleven minor versions, the final instance of the declared-but-unreachable class this cycle cleared:
 
@@ -2212,7 +2216,7 @@ const b = !node.isLongRange && run != null && last?.routeKey === run.routeKey &&
   run.sawHundred && run.belowTx >= RATE_FALLBACK_MIN_TX;
 ```
 
-This is DESIGN §3.3's "persistently below 100k", with the single-exchange retry it names as a confound rejected. zwave-js rewrites a node's cached route rate only when a transmit report arrives, and `record()` copies that value onto every sample, so a sample is a *reading* only on a tick where an acknowledged transmission landed (`fresh && dTx > 0`); a transmission aborted by the node's own premature response reports NoAck yet still rewrites the rate (to 100k in both such aborts on the reference mesh) without moving `commandsTX`, so it is not a reading either; a plain NoAck never reaches the route statistics. Two readings closer than `RATE_FALLBACK_MIN_GAP_MS` (30 s) are one exchange. The newest reading decides: one 100k reading clears the run on that tick. The card reports the run's newest reading, not the newest sample's rate. The run is saved with the evidence, and a sample is never taken inside zwave-js's statistics throttle window (§5.13), where it could read the previous frame's rate. Through v0.64.5 the detector scanned ~30 min of samples (`WINDOW_MS * 3`) for any sub-100k value — the store's copies of ONE retried frame matured the symptom by themselves and held it ~30 min after the link was back at 100k; every onset on the reference mesh was one liveness-sweep ping going out at 40 kbit/s with 3 routing attempts. A route change starts over with no remembered capability, where the old scan remembered it for 30 minutes. The trade: a sustained fallback on a node that only transmits for the two-hourly sweep surfaces at its second slow transmission plus the dwell (up to ~2 h), and then stays until the link recovers, where the scan cleared it after ~25 minutes and never raised it again.
+This is DESIGN §3.3's "persistently below 100k", with the single-exchange retry it names as a confound rejected. zwave-js rewrites a node's cached route rate only when a transmit report arrives, and `record()` copies that value onto every sample, so a sample is a *reading* only on a tick where an acknowledged transmission landed (`fresh && dTx > 0`); a send cut short because the node's S0 nonce report or S2 SOS nonce report arrived before the ACK reports NoAck yet still rewrites the rate without moving `commandsTX` (RESEARCH §2.2), so it is not a reading either; a plain NoAck, or any other premature response, never reaches the route statistics. A below-100k reading less than `RATE_FALLBACK_MIN_GAP_MS` (30 s) after the previous *counted* below-100k reading is the same exchange and is not counted. The gap is measured from that counted reading, not from the reading just before, so below-100k readings at 0 s, 20 s and 40 s count twice, and a reading exactly 30 s after the counted one counts. The newest reading decides: one 100k reading clears the run, anchor included, on that tick. The card reports the run's newest reading, not the newest sample's rate. The run is saved with the evidence. A node whose latest statistics event is under `STATS_SETTLE_MS` (300 ms) old — inside zwave-js's statistics throttle window, where a sample could read the previous frame's rate — is sampled one tick later instead (§5.13), but at most one tick in a row: a node that talks continuously is sampled on the next tick even if it is still inside the window, the one case in which a sample can still read the previous frame's rate. Through v0.64.5 the detector scanned ~30 min of samples (`WINDOW_MS * 3`) for any sub-100k value — the store's copies of ONE retried frame matured the symptom by themselves and held it ~30 min after the link was back at 100k; every onset on the reference mesh was one liveness-sweep ping going out at 40 kbit/s with 3 routing attempts. A route change starts over with no remembered capability, where the old scan remembered it for 30 minutes. The trade: a sustained fallback on a node that only transmits for the two-hourly sweep surfaces at its second slow transmission plus the dwell (up to ~2 h), and then stays until the link recovers, where the scan cleared it after ~25 minutes and never raised it again.
 
 This is the fail-closed rule (DESIGN §3.3, RESEARCH §2.2): a device or route whose ceiling is 40k/9.6k is *capability*, not a fault, and must not fire. Severity is `warn` at 9.6k, else `watch`. Labels come from `RATE_LABEL = {1:'9.6k', 2:'40k', 3:'100k', 4:'LR-100k'}`.
 
@@ -2290,7 +2294,7 @@ node at once with a fabricated symptom. `'direct'` is a fact about the mesh;
 
 ```
 windowS2(samples, 30 min) >= S2_ABS (12)
-  AND hadRecent(samples, now, S2_RECENT_MS (10 min), s => s.dS2Resync)
+  AND hadRecent(samples, now, S2_RECENT_MS (5 min = DWELL_MS), s => s.dS2Resync)
 ```
 
 Fed by the driver log-event lane of §6.11, not by any counter — S2 nonce
@@ -2400,6 +2404,7 @@ All `symptoms.ts` thresholds ship as documented compile-time constants (shareabi
 | `CHRONIC_MIN_HITS` | 400 | Evaluable-bad observations before "chronic" |
 | `CTRL_DEGRADED_ABS` | 5 | Serial NAK+CAN+timeoutACK per window (×3 = crit) |
 | `DWELL_MS` | 5 min | Continuous breach required before a symptom surfaces |
+| `EDGE_MIN_MEMBERS` | 2 | Degrading dependents a shared repeater needs before an edge-cluster forms |
 | `FLAPS_WINDOW` | 3 | Alive↔Dead transitions/window → dead-flap |
 | `GHOST_MIN_COVERAGE_MS` | 3 days | Observed-with-zero-comms before ghost-suspect |
 | `MESH_ACTIVE_FRACTION` | 0.35 | Mesh gate FIRE fraction |
@@ -2407,16 +2412,22 @@ All `symptoms.ts` thresholds ship as documented compile-time constants (shareabi
 | `MESH_MIN_DEGRADED` | 3 | Hard floor on degraded nodes for a mesh event |
 | `MESH_RELEASE_FRACTION` | 0.20 | Mesh gate RELEASE fraction (hysteresis) |
 | `MIN_WINDOW_TX` | 20 | Minimum sends for a timeout rate to be meaningful |
+| `QUIET_MS` | 6 h | Floor on the silence after which a mains node is `quiet-node` (effective threshold = max(`QUIET_MS`, sweep cadence × `QUIET_SWEEPS`)) |
+| `QUIET_SWEEPS` | 3 | Multiple of the configured liveness-sweep cadence that sets the quiet-node silence above the `QUIET_MS` floor (v0.63.0) |
+| `RATE_FALLBACK_MIN_TX` | 2 | Separate below-100k readings on the node's current route, counted since that route's newest 100k reading, before rate-fallback arms (v0.64.6) |
+| `ROUTE_CHURN_WINDOW` | 4 | LWR route changes within `WINDOW_MS` (with one inside the dwell) → route-churn |
 | `RTT_Z` | 4 | z-score over route-stratified RTT baseline |
 | `RX_FLOOD_MULT` | 20 | dRx rate over the mesh median → chatty |
 | `S2_ABS` | 12 | Resyncs in the window → `s2-desync` (absolute; see below) |
-| `S2_RECENT_MS` | 10 min | Recency conjunct for `s2-desync` |
+| `S2_RECENT_MS` | 5 min (= `DWELL_MS`) | Recency conjunct for `s2-desync` |
 | `S2_WARN_MULT` | 3 | ×`S2_ABS` escalates watch → warn |
 | `S2_WINDOW_MS` | 30 min | S2 SPAN-resync lookback (sparser than counter signals) |
 | `TIMEOUT_RATE_ABS` | 0.15 | Chronic / absolute timeout-rate threshold |
 | `TIMEOUT_RATE_MULT` | 3 | Relative multiplier over own baseline |
 | `WEAK_MARGIN_DB` | 7 | Direct-node weak-signal SNR margin |
 | `WINDOW_MS` | 10 min | Windowed-rate / flap lookback |
+
+Rate-fallback's two companion constants live where they act (§7.2.4): `RATE_FALLBACK_MIN_GAP_MS = 30 s` (`evidenceStore.ts`; a below-100k reading closer than this to the previous counted one is the same exchange) and `STATS_SETTLE_MS = 300 ms` (`zwaveData.ts`; a node whose latest statistics event is younger is sampled one tick later, at most one tick in a row).
 
 Baseline constants (`baselines.ts`): `N_BANDS = 6`, `MIN_OBS = 20`, `MIN_DAYS = 3`, `DECAY = 0.01`, `DAYS_RING = 10`, `RSSI_MAD_FLOOR = 3 dB`, `RTT_MAD_FLOOR = 8 ms`, RSSI bins 2 dB over [−120, −20] (50 bins), the RTT edge set of §7.1.3, `SCHEMA_V = 1`, `DEFAULT_MAX_AGE_MS = 30 days`, `DEFAULT_BOOT_GRACE_MS = 180 s`.
 
@@ -2449,7 +2460,7 @@ export function planAll(
 ): Plan[];
 ```
 
-`planFor` is a single `switch (symptom.kind)` over the thirteen `SymptomKind`s (§8.4). It never reads a clock, a store, or the network — its only inputs are the symptom, the node snapshot (which may be `undefined`), and the `PlanContext` (the write-actions gate and an optional M5 efficacy lookup). `planAll` is the batch entry point used to plan a whole symptom list; it drops symptoms subsumed under a mesh event (§8.7) before mapping.
+`planFor` is a single `switch (symptom.kind)` over the fifteen `SymptomKind`s (§8.4). It never reads a clock, a store, or the network — its only inputs are the symptom, the node snapshot (which may be `undefined`), and the `PlanContext` (the write-actions gate and an optional M5 efficacy lookup). `planAll` is the batch entry point used to plan a whole symptom list; it drops symptoms subsumed under a mesh event (§8.7) before mapping.
 
 Data trace into the planner:
 
@@ -2712,13 +2723,17 @@ Two properties define this milestone and everything below follows from them:
 interface Episode {
   kind: SymptomKind;
   nodeId: number | null;
-  band: number;                 // time-of-day context (bandOf(onsetMs); 6×4h, from baselines.ts)
   onsetMs: number;
+  dwellStartMs?: number;        // dwell start — the first breaching reading (v0.64.6); absent = read as onsetMs − DWELL_MS
   before: WindowMetrics | null; // degraded window captured at onset
   action: { kind: ActionKind; atMs: number; refused: boolean } | null;
   resolvedMs: number | null;
   after: WindowMetrics | null;  // settled window captured at resolution
   verdict: Verdict | null;
+  unprobeable?: boolean;        // node could not be probed at all (sleeping/FLiRS) — unverifiable is structural (v0.38)
+  transient?: boolean;          // starved before-window, after met its floor, live span < DWELL_MS + UNDERSAMPLED_AFTER_MS (v0.39; live span since v0.64.6)
+  undersampled?: boolean;       // starved before-window though live long enough, or any starved quiet-node closure (v0.41.2; live span and quiet-node rule since v0.64.6)
+  confounded?: boolean;         // node died, or an unattributed remediation ran, mid-episode — credited to neither arm (v0.40)
 }
 
 // Every recovery signal over a window of EvidenceSamples, computed kind-agnostically.
@@ -2728,28 +2743,34 @@ interface WindowMetrics {
   // ── timeout family (return-path-degraded, chronic-return-path, quiet-node) ──
   tx: number;                   // Σ dTx (successful commands sent to the node)
   rx: number;                   // Σ dRx
-  timeouts: number;             // Σ dTimeout (Get replies that never came — the reliability signal)
+  timeouts: number;             // Σ dTimeout (replies to reply-expecting commands that never came — the reliability signal)
   rate: number | null;          // timeouts / tx, or null when tx < minTx (never a fabricated 0/0)
   // ── other recovery signals ──
   flaps: number;                // Σ dFlaps (Alive↔Dead transitions) — dead-flap recovery
   s2: number;                   // Σ dS2Resync over samples where the log lane WAS listening (v0.26)
   s2Known: number;              // COUNT of those samples — the s2 verdict's own evidence floor
+  routeChanges: number;         // Σ dRouteChanges (LWR re-routes) — route-churn recovery
+  routeKnown: number;           // COUNT of samples whose route was VISIBLE — the route verdict's evidence floor
   rssiMedian: number | null;    // median of FRESH rssi readings — weak-signal recovery
   rssiN: number;                // COUNT of fresh rssi readings behind rssiMedian (its evidence floor)
   rttMedian: number | null;     // median of FRESH rtt readings — rtt-degraded recovery
   rttN: number;                 // COUNT of fresh rtt readings behind rttMedian (its evidence floor)
-  rateKbpsMin: number | null;   // worst FRESH negotiated PHY rate — rate-fallback recovery (null = no fresh reading)
+  rateKbpsMin: number | null;   // worst negotiated PHY rate over FRESH samples — rate-fallback recovery (null = no fresh sample carried a rate)
 }
 
 // A DECAYED tally — the learned memory (not raw counts).
-interface Tally { n: number; ok: number; }
+interface Tally {
+  n: number;                    // decayed episode count
+  ok: number;                   // decayed count that resolved `improved`
+  bad: number;                  // decayed count that resolved `worse` (v0.44.0)
+}
 
 type Verdict = 'improved' | 'no-change' | 'worse' | 'refused-misdiagnosis' | 'unverifiable';
 ```
 
-A window carries **every** recovery signal, because a symptom's recovery shows up in a *different* signal depending on its kind (§9.4). The timeout family's signal is **timeouts/tx**, consistent with the load-bearing fact that `commandsDroppedTX` does *not* count RF ACK failures — `timeoutResponse` (a `Get` whose reply never arrived, node stays Alive) is the measurable per-command degradation `WindowMetrics.rate` is computed from. RSSI, RTT, and the negotiated PHY rate are all re-sampled from the driver's cached stats, so they are folded **only from `fresh` samples** — a re-read of the same cached value between stats events is not a new observation. Crucially, a *fresh* sample can still carry a **null** rssi/rtt (the no-signal sentinels 125/126/127, or a null rtt), so `freshN` (fresh-sample count) is **not** the count of usable readings; `rssiN`/`rttN` carry the true per-signal observation counts, which is what §9.4's evidence floors gate on. `flaps` is an event-drain count, folded over **all** samples (a flap is concrete whether or not a stats event landed).
+A window carries **every** recovery signal, because a symptom's recovery shows up in a *different* signal depending on its kind (§9.4). The timeout family's signal is **timeouts/tx**, consistent with the load-bearing fact that `commandsDroppedTX` does *not* count RF ACK failures — `timeoutResponse` (a reply-expecting command — a Get, a supervised Set, or a secure send's nonce Get — whose reply never arrived, node stays Alive) is the measurable per-command degradation `WindowMetrics.rate` is computed from. RSSI, RTT, and the negotiated PHY rate are all re-sampled from the driver's cached stats, so they are folded **only from `fresh` samples** — a re-read of the same cached value between stats events is not a new observation. The PHY rate needs one more caveat: zwave-js rewrites it only when a transmit report arrives (§5.7), so a fresh tick with no acknowledged transmission (`dTx` 0 — say, one where only `commandsRX` moved) carries a copied rate, or the rewrite from a send cut short by the node's S0 nonce report or S2 SOS nonce report (RESEARCH §2.2). Unlike the rate run behind the detector (§7.2.4), this recovery metric does not exclude those. Crucially, a *fresh* sample can still carry a **null** rssi/rtt (the no-signal sentinels 125/126/127, or a null rtt), so `freshN` (fresh-sample count) is **not** the count of usable readings; `rssiN`/`rttN` carry the true per-signal observation counts, which is what §9.4's evidence floors gate on. `flaps` is an event-drain count, folded over **all** samples (a flap is concrete whether or not a stats event landed).
 
-`windowMetrics(samples, minTx = 5)` sums `dTx/dRx/dTimeout`, `dFlaps` and `dRouteChanges`, counts the samples whose measurement lane was live (`s2Known`, `routeKnown`), and — under the `fresh` gate — medians `rssi`/`rtt` (tracking `rssiN`/`rttN`) and mins `rateKbps`. Below five commands a per-command timeout rate is not meaningful, so `rate` stays `null` rather than manufacturing a value — a `null` rate downstream forces an `unverifiable` verdict, never a false claim. The same fail-closed rule applies to every other metric: a window with no fresh rate reading has `rateKbpsMin == null`, and a median backed by fewer than `MIN_OBS` readings is rejected — both → `unverifiable`, never a verdict fabricated from stale or single-sample data.
+`windowMetrics(samples, minTx = 5)` sums `dTx/dRx/dTimeout`, `dFlaps` and `dRouteChanges`, counts the samples whose measurement lane was live (`s2Known`, `routeKnown`), and — under the `fresh` gate — medians `rssi`/`rtt` (tracking `rssiN`/`rttN`) and mins `rateKbps`. Below five commands a per-command timeout rate is not meaningful, so `rate` stays `null` rather than manufacturing a value — a `null` rate downstream forces an `unverifiable` verdict, never a false claim. The same fail-closed rule applies to every other metric: a window with no fresh sample carrying a rate has `rateKbpsMin == null`, and a median backed by fewer than `MIN_OBS` readings is rejected — both → `unverifiable`, never a verdict fabricated from stale or single-sample data.
 
 ### 9.2 The episode lifecycle
 
@@ -2786,7 +2807,7 @@ Three subtleties are load-bearing:
 
 - **`live` includes subsumed symptoms.** A symptom that is present but merely *subsumed* is still `live` and must NOT resolve. Subsumption demotes the recommendation; it is not recovery. Only genuine absence starts the resolution timer.
 - **The dwell doubles as a settle window.** Waiting 10 minutes of continuous absence means the after-window (`nodeWindow`, last 5 min) is sampled well past the recovery transition, so the "after" metrics reflect the settled state, not the moment of change.
-- **The confirmation window is not live time (v0.64.6).** The first-absent tick travels out in each `toResolve` entry as `absentSinceMs`, because `pending` loses it on the resolve tick, and each episode keeps the symptom's dwell start as `dwellStartMs`. The unverifiable split below measures the symptom's LIVE span from one to the other. Through v0.64.5 it measured open-to-resolve, which always included these ten minutes.
+- **The confirmation window is not live time (v0.64.6).** The first-absent tick travels out in each `toResolve` entry as `absentSinceMs`, because `pending` loses it on the resolve tick, and each episode keeps the symptom's dwell start as `dwellStartMs`. The transient/undersampled split of starved `unverifiable` closures (§11.12) measures the symptom's LIVE span from `dwellStartMs` to `absentSinceMs`. Through v0.64.5 it measured open-to-resolve, which always included these ten minutes.
 
 **The before/after windows** come from `nodeWindow(nodeId, now)`: the last 5 minutes (`WINDOW_MS = 5 * 60_000`) of evidence samples for that node, aggregated through `windowMetrics`. A mesh-scoped symptom (`nodeId == null`) has no per-node evidence and yields `null` → the episode can only ever read `unverifiable`, never a fabricated improvement.
 
@@ -2800,19 +2821,20 @@ The ledger keeps two decayed tallies per symptom kind, plus a false-positive cou
 | `control: Map<SymptomKind, Tally>` | `kind` | Spontaneous-recovery arm — episodes that resolved with **no** action |
 | `fp: Map<SymptomKind, number>` | `kind` | `refused-misdiagnosis` count (detector false positives) — **read by REMEDY from v0.35** via `OutcomeStore.falsePositives(kind)` → `zwaveData.falsePositives` → `DataProvider.falsePositives`; before that it was tallied and shown nowhere, which is a strange gap for an advisory engine, since it is the one number that argues *against* the card it belongs to. Rendered only above zero (`⚠ this detector has been refused as a misdiagnosis N× — weigh the evidence above before acting`): a clean detector says nothing rather than boasting, and a zero on every card trains the operator to stop reading the line. |
 
-**Populating the action arm.** Every mutating verb flows through the ActionRunner, so the action arm is fed by its structured `onOutcome` hook — operator actions from the type-CONFIRM menu, and (since v0.30) auto-ping's probes, which reuse the same ping verb (§11.12). The wiring is: `createActionRunner.run()` fires `o.onOutcome?.(kind, nodeId, true)` on success / `…, false)` on failure (zwaveActions.ts:56/61) → `index.ts:103` routes it to `zwaveData.recordActionOutcome(kind, nodeId, ok)` → `outcomes.recordAction(...)`. `recordActionOutcome` applies three conservative filters *before* the ledger sees it:
+**Populating the action arm.** Every mutating verb flows through the ActionRunner, so the action arm is fed by its structured `onOutcome` hook — operator actions from the type-CONFIRM menu, and (since v0.30) auto-ping's probes, which reuse the same ping verb (§11.12). The wiring is: `createActionRunner.run()` fires `o.onOutcome?.(kind, nodeId, true, undefined, origin, sentAt)` on success and `o.onOutcome?.(kind, nodeId, false, refusal, origin)` on failure, both only for an action that feeds the ledger (`learn`; the engine's verification probes, device control and config writes do not) (in `run()`, zwaveActions.ts) → `main()` in `index.ts` routes it to `zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin, sentAt)` → `outcomes.recordAction(...)`. `recordActionOutcome` applies conservative filters *before* the ledger sees it:
 
 - **Mesh-wide actions dropped.** `nodeId == null` (rebuildAll / stopRebuild) is not attributed — it cannot be credited to any one node's episode without confounding.
-- **Only successful actions count.** `if (!ok) return;` A failed action was not "taken."
-- **`refused` is always passed as `false` in M5.** The `refused-misdiagnosis` verdict is *reserved*, not auto-detected this milestone (see §9.5).
+- **A failure that is not a driver refusal is dropped.** `if (refusal !== 'refused') return;` A transport or WS failure was not "taken", and it indicts nothing.
+- **A driver refusal is recorded, scoped to the detectors that asked for the action (v0.43.1).** `run()` classifies each failure while the driver's error is still in hand: only a `removeFailed` whose error `isNotFailedRefusal` recognises as "the node is not failed" is `'refused'`; every other failure is `'transport'`. A refusal goes to `recordAction` with `refused = true` and the kinds `refusalScope(actionKind)` returns — the symptom kinds whose own plan offers that action (`REFUSAL_INDICTS` in planner.ts; today a refused `removeFailed` reaches `ghost-suspect` only). An empty scope records nothing. This is what makes the `refused-misdiagnosis` verdict and the `fp` counter reachable (§9.4). The exact production wording of a refusal has not been observed, so a `removeFailed` failure with a ZW0360 reason the classifier does not recognise is flagged in the log.
 
-Inside `recordAction`, attribution is node-scoped, not symptom-scoped — the operator picks an action for a *node*, and any of its active symptoms could be the one it addresses:
+Inside `recordAction`, a success is attributed node-scoped, not symptom-scoped — the operator picks an action for a *node*, and any of its active symptoms could be the one it addresses. A refusal passes its scope as `onlyKinds` and reaches only those kinds:
 
 ```ts
 const prefix = `${nodeId ?? 'mesh'}:`;
 for (const [k, ep] of open) {
-  if (!k.startsWith(prefix)) continue;   // every open episode on this node
-  if (skip?.(k)) continue;               // …except ones already recovering on their own
+  if (!k.startsWith(prefix)) continue;                  // every open episode on this node
+  if (onlyKinds && !onlyKinds.has(ep.kind)) continue;   // a refusal: only the kinds that asked for the action
+  if (skip?.(k)) { ep.confounded = true; continue; }    // …except ones already recovering on their own (confounded, v0.40)
   if (ep.action == null) ep.action = { kind: actionKind, atMs, refused };  // first action wins
 }
 ```
@@ -2876,12 +2898,12 @@ Each guard corresponds to a specific way a naïve counter would fool itself:
 - **Evidence, or it's unverifiable — and each metric gates on evidence of ITS OWN signal.** This is the load-bearing subtlety: `freshN` (fresh-sample count) is **not** a valid evidence floor for rssi/rtt, because a fresh sample routinely carries a null rssi/rtt (the no-signal sentinels), so a median built from a single reading could pass a `freshN ≥ 3` gate. Each branch therefore gates on its own denominator:
     - **timeout** — `comparable(a, b)` gates on TX only: both windows carry ≥ `MIN_WINDOW_TX` (5) commands and are within `TRAFFIC_FACTOR` (3×) of each other. A mesh that went quiet can fake improvement in either direction, because the denominator of a per-command rate collapsing is not a recovery. RX is deliberately **not** gated (a SET-only node legitimately has near-zero unsolicited RX).
     - **rssi / rtt** — both windows need ≥ `MIN_OBS` (3) actual **readings** (`rssiN`/`rttN`), not merely 3 fresh samples. A median backed by fewer readings is `unverifiable`.
-    - **rate** — `rateKbpsMin` is folded from **fresh** samples only, so a non-null value already means ≥1 fresh negotiated-rate reading; a quiet after-window (all stale carry-forwards) is `null` → `unverifiable`, never scored from a sticky pre-fix rate.
+    - **rate** — `rateKbpsMin` is folded from **fresh** samples only, so a fully quiet after-window (all stale carry-forwards) is `null` → `unverifiable`. A non-null value is not necessarily a *reading* in the §5.7/§7.2.4 sense, though: a fresh sample with no acknowledged transmission (`dTx` 0) still carries the driver's cached route rate, so an after-window whose fresh samples are all RX-only is scored on the last transmitted — possibly pre-fix — rate, and the rewrite from a send cut short by the node's S0 nonce report or S2 SOS nonce report (RESEARCH §2.2) can score `improved`. This metric does not apply the rate run's reading rule (`fresh && dTx > 0`).
     - **flap** — flaps are concrete event drains (fresh-independent), so the *before* window needs only prior flapping (`flaps ≥ 1`), **not** a fresh-sample floor a mostly-Dead flapping node rarely meets. The *after* window must instead prove liveness (≥ `MIN_LIVE` fresh samples), so a node that simply went hard-dead — `after.flaps === 0` only because it stopped transitioning — is `unverifiable`, not a fabricated recovery.
 
 - **Regression detection is per-metric too.** Timeout: after-rate past `WORSE_FACTOR` (1.5×) the before *and* still above release → `worse`. RTT: after-median ≥ 1.5× the before → `worse`. RSSI: a ≥4 dB *drop* → `worse`. Flap: *more* flaps after than before → `worse`. Rate: any drop below the before-rate → `worse`. The action (or the interval) made things worse, not neutral.
 
-- **`refused-misdiagnosis` is reserved, keyed to the symptom.** Conceptually a driver refusal (e.g. `remove_failed_node` on a node that actually responds, or a rebuild returning `false`) refutes the *diagnosis*, so it bumps that detector's false-positive tally (`fp`) and NEVER counts as action efficacy. In M5 it is present in the model but **not auto-detected**: `recordActionOutcome` always passes `refused = false`, because the operator-action hook cannot reliably distinguish a genuine driver refusal from a transient WS/connectivity error, and a node-scoped stamp would wrongly mark non-ghost symptoms. That verdict is reserved for a future executor (§3.5) that receives structured driver errors.
+- **`refused-misdiagnosis` is keyed to the symptom, and auto-detected since v0.43.1.** A driver refusal (e.g. `remove_failed_node` on a node that actually responds) refutes the *diagnosis*, so it bumps that detector's false-positive tally (`fp`) and NEVER counts as action efficacy. Until v0.43.1 it was present in the model but never detected, for two reasons that are now both handled (§9.3): the operator-action hook could not distinguish a genuine driver refusal from a transient WS/connectivity error — `run()` now classifies the failure on the driver's own error, and only `removeFailed` can be refused — and a node-scoped stamp would wrongly mark non-ghost symptoms — the refusal now reaches only the kinds `refusalScope(action)` returns.
 
 - **Per-episode exponential decay.** `bump` discounts all prior history by `keep = 1 − decay = 0.97` on every new episode before adding the new one:
 
@@ -2960,11 +2982,11 @@ The full read path each frame: Remedy `symptomBlock` → `planFor(sym, node, { w
 
 ### 9.6 Persistence, reset, and edge guards
 
-**Persistence.** The store persists to `OUTCOMES_PATH` (config.ts:97, exported as `/data/outcomes.json`; absent → in-memory only). `save()` is atomic (write `${path}.tmp`, then `renameSync`); `load()` is a no-op if the path is unset/missing and swallows corrupt JSON ("starting fresh"). It is loaded once at startup (`this.outcomes?.load()`), flushed by a 5-minute `setInterval` (`.unref()`'d so it never holds the event loop open), and flushed again on shutdown. The store is only constructed when baselines exist (`this.baselines ? createOutcomeStore(...) : null`) — no baselines, no outcome learning.
+**Persistence.** The store persists to `OUTCOMES_PATH` (`outcomesPath` in config.ts, exported as `/data/outcomes.json`; absent → in-memory only). `save()` is atomic (write `${path}.tmp`, then `renameSync`); `load()` is a no-op if the path is unset/missing and swallows corrupt JSON ("starting fresh"). It is loaded once at startup (`this.outcomes?.load()`), flushed by a 5-minute `setInterval` (`.unref()`'d so it never holds the event loop open), and flushed again on shutdown. The store is only constructed when baselines exist (`this.baselines ? createOutcomeStore(...) : null`) — no baselines, no outcome learning.
 
-`toJSON` writes `{ v: 1, control, action, fp }`. **Open episodes are deliberately NOT persisted** — an episode spanning a restart lost its before-window's continuity and cannot yield an honest verdict, so it re-opens fresh when the symptom is re-detected. `loadJSON` refuses any payload whose `v !== 1` and runs every tally through `validTally` (finite, `n >= 0`, `ok >= 0`, `ok <= n + 1e-9`) before admitting it.
+`toJSON` writes `{ v: 1, homeId, control, action, fp, unver, unverUnprobe, splitRule, unverTransient, unverUndersampled, confounded, armNodes, controlNodes }`. Every key is written on every save (`homeId` as `null` when no controller id is bound or loaded; see the Mesh Identity chapter, v0.64.0). Everything but `v`, `control`, `action` and `fp` was added later at the same `v: 1`, and on load every key after `v` is optional: an older file without one starts that structure empty. **Open episodes are deliberately NOT persisted** — an episode spanning a restart lost its before-window's continuity and cannot yield an honest verdict, so it re-opens fresh when the symptom is re-detected. `loadJSON` refuses any payload whose `v !== 1`, runs every `control`/`action` tally through `validTally` (finite, `n >= 0`, `ok >= 0`, `ok <= n + 1e-9`, and — when present — `0 <= bad <= n` with `ok + bad <= n`) before admitting it, and admits only finite, non-negative values into the count maps.
 
-**The split marker (v0.64.6).** `toJSON` also writes `splitRule: 'live-span'` (optional; `v` stays 1). `loadJSON` restores `unverTransient`/`unverUndersampled` only from a ledger carrying it. An older ledger split them on open-to-resolve time, which filed every brief episode as `undersampled`, and closed episodes are not kept to re-split them, so both restart at 0: the store logs the discarded totals, marks itself dirty so the marker reaches disk, and hands a one-shot notice (`takeLoadNotice()`) that `zwaveData` pushes into the Log ring as an `engine` event — after the start-up load, and after an identity keep or resume, which reload the ledger. Both tallies are display-only; no arm, planner or alarm reads them.
+**The split marker (v0.64.6).** `splitRule` is always written as `'live-span'` (optional on load; `v` stays 1). `loadJSON` restores `unverTransient`/`unverUndersampled` only from a ledger carrying it. An older ledger split them on open-to-resolve time, which filed every brief episode as `undersampled`, and closed episodes are not kept to re-split them, so both restart at 0. When a non-zero tally was discarded, the store also logs the discarded totals, marks itself dirty so the marker reaches disk, and hands a one-shot notice (`takeLoadNotice()`) that `zwaveData` pushes into the Log ring as an `engine` event — after the start-up load, and after an identity keep or resume, which reload the ledger. An older ledger with nothing to discard loads silently, and its marker is written by the next save something else triggers. Both tallies are display-only; no arm, planner or alarm reads them.
 
 **Network-identity reset.** The learned arms belong to one physical mesh. On a controller `home_id` change (stick swap / different NVM restore), `reset()` wipes open episodes and both arms, and — uniquely — **immediately `save()`s the empty state through to disk**, so a restart cannot reload the old network's learning from `/data`. `pendingResolve` is cleared alongside. This mirrors `baselines.reset()`.
 
@@ -3035,7 +3057,7 @@ Two deliberate departures a maintainer must know:
 
 - **Per-kind recovery metrics** (`metricOf` → rssi / rtt / rate / flaps / timeout) replaced the original timeout-rate-only scoring; each gates on observations of *its own* signal, because a fresh sample routinely carries a null rssi/rtt and a shared "fresh sample" count would let a median-of-one pass as robust. What remains as-built is that a kind whose recovery shows up in no collected signal still reads `unverifiable` — honest, and now **counted** (§9.7) rather than silent.
 
-- **Marginal (un-banded) arms — a documented diurnal confound.** Each `Episode` records a `band` (from `bandOf(onsetMs)`, the same 6×4h time-of-day bands as `baselines.ts`), but the arm keys are **marginal**: control by `kind`, action by `${kind}|${act}` — band is *not* in either key. DESIGN §3.6's bullet describing the action arm as keyed by `(kind, action, time-of-day band)` is superseded by this as-built decision: per-band keying would need n ≥ `minEpisodes` across 6 bands to learn anything, and comparing a band-summed action rate against an un-banded base rate is a Simpson's-paradox confound. Both arms are kept marginal on purpose, with the diurnal limitation documented rather than papered over.
+- **Marginal (un-banded) arms — a documented diurnal confound.** Episodes carry no time-of-day band (the unused `Episode.band` field was dropped in v0.44.0), and the arm keys are **marginal**: control by `kind`, action by `${kind}|${act}` — band is *not* in either key. DESIGN §3.6's bullet describing the action arm as keyed by `(kind, action, time-of-day band)` is superseded by this as-built decision: per-band keying would need n ≥ `minEpisodes` across 6 bands to learn anything, and comparing a band-summed action rate against an un-banded base rate is a Simpson's-paradox confound. Both arms are kept marginal on purpose, with the diurnal limitation documented rather than papered over.
 
 ## 10. The Interference Watch (M6)
 
@@ -3078,9 +3100,9 @@ right = iv.correlated.active
 ```
 driver-WS client ─┐
                   ├─► ZwaveData.interference()  ──►  computeInterference()  ──►  InterferenceView
-evidenceStore ────┤    (memoized 10 s, zwaveData.ts:916)   (pure, interference.ts:80)      │
+evidenceStore ────┤    (memoized 10 s, zwaveData.ts)       (pure, interference.ts)         │
 symptom detector ─┘                                                                          ▼
-                              DataProvider.interference()  ◄── index.ts:82 / dataProvider.ts:214
+                              DataProvider.interference()  ◄── createTuiDataProvider() / buildZwaveDataSource(), dataProvider.ts
                                           │
                                           ▼
                               renderInterference(ctx)  (pure render, ≤ view.cols per line)
@@ -3089,7 +3111,7 @@ symptom detector ─┘                                                         
 The expensive step is the diurnal fold: it walks **every non-controller node's coarse-bucket ring** (30-minute buckets over a 14-day horizon — up to ~672 buckets/node, ≈26k buckets across a 39-node mesh). The telnet screen redraws at ~1 Hz, so folding that per frame would be wasteful. The fold is therefore memoized in `ZwaveData.interference()` on the **~10-second sample cadence**:
 
 ```ts
-// zwaveData.ts:916
+// zwaveData.ts
 interference(): InterferenceView {
   const now = Date.now();
   if (this.lastInterference && now - this.lastInterference.at < 10_000) return this.lastInterference.view;
@@ -3150,7 +3172,7 @@ const MIN_SERIAL_SAMPLES = 2;  // need ≥2 controller samples to form any per-h
 
 ### 10.3 The noise floor — masthead-identical median
 
-**The number.** The representative floor is a **median**, computed identically to the masthead's `computeNoiseFloor` so the two screens can never disagree. `medianFloor(channels)` (interference.ts:70) takes the **leading contiguous run** of channels — the driver's own convention, where a `null` channel *ends* the run — then medians the finite, negative values:
+**The number.** The representative floor is a **median**, computed identically to the masthead's `computeNoiseFloor` so the two screens can never disagree. `medianFloor(channels)` in interference.ts takes the **leading contiguous run** of channels — the driver's own convention, where a `null` channel *ends* the run — then medians the finite, negative values:
 
 ```ts
 function leadingRun(channels: (number|null)[]): number[] {   // inlined to avoid a module cycle
@@ -3237,7 +3259,7 @@ if (spanH > 0) {
 }
 ```
 
-`timeoutResponse` (surfaced as **`reply-tmo`**) is displayed but **deliberately excluded from the band**. This is a direct consequence of the project's load-bearing counter semantics: a `timeoutResponse` is a *per-node* reply timeout — a Get whose answer never came while the node stayed Alive — not a host↔stick serial fault. It is the TUI's genuine RF-reliability signal, so it belongs to the node, not to the serial link. (Correspondingly, `commandsDroppedTX` is not on this panel at all: it does not count RF ACK failures, so it would be noise here.)
+`timeoutResponse` (surfaced as **`reply-tmo`**) is displayed but **deliberately excluded from the band**. This is a direct consequence of the project's load-bearing counter semantics: a `timeoutResponse` is a *per-node* reply timeout — a reply-expecting command (a Get, a supervised Set, or a secure send's nonce Get) whose answer never came while the node stayed Alive — not a host↔stick serial fault. It is the TUI's genuine RF-reliability signal, so it belongs to the node, not to the serial link. (Correspondingly, `commandsDroppedTX` is not on this panel at all: it does not count RF ACK failures, so it would be noise here.)
 
 The row renders NAK / CAN / tmo-ACK / reply-tmo as `N/h` integers, coloured green when `healthy`, bold yellow when `strained`, grey when `unknown`. With fewer than two fresh samples the band is `unknown` and the panel prints `◷ not enough controller-sample history yet.`
 
@@ -3383,7 +3405,7 @@ The mutating surface is split across four pure-ish modules plus the session stat
 
 ### 11.2 The ActionRunner — verbs & WS command shapes
 
-`createActionRunner(o: ActionRunnerOptions)` (in `zwaveActions.ts`) returns an object implementing the `ActionRunner` interface (`server/src/types.ts:342`). Seven verbs, each returning `Promise<ActionResult>` where `ActionResult = { ok: boolean; message: string }`. The exact WS command shapes were **probed against the live driver** and are documented in the file header; they fall into three families:
+`createActionRunner(o: ActionRunnerOptions)` (in `zwaveActions.ts`) returns an object implementing the `ActionRunner` interface (`server/src/types.ts`). Seven verbs, each returning `Promise<ActionResult>` where `ActionResult = { ok: boolean; message: string }`. The exact WS command shapes were **probed against the live driver** and are documented in the file header; they fall into three families:
 
 ```
 verb            impact       WS command (via HaWsClient.send)
@@ -3407,7 +3429,7 @@ These callbacks are wired in `index.ts` (step 4b) against the data layer: `entry
 
 #### The `run()` wrapper — gate, log, execute, learn
 
-Every verb is a thin call into a shared `run(kind, nodeId, verb, fn)` closure that enforces a fixed lifecycle (`zwaveActions.ts:50`):
+Every verb is a thin call into a shared `run(kind, nodeId, verb, fn)` closure that enforces a fixed lifecycle (`createActionRunner()` in `zwaveActions.ts`):
 
 ```
 if (!o.enabled) return { ok:false, message:'write actions are disabled' };   // ← master gate (defence in depth)
@@ -3449,7 +3471,7 @@ The env bridge follows the run script's **numeric** boolean convention (`1`/`0`,
 
 At the session level, `enabled` drives three behaviours:
 
-- **Shortcut keys** (`p`/`i`/`h`/`x`/`R`) are only routed when `this.actions?.enabled` (`session.ts:412`). In read-only mode they fall through to normal navigation.
+- **Shortcut keys** (`p`/`i`/`h`/`x`/`R`) are only routed when `this.actions?.enabled` (`feed()` in `session.ts`). In read-only mode they fall through to normal navigation.
 - **The Actions Menu (`a`)** opens regardless of `enabled` — it's informational in read-only mode (you can read every impact) — but selecting a row when locked yields an explanatory notice rather than arming anything (`selectMenuItem`, §11.6).
 - The menu header renders a `READ-ONLY` (yellow) vs `ARMED` (green) badge from the `locked = !this.actions?.enabled` flag.
 
@@ -3457,7 +3479,7 @@ At the session level, `enabled` drives three behaviours:
 
 ### 11.4 The action catalog & the SAFE / CAUTION / DESTRUCTIVE tiers
 
-`ACTION_CATALOG` (`actionsCatalog.ts:46`) is the single source of truth. It lists the seven descriptors **in menu order — device actions first (least→most dangerous), then system-wide.** Each `ActionDescriptor` carries a `kind`, a `label`, a `scope` (`'device' | 'system'`), an `impact`, a `desc` ("what it does"), an `impactNote` ("what to expect", shown in the confirm box), and `needsNode`.
+`ACTION_CATALOG` (`actionsCatalog.ts`) is the single source of truth. It lists the seven descriptors **in menu order — device actions first (least→most dangerous), then system-wide.** Each `ActionDescriptor` carries a `kind`, a `label`, a `scope` (`'device' | 'system'`), an `impact`, a `desc` ("what it does"), an `impactNote` ("what to expect", shown in the confirm box), and `needsNode`.
 
 The three **impact tiers** drive both the UI colour/badge and the confirm posture:
 
@@ -3494,7 +3516,7 @@ The `impactNote` strings are load-bearing operator guidance, quoted from the cat
 
 **`renderTypeConfirm`** draws the deliberate confirm box via `centeredNotice`. It restates label, target, `desc`, and the wrapped `impactNote` (all coloured by impact), then the arming prompt. The title is `⚠  CONFIRM` (destructive) or `CONFIRM`, coloured green/yellow/red by tier. The input field shows the typed buffer plus a cyan block caret `▉`; the instant the buffer **exactly equals** `CONFIRM` it flips to a green `CONFIRM` and the prompt becomes `▶ press Enter to execute`. `Esc = cancel` is always shown.
 
-`CONFIRM_WORD = 'CONFIRM'` (`actionsCatalog.ts:160`) is the exact string the operator must type. It is exported so the session, the renderer, and tests all agree on it.
+`CONFIRM_WORD = 'CONFIRM'` (`actionsCatalog.ts`) is the exact string the operator must type. It is exported so the session, the renderer, and tests all agree on it.
 
 ### 11.6 The confirm state machine (`TuiSession`)
 
@@ -3514,7 +3536,7 @@ menuOpen, menuIndex, menuSnapshot, menuTarget   // frozen menu (§11.7)
 
 #### Entry points → `beginAction`
 
-`beginAction(kind, immediate, node?)` is the **single entry point for both the menu and the shortcut keys** (`session.ts:498`):
+`beginAction(kind, immediate, node?)` is the **single entry point for both the menu and the shortcut keys** (`session.ts`):
 
 - It looks up the descriptor; for device-scoped actions it resolves the target — the **explicit `node`** when the menu supplies its frozen target, otherwise `actionTargetNode()` (the live selection). Returns `false` (no-op) if a device action has no target.
 - `actionTargetNode()` resolves the target from **the screen's own cursor** (v0.24): the **Log** targets the *highlighted event's* node (matching what Enter would do), **Remedy** targets the *symptom under its cursor* — on that screen the cursor IS the action target — and **Overview**/**Detail** target the selected row. The aggregate screens (Topology, Heatmap, Controller, Interference) have **no node cursor** and return `undefined`, so a node action is REFUSED there with an on-screen reason instead of silently acting on whatever the invisible Overview cursor happened to hold. `p` is the one action that executes with no CONFIRM box, which is what made that fall-through a safety defect rather than a cosmetic one.
@@ -3534,7 +3556,7 @@ Note there is **no shortcut for `refreshValues` or `stopRebuild`** — those are
 
 #### Type-CONFIRM capture
 
-`handleTypeConfirmKey` (`session.ts:583`) is the arming box:
+`handleTypeConfirmKey` (`session.ts`) is the arming box:
 
 - `Esc` → `cancelConfirm()`.
 - `Enter` → if `confirmBuffer === CONFIRM_WORD`, clear all confirm state and `void executeAction(a)`; **otherwise reset the buffer to empty** so a wrong/partial word must be retyped cleanly (no "almost-armed" state lingers).
@@ -3544,7 +3566,7 @@ Note there is **no shortcut for `refreshValues` or `stopRebuild`** — those are
 
 #### Execute → working → outcome
 
-`executeAction(action)` (`session.ts:624`) sets `actionInFlight`, forces a full repaint (`WORKING` card via `centeredNotice`), then `switch`es on `action.kind` to the matching runner method (node-scoped verbs pass `action.nodeId!`). Any throw is caught into `{ ok:false, message }`. On resolve it clears the in-flight flag and sets `actionNotice` to `✓  <label>` or `✗  <message>`, shown as a `RESULT` card ("press any key to continue · see the Log screen for history"). While in flight, `feed()` **swallows every key** so a second action can't be launched over a running one.
+`executeAction(action)` (`session.ts`) sets `actionInFlight`, forces a full repaint (`WORKING` card via `centeredNotice`), then `switch`es on `action.kind` to the matching runner method (node-scoped verbs pass `action.nodeId!`). Any throw is caught into `{ ok:false, message }`. On resolve it clears the in-flight flag and sets `actionNotice` to `✓  <label>` or `✗  <message>`, shown as a `RESULT` card ("press any key to continue · see the Log screen for history"). While in flight, `feed()` **swallows every key** so a second action can't be launched over a running one.
 
 ### 11.7 Security guards
 
@@ -3564,12 +3586,12 @@ The confirm flow is hardened against several concrete attacks and race condition
 
 ### 11.8 The `onOutcome` hook → M5 learning ledger
 
-The runner's optional `onOutcome(kind, nodeId, ok)` fires **after each action resolves** (both success and failure paths of `run()`). It is wired in `index.ts` to `zwaveData.recordActionOutcome`, which attributes the action to the node's open episodes in the M5 outcome ledger.
+The runner's optional `onOutcome(kind, nodeId, ok, refusal?, origin?, sentAt?)` fires **after each action resolves** (both success and failure paths of `run()`, for the actions that feed the ledger). It is wired in `index.ts` to `zwaveData.recordActionOutcome`, which attributes the action to the node's open episodes in the M5 outcome ledger.
 
-`recordActionOutcome` (`zwaveData.ts:883`) is deliberately conservative about what becomes learning data:
+`recordActionOutcome` (`zwaveData.ts`) is deliberately conservative about what becomes learning data:
 
 - **Mesh-wide actions (`nodeId == null`) are dropped.** `rebuildAll`/`stopRebuild` cannot be credited to any single node's episode without confounding, so they are not attributed.
-- **Only successful actions become episode data** (`if (!ok) return`). A failed action wasn't really "taken"; and the hook cannot distinguish a genuine driver refusal ("node is not failed") from a transient WS error, so it will **not** infer a `refused-misdiagnosis` verdict from a failure — that verdict is reserved for a future structured-error executor.
+- **A failure becomes episode data only when it is a driver refusal** (v0.43.1). `run()` classifies each failure on the driver's own error: a `removeFailed` the driver refuses because the node is not failed is `'refused'`; anything else, a transient WS error included, is `'transport'` and is dropped (`if (refusal !== 'refused') return`). A refusal is recorded with `refused = true` against only the symptom kinds whose plan offered the action (`refusalScope`), so it yields `refused-misdiagnosis` for `ghost-suspect` and leaves the node's other symptoms alone (§9.3).
 - **Actions against an already-recovering symptom are skipped** — `recordAction` is passed a `skip` predicate over `this.pendingResolve`, so an action landing during a symptom's confirmation window isn't credited with a recovery that was happening anyway.
 
 This is the one thread by which manual operator behaviour feeds the learning engine — and it is strictly *observational*: the ledger learns from what the human chose to do; it never chooses.
@@ -3594,8 +3616,8 @@ authRequired = !!auth?.enabled && (!trusted || !!auth?.requireOnIngress)
 - **HA Ingress (sidebar)** connections are `trusted`. Home Assistant has already authenticated the user; the add-on recognises them by the `X-Ingress-Path` header **and** a Supervisor-subnet source IP. `isIngressTrusted(req) = !!headers['x-ingress-path'] && isSupervisorSource(req.ip)`, where `isSupervisorSource` tests membership of the address `supervisor` actually **resolves to**, pinned once at startup by `pinSupervisorAddress()` before the server listens (normalising IPv4-mapped IPv6). Resolution failure **fails closed**: nothing is trusted and the operator simply logs in.
 
 > **Changed in v0.24.3.** This used to match the whole **`172.30.32.0/23`** hassio bridge — which is where every *sibling add-on container* lives, not just the Supervisor. Because `:8788` is ingress-only, every peer able to open that socket was already inside the `/23`, so the second term was always true and the expression collapsed to *"did the client send a header it chooses."* Any sibling add-on — or an SSRF in a third-party one — got a login-free operator session. The header **alone is forgeable** by anything reaching the published LAN port, so the socket-peer pin (`trustProxy: false`, so `req.ip` is unspoofable) is what makes it trustworthy. Trusted connections **skip the login** unless `requireOnIngress` is set.
-- **Telnet (`:2324`)** is always constructed with `trusted: false` (`server.ts:278`) — it is direct LAN and never HA-authenticated — so it **always faces the login gate whenever `auth_enabled`.**
-- The `/console/ws` transport computes `trusted = isTrusted(req)` per upgrade (`wsConsole.ts:370`).
+- **Telnet (`:2324`)** is always constructed with `trusted: false` (`startTelnetServer()` in `server.ts`) — it is direct LAN and never HA-authenticated — so it **always faces the login gate whenever `auth_enabled`.**
+- The `/console/ws` transport computes `trusted = isTrusted(req)` per upgrade (`registerWsConsole()` in `wsConsole.ts`).
 
 #### Password handling — scrypt, plaintext, constant cost
 
@@ -3658,19 +3680,19 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 
 | Guard | Where | Protects against |
 |---|---|---|
-| `!o.enabled` check inside `run()` | `zwaveActions.ts:51` | Runner executing even if called with write actions off |
-| Buffer capped at `CONFIRM_WORD.length`, `===` match | `session.ts:607, 589` | Overtyping past `CONFIRM`; partial/"almost" arming |
-| `deviceCmd`/`entryCmd`/ping throw on missing id | `zwaveActions.ts:38–47, 71` | Sending a command with no device/entry/ping target |
-| `dummyHash` + `byName.has(...) && ok` | `loginPolicy.ts:138, 159` | Username enumeration by timing; collision auth |
-| Explicit read-only notice on locked select | `session.ts:566–571` | A keypress being silently ignored |
-| Frozen `menuTarget` + `menuSnapshot` at open | `session.ts:523` | Streaming events / rebuild flips moving a row or target under the cursor |
-| Keys swallowed while `actionInFlight` | `session.ts:380` | Double-submitting an action |
-| Login buffers length-bounded, input ignored while verifying | `session.ts:237, 262, 264` | Buffer abuse; keys racing an in-flight scrypt |
-| `mode='denied'` when enabled w/o users | `session.ts:190–199` | Silently allowing LAN access on misconfig |
+| `!o.enabled` check inside `run()` | `run()` in `zwaveActions.ts` | Runner executing even if called with write actions off |
+| Buffer capped at `CONFIRM_WORD.length`, `===` match | `handleTypeConfirmKey()` in `session.ts` | Overtyping past `CONFIRM`; partial/"almost" arming |
+| `deviceCmd`/`entryCmd`/ping throw on missing id | `deviceCmd` / `entryCmd` / `ping` in `createActionRunner()`, `zwaveActions.ts` | Sending a command with no device/entry/ping target |
+| `dummyHash` + `byName.has(...) && ok` | `createAuthPolicy()` → `verify`, `loginPolicy.ts` | Username enumeration by timing; collision auth |
+| Explicit read-only notice on locked select | `selectMenuItem()` in `session.ts` | A keypress being silently ignored |
+| Frozen `menuTarget` + `menuSnapshot` at open | `openMenu()` in `session.ts` | Streaming events / rebuild flips moving a row or target under the cursor |
+| Keys swallowed while `actionInFlight` | `feed()` in `session.ts` | Double-submitting an action |
+| Login buffers length-bounded, input ignored while verifying | `handleLoginKey()` in `session.ts` | Buffer abuse; keys racing an in-flight scrypt |
+| `mode='denied'` when enabled w/o users | `TuiSession` constructor, `session.ts` | Silently allowing LAN access on misconfig |
 | Per-source-IP telnet cap (4) + idle reclaim + TCP keepalive | `telnet/server.ts` | One host taking every telnet slot; silent sockets holding slots forever |
-| `rebuildAll`/`stopRebuild` mutual exclusion | `actionsCatalog.ts:145–146` | Offering a no-op action |
-| `resetActionState()` on login & re-lock | `session.ts:214, 220` | A half-armed destructive action surviving the auth boundary |
-| Shared per-peer throttle, capped map | `loginPolicy.ts:167–179` | Reconnect resetting brute-force budget; map growth flood |
+| `rebuildAll`/`stopRebuild` mutual exclusion | `buildMenu()` in `actionsCatalog.ts` | Offering a no-op action |
+| `resetActionState()` on login & re-lock | `resetLogin()` in `session.ts` | A half-armed destructive action surviving the auth boundary |
+| Shared per-peer throttle, capped map | `blockedMsFor` / `registerFailure` in `loginPolicy.ts` | Reconnect resetting brute-force budget; map growth flood |
 | `X-Ingress-Path` **and** the pinned Supervisor address | `index.ts`, `auth.ts` | Forged ingress header from the LAN port; a sibling add-on forging ingress trust |
 
 ### 11.12 Auto-ping — the autonomous writes (v0.30, extended v0.36)
@@ -3687,9 +3709,9 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 
 **Every closure shows its arithmetic (v0.38.2).** The episode-closure log line carries per-window evidence counts — `[before fresh=5 rtt=1 rssi=5 rate=y | after fresh=5 rtt=0 rssi=5 rate=y]`, `none` for an absent window — because a bare `unverifiable` names the verdict but not the failing floor. Production showed the need precisely: `rate-fallback` episodes scored six-for-six while `rtt-degraded` episodes on the same probed, answering nodes closed `unverifiable` three-for-three, and nothing in the log could say which of three candidate mechanisms starved the RTT count (the driver omitting the optional `rtt` field from statistics events, the sampling cadence collapsing distinct probes into one reading, or the before-window refinement stopping early). The counts make the next such closure its own diagnosis.
 
-**"We could not sample it" is not "it was brief" (v0.41.2).** The transient split above is right in shape and was over-claiming in practice. For an ECHO-ONLY node — one whose only fresh readings are its 120-minute sweep replies — the before-side floor of `MIN_OBS` is unreachable *whatever the symptom's duration*, so `transient` was **arithmetically guaranteed rather than measured**, and the closure line asserted "degraded state ended before its evidence floor" on evidence that could not distinguish that from "we only ever got one look". A production audit caught it on the first such closure in the wild. The one signal that separates the two is DURATION: an episode whose symptom stayed LIVE past `UNDERSAMPLED_AFTER_MS` after its dwell matured (5 min — the span of a full verification burst, so every opportunity the engine can create to fill the window has passed) and *still* did not reach its floor was limited by the device's reporting rate, not by the symptom's brevity. Those close as `undersampled`, counted apart, tagged apart on the closure line, and rendered as their own REMEDY and ENGINE rows. Genuinely brief episodes keep `transient`, which now means what it says.
+**"We could not sample it" is not "it was brief" (v0.41.2).** The transient split below (v0.39) is right in shape and was over-claiming in practice. For an ECHO-ONLY node — one whose only fresh readings are its 120-minute sweep replies — the before-side floor of `MIN_OBS` is unreachable *whatever the symptom's duration*, so `transient` was **arithmetically guaranteed rather than measured**, and the closure line asserted "degraded state ended before its evidence floor" on evidence that could not distinguish that from "we only ever got one look". A production audit caught it on the first such closure in the wild. The one signal that separates the two is DURATION: an episode whose symptom stayed LIVE past `UNDERSAMPLED_AFTER_MS` after its dwell matured (5 min — the span of a full verification burst, so every opportunity the engine can create to fill the window has passed) and *still* did not reach its floor was limited by the device's reporting rate, not by the symptom's brevity. Those close as `undersampled`, counted apart, tagged apart on the closure line, and rendered as their own REMEDY and ENGINE rows. Genuinely brief episodes keep `transient`, which now means what it says.
 
-**The confirmation window is not live time (v0.64.6).** The v0.41.2 rule measured duration open-to-resolve, and resolution waits out the 10-minute confirmation window (§9.2), so every closure measured at least ten minutes: `transient` could never be assigned, and every brief blink closed as "this node reports too rarely to reach the floor, whatever the duration". In about 50 h of live log, 6 of 6 starved closures were tagged `undersampled`, all on listening nodes; in each, the first absence came within about two minutes of the verification burst starting — three cleared after the first answered probe, three after the second. The split now measures the symptom's live span, from its dwell start (`dwellStartMs`, the first breaching reading) to the first tick it was seen absent (`absentSinceMs`), against `DWELL_MS + UNDERSAMPLED_AFTER_MS` (10 min). Anchoring at the dwell start, not at the episode's open tick, matters for exactly the case `undersampled` exists for: one breaching reading on an echo-only node ages out of rtt-degraded's 10-minute lookback strictly past that boundary whatever the tick timing, whereas an open-tick anchor would let one late or skipped tick relabel it `transient`. A caller that passes neither timestamp keeps the old meaning, so a store-level `resolve()` without them still reads as live until it resolved. `quiet-node` always closes `undersampled`: its breach is silence, so a transmission in its before-window would have ended it, and that window cannot reach the timeout floor at any duration — a live-span label would only record how fast the verification probe landed.
+**The confirmation window is not live time (v0.64.6).** The v0.41.2 rule measured duration open-to-resolve, and resolution waits out the 10-minute confirmation window (§9.2), so every closure measured at least ten minutes: `transient` could never be assigned, and every brief blink closed as "this node reports too rarely to reach the floor, whatever the duration". In about 50 h of live log, 6 of 6 starved closures were tagged `undersampled`, all on listening nodes; in each, the first absence came within about two minutes of the verification burst starting — three cleared after the first answered probe, three after the second. The split now measures the symptom's live span, from its dwell start (`dwellStartMs`, the first breaching reading) to the first tick it was seen absent (`absentSinceMs`), against `DWELL_MS + UNDERSAMPLED_AFTER_MS` (10 min). Anchoring at the dwell start, not at the episode's open tick, matters for exactly the case `undersampled` exists for: one breaching reading on an echo-only node ages out of rtt-degraded's 10-minute lookback strictly past that boundary whatever the tick timing, whereas an open-tick anchor would let one late or skipped tick relabel it `transient`. A caller that passes neither timestamp keeps the old meaning, so a store-level `resolve()` without them still reads as live until it resolved. A starved `quiet-node` closure (a before-window present but below its floor, an after-window meeting its own) always closes `undersampled`, never `transient`: its breach is silence, so a transmission in its before-window would have ended it, and that window cannot reach the timeout floor at any duration — a live-span label would only record how fast the verification probe landed.
 
 **A transient blink is not an evidence gap (v0.39).** The arithmetic paid for itself on its first unverifiable closure — `[before fresh=1 rtt=1 rssi=1 rate=y | after fresh=5 rtt=5 rssi=5 rate=y]` on a node that answered all ten probes — and settled the three-mechanism question: the driver was delivering `rtt` on every fresh sample (eight windows observed, `rtt` equal to `fresh` in each), and probes were not collapsing. The starving side was the *before*-window, and correctly so: `refineBefore` stops refining the moment the symptom clears, because folding recovered readings into the degraded window would compare the node against itself healthy. A degradation that lasts one sample therefore freezes its before-window below `MIN_OBS` forever — *structurally* unverifiable, exactly the shape the unprobeable split (above) was invented for. `resolve()` now classifies it: an `unverifiable` verdict whose before-window failed its kind's floor while the after-window met its own is counted as `unverifiableTransient`, tagged on the closure line (`(transient — degraded state ended before its evidence floor)`), and rendered on REMEDY as its own `unscoreable by design` row — so the plain `unverifiable` counter again means only what it should: a gap more evidence could have filled. The per-side floors live in one exported `sideFloorMet` (factored out of `scoreRecovery`, which keeps only its comparisons and the joint tx-ratio check), so the verdict and the classification can never disagree about where a floor sits. This also explains the original rate-vs-rtt asymmetry in one stroke: `rate`'s floor is one fresh reading, `rtt`'s is three, so the same one-sample blink scores the first and starves the second.
 
@@ -4109,8 +4131,10 @@ The `Dockerfile` is a two-stage build; `build.yaml` supplies the per-arch base:
   bashio), `apk add nodejs npm ca-certificates tzdata`, copies `server/` +
   `node_modules` + `rootfs/`, and `EXPOSE 8788 2324`.
 - `build.yaml` pins `build_from` to `ghcr.io/home-assistant/{arch}-base:3.21`
-  (Alpine 3.21 ships Node 22 in `main`). HA Supervisor builds on the target arch,
-  so there is no cross-compile / QEMU.
+  (Alpine 3.21 ships Node 22 in `main`). Release images are built per arch on
+  native runners by `publish-release.yml` (QEMU is set up only as a fallback), and a
+  local-folder deploy is built by HA Supervisor on the target arch, so neither path
+  normally cross-compiles.
 - The build metadata `ARG`s are promoted to `ENV` at the end
   (`ENV BUILD_VERSION=${BUILD_VERSION} …`) so `process.env.BUILD_VERSION` is
   populated at runtime and `/api/version` reports the real release instead of the
@@ -4125,16 +4149,21 @@ be PID 1 — mandatory for any add-on on the official HA base images.
 ### 12.6 The LOCAL add-on deploy model (as actually operated)
 
 The repository is published as a Home Assistant **add-on repository** —
-`repository.yaml` advertises the store entry, and `config.yaml` deliberately ships
-**no `image:` key**, so Supervisor builds the add-on from this repo's `Dockerfile`
-on the user's own host. That is the path documented in `README.md` for anyone
-installing it.
+`repository.yaml` advertises the store entry, and `config.yaml`'s `image:` key
+(`ghcr.io/<owner>/{arch}-zwave-tui`) points Supervisor at the prebuilt
+multi-arch images `publish-release.yml` pushes for every release (§12.7). A store
+install and the Update button **pull** the image for `version:`; nothing is built
+on the user's host. That is the path documented in `README.md` for anyone
+installing it. `configContract.test.ts` pins the image name in `image:` (the
+`{arch}-zwave-tui` part) to a package name the workflow pushes; it does not check
+the `ghcr.io/<owner>/` prefix.
 
 The maintainer additionally runs it as a **local add-on** (slug `local_zwave_tui`)
 deployed straight to the Pi for fast iteration. That deploy flow **flattens the
-repo into the local add-on folder**; since `config.yaml` carries no `image:` key,
-Supervisor builds the container locally from the `Dockerfile` either way. The
-operational recipe (with its hard-won gotchas):
+repo into the local add-on folder** and strips `image:` from the deployed
+`config.yaml` (step 3), so Supervisor builds that local copy from the
+`Dockerfile` instead of pulling the release image. The operational recipe (with
+its hard-won gotchas):
 
 1. **Typecheck first** — `npm run typecheck` in `server/` (there is no compile
    step to catch errors otherwise).
@@ -4146,37 +4175,64 @@ operational recipe (with its hard-won gotchas):
      rebuild at the same `version:`, call `…/rebuild` instead. (`version:` only
      bumps between releases, so intra-version iteration must use `rebuild`.)
 
-The add-on ships **no `image:` key**, so *both* install paths build from source on
-the host: adding this repository to the Home Assistant store lets Supervisor build
-and manage the add-on natively (the normal user path), while the local-folder path
-in §12.6 is the maintainer's fast-iteration route. No container registry is
-involved in either.
+Only the local-folder path builds from source, which suits intra-version
+iteration; the store path pulls the published GHCR image and involves no
+on-device build.
 
 ### 12.7 Release pipeline
 
-Three workflows guard and publish the project:
+Five workflows guard and publish the project. Two gate every change:
 
-1. **`ci.yml`** (every push + PR — a **required** check: `main` is protected and
-   these contexts must pass to merge, with admin bypass left on for urgent
-   fixes) — type-checks and runs the
+1. **`ci.yml`** (pushes to and PRs into `main` — a **required** check: `main` is
+   protected and these contexts must pass to merge, with admin bypass left on
+   for urgent fixes) — type-checks and runs the
    full server test suite (`tsc --noEmit -p tsconfig.test.json`, which covers the
-   test tree too), smoke-builds the add-on container (amd64), and builds the
-   printable manual, failing the PR if `DOCS.md` stops converting cleanly.
-2. **`codeql.yml`** — a self-contained CodeQL security analysis.
-3. **`publish-release.yml`** (on a `vX.Y.Z` **tag** push) — re-runs the tests,
-   builds the manual (`.docx` via pandoc + `.pdf` via LibreOffice), and cuts a
-   GitHub Release using that version's `CHANGELOG.md` section as the notes, with
-   the manual attached.
+   test tree too), smoke-builds the add-on container for amd64 and aarch64 (each
+   on a native runner), and builds the printable manual, failing the PR if
+   `DOCS.md` stops converting cleanly.
+2. **`codeql.yml`** (pushes to and PRs into `main`, and weekly; also a required
+   check) — CodeQL `security-extended` analysis of the server. Results are
+   uploaded to the
+   Security tab, and `.github/scripts/check-sarif.mjs` fails the job on
+   actionable findings, because an upload alone does not fail a build.
 
-Cutting a release is therefore: merge the `version:` bump + the new CHANGELOG
-section to `main`, then push the tag at the merge commit:
+Three form the release relay:
+
+3. **`release.yml`** (manual `workflow_dispatch`) — the one-click way to open a
+   release: computes the next version, refuses one whose tag already exists,
+   bumps `version:` in `config.yaml` together with `server/package.json` and the
+   two version fields of `server/package-lock.json`, prepends the CHANGELOG
+   section, and opens a `release/vX.Y.Z` PR titled `Release vX.Y.Z` with
+   auto-merge enabled.
+4. **`tag-release.yml`** (a push to `main` that touches `config.yaml`, acting only
+   when the commit subject starts with `Release v`) — reads the version from
+   `config.yaml`, refuses to tag when `server/package.json` disagrees, pushes the
+   annotated `vX.Y.Z` tag, and dispatches `publish-release.yml` for that version:
+   a tag pushed with the default `GITHUB_TOKEN` cannot trigger another workflow
+   by itself. A tag that already exists makes it a no-op.
+5. **`publish-release.yml`** (a `vX.Y.Z` tag push, or `workflow_dispatch` with a
+   `version` input) — checks the version against `config.yaml`, re-runs the
+   tests, builds and pushes the aarch64 + amd64 images to GHCR
+   (`ghcr.io/<owner>/{arch}-zwave-tui`, tagged `X.Y.Z` and `latest`, each arch on
+   a native runner), builds the manual (`.docx` via pandoc + `.pdf` via
+   LibreOffice), and cuts a GitHub Release using that version's `CHANGELOG.md`
+   section as the notes, with the manual attached. A missing CHANGELOG section
+   fails the release; a Release that already exists is not re-created.
+
+Cutting a release is therefore: bump `version:` in `config.yaml`,
+`server/package.json` and `server/package-lock.json` together
+(`configContract.test.ts` pins them to each other), add the `## X.Y.Z — DATE`
+CHANGELOG section, and squash-merge with a subject that starts `Release vX.Y.Z`
+— or run `release.yml`, which opens that PR. Tagging is automatic; there is no
+manual tag push. A merge whose subject does not start `Release v` releases
+nothing. The dispatch path remains for running the release of an existing tag:
 
 ```bash
-git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z
+gh workflow run publish-release.yml -f version=X.Y.Z
 ```
 
-No container image is published — the add-on is built from source on the user's
-host (§12.6). Green tests plus adversarial multi-agent review are the merge gate.
+The GHCR images pushed here are what store installs and updates pull (§12.6).
+Green tests plus adversarial multi-agent review are the merge gate.
 
 ### 12.8 Security posture
 
@@ -4365,9 +4421,16 @@ triggering on state can never disagree about the mesh:
   | entity | state | notable attributes |
   |---|---|---|
   | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason` |
-  | `sensor.zwave_tui_engine` | `running` / `suppressed:<why>` / `disabled` | `detectors_ready`, `detectors_total` |
+  | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_total` |
   | `sensor.zwave_tui_summons` | count | `node_ids` |
   | `sensor.zwave_tui_symptoms` | count | `critical`, `warning`, `kinds` |
+
+  The engine sensor's states are listed in the order the code checks them:
+  `awaiting-identity-decision` (a mesh identity decision is pending; it outranks
+  every other state), `disabled` (no learned-baselines store), `no-auto-ping` (the
+  engine is learning but auto-ping is not running, because `auto_ping_enabled` or
+  `write_actions_enabled` is off — the default install), and `running` /
+  `suppressed:<why>`, which appear only with both switches on.
 
 **`degraded` is deliberately not "any symptom exists".** A warn-level symptom on
 one node is the resting state of a real mesh, and an alert that is always on is

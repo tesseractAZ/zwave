@@ -1,8 +1,8 @@
 name: CI
 
 # Type-check + test the server and smoke-build the add-on container on every
-# push and PR. Cheap insurance that no broken commit lands on main and gets
-# installed onto the Pi.
+# push to and PR into main. Cheap insurance that no broken commit lands on main
+# and gets installed onto the Pi.
 #
 # These ARE required checks: `main` carries a branch-protection rule requiring
 # "Type-check & test (server)", both "Dockerfile smoke build" jobs, the docs
@@ -51,7 +51,7 @@ jobs:
         run: npm test
 
   docker-smoke:
-    # Build the Home Assistant add-on container on every push/PR, for EVERY
+    # Build the Home Assistant add-on container on push/PR to main, for EVERY
     # architecture config.yaml declares. Previously this built amd64 only —
     # which meant aarch64, the one architecture actually deployed (a Pi 5), was
     # never compiled in CI, so an arch-specific Dockerfile or apk regression
@@ -124,7 +124,7 @@ jobs:
 
   docs:
     # Assemble README + SECURITY + zwave_tui/DOCS.md into one printable manual on
-    # every push/PR, as BOTH an editable .docx (pandoc) and a reader-friendly
+    # push/PR to main, as BOTH an editable .docx (pandoc) and a reader-friendly
     # .pdf (LibreOffice converts the .docx — no LaTeX). Purpose: (1) fail the PR
     # if DOCS.md no longer converts cleanly, and (2) upload a downloadable offline
     # manual for the branch. publish-release.yml builds the same manual again and

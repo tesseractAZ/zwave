@@ -1243,8 +1243,9 @@ test('a departed node discarding its learning is visible IN THE TUI (v0.53.0)', 
 
 test('displayed lastSeen: only a counter that proves the node was HEARD stamps arrival — timeout and dropped-TX do not (v0.64.6)', async () => {
   // zwave-js moves timeoutResponse when the node did NOT answer a command that
-  // expected a reply (one report timeout after its acknowledgement, in its own
-  // statistics event); stamping that as "heard" credited silence as an answer.
+  // expected a reply (the report timeout plus its round-trip time after its
+  // acknowledgement, in its own statistics event); stamping that as "heard"
+  // credited silence as an answer.
   // commandsDroppedTX is excluded defensively (see the onNodeStats comment).
   const ha = fakeHa();
   const zd = await bootedZwaveData(ha, { refreshMs: 80, routePollMs: 160 });

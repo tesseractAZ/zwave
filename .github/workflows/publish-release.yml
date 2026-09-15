@@ -2,7 +2,7 @@ name: Publish release
 
 # Cut a GitHub Release on a `v*.*.*` tag push: run the server tests, build and
 # push the MULTI-ARCH GHCR images (aarch64 + amd64 — installs pull these, per
-# config.yaml's `image:` key; since v0.29.2 there is no on-device build), build
+# config.yaml's `image:` key; since v0.29.4 there is no on-device build), build
 # the printable manual (.docx editable, .pdf reader-friendly), and create the
 # Release with the CHANGELOG notes + manual attached.
 #

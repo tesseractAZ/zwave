@@ -18,7 +18,7 @@ dist/
 .vscode/
 .idea/
 
-# local data (SQLite recorder + per-run scratch)
+# local data (state JSON + per-run scratch)
 data/
 
 # Claude session/scratch (kept local)

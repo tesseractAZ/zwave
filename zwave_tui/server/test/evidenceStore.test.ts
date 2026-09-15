@@ -835,7 +835,7 @@ test('the rate run counts only ACKNOWLEDGED, separate transmissions — and outl
   s.record(6, stats({ commandsTX: 2, lwr: lwrAt(2) }), NodeStatus.Alive, FRESH, at());   // 40k, acknowledged
   s.record(6, stats({ commandsTX: 3, lwr: lwrAt(2) }), NodeStatus.Alive, FRESH, at());   // 10 s later: the same exchange
   for (let i = 0; i < 10; i++) s.record(6, stats({ commandsTX: 3, lwr: lwrAt(2) }), NodeStatus.Alive, { fresh: false }, at());   // copies
-  s.record(6, stats({ commandsTX: 3, commandsDroppedTX: 1, lwr: lwrAt(3) }), NodeStatus.Alive, FRESH, at());   // an ABORTED transmission rewrote the rate to 100k
+  s.record(6, stats({ commandsTX: 3, commandsDroppedTX: 1, lwr: lwrAt(3) }), NodeStatus.Alive, FRESH, at());   // a send cut short by a nonce report rewrote the rate to 100k
   s.record(6, stats({ commandsTX: 4, commandsDroppedTX: 1, lwr: lwrAt(2) }), NodeStatus.Alive, FRESH, at());   // a separate 40k exchange
   assert.equal(s.forNode(6).length, 3, 'the fine ring has long since dropped the 100k reading');
   assert.deepEqual(s.rateRun(6), { routeKey: 'direct', sawHundred: true, belowTx: 2, lastBelowTxAt: FIXED + 15 * TICK, rateKbps: 40 });

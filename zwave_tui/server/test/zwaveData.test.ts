@@ -4,10 +4,11 @@ import assert from 'node:assert/strict';
 import { diffSymptomLog, statsNodeId, mapRouteRaw, statsCounters, isFreshSample, pickDisplayAttrs, mapConfigParams, mapControllerStats } from '../src/zwave/zwaveData';
 
 // ── statsNodeId: the casing bug that froze all live stats ──────────────────
-// HA delivers the INITIAL on-subscribe event with `nodeId` (camelCase) but every
-// SUBSEQUENT live push with `node_id` (snake_case). Both must resolve or stats
-// freeze at their subscribe-time values.
-test('statsNodeId accepts the initial camelCase event (nodeId)', () => {
+// Through HA 2026.8.3 the INITIAL on-subscribe event carried `nodeId`
+// (camelCase) while every SUBSEQUENT live push carried `node_id` (snake_case);
+// from HA 2026.9.0 both use `node_id`. Both must resolve, or on the older
+// releases stats freeze at their subscribe-time values.
+test('statsNodeId accepts the pre-2026.9 initial camelCase event (nodeId)', () => {
   assert.equal(statsNodeId({ source: 'node', nodeId: 3 }), 3);
 });
 test('statsNodeId accepts the live snake_case event (node_id) — the freeze fix', () => {

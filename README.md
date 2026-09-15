@@ -3,8 +3,8 @@
 A telnet **control-room terminal UI** for a Home Assistant Z-Wave JS mesh — and a
 **learned remediation engine** that watches that mesh over time, learns each
 node's normal, and turns anomalies into grounded, ranked recommendations.
-Recommendations are never acted on automatically; the one autonomous write is
-the opt-in, off-by-default **auto-ping** (see *Write actions & safety*).
+Recommendations are never acted on automatically; the one autonomous mesh write
+is the opt-in, off-by-default **auto-ping** (see *Write actions & safety*).
 
 It talks to the **Home Assistant Core WebSocket** (the node roster, live
 statistics, and — behind a typed confirmation — maintenance, device-control, and
@@ -49,8 +49,11 @@ measured evidence:**
 2. **Baselines** — each node's "normal" is learned per time-of-day band across
    several distinct days before its detectors may fire; symptomatic windows are
    quarantined so a fault can't teach the baseline to accept itself.
-3. **Symptom detectors** — degraded return path, dead-flapping, rate fallback,
-   high RTT, weak signal, **route churn** (the mesh cannot settle on a stable
+3. **Symptom detectors** — degraded return path, dead-flapping, **node down**
+   (a node the driver has marked Dead, past a short dwell), a **quiet node** (a
+   mains node that still reads Alive but has gone unheard for at least three
+   liveness-sweep cadences, never less than 6 h), rate fallback, high RTT,
+   weak signal, **route churn** (the mesh cannot settle on a stable
    path — usually one marginal repeater), a chatty flooder, a suspected ghost,
    controller serial-link strain, **S2 nonce-resync storms** (a marginal *secure*
    link, which no statistics counter can see — it is read from the driver's own
@@ -58,8 +61,18 @@ measured evidence:**
    and correlation across nodes: an **edge-cluster** (a small group sharing one
    repeater) and a mesh-wide interference event, which *subsume* the per-node
    symptoms beneath them so you see one cause, not N faults.
-   A detector only fires while the condition is *still happening* — a burst that
-   ends de-asserts rather than maturing into a "persistent" symptom.
+   A detector that counts events (flaps, timeouts, S2 resyncs, re-routes) only
+   fires while the condition is *still happening* — a burst that ends de-asserts
+   rather than maturing into a "persistent" symptom. Rate fallback is the
+   exception: a slow reading within 30 s of the last counted one is the same
+   exchange, so one retried exchange never fires it, but once two separate slow
+   acknowledged transmissions follow a 100 kbps one on the same route, the newest
+   reading decides — it holds until a 100 kbps reading, or a reading on a
+   different route, clears it, which on a node that only the liveness sweep
+   addresses can be hours. While the driver reports no route, or a different
+   route that has carried no reading yet, the symptom is withdrawn but its
+   evidence is kept: it returns after the 5-minute dwell if the same route
+   reappears, with no new reading needed.
 4. **Planner** — each symptom becomes a ranked set of recommendations: physical
    guidance first (most Z-Wave fixes are physical — move a repeater, power-cycle,
    relocate the stick) plus any safe executable probe. Safety gates fail closed;
@@ -74,7 +87,7 @@ measured evidence:**
 
 **Read-only by default.** Every operator action is human-gated behind a typed
 `CONFIRM`; the engine's recommendations are never self-executed. The one
-autonomous write — the opt-in **auto-ping** probe — is documented in
+autonomous mesh write — the opt-in **auto-ping** probe — is documented in
 [Write actions & safety](#write-actions--safety).
 
 ## Screens & keys
@@ -106,7 +119,7 @@ device doing right now?"* and *"how is it configured?"*:
 ![The Detail screen scrolled to its LIVE ENTITIES and CONFIG PARAMETERS sections: a motion sensor reading detected, a light on at 70 percent, a power sensor at 38.4 W, and five Z-Wave configuration parameters with their decoded enum meanings](docs/screenshots/detail.svg)
 
 <details>
-<summary><b>The other six screens</b> — Controller, Topology, Heatmap, Log, Remedy, Interference</summary>
+<summary><b>Six more screens</b> — Controller, Topology, Heatmap, Log, Remedy, Interference (Engine, screen 9, has no screenshot yet)</summary>
 
 #### Controller — radio health, noise floor, counters
 ![Controller screen](docs/screenshots/controller.svg)
@@ -165,8 +178,10 @@ claims about a device.
 
 ## Write actions & safety
 
-**Read-only by default.** **Enable Write Actions** is off, so the add-on only
-observes. Turn it on to unlock actions on the selected node. Press **`a`** to open
+**Read-only by default.** **Enable Write Actions** is off, so the add-on sends
+nothing to the mesh or its devices; it still publishes its own conclusions as
+Home Assistant states (see [The machine-readable boundary](#the-machine-readable-boundary)).
+Turn the switch on to unlock actions on the selected node. Press **`a`** to open
 the **Actions Menu**. It is **scoped to what you are looking at** — on the Overview or
 Detail it offers only actions bounded by the selected node, and groups:
 
@@ -193,12 +208,15 @@ immediate). Every outcome is logged. The *engine* never executes its
 recommendations; device control and config writes are **operator** actions, and
 are never fed to the learning ledger.
 
-**Auto-ping — the one autonomous write (v0.30, opt-in).** With
+**Auto-ping — the one autonomous mesh write (v0.30, opt-in).** With
 `auto_ping_enabled` on (and only under the master `write_actions_enabled` gate),
 the engine probes a mains node that has been **Dead past a dwell** (default
-10 min, 3 attempts with 10/30/60 min backoff), and issues a **liveness probe** to
-a mains node **silent past a threshold** (default 120 min — Z-Wave JS marks Dead
-only reactively, so an unplugged device can read "Alive" for hours until
+10 min, then up to 3 attempts with 10/30/60 min waits between them — at the
+default 3 only the 10 and 30 min waits are reached, so the engine hands the node
+to you about 50 min after death, or about 40 min if it died with a liveness
+probe to it unanswered, since that skips the dwell), and issues a **liveness
+probe** to a mains node **silent past a threshold** (default 120 min — Z-Wave JS
+marks Dead only reactively, so an unplugged device can read "Alive" for hours until
 something talks to it). It is restricted to ping because ping is idempotent and
 has nothing to undo; battery/sleeping devices are never probed; a boot window,
 a rebuild suppressor, and a mesh-storm guard (≥25 % dead ⇒ stand down) bound it.
@@ -230,16 +248,18 @@ has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
 Headlines, each stated as narrowly as it was measured: the slowest screen
 redraw is **412 µs** against a 1 000 ms frame budget; the container holds
 **93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
-RSS) and sampled **0.02 % CPU** once, not as an average; **1 159 tests in 12.0 s**
-and **645 mutants in ~16 min** gate every release. A TUI session costs
+RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.64.6 release
+run, **1 159 tests in 12.0 s** and **645 mutants in ~16 min** gated the release.
+A TUI session costs
 **4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
 rate but one whole-frame redraw per second.
 
 That document also carries what is *not* measured, and why most of it does not
 need to be — and, for the two items that did earn measuring, what the numbers
 overturned. The mutation harness is **not** startup-bound, as had been guessed:
-sys is 8 % and the measured spawn floor 10 %, against 73 % spent re-transpiling
-TypeScript on every one of 644 invocations.
+sys is 8 % and the measured spawn floor 10 %, against 73 % spent in the 644
+targeted test runs themselves — a phase the harness times whole, so how it splits
+between transpiling, module loading and running the tests is not measured.
 
 ## The machine-readable boundary
 
@@ -254,9 +274,16 @@ re-asserted every 30 seconds:
 | entity | state | notable attributes |
 | --- | --- | --- |
 | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason` |
-| `sensor.zwave_tui_engine` | `running` / `suppressed:<why>` / `disabled` | `detectors_ready`, `detectors_total` |
+| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_total` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
+
+The engine sensor's states are listed in the order the code checks them:
+`awaiting-identity-decision` (a mesh identity decision is pending; it outranks
+every other state), `disabled` (no learned-baselines store), `no-auto-ping` (the
+engine is learning but auto-ping is not running, because `auto_ping_enabled` or
+`write_actions_enabled` is off — the default install), and `running` /
+`suppressed:<why>`, which appear only with both switches on.
 
 `GET /api/health` carries the same values — built from the same function, so a
 monitor polling HTTP and an automation triggering on state cannot disagree about
@@ -332,17 +359,22 @@ expose the telnet port on a network you don't fully trust.
 
 *(Maintainer notes.)* Releases are fully automated by a three-workflow relay:
 
-1. Bump the version in **both** `zwave_tui/config.yaml` (`version:`) **and**
-   `zwave_tui/server/package.json` — CI enforces the lock-step
-   (`configContract.test.ts`) and `tag-release.yml` refuses to tag on drift —
-   add a `## X.Y.Z — DATE` section to `zwave_tui/CHANGELOG.md`, then
+1. Bump the version in `zwave_tui/config.yaml` (`version:`),
+   `zwave_tui/server/package.json` **and** `zwave_tui/server/package-lock.json`
+   (both its top-level `version` and `packages[""].version`; running
+   `npm version X.Y.Z --no-git-tag-version` in `zwave_tui/server` sets both
+   server files) — CI enforces the lock-step (`configContract.test.ts`) and
+   `tag-release.yml` refuses to tag when `config.yaml` and `package.json`
+   disagree — add a `## X.Y.Z — DATE` section to `zwave_tui/CHANGELOG.md`, then
    squash-merge with a subject that **starts with `Release vX.Y.Z`** — that
    prefix is the trigger; CI gates the PR as usual. (**`release.yml`** is the
-   one-click alternative: a `workflow_dispatch` that performs both bumps, writes
-   the CHANGELOG section, and opens that release PR for you.)
-2. **`tag-release.yml`** sees the merge subject and pushes the `vX.Y.Z` tag
-   automatically — no manual tagging.
-3. On that tag, **`publish-release.yml`** runs the server tests, builds and
+   one-click alternative: a `workflow_dispatch` that performs the same bumps,
+   writes the CHANGELOG section, and opens that release PR for you.)
+2. **`tag-release.yml`** sees the merge subject, pushes the `vX.Y.Z` tag, and
+   then dispatches **`publish-release.yml`** for that version
+   (`workflow_dispatch`) — a tag pushed with the default `GITHUB_TOKEN` cannot
+   trigger another workflow by itself. No manual tagging.
+3. **`publish-release.yml`** checks out that tag, runs the server tests, builds and
    pushes the **multi-arch GHCR images** (`aarch64` + `amd64`), builds the
    printable manual (`.docx` + `.pdf`), and cuts a **GitHub Release** with the
    CHANGELOG notes and the manual attached.
@@ -350,8 +382,10 @@ expose the telnet port on a network you don't fully trust.
 A merge whose subject does *not* start with `Release v` changes `main` without
 releasing anything — docs and tooling changes ride along until the next release.
 
-`ci.yml` (typecheck + tests + docs build + docker smoke build) is the required
-gate on every PR; `codeql.yml` runs the self-contained CodeQL security check.
+`ci.yml` (typecheck + tests + docs build + `amd64`/`aarch64` docker smoke builds)
+and `codeql.yml` (CodeQL `security-extended`; results are uploaded to the
+Security tab, and `check-sarif.mjs` fails the job on actionable findings) are
+both required status checks on every PR to `main`.
 
 ## Local development
 
@@ -361,14 +395,19 @@ gate on every PR; `codeql.yml` runs the self-contained CodeQL security check.
   the Dockerfile and source sat at the repository root, where a store install
   could never find them.
 - `zwave_tui/server/` — TypeScript backend run directly with `tsx` (no build step).
-  `npm test` runs the suite (600+ node:test cases); `npm run typecheck` is the CI
-  gate; `npm start` runs the server.
+  `npm test` runs the node:test suite (count and run time under
+  [Performance](#performance)); `npm run typecheck` is the CI gate; `npm start`
+  runs the server.
 - `node server/scripts/mutation-check.mjs` (from `zwave_tui/`) reverts each behavioural fix one at a time
   and requires the suite to go red. A green suite proves the tests run; this
   proves they would *notice*. It refuses to draw a conclusion it has not earned:
   `SURVIVED` is a fix no test protects, `MISSING` means the script has drifted
-  from the code, and `INVALID` is a mutant that does not compile — a broken build
-  makes every test fail to load, so counting it as a kill would prove nothing.
+  from the code, `AMBIGUOUS` is an anchor that matches more than one site (so the
+  mutation would land on a site nobody chose), `INVALID` is a mutant that does
+  not compile — a broken build makes every test fail to load, so counting it as a
+  kill would prove nothing — and `RELABEL` is a mutant still marked equivalent
+  that the suite now kills, so its label is stale. All five fail the run; an
+  anchor pre-flight rejects `MISSING` and `AMBIGUOUS` before any mutant runs.
   It also checks the suite is green before it starts (on an already-red tree
   every mutant would falsely report `killed`) and refuses to run twice at once.
 - The browser console (`/console`) vendors xterm.js from `node_modules` — no CDN,

@@ -6,16 +6,18 @@ name: Release
 #     1. Compute the next version (semver bump, or an explicit override)
 #     2. Refuse if that tag already exists, so re-runs are idempotent
 #     3. Bump `version:` in zwave_tui/config.yaml AND zwave_tui/server/package.json
+#        (plus the two version fields in its package-lock.json)
 #     4. Prepend a CHANGELOG section (your notes, or the commit log since the last tag)
 #     5. Open a `release/vX.Y.Z` PR with auto-merge enabled
 #
 # `main` requires a PR, so this cannot push straight to it. Once the PR merges,
 # `tag-release.yml` creates the tag and starts `publish-release.yml`.
 #
-# The two version files are bumped TOGETHER on purpose: the suite pins them to
-# each other (configContract: "server/package.json version tracks the add-on
-# version"), so bumping only config.yaml — which is all the power equivalent
-# needs — would open a PR that fails its own CI.
+# The version files are bumped TOGETHER on purpose: the suite pins them to each
+# other (configContract: "server/package.json version tracks the add-on
+# version", and "server/package-lock.json version tracks server/package.json"),
+# so bumping only config.yaml — which is all the power equivalent needs — would
+# open a PR that fails its own CI.
 
 on:
   workflow_dispatch:
@@ -80,7 +82,7 @@ jobs:
           echo "next=$next"   >> "$GITHUB_OUTPUT"
           echo "Releasing ${cur} → ${next}"
 
-      - name: Bump both version files + CHANGELOG
+      - name: Bump the version files + CHANGELOG
         env:
           NEXT: ${{ steps.v.outputs.next }}
           CURRENT: ${{ steps.v.outputs.current }}
@@ -89,13 +91,21 @@ jobs:
           set -euo pipefail
           # config.yaml — the version Home Assistant reads.
           sed -i -E "s/^version:.*/version: \"${NEXT}\"/" zwave_tui/config.yaml
-          # server/package.json — pinned to it by configContract.test.ts.
+          # server/package.json — pinned to it by configContract.test.ts — and
+          # the lock's two copies (top level and packages[""]), pinned to
+          # package.json the same way. Only those fields change; no npm install.
           node -e '
             const fs = require("fs");
-            const p = "zwave_tui/server/package.json";
-            const j = JSON.parse(fs.readFileSync(p, "utf8"));
-            j.version = process.env.NEXT;
-            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+            const bump = (p, set) => {
+              const j = JSON.parse(fs.readFileSync(p, "utf8"));
+              set(j);
+              fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+            };
+            bump("zwave_tui/server/package.json", (j) => { j.version = process.env.NEXT; });
+            bump("zwave_tui/server/package-lock.json", (j) => {
+              j.version = process.env.NEXT;
+              j.packages[""].version = process.env.NEXT;
+            });
           '
           body="${NOTES:-}"
           if [[ -z "$body" ]]; then
@@ -111,6 +121,7 @@ jobs:
           echo "--- bumped ---"
           grep -E '^version:' zwave_tui/config.yaml
           node -p "require('./zwave_tui/server/package.json').version"
+          node -p "const l = require('./zwave_tui/server/package-lock.json'); l.version + ' / ' + l.packages[''].version"
 
       - name: Open the release PR (auto-merge)
         env:
@@ -122,7 +133,8 @@ jobs:
           git config user.name  'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git checkout -b "$branch"
-          git add zwave_tui/config.yaml zwave_tui/server/package.json zwave_tui/CHANGELOG.md
+          git add zwave_tui/config.yaml zwave_tui/server/package.json \
+            zwave_tui/server/package-lock.json zwave_tui/CHANGELOG.md
           # The subject MUST start with "Release v" — tag-release.yml keys off it.
           git commit -m "Release v${NEXT}"
           git push -u origin "$branch"

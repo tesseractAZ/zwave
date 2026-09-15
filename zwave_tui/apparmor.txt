@@ -13,7 +13,7 @@
 # Permissive enough for our runtime:
 #   - Node 22 + npm + s6-overlay init system
 #   - Fastify HTTP + WebSocket console (8788) + telnet TUI (2324)
-#   - SQLite writes under /data
+#   - atomic JSON state writes under /data (temp file + rename)
 #   - Outbound to ws://supervisor/core/websocket (HA Core WS API)
 #
 # Restrictive enough to deny:
@@ -90,7 +90,9 @@ profile addon_zwave_tui flags=(attach_disconnected,mediate_deleted) {
   /app/server/node_modules/**/*.so* mix,
 
   # Persistent storage (/data is volume-mounted by HA Supervisor).
-  # SQLite needs the rwk permission for WAL + shm files.
+  # The state stores write atomic JSON: `<file>.tmp`, then rename() into place.
+  # Nothing takes a file lock, so `k` is not exercised; the broad `file,` rule
+  # above already grants this path too.
   /data/** rwk,
 
   # Temp + runtime files.

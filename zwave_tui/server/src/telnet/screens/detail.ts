@@ -248,9 +248,10 @@ export function renderDetail(ctx: ScreenCtx): string[] {
     if (longRtt.length >= 3) pushG(trendRow('RTT long', longRtt, 'ms', trendColor(longRtt, rttColor), inner));
 
     // Response-timeout % via the SHARED responseTimeoutPct — the same figure the
-    // Overview TMO column shows. Numerator is timeoutResponse (ACKed Get whose
-    // reply was lost), NOT commandsDroppedTX (RESEARCH.md §0); the raw drop
-    // counters live honestly in the TRAFFIC section below.
+    // Overview TMO column shows. Numerator is timeoutResponse (an ACKed
+    // reply-expecting command — a Get, a supervised Set, or a secure send's
+    // nonce Get — whose reply was lost), NOT commandsDroppedTX (RESEARCH.md §0);
+    // the raw drop counters live honestly in the TRAFFIC section below.
     const pct = responseTimeoutPct(s);
     const timeouts = Math.min(s.timeoutResponse, s.commandsTX);
     // Same rule, and the SHARED band (this had a fourth private copy of the

@@ -18,11 +18,40 @@ Confidence labels:
   1.5.0 ships) or live-probed on this installation (HA Core 2026.7.2)
 - **lore** — community/vendor guidance, directionally reliable, not spec
 
-Driver pinning: the live HA Z-Wave JS add-on **1.5.0 bundles zwave-js
-15.24.2→15.25.0**; empirical tests ran on 15.25.3 (nearest published patch;
-the statistics/route increment sites are byte-identical between the two).
-Statistics semantics **have changed across major versions** (the drop counter
-was only added in 8.8.0) — re-verify §2 on every add-on upgrade.
+Driver pinning: when this was compiled (2026-07-16) the live HA Z-Wave JS
+add-on was **1.5.0, bundling zwave-js 15.24.2→15.25.0**; empirical tests ran on
+15.25.3 (nearest published patch; the statistics/route increment sites are
+byte-identical between the two). Statistics semantics **have changed across
+major versions** (the drop counter was only added in 8.8.0) — re-verify §2 on
+every add-on upgrade.
+
+*Re-checked for v0.64.6 (2026-09-14) by reading the zwave-js 15.27.1 source,
+the driver then running.* This covers only the claims that release depends on,
+not a full §2 re-verification, and nothing was re-run empirically; "only" below
+means only within the files re-read (`Driver.ts`, `Node.ts`,
+`MessageGenerators.ts`, `Transaction.ts`, `Statistics.ts`, `SupervisionCC.ts`,
+`SendDataMessages.ts`, `CommandClass.ts`, and `@zwave-js/shared`'s
+`throttle`; for v0.64.7 also `SecurityCC.ts`, `Security2CC.ts` and
+`SendDataBridgeMessages.ts`):
+- every non-OK callback throws in the send loop (`executeTransaction`) — a
+  plain NoAck, or a `TransmitStatus.Fail` report after the controller
+  transmitted, as `Controller_CallbackNOK`; a Fail report with `txTicks` 0 is
+  retried as a jam, then throws `Controller_MessageDropped`, which is never
+  fed back. A `Controller_CallbackNOK` callback reaches the message generator
+  only when the node's S0 nonce report or S2 SOS nonce report arrived before
+  the ACK, so the sole `commandsDroppedTX` increment
+  (`handleSerialAPICommandResult`) is reached only then; the loop breaks out
+  the same way on any other premature response, but that response has already
+  aborted the transaction and reset its generator, so the handler never runs
+  (§2.2). This narrows §0's premature-abort bullet, its Fail-report paragraph
+  and §7 item 13 (source reading only, not reproduced);
+- `timeoutResponse` still increments only in `sendMessage` on
+  `Controller_NodeTimeout`; a supervised Set reaches it, and so does the nonce
+  Get an S0 or S2 send issues first when it holds no usable nonce (§7 item 11);
+- `lwr.protocolDataRate` is still written only by `updateRouteStatistics`,
+  called from the TX-report branch of `handleSerialAPICommandResult` (§2.2);
+- node statistics events are emitted through a 250 ms leading-and-trailing
+  throttle (§1.11).
 
 ---
 
@@ -47,7 +76,11 @@ the current TUI's `txDropPct`. Reproduced against zwave-js@15.25.3:
   fast node whose report beats the MAC ACK → `SendDataAbort` → NoAck callback,
   but delivery is treated as OK). So the counter is *noisy*, not a clean RF
   signal. (Could not force this in a mock → real-world rate uncertain; treat any
-  nonzero value as weak evidence at most.)
+  nonzero value as weak evidence at most.) *(zwave-js 15.27.1 source reading,
+  not reproduced: of these aborts only one triggered by an S0 nonce report or
+  S2 SOS nonce report reaches the increment; a node's report or Supervision
+  Report beating the ACK aborts the transaction first, so neither send counter
+  moves — see the driver-pinning note and §2.2.)*
 
 **What the counter actually means** (zwave-js 8.8.0 changelog, verbatim):
 "updated when an outgoing command **could not be sent** to a node" — a dispatch
@@ -61,27 +94,41 @@ generator) CAN fire on it, which would typically hit *all* nodes at once. That
 Fail-report path has **not been reproduced empirically** (§7 gap) — do not
 build a jamming detector on it before the probe; if confirmed, its only
 legitimate use is a fleet-simultaneous `dDropTx` spike as mesh-level
-corroboration, never a per-node signal.
+corroboration, never a per-node signal. *(zwave-js 15.27.1 source reading, not
+reproduced: a jam never reaches the increment. The send loop retries a Fail
+report with `txTicks` 0 — the controller did not transmit — as a jam, then
+throws `Controller_MessageDropped`, which its catch rethrows before the
+premature-response check. A Fail report after the controller transmitted
+throws `Controller_CallbackNOK` and reaches the increment only when that node's
+S0 nonce report or S2 SOS nonce report arrived before the ACK — a per-node
+event, not a fleet-wide one. On this driver a fleet-simultaneous `dDropTx`
+spike is therefore not a jamming signal — see the driver-pinning note.)*
 
 **The reliable RF-failure signals instead are:**
 1. **Node status flapping Alive↔Dead** (`subscribe_node_status`) — a listening
    node that fails all send retries goes DEAD; this is *the* hard link-failure
    event. Caveat: dead-marking only happens *when traffic is attempted* — a
    silent node never goes dead, so absence of dead events ≠ health.
-2. **`timeoutResponse`** — the node MAC-ACKed a Get but never returned the
+2. **`timeoutResponse`** — the node MAC-ACKed a reply-expecting command (a Get,
+   a supervised Set, or a secure send's nonce Get) but never returned the
    expected report; zwave-js increments it and the node **stays Alive**
-   (reproduced: ack-but-no-report → `timeoutResponse=1`, `status=Alive`). The RF
-   link is demonstrably up (the ACK arrived); the failure is return-path / node
-   responsiveness / rate. **Only accrues for Get-type (response-expecting)
-   traffic** — SET-only nodes won't show it.
+   (reproduced with a Get: ack-but-no-report → `timeoutResponse=1`,
+   `status=Alive`). The RF link is demonstrably up (the ACK arrived); the
+   failure is return-path / node responsiveness / rate. **Only accrues for
+   reply-expecting traffic** — a Get; a Set sent with Supervision, whose
+   Supervision Get expects a Supervision Report; or the nonce Get an S0 or S2
+   send issues before its command when it holds no usable nonce, which expects
+   a Nonce Report *(source, zwave-js 15.27.1 — §7 item 11; the nonce case not
+   reproduced)*. Nodes whose Sets go unsupervised and need no nonce won't show
+   it for those Sets.
 
 **Denominator correction:** `commandsTX` increments **only on a successful
 (OK) send**. So `(commandsDroppedTX + timeoutResponse) / commandsTX` is
 *timeouts-over-successes*, not a true attempt-failure rate. Keep the existing
 `tx<=0 ⇒ null` guard. **Re-derive the live symptom:** the two patio-light
 switches' "25–33 % TX drop" is almost certainly **`timeoutResponse`-driven**
-(ACKed Gets whose reports were lost), *not* ACK-drop-driven — which points at
-return-path/route quality, not a dead link.
+(ACKed Gets, supervised Sets or nonce Gets whose reports were lost), *not*
+ACK-drop-driven — which points at return-path/route quality, not a dead link.
 
 **Engine consequence:** the classifier must distinguish three states, each with
 a different remedy family:
@@ -273,6 +320,18 @@ measurement** (a stray 127 corrupts a baseline), exactly as zwave-js's
 `isRssiError()` does. Chip RSSI precision is coarse (±2 dB); **don't act on RSSI
 deltas < ~3–4 dB.**
 
+**Emission is throttled** *(source, zwave-js 15.27.1 — added for v0.64.6)*:
+`StatisticsHost.updateStatistics` (`Statistics.ts`) emits `statistics updated`
+through `@zwave-js/shared`'s `throttle(…, 250, true)`, which fires on the
+leading AND trailing edge — an update at least 250 ms after the previous
+emission is emitted at once; updates closer than that collapse into one
+emission, carrying the latest statistics, 250 ms after the previous one. For
+one transmission `Driver.ts handleSerialAPICommandResult` increments
+`commandsTX` before it calls `updateRouteStatistics`, so the new counter can
+arrive in a leading event and the rate that transmission produced in a
+trailing event up to 250 ms later. Pairing a counter delta with the route rate
+therefore requires waiting out the window (DESIGN §3.1, settle deferral).
+
 ---
 
 ## 2. Routing mechanics & statistics semantics
@@ -306,7 +365,9 @@ Resort-to-Direct → Explorer frame (last resort)**.
 
 ### 2.2 Rate & `protocolDataRate` *(source)*
 `updateRouteStatistics` sets `lwr.protocolDataRate = txReport.routeSpeed` on
-every TX report. Enum: `9k6=1, 40k=2, 100k=3, LR100k=4`. So a node reading
+every TX report that reaches `Driver.ts handleSerialAPICommandResult` — not
+every TX report the controller returns (see "When the cached rate is rewritten"
+below). Enum: `9k6=1, 40k=2, 100k=3, LR100k=4`. So a node reading
 `protocolDataRate=1` genuinely negotiated 9.6k on its last working route — the
 *real* per-route rate, not a nominal cap. **Correction:** `TXReport.ts` has
 `routeSpeed`/`routingAttempts`/`routeSchemeState` but **no "speed
@@ -317,6 +378,27 @@ at 40k), or **beam** requirements. Only a **100k-capable path persistently at
 9k6** is strong RF-impairment evidence. **The exact 100k→40k→9.6k fallback
 *algorithm* is not published in any fetched source** — treat observed 9k6 as a
 degradation **flag**, not a claimed mechanism (see gaps).
+
+**When the cached rate is rewritten** *(source, zwave-js 15.27.1 — added for
+v0.64.6)*: only when a SendData callback carrying a TX report reaches
+`Driver.ts handleSerialAPICommandResult` (`if (hasTXReport(result))`) — an OK
+report, or the NoAck report of a send cut short (`SendDataAbort`) because the
+node's S0 nonce report or S2 SOS nonce report arrived before the ACK. That is
+the one premature case whose callback reaches a still-running message
+generator: the send loop throws `Controller_CallbackNOK`, its catch sees
+`msg.prematureNodeUpdate` and breaks out of the retry loop, and the NoAck
+report goes to `generateNextMessage`; it increments `commandsDroppedTX`, leaves
+`commandsTX` unchanged and still rewrites the rate. Any other premature response
+(a Get's report, or a Supervision Report, beating the ACK) aborts the whole
+transaction: `Transaction.abort` throws the report into the
+`createMessageGenerator` wrapper, which resolves with it and resets the
+generator, so when the loop breaks out the same way there is nothing left to
+feed and `handleSerialAPICommandResult` never runs — neither send counter moves
+and the rate is not rewritten. A plain NoAck throws
+`Controller_CallbackNOK` in the send loop first, with the same result. Between
+TX reports the cached value persists, so a periodic read carries a new rate
+only if a TX report landed in between — and `commandsTX` moving marks an
+acknowledged one, not an aborted one.
 
 ### 2.3 Per-hop fault localization — free from statistics *(source)*
 `RouteStatistics` (lwr/nlwr) carries `rssi` (ACK at controller),
@@ -549,9 +631,9 @@ traced in HA's auth source — see gaps).
 - `subscribe_log_updates` streams driver logs (incl. neighbor-list lines and
   per-step rebuild progress) — a **best-effort** enrichment only (log format is
   not an API; `update_log_config` mutates *shared* driver state → always restore).
-- Stats event quirks: initial seed uses `nodeId` (camelCase), updates use
-  `node_id`; controller events carry `timout_response`. Parse **both** key
-  spellings defensively.
+- Stats event quirks: the initial seed used `nodeId` (camelCase) through HA
+  2026.8.3 and uses `node_id` from 2026.9.0; updates use `node_id`; controller
+  events carry `timout_response`. Parse **both** key spellings defensively.
 - `last_seen` exists in the lib but is **not forwarded** by api.py.
 
 ### 3.8 Destructive commands share the channel — deny-by-default *(source)*
@@ -838,14 +920,41 @@ via n7 @ 9.6k, F+R flags, RSSI improving) and #3 South Patio Light (77, "DROP
     Google SRE's hierarchy as the formal analog (§5.2).
 
 **Added by the design review (2026-07-16) — probe before M3 hardens:**
-11. **Do Supervision-encapsulated SETs accrue `timeoutResponse`?** Load-bearing
-    and unverified — a supervised Set DOES expect a report, so either answer
-    breaks a stated assumption ("Get-only" semantics vs SET-heavy nodes being
-    invisible). Probe with the same `@zwave-js/testing` harness used for the §0
-    repro (supervised Set, swallow the Supervision Report, observe
-    `timeoutResponse` + status). Until resolved, TMO-derived symptoms carry a
-    traffic-mix caveat and the return-path narrative must not claim Get-only
-    semantics as fact.
+11. ~~**Do Supervision-encapsulated SETs accrue `timeoutResponse`?**~~ —
+    **ANSWERED at source level: yes** *(zwave-js 15.27.1, traced for v0.64.6;
+    not reproduced empirically)*. `SupervisionCC.mayUseSupervision` admits only
+    singlecast commands that expect no response (in practice Sets);
+    `Driver.sendSupervisedCommand` wraps such a command in a `SupervisionCCGet`,
+    which declares `@expectedCCResponse(SupervisionCCReport)`, so the SendData
+    message's `expectsNodeUpdate` (`SendDataMessages.ts` /
+    `SendDataBridgeMessages.ts`, which share the method body) is true. After an
+    OK transmit report, `simpleMessageGenerator` calls `waitForNodeUpdate`,
+    which throws `Controller_NodeTimeout` if the report never arrives;
+    `Driver.sendMessage` increments `timeoutResponse` on that error and
+    `sendCommandInternal` then swallows it. The frame must be acknowledged — a
+    NOK transmit report throws before the wait starts. An unsupervised Set
+    expects no reply of its own, so a plain one never accrues. A secure send
+    can accrue before its command goes out: `secureMessageGeneratorS0` (when no
+    free nonce is held) and `secureMessageGeneratorS2` (when the SPAN state is
+    None or LocalEI, or a SPAN for a different class) first send a nonce Get
+    through `sendCommandGenerator`, with one attempt and no catch.
+    `SecurityCCNonceGet` and `Security2CCNonceGet` declare their Nonce Report
+    as `@expectedCCResponse`, so an acknowledged nonce Get whose report never
+    arrives throws the same `Controller_NodeTimeout`, `timeoutResponse`
+    increments, and the command is never sent, supervised or not. The
+    encapsulated command then waits like a plain one: both generators end in
+    `simpleMessageGenerator`, and `Security2CCMessageEncapsulation` expects a
+    response exactly when its inner command does. The saved driver logs show
+    that wait expiring on S2: two S2-encapsulated supervised Sets were
+    acknowledged and then logged `Timed out while waiting for a response from
+    the node (ZW0201)` 1.10 s and 1.13 s later. **Still open:** the empirical
+    `@zwave-js/testing` repro (supervised Set, swallow the Supervision Report,
+    observe `timeoutResponse` + status); an observed `timeoutResponse`
+    increment, since those logs carry no statistics; an unanswered nonce Get,
+    since every one in the logs was answered; and any S0 traffic, which the
+    logs do not contain. The return-path narrative must not claim Get-only
+    semantics; a traffic-mix caveat remains: a shift between reply-expecting
+    commands and unsupervised Sets moves the rate in either direction.
 12. **`routeSchemeState` / per-TX-report detail** (txTicks, txChannelNo,
     measuredNoiseFloor, routingAttempts) exists on **NEITHER** WS surface as
     structured data — TXReport-only, text logs the sole fragile carrier
@@ -856,7 +965,12 @@ via n7 @ 9.6k, F+R flags, RSSI improving) and #3 South Patio Light (77, "DROP
     before any jamming heuristic; if confirmed, the only legitimate use is a
     fleet-simultaneous `dDropTx` spike as mesh-level corroboration — never
     per-node. Also probe whether HA forwards zwave-js's controller `Jammed`
-    status events — that would be the clean signal.
+    status events — that would be the clean signal. *(zwave-js 15.27.1 source
+    reading, not reproduced: a Fail report throws in the send loop before the
+    increment — `Controller_CallbackNOK`, or `Controller_MessageDropped` after
+    the jam retries when `txTicks` is 0 — and only a `Controller_CallbackNOK`
+    on a send cut short by the node's S0 nonce report or S2 SOS nonce report
+    is fed back to it; see §0 and the driver-pinning note.)*
 
 ---
 
