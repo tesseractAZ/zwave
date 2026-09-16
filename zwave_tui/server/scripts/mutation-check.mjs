@@ -2476,7 +2476,7 @@ const MUTANTS = [
     find: "        text: `${sym.kind}${subsumptionLabel(sym.subsumedBy, ' ')}: ${firstSentence(sym.narrative)}` });",
     repl: "        text: `${sym.kind}${sym.subsumedBy ? ' (under mesh event)' : ''}: ${firstSentence(sym.narrative)}` });",
     what: 'the log names the same subsumption REMEDY does' },
-  { id: 'sentence-split-spares-decimals', file: 'src/telnet/ledgerText.ts', tests: ['zwaveData', 'ledgerText'],
+  { id: 'sentence-split-spares-decimals', file: 'src/telnet/ledgerText.ts', tests: ['zwaveData'],
     // `split('.')[0]` cut a one-decimal number in half: a node silent 7.2 h
     // logged "…has not been heard from in 7".
     find: '  const m = /^(.*?[.!?])(\\s|$)/s.exec(text);',
@@ -2505,7 +2505,7 @@ const MUTANTS = [
     find: "blocked: 'RF-link symptom — will not repair it'",
     repl: "blocked: 'RF-link symptom — re-interviewing will not repair it and it is not the right tool'",
     what: 'every blocked reason stays inside the chip budget the renderer can carry' },
-  { id: 'rebuild-names-what-it-destroys', file: 'src/telnet/actionsCatalog.ts', tests: ['actionsMenu'],
+  { id: 'rebuild-names-what-it-destroys', file: 'src/telnet/actionsCatalog.ts', tests: ['actionsCatalog'],
     find: 'It also DISCARDS any manually-set priority route for this node — you must set it again afterwards.',
     repl: '',
     what: 'the confirm box says a route rebuild deletes manually-set priority routes' },
