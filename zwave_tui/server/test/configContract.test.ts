@@ -430,3 +430,26 @@ test("index.ts carries the runner's launch stamp to the manual probe (v0.64.5)",
     'the probe hook must pend a MANUAL probe at the launch stamp',
   );
 });
+
+test('index.ts hands auto-ping the two driver-WS readings (v0.65.0)', () => {
+  // Source assertions for the same reason as the launch stamp above: these are
+  // the only hops between the data layer and the engine that no unit test can
+  // drive, and TypeScript cannot pin them either — both hooks are OPTIONAL on
+  // `AutoPingRunnerOptions`, so `() => null`, or dropping the line entirely,
+  // still type-checks. Either way the engine reverts silently to v0.64.7: the
+  // sweep probes into a switched-off receiver and books the NoAcks as misses,
+  // and the driver's own restart burst is credited as the node's own voice.
+  // (Both behaviours are pinned for real in autoPing.test.ts and, on the
+  // producer side, in zwaveDataChurn.test.ts against a live mock driver-WS.)
+  const index = read('server/src/index.ts');
+  assert.match(
+    index,
+    /rfOffSince: \(\) => zwaveData\.controllerRfOffSince\(\)/,
+    'auto-ping must read the live RF-off state, or the blackout suppression never fires',
+  );
+  assert.match(
+    index,
+    /driverReconnectedAt: \(\) => zwaveData\.driverReconnectedAt\(\)/,
+    'auto-ping must read the driver-restart stamp, or the burst is credited as self-proof',
+  );
+});

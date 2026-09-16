@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { WebSocketServer, type WebSocket as WsSocket } from 'ws';
 import {
   createDriverWsClient,
   parseBgRssi,
@@ -16,6 +15,8 @@ import {
   s2Fault,
 } from '../src/zwave/driverWsClient';
 import { driverHomeGuard, leadingRun } from '../src/zwave/zwaveData';
+import { WebSocketServer } from 'ws';
+import { mockServer } from './_driverWsMock';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -27,59 +28,6 @@ async function waitFor(cond: () => boolean, ms = 4000): Promise<void> {
     if (Date.now() - t0 > ms) throw new Error('waitFor: condition not met in time');
     await sleep(25);
   }
-}
-
-/**
- * A minimal mock zwave-js-server: records every command the client sends
- * (the allowlist proof), answers the handshake, and lets tests push events.
- */
-async function mockServer(over: { minSchema?: number; maxSchema?: number; homeId?: number } = {}) {
-  const wss = new WebSocketServer({ port: 0 });
-  await new Promise<void>((r) => wss.once('listening', () => r()));
-  const commands: string[] = [];
-  let connections = 0;
-  let sock: WsSocket | null = null;
-  wss.on('connection', (ws) => {
-    connections += 1;
-    sock = ws;
-    ws.on('message', (raw) => {
-      const m = JSON.parse(String(raw)) as { messageId: string; command: string };
-      commands.push(m.command);
-      if (m.command === 'set_api_schema') {
-        ws.send(JSON.stringify({ type: 'result', messageId: m.messageId, success: true, result: {} }));
-      } else if (m.command === 'start_listening_logs' || m.command === 'stop_listening_logs') {
-        ws.send(JSON.stringify({ type: 'result', messageId: m.messageId, success: true, result: {} }));
-      } else if (m.command === 'start_listening') {
-        ws.send(JSON.stringify({
-          type: 'result', messageId: m.messageId, success: true,
-          result: {
-            state: {
-              controller: { statistics: { backgroundRSSI: { channel0: { average: -101, current: -99 }, channel1: { average: -97, current: -95 }, timestamp: 1 } } },
-              nodes: [
-                { nodeId: 6, isListening: true, isFrequentListening: false, statistics: { lastSeen: '2026-07-16T20:00:00.000Z' } },
-                { nodeId: 44, isListening: false, isFrequentListening: true, statistics: {} },
-              ],
-            },
-          },
-        }));
-      }
-    });
-    ws.send(JSON.stringify({
-      type: 'version', driverVersion: '15.25.0', serverVersion: '3.10.0',
-      homeId: over.homeId ?? 3586281591,
-      minSchemaVersion: over.minSchema ?? 0,
-      maxSchemaVersion: over.maxSchema ?? 42,
-    }));
-  });
-  const port = (wss.address() as { port: number }).port;
-  return {
-    url: `ws://127.0.0.1:${port}`,
-    commands,
-    connectionCount: () => connections,
-    push: (event: unknown) => sock?.send(JSON.stringify({ type: 'event', event })),
-    dropClient: () => sock?.terminate(),
-    close: () => new Promise<void>((r) => wss.close(() => r())),
-  };
 }
 
 function collect() {

@@ -53,7 +53,7 @@ function mesh(live: number, extra: NodeSnapshot[] = []): NodeSnapshot[] {
 /** Drive one tick: track episodes, then decide. */
 function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
   config?: AutoPingConfig; controller?: ControllerSnapshot | null; booting?: boolean; verifyDue?: number[];
-  rfOffSince?: number | null;
+  rfOffSince?: number | null; bootDeadLane?: boolean;
 } = {}) {
   trackEpisodes(state, nodes, now);
   return decideAutoPings({
@@ -61,6 +61,12 @@ function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
     controller: over.controller ?? null,
     config: over.config ?? cfg(),
     booting: over.booting ?? false,
+    // Left undefined by default, so the ~40 callers that rely on the plain
+    // boot-window early exit keep their meaning. A test that means to reach a
+    // gate BELOW that exit has to release the dead lane explicitly (v0.65.0
+    // review) — without it the decision returns at `booting && !bootDeadLane`
+    // and the assertion below it is satisfied by the wrong branch.
+    bootDeadLane: over.bootDeadLane,
     rfOffSince: over.rfOffSince ?? null,
     verifyDue: over.verifyDue ? () => over.verifyDue!.map((id) => ({ id, first: true })) : undefined,
   });
@@ -2155,7 +2161,10 @@ test('the blackout still reports boot-window while the mesh is settling (v0.65.0
   // Same discipline as storm/no-capability-data (v0.64.4): releasing a lane
   // inside the boot window must not release a start-up alarm.
   const s = createAutoPingState();
-  const d = tick(s, mesh(20, [dead(7)]), T, { booting: true, rfOffSince: T - 1_000 });
+  // `bootDeadLane` is what makes this test reach the RF gate at all: without it
+  // the decision returns at the plain boot-window exit above it, and the mutant
+  // that drops the `gate()` wrapper survives a green suite (v0.65.0 review).
+  const d = tick(s, mesh(20, [dead(7)]), T, { booting: true, bootDeadLane: true, rfOffSince: T - 1_000 });
   assert.equal(d.suppressed, 'boot-window');
 });
 
@@ -2243,6 +2252,72 @@ test("the driver's own restart burst is not the node's voice — it credits noth
   seen(clock - 1_000);
   sweepThenAnswer();
   assert.equal(results.at(-1)?.cls, 'self-proven', 'the burst window is bounded, not a permanent doubt');
+  // 5. …and BOUNDED at a size the live restarts justify. The 2026-09-15
+  //    restarts walked 38 nodes in 9 s; the deadline only has to outlast that
+  //    plus the add-on's own reconnect, and a window measured in tens of
+  //    minutes would refuse legitimate self-proof after every driver restart.
+  //    Without a value assertion this constant is pinned against REMOVAL only:
+  //    widening it to 30 min leaves the whole suite green (v0.65.0 review).
+  const { DRIVER_BURST_MS, DRIVER_BURST_LEAD_MS } = await import('../src/zwave/autoPing');
+  assert.ok(DRIVER_BURST_MS >= 30_000 && DRIVER_BURST_MS <= 5 * MIN,
+    `generous over the measured ~9 s burst, but bounded (is ${DRIVER_BURST_MS} ms)`);
+  assert.ok(DRIVER_BURST_LEAD_MS > 0 && DRIVER_BURST_LEAD_MS <= MIN,
+    'the driver pings as it comes up, so the window leads the anchor — by seconds, not minutes');
+  h.stop();
+});
+
+test('a driver restart the driver-WS never reconnects to still refuses attribution (v0.65.0 review)', async () => {
+  // The anchor used to be the add-on's OWN driver-WS handshake, and a driver
+  // restart is the event most likely to take that link down. In the 2026-09-15
+  // audit the second restart's reconnect ladder stopped after attempt 2 and
+  // never handshook again, so `driverReconnectedAt()` stayed 22 h stale while
+  // 25 of the 28 fabricated credits were booked — the rule as shipped removed
+  // 3 of them. zwaveData now also anchors on the config-entry reload, which is
+  // seen on the HA socket; this pins the consumer's half: a STALE anchor must
+  // not be what decides it.
+  const { startAutoPing, BOOT_WINDOW_MS, DRIVER_BURST_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  let reconnAt: number | null = null;
+  const results: { nodeId: number; cls: string }[] = [];
+  const n7 = node(7, { stats: { lastSeen: T } as never });
+  const seen = (v: number) => { (n7.stats as unknown as { lastSeen: number | null }).lastSeen = v; };
+  const nodes = [node(1, { isController: true }), n7];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, probe: async () => {}, log: () => {},
+    config: cfg({ staleMs: 60 * MIN }), tickMs: 1_000_000, now: () => clock,
+    onProbeResult: (nodeId, _answered, cls) => results.push({ nodeId, cls }),
+    driverReconnectedAt: () => reconnAt,
+  });
+  const sweepThenAnswer = (): void => {
+    h.tick();
+    clock += 2 * MIN;
+    seen(clock - 1_000);
+    h.tick();
+  };
+  clock = T + BOOT_WINDOW_MS + MIN;
+  sweepThenAnswer();                       // establish attribution for this run
+  clock += 61 * MIN;
+  // The restart is signalled by an anchor that is FRESH, however it was
+  // obtained — a handshake, or the config-entry reload when no handshake comes.
+  reconnAt = clock - 10_000;
+  seen(clock - 9_000);
+  h.tick();
+  clock += 2 * MIN;
+  seen(clock - 1_000);
+  h.tick();
+  assert.equal(results.at(-1)?.cls, 'attribution-unknown', 'setup: a fresh anchor refuses the credit');
+  // Now the audited failure: the same mesh-wide advance, but the only anchor on
+  // offer is the previous restart's, hours old. Nothing may be credited on the
+  // strength of an anchor that cannot describe this burst.
+  clock += 61 * MIN;
+  const staleAnchor = clock - 22 * 60 * MIN;
+  assert.ok(clock - staleAnchor > DRIVER_BURST_MS, 'setup: the anchor is long expired');
+  reconnAt = staleAnchor;
+  seen(clock - 1_000);
+  sweepThenAnswer();
+  assert.equal(results.at(-1)?.cls, 'self-proven',
+    'a stale anchor must not suppress — it is inert, which is why a LIVE second anchor is required');
   h.stop();
 });
 

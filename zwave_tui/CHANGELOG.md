@@ -23,10 +23,31 @@ verdicts throughout, and `binary_sensor.zwave_tui_degraded` read `off`.
 Three changes. A config-entry reload is now latched and the feeds are rebuilt on
 the first roster poll that succeeds afterwards, releasing the orphaned
 subscriptions first and keeping the cached counters. A watchdog rebuilds them
-regardless if no statistics event arrives from any node for ten minutes while the
-socket is live, so a cause nobody has seen yet ends the same way. And a silent
-feed now raises the degraded sensor, with the measured silence in its reason:
-absence had been reading as success in the one place an operator looks.
+regardless if no statistics event arrives from the mesh — any node or the
+controller — for ten minutes while the socket is live, so a cause nobody has seen
+yet ends the same way. And a silent feed now raises the degraded sensor, with the
+measured silence in its reason: absence had been reading as success in the one
+place an operator looks.
+
+The rebuild itself needed two guards it did not ship with. It now stands aside
+while a rebuild is already in flight, instead of clearing the flag that says who
+owns the connection and starting a second run beside the first — two runs at one
+connection each read the other as current, so neither stands down, and every
+feed doubles on a socket that never closed. And the reload it is repairing is
+consumed by the re-arm that actually runs: a second reload arriving inside the
+throttle window used to spend the latch on a call that did nothing, leaving
+those feeds orphaned with no repair scheduled at all. The rebuild also retains
+the two whole-house activity subscriptions it creates, which a config-entry
+reload does NOT orphan — without that, every re-arm left a live `state_changed`
+fanout behind and logged each lock, switch and sensor transition one more time.
+
+One more fabrication the rebuild would otherwise have caused: zwave-js keeps node
+statistics in memory only, so the driver that comes back starts every counter at
+zero, and the cached counters the re-arm deliberately keeps are the previous
+driver's. Read as movement, that replay stamped "heard just now" on the whole
+roster at once — including the nodes the new driver could not reach. A counter
+that went backwards is now read as what it is, a new driver, and the node keeps
+its real `lastSeen`.
 
 ### Fixed — the driver's own restart pings were credited to the mesh
 
@@ -37,9 +58,18 @@ audit window, into a counter that is persisted, never decays, and is shown on th
 node dossier beside the answered/asked ratio. It is the same fabrication v0.40.2
 removed for the add-on's own boot, from a source that release did not cover.
 
-A `lastSeen` that lands inside the driver-WebSocket reconnect burst is now
-classed `attribution-unknown`, which credits nothing and says so. The window is
-bounded (two minutes), so a reconnect cannot suppress self-proof indefinitely.
+A `lastSeen` that lands inside the driver-restart burst is now classed
+`attribution-unknown`, which credits nothing and says so. The window is bounded
+(two minutes), so a restart cannot suppress self-proof indefinitely.
+
+It is anchored on two signals rather than one, because the obvious anchor is
+missing exactly when it is needed. Keying only on the add-on's own driver-WebSocket
+handshake would have caught 3 of those 28 credits: the second restart took the
+driver-WebSocket down with it and the reconnect never completed, so the stamp was
+22 hours stale while the other 25 were booked. The config-entry reload is the
+teardown half of the same restart, is seen on the Home Assistant socket, and
+lands seconds before the driver's ping burst — so the later of the two anchors
+the window.
 
 ### Fixed — the sweep probed straight through the controller's nightly blackout
 
@@ -60,7 +90,14 @@ any reconnect: a hold that cannot be refreshed must not become a stuck switch.
 
 - The manual records that three battery nodes have no liveness coverage from
   either the driver or this add-on, with the cadence data that makes a watch for
-  them cheap to build.
+  them cheap to build. Their measured jitter is percent-scale, not the tenth of a
+  percent first recorded, so the manual now says which kind of watch that data
+  supports — one keyed on a missed slot, not on the period's jitter.
+- The manual is corrected on three points where it claimed more than the code
+  does: the feed watchdog measures node *or* controller silence; the RF-off
+  reading expires two minutes after the controller last reported the radio down,
+  each report refreshing it; and the in-flight probe drop covers the ticks that
+  land inside a blackout, not a probe launched just before one.
 
 TESTS_AND_MUTANTS_LINE_0650
 
