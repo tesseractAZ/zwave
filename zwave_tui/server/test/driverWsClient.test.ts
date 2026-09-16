@@ -9,6 +9,9 @@ import {
   DRIVER_SCHEMA_MIN,
   DRIVER_SCHEMA_MAX,
   s2ResyncNodeId,
+  controllerRfEvent,
+  rfOffActive,
+  RF_OFF_MAX_MS,
   type DriverWsCallbacks,
   s2Fault,
 } from '../src/zwave/driverWsClient';
@@ -597,4 +600,78 @@ test('the S2 lane names WHY it is dark — and stays quiet while merely pending 
   assert.equal(F({ logsAcked: false, logsMsgId: 'm1', logStormStopped: false, live: true }), null);
   // Not live at all: the DRIVER LINK row already says so — do not double-report.
   assert.equal(F({ logsAcked: false, logsMsgId: null, logStormStopped: false, live: false }), null);
+});
+
+/* ── v0.65.0: the controller's receiver going down ────────────────────────── */
+
+test('controllerRfEvent matches the radio going off and back on (v0.65.0)', () => {
+  const ev = (message: unknown, ctx?: unknown) =>
+    ({ event: 'logging', message, ...(ctx !== undefined ? { context: ctx } : {}) }) as Record<string, unknown>;
+  assert.equal(controllerRfEvent(ev('Turning RF off...')), 'off');
+  assert.equal(controllerRfEvent(ev('Turning RF on...')), 'on');
+  assert.equal(controllerRfEvent(ev(['Backing up NVM...', 'Turning RF off...'])), 'off',
+    'the driver sends multi-line messages as arrays');
+  assert.equal(controllerRfEvent(ev('Turning RF off...', { type: 'controller' })), 'off');
+});
+
+test('a NODE-attributed line can never switch the sweep off (v0.65.0)', () => {
+  // The message text is server-sent. A node's own message must not be able to
+  // suppress this add-on's write lane fleet-wide.
+  const ev = { event: 'logging', context: { type: 'node', nodeId: 7 }, message: 'Turning RF off...' } as Record<string, unknown>;
+  assert.equal(controllerRfEvent(ev), null);
+});
+
+test('controllerRfEvent ignores everything that is not a logging event (v0.65.0)', () => {
+  assert.equal(controllerRfEvent({ event: 'statistics updated', message: 'Turning RF off...' } as never), null);
+  assert.equal(controllerRfEvent({ event: 'logging', message: 'Querying node 7...' } as never), null);
+  assert.equal(controllerRfEvent({ event: 'logging' } as never), null);
+});
+
+test('the RF-off reading EXPIRES, so a missed `on` cannot suppress forever (v0.65.0)', () => {
+  // The blackout is ~10 s. One dropped log line must not switch the sweep off
+  // until the add-on restarts — holds need deadlines.
+  const T0 = 1_760_000_000_000;
+  const up = { live: true, logsAcked: true, stormStopped: false };
+  assert.ok(RF_OFF_MAX_MS >= 60_000 && RF_OFF_MAX_MS <= 10 * 60_000, 'generous, but bounded');
+  assert.equal(rfOffActive(T0, T0 + 5_000, up), T0, 'inside the blackout it holds');
+  assert.equal(rfOffActive(T0, T0 + RF_OFF_MAX_MS - 1, up), T0, 'right up to the deadline');
+  assert.equal(rfOffActive(T0, T0 + RF_OFF_MAX_MS, up), null, 'and expires on it');
+  assert.equal(rfOffActive(null, T0, up), null, 'nothing observed is not a blackout');
+});
+
+test('a reading nobody can refresh is not trusted: a dark link or log lane reads null (v0.65.0)', () => {
+  // The `Turning RF on` that ends the blackout arrives on the same lane. With
+  // the lane dark we would never see it, so the hold must not stand.
+  const T0 = 1_760_000_000_000;
+  assert.equal(rfOffActive(T0, T0 + 1_000, { live: false, logsAcked: true, stormStopped: false }), null);
+  assert.equal(rfOffActive(T0, T0 + 1_000, { live: true, logsAcked: false, stormStopped: false }), null);
+  assert.equal(rfOffActive(T0, T0 + 1_000, { live: true, logsAcked: true, stormStopped: true }), null);
+});
+
+test('the client tracks the controller taking its radio down, and forgets it on reconnect (v0.65.0)', async () => {
+  const srv = await mockServer();
+  const { callbacks } = collect();
+  const c = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60 });
+  c.start();
+  try {
+    await waitFor(() => c.state() === 'live');
+    await waitFor(() => srv.commands.includes('start_listening_logs'));
+    assert.equal(c.controllerRfOffSince(), null, 'nothing observed yet is not a blackout');
+
+    srv.push({ event: 'logging', context: { type: 'controller' }, message: 'Turning RF off...' });
+    await waitFor(() => c.controllerRfOffSince() != null);
+    srv.push({ event: 'logging', context: { type: 'controller' }, message: 'Turning RF on...' });
+    await waitFor(() => c.controllerRfOffSince() == null);
+
+    // A blackout observed on the OLD connection says nothing about the new one,
+    // and the `Turning RF on` that ends it is lost while we are disconnected.
+    srv.push({ event: 'logging', context: { type: 'controller' }, message: 'Turning RF off...' });
+    await waitFor(() => c.controllerRfOffSince() != null);
+    srv.dropClient();
+    await waitFor(() => srv.connectionCount() === 2 && c.state() === 'live');
+    assert.equal(c.controllerRfOffSince(), null, 'the hold does not survive a reconnect');
+  } finally {
+    c.stop();
+    await srv.close();
+  }
 });

@@ -133,6 +133,12 @@ async function main(): Promise<void> {
       // opening a second, less-guarded path to the mesh.
       verifyRequests: (now) => zwaveData.drainVerifyRequests(now),
       verifyOwedCount: () => zwaveData.verifyOwedCount(),
+      // v0.65.0 (live audit): the controller's receiver goes down for ~10 s
+      // every night for the NVM backup, and the driver pings the whole mesh
+      // itself whenever it restarts. Neither is this add-on's probe, and both
+      // are indistinguishable from mesh behaviour without these two readings.
+      rfOffSince: () => zwaveData.controllerRfOffSince(),
+      driverReconnectedAt: () => zwaveData.driverReconnectedAt(),
       onProbeResult: (nodeId, answered, cls) => zwaveData.recordProbeResult(nodeId, answered, cls),
       // v0.41: the ENGINE's own writes, not the operator's — the Log screen
       // rendered every autonomous probe as "operator" before this.

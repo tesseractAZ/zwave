@@ -172,6 +172,13 @@ export function mapStateChanged(
 const COARSE_MAX = 120;
 /** Battery/firmware re-read cadence (v0.26) — slow-moving by nature. */
 const ENTITY_REFRESH_MS = 10 * 60_000;
+/** No statistics event from ANY node for this long, while the HA socket is up
+ *  and the roster poll is succeeding, means the feeds are dead however healthy
+ *  the bookkeeping looks (v0.65.0). The live audit of 2026-09-15 found the
+ *  engine blind for 22 h 48 m after a config-entry reload, with `statsSubscribed`
+ *  still true and 38 node feeds still on the books. Ten minutes is the same
+ *  threshold the TUI already calls a stale statistics feed (telnet/chrome.ts). */
+const STATS_FEED_DEAD_MS = 10 * 60_000;
 const COARSE_INTERVAL_MS = 60_000;
 /** v0.22: min gap before a FAILED config-param fetch is retried, so a Detail
  *  screen that re-requests every frame can't hammer a flaky device. */
@@ -348,6 +355,10 @@ export interface ZwaveData {
   lastUpdated(): number | null;
   /** Epoch ms of the last statistics event (node or controller), or null. */
   lastStatsUpdated(): number | null;
+  /** When the driver-WS link last handshook (v0.65.0), or null. */
+  driverReconnectedAt(): number | null;
+  /** When the controller's receiver went off and has not come back (v0.65.0). */
+  controllerRfOffSince(): number | null;
   /** Rolling RSSI/RTT history for a node (for sparklines). */
   history(nodeId: number): { rssi: readonly number[]; rtt: readonly number[] };
   /** Coarse long-horizon RSSI/RTT trend for a node (~2h). */
@@ -772,6 +783,16 @@ class ZwaveDataImpl implements ZwaveData {
   private configFetchAt = new Map<number, number>();
   /** Epoch ms of the last statistics event (node or controller) — freeze/health probe. */
   private lastStatsAt: number | null = null;
+  /** The statistics subscriptions this connection owns (v0.65.0), retained so
+   *  they can be RELEASED and rebuilt without tearing down the socket. */
+  private ownedStatsSubs: HaSubscription[] = [];
+  /** A zwave_js config-entry reload was seen; re-arm the feeds once the roster
+   *  poll succeeds again (v0.65.0). */
+  private entryReloadSeen = false;
+  private lastFeedRearmAt = 0;
+  /** When the driver-WS link last completed its version handshake (v0.65.0) —
+   *  i.e. when the driver last (re)started under us. */
+  private driverWsConnAt: number | null = null;
   /** Node status from the previous poll — diffed to log alive/dead/wake events. */
   private prevStatus = new Map<number, NodeStatus>();
   /** Event + command log ring (newest first), consumed by the Log screen. */
@@ -880,6 +901,10 @@ class ZwaveDataImpl implements ZwaveData {
           callbacks: {
             onHomeId: (id) => {
               this.driverHomeId = id;
+              // A handshake means a NEW driver connection: the driver pings the
+              // mesh itself as it comes up, and auto-ping must not read those
+              // answers as the nodes' own voices (v0.65.0).
+              this.driverWsConnAt = Date.now();
             },
             onBgRssi: (channels, at) => {
               if (!this.driverHomeOk()) return;
@@ -1893,6 +1918,18 @@ class ZwaveDataImpl implements ZwaveData {
     if (this.stopped) return;
     if (ok) {
       this.errStreak = 0;
+      // The feeds die on a config-entry reload without the socket ever closing,
+      // and nothing else re-arms them (v0.65.0). Re-arm once the roster poll is
+      // answering again, so we rebuild against the driver that is now loaded.
+      if (this.entryReloadSeen) {
+        this.entryReloadSeen = false;
+        void this.rearmStatsFeeds('zwave_js config entry reloaded');
+      } else if (this.statsFeedDead(Date.now())) {
+        // POSITIVE CONTROL. Whatever kills the feed — a cause nobody has seen
+        // yet included — ends here: silence is checked, not assumed benign.
+        const silentM = Math.round((Date.now() - (this.lastStatsAt ?? 0)) / 60_000);
+        void this.rearmStatsFeeds(`no statistics from any node for ${silentM}m`);
+      }
       this.scheduleNext(this.refreshMs);
     } else {
       // Back off on repeated failure (e.g. dev without token, HA restarting) so
@@ -1912,6 +1949,9 @@ class ZwaveDataImpl implements ZwaveData {
       //    multi-hour HA outage otherwise becomes a cache-wipe + forced
       //    reconnect per tick against a recovering Core. Re-arm after 5 min.
       const entryReloading = /not_loaded/.test(this.lastErr ?? '');
+      // Latch it: the reload itself is transient, but the orphaned feeds it
+      // leaves behind are not (v0.65.0). Cleared by the re-arm on recovery.
+      if (entryReloading) this.entryReloadSeen = true;
       const healArmed =
         this.errStreak === 3 || Date.now() - this.lastSelfHealAt >= 5 * 60_000;
       if (this.errStreak >= 3 && !this.entrySeeded && this.entryId && !entryReloading && healArmed) {
@@ -2532,11 +2572,60 @@ class ZwaveDataImpl implements ZwaveData {
       // handles it created before parking. Without this the stand-down never
       // ran for them — the exact gap the churn test measures.
       if (this.superseded(epoch)) { await standDown(); return; }
+      // RETAIN the handles (v0.65.0). A config-entry reload orphans every one of
+      // these on HA's side — the listener is bound to the Node objects of the
+      // driver that just went away — and releasing them needs this same list.
+      this.ownedStatsSubs = owned.slice();
       void this.fetchEntityStates();
     } catch (e) {
       this.statsSubscribed = false;
       this.log(`subscribeStatistics failed: ${errMsg(e)}`);
     }
+  }
+
+  /**
+   * Rebuild the statistics subscriptions on the CURRENT socket (v0.65.0).
+   *
+   * The v0.26 comment on `onReady` — "they are per-connection and die when the
+   * socket closes" — was half the truth: they also die when the zwave_js config
+   * entry reloads, which happens on every driver restart, add-on update and
+   * manual integration reload, and leaves the socket up. Nothing re-armed them,
+   * so `statsSubscribed` stayed true and the engine went blind for the life of
+   * the process: in the 2026-09-15 audit, 22 h 48 m of a 23 h run with every
+   * detector starved, every episode closing `unverifiable`, and auto-ping still
+   * logging healthy verdicts off the driver-WS feed.
+   *
+   * Deliberately NOT a re-discovery: the entry_id, the registries and the cached
+   * counters all still belong to this same network. Only the subscriptions are
+   * rebuilt — the exact thing the v0.26 guard was protecting when it suppressed
+   * the self-heal for `not_loaded`.
+   */
+  private async rearmStatsFeeds(why: string): Promise<void> {
+    const now = Date.now();
+    // One rebuild per dead-feed window: a failing re-subscribe must not become a
+    // per-tick reconnect storm against a Core that is still coming back.
+    if (now - this.lastFeedRearmAt < STATS_FEED_DEAD_MS) return;
+    this.lastFeedRearmAt = now;
+    this.log(`live statistics: re-subscribing (${why})`);
+    for (const sub of this.ownedStatsSubs.splice(0)) await sub.unsubscribe().catch(() => {});
+    this.statusSubbed.clear();
+    this.statsSubbedNodes.clear();
+    this.subStatus.clear();
+    this.pendingNodeSubs.clear();
+    // The cached counters STAY. They are this network's, and clearing them
+    // re-baselines every delta guard for nothing (the v0.26 lesson); the first
+    // event of the new subscription supersedes them anyway.
+    this.statsSubscribed = false;
+    await this.subscribeStatistics();
+  }
+
+  /** Is the statistics feed dead — subscribed, socket up, and nothing arriving
+   *  (v0.65.0)? Absence is only evidence once the feed has ever delivered. */
+  private statsFeedDead(now: number): boolean {
+    return this.statsSubscribed
+      && this.lastStatsAt != null
+      && now - this.lastStatsAt > STATS_FEED_DEAD_MS
+      && this.client.ready();
   }
 
   /** Subscribe one node's statistics + status feeds; failures queue for retry.
@@ -2810,6 +2899,18 @@ class ZwaveDataImpl implements ZwaveData {
   /** Epoch ms of the last statistics event (node or controller), or null. */
   lastStatsUpdated(): number | null {
     return this.lastStatsAt;
+  }
+
+  /** When the driver-WS link last handshook (v0.65.0) — auto-ping uses it to
+   *  refuse attribution for the driver's own restart ping burst. */
+  driverReconnectedAt(): number | null {
+    return this.driverWsConnAt;
+  }
+
+  /** When the controller reported its receiver off and has not reported it back
+   *  on (v0.65.0), or null. Auto-ping suppresses every lane while it is set. */
+  controllerRfOffSince(): number | null {
+    return this.driverWs?.controllerRfOffSince() ?? null;
   }
 
   /** Rolling RSSI/RTT history for a node (for sparklines). Empty when unknown.

@@ -144,6 +144,12 @@ export interface DriverWsClient {
   schema(): number | null;
   /** The server's homeId from the handshake (null until known). */
   homeId(): number | null;
+  /** When the controller reported `Turning RF off` and has not yet reported
+   *  `Turning RF on` (v0.65.0) — the nightly NVM backup takes the radio down
+   *  for ~10 s. null once it is back, once the reading is older than
+   *  `RF_OFF_MAX_MS`, and whenever the link is not live: a stale suppression
+   *  must expire on its own. */
+  controllerRfOffSince(): number | null;
 }
 
 interface VersionMsg {
@@ -210,6 +216,61 @@ export function s2ResyncNodeId(ev: Record<string, unknown>): number | null {
   if (msg.includes('re-transmission with SPAN extension')) return null;
   if (msg.includes('SPAN extension')) return nodeId;
   if (msg.includes('cannot decode command')) return nodeId;
+  return null;
+}
+
+/** How long a `Turning RF off` may stand without its `Turning RF on` (v0.65.0).
+ *
+ *  A suppression with no deadline is a switch the mesh can leave stuck: one
+ *  dropped log line, one log-stream storm stop, one reconnect mid-backup, and
+ *  auto-ping would be off until the add-on restarts. The observed blackout is
+ *  ~10.3 s (nightly NVM backup + soft reset), so two minutes is generous and
+ *  still bounded. */
+export const RF_OFF_MAX_MS = 120_000;
+
+/**
+ * Is the receiver-off reading still usable (v0.65.0)?
+ *
+ * Pure so every conjunct can be pinned by a test rather than by waiting two
+ * minutes. Three ways a set `rfOffSince` must still read null: the link is no
+ * longer live (we would never see the `on`), the log lane is dark (same), and
+ * the deadline has passed. A write lane held off by a reading nobody can
+ * refresh is exactly the stuck switch this deadline exists to prevent.
+ */
+export function rfOffActive(
+  rfOffSince: number | null,
+  now: number,
+  link: { live: boolean; logsAcked: boolean; stormStopped: boolean },
+): number | null {
+  if (rfOffSince == null) return null;
+  if (!link.live || !link.logsAcked || link.stormStopped) return null;
+  return now - rfOffSince < RF_OFF_MAX_MS ? rfOffSince : null;
+}
+
+/**
+ * Is this driver `logging` event the controller turning its receiver off or on
+ * (v0.65.0, from the 2026-09-15 live audit)?
+ *
+ * The nightly NVM backup takes the radio down: `Backing up NVM...` →
+ * `Turning RF off...` → ~10 s of ExtendedNVMOperations → `Performing soft
+ * reset...` → `Turning RF on...`. A probe in flight across that window cannot
+ * be acknowledged, so it NoAcks, and one unacknowledged frame is enough for the
+ * driver to mark a node Dead — a false death the add-on would then report and
+ * remediate. auto-ping suppresses itself while this is on.
+ *
+ * Node attribution is deliberately NOT required (it is a controller-level
+ * line), so the match is narrowed instead: the two exact phrases, and never a
+ * node-attributed line, so a node's own message cannot switch the mesh's
+ * sweep off. The text is server-sent: matched, never logged or stored.
+ */
+export function controllerRfEvent(ev: Record<string, unknown>): 'off' | 'on' | null {
+  if (ev.event !== 'logging') return null;
+  const ctx = ev.context as Record<string, unknown> | undefined;
+  if (ctx && typeof ctx === 'object' && ctx.type === 'node') return null;
+  const raw = ev.message;
+  const msg = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.filter((x) => typeof x === 'string').join('\n') : '';
+  if (msg.includes('Turning RF off')) return 'off';
+  if (msg.includes('Turning RF on')) return 'on';
   return null;
 }
 
@@ -284,6 +345,9 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   let msgId = 0;
   /** Log-stream state — all per-connection, reset in connect(). */
   let logsMsgId: string | null = null; // messageId of our start_listening_logs
+  /** When the controller last reported its receiver OFF (v0.65.0), or null.
+   *  Read through the deadline in `controllerRfOffSince()` — never raw. */
+  let rfOffSince: number | null = null;
   /** True only between a successful start_listening_logs ack and the next
    *  disconnect / storm-stop — the S2 lane's liveness (see s2LaneLive). */
   let logsAcked = false;
@@ -355,6 +419,10 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     if (stopped || state === 'dormant' || !url) return;
     teardownSocket();
     logsMsgId = null;
+    // A blackout observed on the OLD connection says nothing about the new one,
+    // and a `Turning RF on` that lands while we are disconnected is lost — so
+    // the suppression never survives a reconnect (v0.65.0).
+    rfOffSince = null;
     logStormStopped = false;
     logsAcked = false;
     logEvWindowStart = 0;
@@ -550,6 +618,11 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       log(`driver-ws: log stream storm (>${LOG_STORM_PER_MIN}/min — driver log level raised?) — S2 watch paused until reconnect`);
       return;
     }
+    // The radio going down is not a node event, and it gates a WRITE lane, so
+    // it is matched before the S2 family and independently of it (v0.65.0).
+    const rf = controllerRfEvent(ev);
+    if (rf === 'off') rfOffSince = now;
+    else if (rf === 'on') rfOffSince = null;
     const nodeId = s2ResyncNodeId(ev);
     if (nodeId != null) cb.onS2Resync?.(nodeId);
   }
@@ -588,6 +661,9 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     },
     s2LaneFault(): 'refused' | 'storm-stopped' | null {
       return s2Fault({ logsAcked, logsMsgId, logStormStopped, live: state === 'live' });
+    },
+    controllerRfOffSince(): number | null {
+      return rfOffActive(rfOffSince, Date.now(), { live: state === 'live', logsAcked, stormStopped: logStormStopped });
     },
     start(): void {
       if (!url) {

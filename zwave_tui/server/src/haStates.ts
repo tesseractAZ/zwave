@@ -58,6 +58,10 @@ export interface StatePost {
  * Everything the engine concluded, as the four values an automation triggers
  * on. PURE — the caller does the I/O, so this is testable without a network.
  */
+/** The statistics feed is dead once nothing has arrived for this long — the
+ *  same threshold the TUI's own stale-feed chip uses (v0.65.0). */
+const STATS_FEED_DEAD_MS = 10 * 60_000;
+
 export function buildStates(data: DataProvider): StatePost[] {
   const syms = data.symptoms();
   const crit = syms.filter((s) => s.severity === 'crit').length;
@@ -97,9 +101,19 @@ export function buildStates(data: DataProvider): StatePost[] {
   // resting state of a real 39-node mesh, and an alert that is always on is not
   // an alert. It fires on: a summons, a critical symptom, or the engine being
   // structurally unable to do its job.
+  // THE ENGINE GOING BLIND is the strongest case of "structurally unable to do
+  // its job", and it was the one case nothing published. A zwave_js config-entry
+  // reload orphans the statistics subscriptions, and in the 2026-09-15 live audit
+  // this sensor read `off` for 22 h 48 m while every detector starved and every
+  // episode closed `unverifiable` (v0.65.0). Only meaningful once the feed has
+  // delivered something: a fresh start has nothing to have gone silent.
+  const statsAt = data.lastStatsUpdated?.() ?? null;
+  const statsSilentMs = statsAt == null ? null : Date.now() - statsAt;
+  const statsBlind = statsSilentMs != null && statsSilentMs > STATS_FEED_DEAD_MS;
   const degraded = summonsNodes.length > 0
     || crit > 0
     || ident != null
+    || statsBlind
     || (ap != null && (ap.suppressed === 'storm' || ap.suppressed === 'no-capability-data'));
 
   return [
@@ -113,6 +127,8 @@ export function buildStates(data: DataProvider): StatePost[] {
           ? 'none'
           : ident != null
             ? `mesh identity changed (${ident.previous} → ${ident.live}) — awaiting Keep or Start-fresh`
+            : statsBlind
+            ? `statistics feed silent ${Math.round((statsSilentMs ?? 0) / 60_000)}m — the engine is blind`
             : summonsNodes.length > 0
             ? `${summonsNodes.length} node(s) need a human`
             : crit > 0

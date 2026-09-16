@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.65.0
+
+### Fixed — the engine went blind after a Z-Wave JS reload, and said nothing
+
+Home Assistant binds each node-statistics subscription to the `Node` objects of
+the driver loaded at the time. When the `zwave_js` config entry reloads — a
+driver restart, an add-on update, a manual integration reload — those objects are
+replaced and every subscription is orphaned, silently: no error, no close, and
+the WebSocket stays up. The add-on rebuilt its feeds only on a socket
+reconnect, so nothing rebuilt them, and `statsSubscribed` stayed true with all
+38 node feeds still on the books.
+
+A 23-hour audit of the live mesh caught it: the driver restarted 9 minutes into
+the window and the evidence engine was blind for the remaining 22 h 48 m. Every
+detector starved, the one episode that opened closed `unverifiable` after
+spending ten verification probes the mesh answered and the store never saw, and
+the baselines and ledger took in nothing. Auto-ping kept working — it judges
+probes from the driver's own WebSocket — so the add-on logged healthy-looking
+verdicts throughout, and `binary_sensor.zwave_tui_degraded` read `off`.
+
+Three changes. A config-entry reload is now latched and the feeds are rebuilt on
+the first roster poll that succeeds afterwards, releasing the orphaned
+subscriptions first and keeping the cached counters. A watchdog rebuilds them
+regardless if no statistics event arrives from any node for ten minutes while the
+socket is live, so a cause nobody has seen yet ends the same way. And a silent
+feed now raises the degraded sensor, with the measured silence in its reason:
+absence had been reading as success in the one place an operator looks.
+
+### Fixed — the driver's own restart pings were credited to the mesh
+
+zwave-js pings every node as it comes up, which advances each node's `lastSeen`
+within seconds. The liveness sweep read that as the node speaking on its own and
+recorded a `self-proven` credit — 28 of them across two driver restarts in the
+audit window, into a counter that is persisted, never decays, and is shown on the
+node dossier beside the answered/asked ratio. It is the same fabrication v0.40.2
+removed for the add-on's own boot, from a source that release did not cover.
+
+A `lastSeen` that lands inside the driver-WebSocket reconnect burst is now
+classed `attribution-unknown`, which credits nothing and says so. The window is
+bounded (two minutes), so a reconnect cannot suppress self-proof indefinitely.
+
+### Fixed — the sweep probed straight through the controller's nightly blackout
+
+The nightly NVM backup turns the controller's receiver off for about ten seconds
+and soft-resets it. A frame sent across that window cannot be acknowledged, and
+one unacknowledged sweep frame is enough for the driver to mark a node Dead —
+which this engine would then report, remediate and count as a miss. On both
+nights of the audit the backup happened to fall inside an idle stretch of the
+sweep cycle, so it was exposure rather than an observed failure.
+
+The add-on now reads the controller's `Turning RF off` and `Turning RF on` from
+the driver log stream it already subscribes to, suppresses every probe lane while
+the radio is down, and drops probes that were already in flight without booking
+them as misses. The reading expires after two minutes, on a dark log lane, and on
+any reconnect: a hold that cannot be refreshed must not become a stuck switch.
+
+### Also in this release
+
+- The manual records that three battery nodes have no liveness coverage from
+  either the driver or this add-on, with the cadence data that makes a watch for
+  them cheap to build.
+
+TESTS_AND_MUTANTS_LINE_0650
+
 ## 0.64.7
 
 ### Fixed — documentation that no longer matched the add-on

@@ -33,6 +33,9 @@ const HOME = 3586281591;
 /** Lets one test simulate a stick swap / NVM restore — the ONLY thing that
  *  legitimately changes home_id. Reset to null in that test's finally. */
 let homeOverride: number | null = null;
+/** Set to an error message to make the roster poll fail — a config-entry reload
+ *  is the case that matters (v0.65.0). Reset to null in the test's finally. */
+let failNetworkStatus: string | null = null;
 /** Roster the fake controller reports. Mutable so a test can make a node
  *  LEAVE the network — the eviction path cannot be reached otherwise. */
 const NODE7 = { node_id: 7, status: 4, ready: true, is_routing: true, is_secure: false };
@@ -50,6 +53,9 @@ function cannedResult(cmd: Record<string, unknown>): unknown {
     case 'get_states':
       return [{ entity_id: 'switch.node_seven', state: 'on', attributes: {} }];
     case 'zwave_js/network_status':
+      // A zwave_js config-entry reload (driver restart, add-on update,
+      // integration reload) fails exactly this call while it is out (v0.65.0).
+      if (failNetworkStatus != null) throw new Error(failNetworkStatus);
       // The roster is built from controller.nodes (not the registry) — the
       // registry only enriches names/entities. Status 4 = Alive.
       return {
@@ -1456,5 +1462,83 @@ test("a pre-v0.64.6 ledger RESUMED from its archive announces the discarded spli
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ── v0.65.0: the statistics feeds must survive a config-entry reload ─────── */
+
+test('a zwave_js config-entry RELOAD re-arms the statistics feeds (v0.65.0)', async () => {
+  // The 2026-09-15 live audit: a driver restart reloads the config entry, which
+  // orphans every node-statistics subscription on HA's side — the listener is
+  // bound to the Node objects of the driver that just went away. Nothing
+  // re-armed them, so the engine ran blind for 22 h 48 m of a 23 h window while
+  // auto-ping kept logging healthy verdicts off the separate driver-WS feed.
+  const ha = fakeHa();
+  const lines: string[] = [];
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, log: (m: string) => lines.push(m) });
+  const feed = 'zwave_js/subscribe_node_statistics';
+  try {
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) >= 1);
+    const subsBefore = ha.subCount.get(feed) ?? 0;
+    const liveBefore = ha.live.get(feed) ?? 0;
+    assert.ok(liveBefore >= 1, 'precondition: the node feed is live');
+
+    failNetworkStatus = 'HA WS error (not_loaded): Config entry 01KQ5 not loaded';
+    await waitFor(() => lines.some((l) => /refresh failed/.test(l)));
+    failNetworkStatus = null;
+
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) > subsBefore, 4000);
+    assert.ok(lines.some((l) => /live statistics: re-subscribing \(zwave_js config entry reloaded\)/.test(l)),
+      `the re-arm must say why: ${JSON.stringify(lines.slice(-6))}`);
+    assert.equal(ha.live.get(feed), liveBefore,
+      'the orphaned subscriptions are RELEASED, not left doubled on the socket');
+  } finally {
+    failNetworkStatus = null;
+    zd.stop();
+  }
+});
+
+test('a feed that silently stops delivering is re-armed on its own — absence is not success (v0.65.0)', async () => {
+  // The positive control. Whatever kills the feed — including a cause nobody
+  // has seen yet — ends here, because silence is CHECKED rather than assumed
+  // benign. Without it the add-on cannot tell "a quiet mesh" from "no data".
+  const ha = fakeHa();
+  const lines: string[] = [];
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, log: (m: string) => lines.push(m) });
+  const feed = 'zwave_js/subscribe_node_statistics';
+  try {
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) >= 1);
+    const subsBefore = ha.subCount.get(feed) ?? 0;
+    const priv = zd as unknown as { lastStatsAt: number | null };
+    priv.lastStatsAt = Date.now() - 25 * 60_000;   // nothing from ANY node for 25 min
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) > subsBefore, 4000);
+    assert.ok(lines.some((l) => /re-subscribing \(no statistics from any node for \d+m\)/.test(l)),
+      `the watchdog must name the silence: ${JSON.stringify(lines.slice(-6))}`);
+    // …ONCE per dead-feed window. A re-subscribe that fails to revive the feed
+    // must not become a per-tick reconnect storm against a recovering Core.
+    const afterFirst = ha.subCount.get(feed) ?? 0;
+    priv.lastStatsAt = Date.now() - 25 * 60_000;
+    await sleep(400);
+    assert.equal(ha.subCount.get(feed) ?? 0, afterFirst, 'the re-arm is throttled, not repeated every tick');
+  } finally {
+    zd.stop();
+  }
+});
+
+test('a feed that has never delivered anything is NOT re-armed in a loop (v0.65.0)', async () => {
+  // lastStatsAt is null before the first event ever arrives. Treating that as a
+  // dead feed would re-subscribe on every tick of a mesh that is merely new.
+  const ha = fakeHa();
+  const lines: string[] = [];
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, log: (m: string) => lines.push(m) });
+  const feed = 'zwave_js/subscribe_node_statistics';
+  try {
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) >= 1);
+    const subsBefore = ha.subCount.get(feed) ?? 0;
+    await sleep(400);   // several refresh ticks with no statistics event at all
+    assert.equal(ha.subCount.get(feed) ?? 0, subsBefore, 'no re-arm without evidence the feed ever worked');
+    assert.equal(lines.filter((l) => /re-subscribing/.test(l)).length, 0);
+  } finally {
+    zd.stop();
   }
 });
