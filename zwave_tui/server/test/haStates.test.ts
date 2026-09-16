@@ -90,3 +90,27 @@ test('the publisher no-ops without a token, and never throws on a Core restart',
   assert.equal(logs.length, 1, 'a repeated failure is latched, not printed every tick');
   assert.match(logs[0], /not reaching HA/);
 });
+
+/* ── v0.65.0: a blind engine is a degraded mesh ───────────────────────────── */
+
+test('a statistics feed that has gone SILENT degrades the mesh — the engine is blind (v0.65.0)', () => {
+  // The 2026-09-15 audit: a zwave_js config-entry reload orphaned the feeds and
+  // this sensor read `off` for 22 h 48 m while every detector starved. An
+  // add-on whose evidence has stopped arriving is not a healthy mesh.
+  const s = buildStates(data({ lastStatsUpdated: () => Date.now() - 42 * 60_000 } as never));
+  assert.equal(by(s, ENTITY_DEGRADED).state, 'on');
+  assert.match(String(by(s, ENTITY_DEGRADED).attrs.reason), /statistics feed silent 42m/);
+});
+
+test('a feed that is merely quiet for a few minutes does NOT degrade the mesh (v0.65.0)', () => {
+  const s = buildStates(data({ lastStatsUpdated: () => Date.now() - 3 * 60_000 } as never));
+  assert.equal(by(s, ENTITY_DEGRADED).state, 'off');
+});
+
+test('a feed that has never delivered anything is not called silent (v0.65.0)', () => {
+  // A fresh start has nothing to have gone quiet — absence of a reading is not
+  // a reading of absence.
+  const s = buildStates(data({ lastStatsUpdated: () => null } as never));
+  assert.equal(by(s, ENTITY_DEGRADED).state, 'off');
+  assert.equal(by(s, ENTITY_DEGRADED).attrs.reason, 'none');
+});

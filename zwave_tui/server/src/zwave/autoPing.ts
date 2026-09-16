@@ -55,6 +55,12 @@ export type AutoPingSuppression =
   | 'rebuilding-routes'
   | 'no-capability-data'
   | 'storm'
+  /** The controller's receiver is OFF (v0.65.0) — the nightly NVM backup takes
+   *  the radio down for ~10 s and soft-resets. A frame sent across that window
+   *  cannot be acknowledged, and ONE unacknowledged frame is enough for the
+   *  driver to mark a node Dead, which this engine would then report and
+   *  remediate. Probing into a switched-off radio measures the radio. */
+  | 'controller-rf-off'
   | 'none';
 
 export interface AutoPingConfig {
@@ -350,6 +356,9 @@ export interface AutoPingInput {
   config: AutoPingConfig;
   /** True inside the post-start window, where statuses are not yet trustworthy. */
   booting: boolean;
+  /** When the controller reported its receiver OFF and has not reported it back
+   *  on (v0.65.0), or null. See `controllerRfEvent` in driverWsClient. */
+  rfOffSince?: number | null;
   /**
    * Nodes the outcome ledger has asked to probe for episode verification
    * (v0.36). Subject to EVERY gate below — a verification probe is a write like
@@ -533,6 +542,10 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const gate = (why: AutoPingSuppression): AutoPingSuppression => (booting ? 'boot-window' : why);
   // A rebuild is already rewriting routes; nodes drop in and out by design.
   if (controller?.isRebuildingRoutes) return { ...base, suppressed: gate('rebuilding-routes') };
+  // The radio is off — every lane, not just the sweep. The dead ladder must not
+  // ride through it either: its probe is the one that would "confirm" a death
+  // the blackout itself caused (v0.65.0).
+  if (input.rfOffSince != null) return { ...base, suppressed: gate('controller-rf-off') };
 
   // A PASS OVER AN EMPTY POPULATION IS NOT AN ALL-CLEAR (v0.52.0). With the
   // driver-WS link dark the engine reported `running · candidates 0 · dead 0 ·
@@ -761,6 +774,40 @@ export function judgeProbeAnswers(
   return out;
 }
 
+/**
+ * Drop the probes a controller blackout made unjudgeable (v0.65.0).
+ *
+ * A probe already ANSWERED before the radio went off keeps its credit — the
+ * answer is on the record, and dropping it would lose a true reading. Only the
+ * ones still unanswered at the blackout are removed, because the one honest
+ * answer available ("did lastSeen move past when we probed") cannot be produced
+ * by a receiver that is switched off. Returns how many were dropped.
+ */
+export function dropBlackoutProbes(state: AutoPingState, nodes: NodeSnapshot[], rfOffSince: number): number {
+  const seenOf = new Map<number, number | null>();
+  for (const n of nodes) seenOf.set(n.nodeId, n.stats?.lastSeen ?? null);
+  let dropped = 0;
+  for (const [nodeId, pending] of [...state.awaitingAnswer]) {
+    const seen = seenOf.get(nodeId) ?? null;
+    const keep = pending.filter((p) => {
+      const answered = seen != null && seen >= p.at;
+      const unjudgeable = !answered && p.at <= rfOffSince;
+      if (unjudgeable) dropped += 1;
+      return !unjudgeable;
+    });
+    if (keep.length > 0) state.awaitingAnswer.set(nodeId, keep);
+    else state.awaitingAnswer.delete(nodeId);
+  }
+  return dropped;
+}
+
+/** How far a driver-WS reconnect's own ping burst reaches (v0.65.0). The live
+ *  restarts took 9 s to walk 38 nodes; two minutes is generous and BOUNDED, so
+ *  a reconnect can never suppress self-proof indefinitely. */
+export const DRIVER_BURST_MS = 120_000;
+/** …and a little before the handshake, since the driver pings as it comes up. */
+export const DRIVER_BURST_LEAD_MS = 5_000;
+
 /** A probe booked as a MISS because its node went Dead on it (v0.64.4). */
 export interface ProbeDeathMiss { nodeId: number; misses: number; cls: ProbeClass; lane: ProbeLane }
 
@@ -961,6 +1008,14 @@ export interface AutoPingRunnerOptions {
   verifyRequests?: (now: number) => { id: number; first: boolean }[];
   /** Nodes with an outstanding verification burst, for the probe line (v0.37.1). */
   verifyOwedCount?: () => number;
+  /** When the controller's receiver went off and has not come back (v0.65.0),
+   *  or null. Suppresses every lane, and makes the probes already in flight
+   *  unjudgeable rather than missed. */
+  rfOffSince?: () => number | null;
+  /** When the driver-WS link last completed a handshake (v0.65.0), or null.
+   *  A driver restart pings the whole mesh itself, which advances every node's
+   *  lastSeen — evidence this add-on cannot attribute to anything it sent. */
+  driverReconnectedAt?: () => number | null;
   /** One liveness-probe outcome, for the persisted per-node reply rate (v0.37).
    *  `selfProven` = the node had already communicated on its own since the
    *  previous sweep, so the probe was confirming rather than discovering. */
@@ -1034,6 +1089,8 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
   let lastDecision: AutoPingDecision | null = null;
   let lastTickMs: number | null = null;
   let lastSuppression: AutoPingSuppression | null = null;
+  /** The blackout whose dropped probes were already announced (v0.65.0). */
+  let lastRfOffLogged: number | null = null;
   let lastTrace = '';
   let lastTraceAt = 0;
 
@@ -1064,6 +1121,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       bootDeadLane: o.ready(),
       verifyDue: () => o.verifyRequests?.(t) ?? [],
       verifyOwedCount: () => o.verifyOwedCount?.() ?? 0,
+      rfOffSince: o.rfOffSince?.() ?? null,
     });
 
     // DECISION TRACE.
@@ -1163,9 +1221,20 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       const attributed = state.lastProbeSeen.get(nodeId) ?? null;
       const heardRecently = seenAt != null && t - seenAt < o.config.staleMs;
       const spokeOnItsOwn = seenAt != null && (attributed == null || seenAt > attributed);
+      // …and against the DRIVER's own voice (v0.65.0). A driver restart pings
+      // the whole mesh to re-establish it, which advances every node's lastSeen
+      // within seconds. That is a third party's probe: attribution cannot tell
+      // it from the node speaking, and v0.40.2 already settled what to do with
+      // an advance we cannot attribute — say so and credit nothing. The live
+      // audit of 2026-09-15 measured the alternative: 28 fabricated
+      // `self-proven` credits from two restarts in 23 h, into a counter that is
+      // persisted and never decays.
+      const reconnAt = o.driverReconnectedAt?.() ?? null;
+      const inReconnectBurst = reconnAt != null && seenAt != null
+        && seenAt >= reconnAt - DRIVER_BURST_LEAD_MS && seenAt <= reconnAt + DRIVER_BURST_MS;
       // Unknown attribution is NOT self-proven: an unbacked credit is worse
       // than a missing one, and it persists (v0.40.2).
-      const selfProven = heardRecently && spokeOnItsOwn && attributed != null;
+      const selfProven = heardRecently && spokeOnItsOwn && attributed != null && !inReconnectBurst;
       // The ECHO label is routed by attribution alone, NOT by recency
       // (v0.40.1): a probe-echo-only node whose answer is 119 minutes old and
       // one whose answer is 121 minutes old are the same physical situation,
@@ -1182,7 +1251,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // labels and 35 false self-proven credits into a persisted, never-decaying
       // counter, once per boot, fleet-wide. Say what is actually known instead,
       // and credit nothing (v0.40.2).
-      const attributionUnknown = attributed == null && heardRecently;
+      const attributionUnknown = heardRecently && (attributed == null || (inReconnectBurst && spokeOnItsOwn));
       // ONE VALUE, in the SAME precedence the label below uses (v0.49.0). The
       // sweep's judgment is FOUR-way and only the `self-proven` arm was ever
       // recorded — the other three were computed, described in the log line,
@@ -1196,7 +1265,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
         : 'unheard';
       const msg = `auto-ping: node ${nodeId} liveness sweep ` +
         (attributionUnknown
-          ? `(heard ${silence} ago, but this run has no probe attribution yet — not credited)`
+          ? (inReconnectBurst && attributed != null
+            ? `(heard ${silence} ago, inside the driver's own restart burst — not attributable, not credited)`
+            : `(heard ${silence} ago, but this run has no probe attribution yet — not credited)`)
           : selfProven
             ? `(already heard ${silence} ago on its own — confirming)`
             : echoOnly
@@ -1373,6 +1444,22 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
      * moment we probed it. An unanswered probe is the signal auto-ping exists
      * to produce, and until now it could not be observed at all.
      */
+    // A probe still unanswered when the controller's receiver went off cannot
+    // be answered: the radio is not listening. Judging it would book a miss the
+    // blackout caused, and a sweep miss kills a node (v0.65.0). Drop those
+    // probes instead — no credit, no miss, no streak.
+    const rfOff = o.rfOffSince?.() ?? null;
+    if (rfOff != null) {
+      const dropped = dropBlackoutProbes(state, nodes, rfOff);
+      if (dropped > 0 && lastRfOffLogged !== rfOff) {
+        lastRfOffLogged = rfOff;
+        const m = `auto-ping: controller receiver off — ${dropped} in-flight probe(s) dropped unjudged (an unanswered frame here is the radio, not the node)`;
+        o.log('info', null, m);
+        o.log2?.(m);
+      }
+    } else if (lastRfOffLogged !== null) {
+      lastRfOffLogged = null;
+    }
     for (const { nodeId, answered, misses, cls, lane } of judgeProbeAnswers(state, nodes, t)) {
       // The expected case stays at debug — one line per probe on every healthy
       // node is several hundred a day saying "as designed", which is the noise

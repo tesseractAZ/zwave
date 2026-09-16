@@ -18,6 +18,7 @@ import { bandOf, N_BANDS } from '../src/zwave/baselines';
 import type { OutcomeStore } from '../src/zwave/outcomes';
 import { NodeStatus, type NodeSnapshot } from '../src/types';
 import type { HaWsClient, HaEventHandler, HaSubscription } from '../src/ha/haWsClient';
+import { mockServer } from './_driverWsMock';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
@@ -33,6 +34,9 @@ const HOME = 3586281591;
 /** Lets one test simulate a stick swap / NVM restore — the ONLY thing that
  *  legitimately changes home_id. Reset to null in that test's finally. */
 let homeOverride: number | null = null;
+/** Set to an error message to make the roster poll fail — a config-entry reload
+ *  is the case that matters (v0.65.0). Reset to null in the test's finally. */
+let failNetworkStatus: string | null = null;
 /** Roster the fake controller reports. Mutable so a test can make a node
  *  LEAVE the network — the eviction path cannot be reached otherwise. */
 const NODE7 = { node_id: 7, status: 4, ready: true, is_routing: true, is_secure: false };
@@ -50,6 +54,9 @@ function cannedResult(cmd: Record<string, unknown>): unknown {
     case 'get_states':
       return [{ entity_id: 'switch.node_seven', state: 'on', attributes: {} }];
     case 'zwave_js/network_status':
+      // A zwave_js config-entry reload (driver restart, add-on update,
+      // integration reload) fails exactly this call while it is out (v0.65.0).
+      if (failNetworkStatus != null) throw new Error(failNetworkStatus);
       // The roster is built from controller.nodes (not the registry) — the
       // registry only enriches names/entities. Status 4 = Alive.
       return {
@@ -76,6 +83,12 @@ interface FakeHa extends HaWsClient {
   live: Map<string, number>;
   /** Fire onReady callbacks — i.e. simulate (re)connection. */
   fireReady(): void;
+  /** Delay every unsubscribe by this long (v0.65.0 review). Production releases
+   *  a handle with a WS round trip, and a re-arm releases ~77 of them — so the
+   *  roster poll and a reconnect can both land INSIDE the release loop. An
+   *  instant fake unsubscribe resolves on a microtask and no timer can
+   *  interleave with it, which hides that whole class of race from the tests. */
+  unsubDelayMs: number;
   /** Gate: when set, subscribe() for this feed parks until released. Holds
    *  EVERY parked resolver — two runs can be parked at once, and the test must
    *  release both (a last-writer-wins slot silently strands run #1, which
@@ -97,6 +110,7 @@ function fakeHa(): FakeHa {
   const client: FakeHa = {
     handlers, subCount, live, gate,
     isReady: true,
+    unsubDelayMs: 0,
     fireReady: () => { for (const cb of [...readyCbs]) cb(); },
     start: () => { /* the test fires ready explicitly */ },
     stop: () => {},
@@ -117,9 +131,23 @@ function fakeHa(): FakeHa {
       handlers.set(feed, [...(handlers.get(feed) ?? []), onEvent]);
       subCount.set(feed, (subCount.get(feed) ?? 0) + 1);
       live.set(feed, (live.get(feed) ?? 0) + 1);
+      // A released subscription stops DELIVERING, not just counting (v0.65.0
+      // review). Decrementing `live` alone made `handlers` a list of every
+      // callback ever created, so a test that fires an event through it could
+      // not tell a released feed from a live one — and duplicate delivery, the
+      // actual cost of a zombie feed, was unmeasurable. Idempotent: a
+      // double-release (the supersede path releases its own handle, and the
+      // caller's stand-down walks the same list) must not under-count.
+      let released = false;
       return {
         subscriptionId: subCount.size,
-        unsubscribe: async () => { live.set(feed, Math.max(0, (live.get(feed) ?? 0) - 1)); },
+        unsubscribe: async () => {
+          if (released) return;
+          released = true;
+          if (client.unsubDelayMs > 0) await sleep(client.unsubDelayMs);
+          live.set(feed, Math.max(0, (live.get(feed) ?? 0) - 1));
+          handlers.set(feed, (handlers.get(feed) ?? []).filter((h) => h !== onEvent));
+        },
       };
     },
   } as unknown as FakeHa;
@@ -1456,5 +1484,308 @@ test("a pre-v0.64.6 ledger RESUMED from its archive announces the discarded spli
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ── v0.65.0: the statistics feeds must survive a config-entry reload ─────── */
+
+test('a zwave_js config-entry RELOAD re-arms the statistics feeds (v0.65.0)', async () => {
+  // The 2026-09-15 live audit: a driver restart reloads the config entry, which
+  // orphans every node-statistics subscription on HA's side — the listener is
+  // bound to the Node objects of the driver that just went away. Nothing
+  // re-armed them, so the engine ran blind for 22 h 48 m of a 23 h window while
+  // auto-ping kept logging healthy verdicts off the separate driver-WS feed.
+  const ha = fakeHa();
+  const lines: string[] = [];
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, log: (m: string) => lines.push(m) });
+  const feed = 'zwave_js/subscribe_node_statistics';
+  try {
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) >= 1);
+    const subsBefore = ha.subCount.get(feed) ?? 0;
+    const liveBefore = ha.live.get(feed) ?? 0;
+    assert.ok(liveBefore >= 1, 'precondition: the node feed is live');
+
+    failNetworkStatus = 'HA WS error (not_loaded): Config entry 01KQ5 not loaded';
+    await waitFor(() => lines.some((l) => /refresh failed/.test(l)));
+    failNetworkStatus = null;
+
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) > subsBefore, 4000);
+    assert.ok(lines.some((l) => /live statistics: re-subscribing \(zwave_js config entry reloaded\)/.test(l)),
+      `the re-arm must say why: ${JSON.stringify(lines.slice(-6))}`);
+    assert.equal(ha.live.get(feed), liveBefore,
+      'the orphaned subscriptions are RELEASED, not left doubled on the socket');
+    // …and so are the ACTIVITY feeds (v0.65.0 review). These are
+    // `subscribe_events` on HA's core bus, NOT zwave_js Node listeners, so a
+    // config-entry reload does not orphan them — the re-arm rebuilds on the
+    // same live socket, and without retaining their handles it left a whole
+    // -house `state_changed` fanout behind on every single re-arm. The stats
+    // feed alone passing is why this shipped: it is the only one asserted above.
+    assert.equal(ha.live.get('state_changed') ?? 0, 1,
+      'the re-arm left a ZOMBIE whole-house activity feed live beside the new one');
+    assert.equal(ha.live.get('zwave_js_notification') ?? 0, 1,
+      'the re-arm left a ZOMBIE notification feed live beside the new one');
+    // The cost of a zombie, measured rather than inferred: one state change in
+    // the house must produce ONE activity row, not one per surviving feed.
+    const rowsBefore = zd.events().length;
+    for (const h of [...(ha.handlers.get('state_changed') ?? [])]) {
+      h({ event: { data: { entity_id: 'switch.node_seven', old_state: { state: 'on' }, new_state: { state: 'off' } } } } as never);
+    }
+    assert.equal(zd.events().length - rowsBefore, 1,
+      'one state change logged more than once — the activity feed is doubled');
+  } finally {
+    failNetworkStatus = null;
+    zd.stop();
+  }
+});
+
+test('a SECOND config-entry reload inside the throttle window is not swallowed (v0.65.0 review)', async () => {
+  // The latch used to be cleared at the CALL SITE, before `rearmStatsFeeds`
+  // consulted its 10-minute throttle. Two reloads close together — an add-on
+  // update, a driver crash loop, a Core restart followed by a Z-Wave JS restart
+  // — therefore spent the latch on a call that returned immediately having done
+  // nothing, leaving the second reload's orphaned feeds with no scheduled
+  // repair at all. The latch now survives a throttled call and is consumed by
+  // the re-arm that actually runs.
+  const ha = fakeHa();
+  const lines: string[] = [];
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, log: (m: string) => lines.push(m) });
+  const priv = zd as unknown as { entryReloadSeen: boolean; lastFeedRearmAt: number };
+  try {
+    // Reload #1 — re-arms, and arms the throttle.
+    failNetworkStatus = 'HA WS error (not_loaded): Config entry 01KQ5 not loaded';
+    await waitFor(() => lines.some((l) => /refresh failed/.test(l)));
+    failNetworkStatus = null;
+    await waitFor(() => lines.some((l) => /re-subscribing \(zwave_js config entry reloaded\)/.test(l)), 4000);
+
+    // Reload #2, inside the throttle window. The re-arm cannot run yet — but
+    // the request must SURVIVE, or nothing ever rebuilds these feeds.
+    lines.length = 0;
+    failNetworkStatus = 'HA WS error (not_loaded): Config entry 01KQ5 not loaded';
+    await waitFor(() => lines.some((l) => /refresh failed/.test(l)));
+    failNetworkStatus = null;
+    await sleep(300);   // several successful ticks, all throttled out
+    assert.equal(lines.filter((l) => /re-subscribing/.test(l)).length, 0,
+      'setup: the throttle must still be holding the second re-arm');
+    assert.equal(priv.entryReloadSeen, true,
+      'the throttled call spent the latch — the second reload is now unrepairable');
+
+    // Let the window expire: the latched reload rebuilds on the next poll,
+    // rather than waiting out the watchdog's separate ten minutes of silence.
+    priv.lastFeedRearmAt = 0;
+    await waitFor(() => lines.some((l) => /re-subscribing \(zwave_js config entry reloaded\)/.test(l)), 4000);
+    assert.equal(priv.entryReloadSeen, false, 'the latch is consumed by the re-arm that RAN');
+  } finally {
+    failNetworkStatus = null;
+    zd.stop();
+  }
+});
+
+test('two rebuilds never run at once on ONE connection (v0.65.0 review)', async () => {
+  // The re-arm force-cleared `statsSubscribed` — the "a run owns this
+  // connection" flag — and called straight into `subscribeStatistics`. Both
+  // runs then captured the SAME epoch, so `superseded()` was false for both and
+  // neither stood down: the v0.26 double subscribe, back on a socket that never
+  // closed. Reproduced on the green tree at controller 2, node_statistics 2,
+  // node_status 2, state_changed 3, and the loser's ~77 handles discarded
+  // unreleasable because `ownedStatsSubs` is assigned, not merged.
+  //
+  // Both interleavings are real and both are exercised here:
+  //  · a rebuild is PARKED inside a subscribe (a slow Core) when the reload
+  //    latch fires — the re-arm must not clear the flag under it;
+  //  · releasing a handle is a WS round trip, so the roster poll lands inside
+  //    the re-arm's release loop — the flag must still be held across it.
+  const feeds = [
+    'zwave_js/subscribe_controller_statistics',
+    'zwave_js/subscribe_node_statistics',
+    'zwave_js/subscribe_node_status',
+    'state_changed',
+    'zwave_js_notification',
+  ];
+  const ha = fakeHa();
+  const lines: string[] = [];
+  // Park the first rebuild inside the controller subscribe, exactly where a
+  // slow HA holds it, and fire the re-arm beside it.
+  ha.gate.feed = 'zwave_js/subscribe_controller_statistics';
+  const parked = new Promise<void>((res) => { ha.gate.parked = res; });
+  const zd = createZwaveData({
+    client: ha, entryId: ENTRY, refreshMs: 40, routePollMs: 60_000,
+    historyPath: null, evidencePath: null, driverWsUrl: null,
+    log: (m: string) => lines.push(m),
+  } as never);
+  const priv = zd as unknown as { entryReloadSeen: boolean; lastFeedRearmAt: number };
+  try {
+    zd.start();
+    ha.fireReady();
+    await parked;                   // rebuild #1 is mid-flight
+    priv.lastFeedRearmAt = 0;
+    priv.entryReloadSeen = true;    // a reload lands while it is still building
+    await sleep(200);               // several ticks fire the re-arm beside it
+    // The request must not be SPENT by a re-arm that stood aside — otherwise
+    // deferring is just the swallowed-reload defect wearing a guard's clothes.
+    assert.equal(priv.entryReloadSeen, true,
+      'the deferred re-arm threw the reload away instead of leaving it latched');
+    ha.gate.feed = null;
+    for (const r of ha.gate.releases.splice(0)) r();
+    await sleep(200);
+    for (const feed of feeds) {
+      assert.equal(ha.live.get(feed) ?? 0, 1,
+        `${feed}: ${ha.live.get(feed)} live feeds — a re-arm ran beside a rebuild in flight`);
+    }
+
+    // Now the release-loop interleaving, on a settled connection.
+    ha.unsubDelayMs = 60;
+    priv.lastFeedRearmAt = 0;
+    await waitFor(() => lines.some((l) => /re-subscribing/.test(l)), 4000);
+    await sleep(600);               // the loop, the polls and the rebuild settle
+    ha.unsubDelayMs = 0;
+    for (const feed of feeds) {
+      assert.equal(ha.live.get(feed) ?? 0, 1,
+        `${feed}: ${ha.live.get(feed)} live feeds — the poll rebuilt inside the release loop`);
+    }
+  } finally {
+    ha.unsubDelayMs = 0;
+    ha.gate.feed = null;
+    for (const r of ha.gate.releases.splice(0)) r();
+    zd.stop();
+  }
+});
+
+test('the re-arm REPLAY after a driver restart carries lastSeen, it does not restamp it (v0.65.0 review)', async () => {
+  // A driver restart is what reloads the config entry, and zwave-js holds node
+  // statistics in memory only — the new driver starts every counter at zero.
+  // The cached counters deliberately survive the re-arm, so the replay arrives
+  // with every counter BELOW the cache. Read as movement, that stamped "heard
+  // just now" on the whole roster at once, including the nodes the new driver
+  // could not reach: the v0.26 "seen 0s ago for all 39 nodes" fabrication, and
+  // the fabricated self-proven credits fix #2 exists to stop, regenerated by
+  // fix #1 on the one path guaranteed to run right after a driver restart.
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha, { refreshMs: 80, routePollMs: 160 });
+  const seenOf = () => zd.snapshot().find((n: NodeSnapshot) => n.nodeId === 7)!.stats.lastSeen;
+  try {
+    pushStats(ha, statsEvent());                          // first delivery: no stamp
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7 && n.stats.commandsTX === 10));
+    pushStats(ha, statsEvent({ commands_tx: 11 }));       // real traffic: stamped
+    await waitFor(() => seenOf() != null);
+    const stamped = seenOf()!;
+
+    // The new driver's replay: every counter re-based at zero.
+    await sleep(60);
+    pushStats(ha, statsEvent({ commands_tx: 0, commands_rx: 0, commands_dropped_rx: 0, commands_dropped_tx: 0, timeout_response: 0 }));
+    await sleep(80);
+    assert.equal(seenOf(), stamped,
+      'a counter that went BACKWARDS is a new driver, not a transmission — the stamp must be carried');
+
+    // POSITIVE CONTROL: the guard must not simply freeze the stamp. The next
+    // genuine increment, from the new driver's own zero baseline, stamps.
+    pushStats(ha, statsEvent({ commands_tx: 1, commands_rx: 0, commands_dropped_rx: 0, commands_dropped_tx: 0, timeout_response: 0 }));
+    await waitFor(() => seenOf() !== stamped);
+    assert.ok(seenOf()! > stamped, 'a real increment after the restart must stamp arrival');
+  } finally {
+    zd.stop();
+  }
+});
+
+test('the driver-WS readings reach the engine through zwaveData, not only the client (v0.65.0 review)', async () => {
+  // The producer side of both v0.65.0 driver-WS readings had no test at all:
+  // deleting `driverWsConnAt = Date.now()` from the handshake callback, or
+  // returning null from either accessor, left the whole suite green. The
+  // consumers were pinned with injected stubs, which prove the consumer and
+  // nothing about the wiring — the "wire it to the production bridge" hole.
+  const srv = await mockServer();          // homeId matches HOME, so the guard passes
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, driverWsUrl: srv.url });
+  try {
+    const t0 = Date.now();
+    await waitFor(() => zd.driverReconnectedAt() != null, 6000);
+    const first = zd.driverReconnectedAt()!;
+    assert.ok(first >= t0 - 1_000, 'the handshake must stamp when the driver came up, not some default');
+
+    // The blackout reading has to cross the same hop.
+    assert.equal(zd.controllerRfOffSince(), null, 'precondition: the radio is up');
+    srv.push({ event: 'logging', context: { type: 'controller' }, message: 'Turning RF off...' });
+    await waitFor(() => zd.controllerRfOffSince() != null, 6000);
+    srv.push({ event: 'logging', context: { type: 'controller' }, message: 'Turning RF on...' });
+    await waitFor(() => zd.controllerRfOffSince() == null, 6000);
+
+    // A SECOND driver restart must move the stamp. A stamp that is merely
+    // non-null is inert against the very burst it exists to describe: the
+    // window is measured from it, so a stale one matches nothing.
+    await sleep(30);
+    srv.dropClient();
+    await waitFor(() => (zd.driverReconnectedAt() ?? 0) > first, 6000);
+  } finally {
+    zd.stop();
+    await srv.close();
+  }
+});
+
+test('a config-entry reload anchors the driver-restart burst window even with the driver-WS dark (v0.65.0 review)', async () => {
+  // `driverReconnectedAt()` used to read ONLY the driver-WS version handshake.
+  // A driver restart is the event most likely to take that link down, and in
+  // the 2026-09-15 audit the second restart's reconnect ladder stopped after
+  // attempt 2 and never handshook again — leaving the reading 22 h stale while
+  // 25 of the 28 fabricated self-proven credits were booked. The reload is the
+  // teardown half of the same restart, seen on the HA socket, which stayed up.
+  const ha = fakeHa();
+  const lines: string[] = [];
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, log: (m: string) => lines.push(m) });
+  try {
+    assert.equal(zd.driverReconnectedAt(), null,
+      'precondition: no driver-WS link, so no handshake stamp exists');
+    const t0 = Date.now();
+    failNetworkStatus = 'HA WS error (not_loaded): Config entry 01KQ5 not loaded';
+    await waitFor(() => lines.some((l) => /refresh failed/.test(l)));
+    failNetworkStatus = null;
+    const at = zd.driverReconnectedAt();
+    assert.ok(at != null && at >= t0, 'the reload must anchor the restart-burst window');
+  } finally {
+    failNetworkStatus = null;
+    zd.stop();
+  }
+});
+
+test('a feed that silently stops delivering is re-armed on its own — absence is not success (v0.65.0)', async () => {
+  // The positive control. Whatever kills the feed — including a cause nobody
+  // has seen yet — ends here, because silence is CHECKED rather than assumed
+  // benign. Without it the add-on cannot tell "a quiet mesh" from "no data".
+  const ha = fakeHa();
+  const lines: string[] = [];
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, log: (m: string) => lines.push(m) });
+  const feed = 'zwave_js/subscribe_node_statistics';
+  try {
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) >= 1);
+    const subsBefore = ha.subCount.get(feed) ?? 0;
+    const priv = zd as unknown as { lastStatsAt: number | null };
+    priv.lastStatsAt = Date.now() - 25 * 60_000;   // nothing from ANY node for 25 min
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) > subsBefore, 4000);
+    assert.ok(lines.some((l) => /re-subscribing \(no statistics from any node for \d+m\)/.test(l)),
+      `the watchdog must name the silence: ${JSON.stringify(lines.slice(-6))}`);
+    // …ONCE per dead-feed window. A re-subscribe that fails to revive the feed
+    // must not become a per-tick reconnect storm against a recovering Core.
+    const afterFirst = ha.subCount.get(feed) ?? 0;
+    priv.lastStatsAt = Date.now() - 25 * 60_000;
+    await sleep(400);
+    assert.equal(ha.subCount.get(feed) ?? 0, afterFirst, 'the re-arm is throttled, not repeated every tick');
+  } finally {
+    zd.stop();
+  }
+});
+
+test('a feed that has never delivered anything is NOT re-armed in a loop (v0.65.0)', async () => {
+  // lastStatsAt is null before the first event ever arrives. Treating that as a
+  // dead feed would re-subscribe on every tick of a mesh that is merely new.
+  const ha = fakeHa();
+  const lines: string[] = [];
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, log: (m: string) => lines.push(m) });
+  const feed = 'zwave_js/subscribe_node_statistics';
+  try {
+    await waitFor(() => (ha.subCount.get(feed) ?? 0) >= 1);
+    const subsBefore = ha.subCount.get(feed) ?? 0;
+    await sleep(400);   // several refresh ticks with no statistics event at all
+    assert.equal(ha.subCount.get(feed) ?? 0, subsBefore, 'no re-arm without evidence the feed ever worked');
+    assert.equal(lines.filter((l) => /re-subscribing/.test(l)).length, 0);
+  } finally {
+    zd.stop();
   }
 });

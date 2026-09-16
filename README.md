@@ -248,8 +248,8 @@ has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
 Headlines, each stated as narrowly as it was measured: the slowest screen
 redraw is **412 µs** against a 1 000 ms frame budget; the container holds
 **93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
-RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.64.7 release
-run, **1 160 tests in 12.8 s** and **645 mutants in ~16 min** gated the release.
+RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.65.0 release
+run, **1 186 tests in 12.5 s** and **683 mutants in ~29 min** gated the release.
 A TUI session costs
 **4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
 rate but one whole-frame redraw per second.
@@ -257,7 +257,7 @@ rate but one whole-frame redraw per second.
 That document also carries what is *not* measured, and why most of it does not
 need to be — and, for the two items that did earn measuring, what the numbers
 overturned. The mutation harness is **not** startup-bound, as had been guessed:
-sys is 8 % and the measured spawn floor 10 %, against 73 % spent in the 644
+sys is 5 % and the measured spawn floor 6 %, against 85 % spent in the 682
 targeted test runs themselves — a phase the harness times whole, so how it splits
 between transpiling, module loading and running the tests is not measured.
 

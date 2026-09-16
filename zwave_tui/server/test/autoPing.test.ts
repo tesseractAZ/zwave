@@ -15,6 +15,7 @@ import {
   unpendProbe,
   noteStale,
   decideAutoPings,
+  dropBlackoutProbes,
   noteAttempt,
   trackEpisodes,
   judgeProbeAnswers,
@@ -52,6 +53,7 @@ function mesh(live: number, extra: NodeSnapshot[] = []): NodeSnapshot[] {
 /** Drive one tick: track episodes, then decide. */
 function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
   config?: AutoPingConfig; controller?: ControllerSnapshot | null; booting?: boolean; verifyDue?: number[];
+  rfOffSince?: number | null; bootDeadLane?: boolean;
 } = {}) {
   trackEpisodes(state, nodes, now);
   return decideAutoPings({
@@ -59,6 +61,13 @@ function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
     controller: over.controller ?? null,
     config: over.config ?? cfg(),
     booting: over.booting ?? false,
+    // Left undefined by default, so the ~40 callers that rely on the plain
+    // boot-window early exit keep their meaning. A test that means to reach a
+    // gate BELOW that exit has to release the dead lane explicitly (v0.65.0
+    // review) — without it the decision returns at `booting && !bootDeadLane`
+    // and the assertion below it is satisfied by the wrong branch.
+    bootDeadLane: over.bootDeadLane,
+    rfOffSince: over.rfOffSince ?? null,
     verifyDue: over.verifyDue ? () => over.verifyDue!.map((id) => ({ id, first: true })) : undefined,
   });
 }
@@ -2129,4 +2138,214 @@ test('a sweep kill whose retry fails says so on the next rung — no second "wit
   assert.equal(ring.filter((m) => /probing without the dwell/.test(m)).length, 1, `only the first retry skips the dwell: ${ring.join(' | ')}`);
   assert.ok(ring.some((m) => /node 7 is still Dead after the immediate retry — probing \(attempt 2\/3\)/.test(m)),
     `the second rung names itself: ${ring.join(' | ')}`);
+});
+
+/* ── v0.65.0: the controller's receiver goes down every night ──────────────
+ * The nightly NVM backup turns the radio off for ~10 s and soft-resets. A frame
+ * sent across that window cannot be acknowledged, and ONE unacknowledged sweep
+ * frame is enough for the driver to mark a node Dead (the 2026-09-15 audit).
+ */
+
+test('a receiver that is OFF suppresses every lane, the dead ladder included (v0.65.0)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  tick(s, nodes, T);
+  const live = tick(s, nodes, T + 30 * MIN);
+  assert.deepEqual(live.ping, [7], 'precondition: the ladder would probe node 7 right now');
+  const d = tick(s, nodes, T + 30 * MIN, { rfOffSince: T + 29 * MIN });
+  assert.deepEqual(d.ping, [], 'nothing is sent into a switched-off receiver');
+  assert.equal(d.suppressed, 'controller-rf-off');
+});
+
+test('the blackout still reports boot-window while the mesh is settling (v0.65.0)', () => {
+  // Same discipline as storm/no-capability-data (v0.64.4): releasing a lane
+  // inside the boot window must not release a start-up alarm.
+  const s = createAutoPingState();
+  // `bootDeadLane` is what makes this test reach the RF gate at all: without it
+  // the decision returns at the plain boot-window exit above it, and the mutant
+  // that drops the `gate()` wrapper survives a green suite (v0.65.0 review).
+  const d = tick(s, mesh(20, [dead(7)]), T, { booting: true, bootDeadLane: true, rfOffSince: T - 1_000 });
+  assert.equal(d.suppressed, 'boot-window');
+});
+
+test('a probe still unanswered when the receiver went off is DROPPED, never booked as a miss (v0.65.0)', () => {
+  const s = createAutoPingState();
+  pendProbe(s, 7, T, 'sweep', 'unheard');
+  const nodes = [node(7, { stats: { lastSeen: T - MIN } as never })];
+  assert.equal(dropBlackoutProbes(s, nodes, T + 5_000), 1);
+  assert.equal(s.awaitingAnswer.get(7), undefined, 'nothing is left to judge');
+  assert.equal(s.missStreak.get(7), undefined, 'and no miss streak was started');
+  assert.deepEqual(judgeProbeAnswers(s, nodes, T + 5 * MIN), [], 'the ordinary judgment has nothing to say either');
+});
+
+test('a probe ANSWERED before the blackout keeps its credit (v0.65.0)', () => {
+  // The answer is already on the record; dropping it would lose a true reading.
+  const s = createAutoPingState();
+  pendProbe(s, 7, T, 'sweep', 'echo-only');
+  const nodes = [node(7, { stats: { lastSeen: T + 1_000 } as never })];
+  assert.equal(dropBlackoutProbes(s, nodes, T + 5_000), 0);
+  const judged = judgeProbeAnswers(s, nodes, T + 5 * MIN);
+  assert.equal(judged.length, 1);
+  assert.equal(judged[0].answered, true);
+});
+
+test('a probe sent after the receiver went off is left to the ordinary judgment (v0.65.0)', () => {
+  // The suppression means this should not happen. If it ever does, the miss is
+  // real against a radio we know was off — no special rule is invented here.
+  const s = createAutoPingState();
+  pendProbe(s, 7, T + 10_000, 'sweep', 'unheard');
+  const nodes = [node(7, { stats: { lastSeen: T - MIN } as never })];
+  assert.equal(dropBlackoutProbes(s, nodes, T + 5_000), 0);
+  assert.equal(s.awaitingAnswer.get(7)?.length, 1);
+});
+
+test("the driver's own restart burst is not the node's voice — it credits nothing (v0.65.0)", async () => {
+  // A driver restart pings the whole mesh itself, advancing every node's
+  // lastSeen within seconds. Attribution cannot tell that from the node
+  // speaking, and the 2026-09-15 audit measured the cost of guessing: 28
+  // fabricated `self-proven` credits from two restarts in 23 h, into a counter
+  // that is persisted and never decays.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  let reconnAt: number | null = null;
+  const results: { nodeId: number; cls: string }[] = [];
+  const n7 = node(7, { stats: { lastSeen: T } as never });
+  const seen = (v: number) => { (n7.stats as unknown as { lastSeen: number | null }).lastSeen = v; };
+  const nodes = [node(1, { isController: true }), n7];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, probe: async () => {}, log: () => {},
+    config: cfg({ staleMs: 60 * MIN }), tickMs: 1_000_000, now: () => clock,
+    onProbeResult: (nodeId, _answered, cls) => results.push({ nodeId, cls }),
+    driverReconnectedAt: () => reconnAt,
+  });
+  // A probe's class is recorded when it is JUDGED, not when it is launched, so
+  // each phase below sends a probe and then lets it mature into an answer.
+  const sweepThenAnswer = (): void => {
+    h.tick();                                   // sweep launches, class decided now
+    clock += 2 * MIN;                           // past the answer grace
+    seen(clock - 1_000);                        // the node answers it
+    h.tick();                                   // judged → onProbeResult(cls)
+  };
+  // 1. First sweep: nothing is attributable yet, so nothing is credited.
+  clock = T + BOOT_WINDOW_MS + MIN;
+  sweepThenAnswer();
+  assert.equal(results.at(-1)?.cls, 'attribution-unknown', 'no probe history yet (v0.40.2)');
+  // 2. CONTROL: the node speaks on its own, past our probe's answer.
+  clock += 61 * MIN;
+  seen(clock - 1_000);
+  sweepThenAnswer();
+  assert.equal(results.at(-1)?.cls, 'self-proven', 'fixture guard: this is what a real self-proof looks like');
+  // 3. TREATMENT: the same advance, but the driver just reconnected — the
+  //    lastSeen it wrote is the driver's own restart ping, not the node's voice.
+  clock += 61 * MIN;
+  reconnAt = clock - 10_000;
+  seen(clock - 9_000);
+  h.tick();
+  clock += 2 * MIN;
+  seen(clock - 1_000);
+  h.tick();
+  assert.equal(results.at(-1)?.cls, 'attribution-unknown', 'an advance inside the restart burst credits nothing');
+  // 4. …and the doubt EXPIRES. A reconnect must not suppress self-proof for the
+  //    life of the process — long after the burst, the node's voice is its own.
+  clock += 61 * MIN;
+  seen(clock - 1_000);
+  sweepThenAnswer();
+  assert.equal(results.at(-1)?.cls, 'self-proven', 'the burst window is bounded, not a permanent doubt');
+  // 5. …and BOUNDED at a size the live restarts justify. The 2026-09-15
+  //    restarts walked 38 nodes in 9 s; the deadline only has to outlast that
+  //    plus the add-on's own reconnect, and a window measured in tens of
+  //    minutes would refuse legitimate self-proof after every driver restart.
+  //    Without a value assertion this constant is pinned against REMOVAL only:
+  //    widening it to 30 min leaves the whole suite green (v0.65.0 review).
+  const { DRIVER_BURST_MS, DRIVER_BURST_LEAD_MS } = await import('../src/zwave/autoPing');
+  assert.ok(DRIVER_BURST_MS >= 30_000 && DRIVER_BURST_MS <= 5 * MIN,
+    `generous over the measured ~9 s burst, but bounded (is ${DRIVER_BURST_MS} ms)`);
+  assert.ok(DRIVER_BURST_LEAD_MS > 0 && DRIVER_BURST_LEAD_MS <= MIN,
+    'the driver pings as it comes up, so the window leads the anchor — by seconds, not minutes');
+  h.stop();
+});
+
+test('a driver restart the driver-WS never reconnects to still refuses attribution (v0.65.0 review)', async () => {
+  // The anchor used to be the add-on's OWN driver-WS handshake, and a driver
+  // restart is the event most likely to take that link down. In the 2026-09-15
+  // audit the second restart's reconnect ladder stopped after attempt 2 and
+  // never handshook again, so `driverReconnectedAt()` stayed 22 h stale while
+  // 25 of the 28 fabricated credits were booked — the rule as shipped removed
+  // 3 of them. zwaveData now also anchors on the config-entry reload, which is
+  // seen on the HA socket; this pins the consumer's half: a STALE anchor must
+  // not be what decides it.
+  const { startAutoPing, BOOT_WINDOW_MS, DRIVER_BURST_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  let reconnAt: number | null = null;
+  const results: { nodeId: number; cls: string }[] = [];
+  const n7 = node(7, { stats: { lastSeen: T } as never });
+  const seen = (v: number) => { (n7.stats as unknown as { lastSeen: number | null }).lastSeen = v; };
+  const nodes = [node(1, { isController: true }), n7];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, probe: async () => {}, log: () => {},
+    config: cfg({ staleMs: 60 * MIN }), tickMs: 1_000_000, now: () => clock,
+    onProbeResult: (nodeId, _answered, cls) => results.push({ nodeId, cls }),
+    driverReconnectedAt: () => reconnAt,
+  });
+  const sweepThenAnswer = (): void => {
+    h.tick();
+    clock += 2 * MIN;
+    seen(clock - 1_000);
+    h.tick();
+  };
+  clock = T + BOOT_WINDOW_MS + MIN;
+  sweepThenAnswer();                       // establish attribution for this run
+  clock += 61 * MIN;
+  // The restart is signalled by an anchor that is FRESH, however it was
+  // obtained — a handshake, or the config-entry reload when no handshake comes.
+  reconnAt = clock - 10_000;
+  seen(clock - 9_000);
+  h.tick();
+  clock += 2 * MIN;
+  seen(clock - 1_000);
+  h.tick();
+  assert.equal(results.at(-1)?.cls, 'attribution-unknown', 'setup: a fresh anchor refuses the credit');
+  // Now the audited failure: the same mesh-wide advance, but the only anchor on
+  // offer is the previous restart's, hours old. Nothing may be credited on the
+  // strength of an anchor that cannot describe this burst.
+  clock += 61 * MIN;
+  const staleAnchor = clock - 22 * 60 * MIN;
+  assert.ok(clock - staleAnchor > DRIVER_BURST_MS, 'setup: the anchor is long expired');
+  reconnAt = staleAnchor;
+  seen(clock - 1_000);
+  sweepThenAnswer();
+  assert.equal(results.at(-1)?.cls, 'self-proven',
+    'a stale anchor must not suppress — it is inert, which is why a LIVE second anchor is required');
+  h.stop();
+});
+
+test('the runner reads the RF-off reading: it suppresses, and drops what was in flight (v0.65.0)', async () => {
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  let rf: number | null = null;
+  const probed: number[] = [];
+  const n7 = node(7, { stats: { lastSeen: T } as never });
+  const nodes = [node(1, { isController: true }), n7];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, probe: async (n) => { probed.push(n); }, log: () => {},
+    config: cfg({ staleMs: 60 * MIN }), tickMs: 1_000_000, now: () => clock,
+    rfOffSince: () => rf,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN;
+  h.tick();
+  assert.deepEqual(probed, [7], 'precondition: the sweep probes it while the radio is up');
+  assert.equal(h.snapshot().nodes.find((n) => n.nodeId === 7)?.pending, 1, 'and that probe is awaiting judgment');
+  // The radio goes down before the answer could arrive.
+  rf = clock + 1_000;
+  clock += 5 * MIN;
+  h.tick();
+  assert.equal(h.snapshot().suppressed, 'controller-rf-off');
+  assert.deepEqual(probed, [7], 'nothing new is sent into a switched-off receiver');
+  const st = h.snapshot().nodes.find((n) => n.nodeId === 7);
+  assert.equal(st?.pending ?? 0, 0, 'the unanswerable probe was dropped');
+  assert.equal(st?.missStreak ?? 0, 0, 'and the blackout booked no miss against the node');
+  h.stop();
 });

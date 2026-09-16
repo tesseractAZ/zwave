@@ -1,5 +1,106 @@
 # Changelog
 
+## 0.65.0
+
+### Fixed — the engine went blind after a Z-Wave JS reload, and said nothing
+
+Home Assistant binds each node-statistics subscription to the `Node` objects of
+the driver loaded at the time. When the `zwave_js` config entry reloads — a
+driver restart, an add-on update, a manual integration reload — those objects are
+replaced and every subscription is orphaned, silently: no error, no close, and
+the WebSocket stays up. The add-on rebuilt its feeds only on a socket
+reconnect, so nothing rebuilt them, and `statsSubscribed` stayed true with all
+38 node feeds still on the books.
+
+A 23-hour audit of the live mesh caught it: the driver restarted 9 minutes into
+the window and the evidence engine was blind for the remaining 22 h 48 m. Every
+detector starved, the one episode that opened closed `unverifiable` after
+spending ten verification probes the mesh answered and the store never saw, and
+the baselines and ledger took in nothing. Auto-ping kept working — it judges
+probes from the driver's own WebSocket — so the add-on logged healthy-looking
+verdicts throughout, and `binary_sensor.zwave_tui_degraded` read `off`.
+
+Three changes. A config-entry reload is now latched and the feeds are rebuilt on
+the first roster poll that succeeds afterwards, releasing the orphaned
+subscriptions first and keeping the cached counters. A watchdog rebuilds them
+regardless if no statistics event arrives from the mesh — any node or the
+controller — for ten minutes while the socket is live, so a cause nobody has seen
+yet ends the same way. And a silent feed now raises the degraded sensor, with the
+measured silence in its reason: absence had been reading as success in the one
+place an operator looks.
+
+The rebuild itself needed two guards it did not ship with. It now stands aside
+while a rebuild is already in flight, instead of clearing the flag that says who
+owns the connection and starting a second run beside the first — two runs at one
+connection each read the other as current, so neither stands down, and every
+feed doubles on a socket that never closed. And the reload it is repairing is
+consumed by the re-arm that actually runs: a second reload arriving inside the
+throttle window used to spend the latch on a call that did nothing, leaving
+those feeds orphaned with no repair scheduled at all. The rebuild also retains
+the two whole-house activity subscriptions it creates, which a config-entry
+reload does NOT orphan — without that, every re-arm left a live `state_changed`
+fanout behind and logged each lock, switch and sensor transition one more time.
+
+One more fabrication the rebuild would otherwise have caused: zwave-js keeps node
+statistics in memory only, so the driver that comes back starts every counter at
+zero, and the cached counters the re-arm deliberately keeps are the previous
+driver's. Read as movement, that replay stamped "heard just now" on the whole
+roster at once — including the nodes the new driver could not reach. A counter
+that went backwards is now read as what it is, a new driver, and the node keeps
+its real `lastSeen`.
+
+### Fixed — the driver's own restart pings were credited to the mesh
+
+zwave-js pings every node as it comes up, which advances each node's `lastSeen`
+within seconds. The liveness sweep read that as the node speaking on its own and
+recorded a `self-proven` credit — 28 of them across two driver restarts in the
+audit window, into a counter that is persisted, never decays, and is shown on the
+node dossier beside the answered/asked ratio. It is the same fabrication v0.40.2
+removed for the add-on's own boot, from a source that release did not cover.
+
+A `lastSeen` that lands inside the driver-restart burst is now classed
+`attribution-unknown`, which credits nothing and says so. The window is bounded
+(two minutes), so a restart cannot suppress self-proof indefinitely.
+
+It is anchored on two signals rather than one, because the obvious anchor is
+missing exactly when it is needed. Keying only on the add-on's own driver-WebSocket
+handshake would have caught 3 of those 28 credits: the second restart took the
+driver-WebSocket down with it and the reconnect never completed, so the stamp was
+22 hours stale while the other 25 were booked. The config-entry reload is the
+teardown half of the same restart, is seen on the Home Assistant socket, and
+lands seconds before the driver's ping burst — so the later of the two anchors
+the window.
+
+### Fixed — the sweep probed straight through the controller's nightly blackout
+
+The nightly NVM backup turns the controller's receiver off for about ten seconds
+and soft-resets it. A frame sent across that window cannot be acknowledged, and
+one unacknowledged sweep frame is enough for the driver to mark a node Dead —
+which this engine would then report, remediate and count as a miss. On both
+nights of the audit the backup happened to fall inside an idle stretch of the
+sweep cycle, so it was exposure rather than an observed failure.
+
+The add-on now reads the controller's `Turning RF off` and `Turning RF on` from
+the driver log stream it already subscribes to, suppresses every probe lane while
+the radio is down, and drops probes that were already in flight without booking
+them as misses. The reading expires after two minutes, on a dark log lane, and on
+any reconnect: a hold that cannot be refreshed must not become a stuck switch.
+
+### Also in this release
+
+- The manual records that three battery nodes have no liveness coverage from
+  either the driver or this add-on, with the cadence data that makes a watch for
+  them cheap to build. Their measured jitter is percent-scale, not the tenth of a
+  percent first recorded, so the manual now says which kind of watch that data
+  supports — one keyed on a missed slot, not on the period's jitter.
+- The manual is corrected on three points where it claimed more than the code
+  does: the feed watchdog measures node *or* controller silence; the RF-off
+  reading expires two minutes after the controller last reported the radio down,
+  each report refreshing it; and the in-flight probe drop covers the ticks that
+  land inside a blackout, not a probe launched just before one.
+
+26 new tests pin these fixes — including the double-subscribe races the review of this release reproduced — and 38 new mutants show each guard is load-bearing. Full run: 674 killed, 0 survived, 9 equivalent.
+
 ## 0.64.7
 
 ### Fixed — documentation that no longer matched the add-on
