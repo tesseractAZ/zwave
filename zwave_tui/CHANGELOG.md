@@ -99,7 +99,7 @@ any reconnect: a hold that cannot be refreshed must not become a stuck switch.
   each report refreshing it; and the in-flight probe drop covers the ticks that
   land inside a blackout, not a probe launched just before one.
 
-TESTS_AND_MUTANTS_LINE_0650
+26 new tests pin these fixes — including the double-subscribe races the review of this release reproduced — and 38 new mutants show each guard is load-bearing. Full run: 674 killed, 0 survived, 9 equivalent.
 
 ## 0.64.7
 
