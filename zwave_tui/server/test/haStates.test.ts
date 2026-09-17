@@ -114,3 +114,46 @@ test('a feed that has never delivered anything is not called silent (v0.65.0)', 
   assert.equal(by(s, ENTITY_DEGRADED).state, 'off');
   assert.equal(by(s, ENTITY_DEGRADED).attrs.reason, 'none');
 });
+
+test('an unchanged healthy mesh still publishes a CHANGED attribute set — the sensor must be able to fail (v0.66.0)', () => {
+  // THE defect this pins. HA's `async_set_internal` fast-paths a write whose
+  // state and attributes both match what it holds: `last_reported` moves in
+  // place, `last_changed`/`last_updated` do not, and that event reaches neither
+  // the recorder, nor `subscribe_entities`, nor the REST payload (a cached dict
+  // the fast path never invalidates). So a healthy mesh and a DEAD add-on were
+  // byte-identical from every surface an automation can reach — the 2026-09-17
+  // log review found this entity `off` with last_updated frozen two days, across
+  // a full add-on restart. The publisher has to move something itself.
+  const healthy = data();
+  const a = by(buildStates(healthy, 1_760_000_000_000), ENTITY_DEGRADED);
+  const b = by(buildStates(healthy, 1_760_000_000_000 + 61_000), ENTITY_DEGRADED);
+  assert.equal(a.state, b.state, 'fixture guard: the mesh itself must be unchanged between the two');
+  assert.equal(a.attrs.reason, b.attrs.reason, 'fixture guard: …and its reason unchanged too');
+  assert.notDeepEqual(a.attrs, b.attrs,
+    'a minute apart on an unchanged mesh must still differ, or HA files it as no-change and the entity goes mute');
+});
+
+test('the heartbeat is QUANTIZED to the minute, so it cannot flood the recorder (v0.66.0)', () => {
+  // The recorder writes a row per change. At the 30 s publish cadence an
+  // unquantized stamp books 2 880 rows a day on a Raspberry Pi to carry a
+  // freshness signal nothing reads faster than the 10-minute dead-feed
+  // watchdog. Quantizing is what makes the heartbeat affordable, so it is a
+  // property, not an implementation detail.
+  const healthy = data();
+  const base = 1_760_000_000_000;
+  const at = (ms: number) => String(by(buildStates(healthy, ms), ENTITY_DEGRADED).attrs.published_at);
+  assert.match(at(base), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/, 'a whole minute, in ISO 8601');
+  assert.equal(at(base + 1_000), at(base + 29_000),
+    'two publishes inside the same minute must be identical — that is the whole saving');
+  assert.notEqual(at(base), at(base + 61_000), '…and it must still move once the minute turns');
+});
+
+test('the heartbeat reports the PUBLISHER, not the mesh — it moves even while degraded (v0.66.0)', () => {
+  // A heartbeat that only ran while healthy would go quiet at exactly the
+  // moment the operator needs to know the add-on is still the one saying so.
+  const sick = data({ lastStatsUpdated: () => 1_760_000_000_000 - 42 * 60_000 } as never);
+  const a = by(buildStates(sick, 1_760_000_000_000), ENTITY_DEGRADED);
+  const b = by(buildStates(sick, 1_760_000_000_000 + 61_000), ENTITY_DEGRADED);
+  assert.equal(a.state, 'on', 'fixture guard: this fixture must really be degraded');
+  assert.notEqual(a.attrs.published_at, b.attrs.published_at, 'the heartbeat does not stop when the mesh is sick');
+});

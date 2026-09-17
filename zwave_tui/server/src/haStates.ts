@@ -62,7 +62,7 @@ export interface StatePost {
  *  same threshold the TUI's own stale-feed chip uses (v0.65.0). */
 const STATS_FEED_DEAD_MS = 10 * 60_000;
 
-export function buildStates(data: DataProvider): StatePost[] {
+export function buildStates(data: DataProvider, now: number = Date.now()): StatePost[] {
   const syms = data.symptoms();
   const crit = syms.filter((s) => s.severity === 'crit').length;
   const warn = syms.filter((s) => s.severity === 'warn').length;
@@ -108,7 +108,7 @@ export function buildStates(data: DataProvider): StatePost[] {
   // episode closed `unverifiable` (v0.65.0). Only meaningful once the feed has
   // delivered something: a fresh start has nothing to have gone silent.
   const statsAt = data.lastStatsUpdated?.() ?? null;
-  const statsSilentMs = statsAt == null ? null : Date.now() - statsAt;
+  const statsSilentMs = statsAt == null ? null : now - statsAt;
   const statsBlind = statsSilentMs != null && statsSilentMs > STATS_FEED_DEAD_MS;
   const degraded = summonsNodes.length > 0
     || crit > 0
@@ -123,6 +123,33 @@ export function buildStates(data: DataProvider): StatePost[] {
       attrs: {
         friendly_name: 'Z-Wave TUI degraded',
         device_class: 'problem',
+        // THE HEARTBEAT (v0.66.0). Every other value here describes the MESH.
+        // This one describes the PUBLISHER, and without it this sensor cannot
+        // fail loudly — which is the one thing an alert entity must do.
+        //
+        // HA's `async_set_internal` takes a fast path when the incoming state
+        // AND attributes both equal what it already holds: it updates
+        // `last_reported` in place, fires EVENT_STATE_REPORTED, and returns.
+        // `last_changed` and `last_updated` never move. That event is listed in
+        // EVENTS_EXCLUDED_FROM_MATCH_ALL, `subscribe_entities` carries only
+        // state_changed, and the REST/WS payload is served from a cached dict
+        // the fast path never invalidates — so `last_reported` reads frozen
+        // everywhere except an in-process template render. A healthy mesh and a
+        // DEAD add-on were therefore byte-identical from every surface an
+        // automation can reach: the 2026-09-17 log review found this entity
+        // reading `off` / `reason: none` with last_updated frozen for two days,
+        // across a full add-on restart it never noticed.
+        //
+        // A value that moves each cycle makes `same_attr` false, so HA builds a
+        // fresh State and `last_updated` advances on every surface. `last_changed`
+        // survives it by construction (`last_changed = old_state.last_changed if
+        // same_state else None`), so "how long has it been off" is not lost.
+        //
+        // QUANTIZED to the minute rather than stamped per tick: the recorder
+        // writes a row per change, and 30 s publishes would book 2 880 rows a
+        // day on a Raspberry Pi to carry a freshness signal that nothing reads
+        // faster than the ten-minute dead-feed watchdog.
+        published_at: new Date(Math.floor(now / 60_000) * 60_000).toISOString(),
         reason: !degraded
           ? 'none'
           : ident != null
