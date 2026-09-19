@@ -52,7 +52,7 @@ the evidence. The log line keeps the measured silence and the threshold in both
 cases, so a genuinely quiet node is not hidden behind the fix for the
 fabricated ones.
 
-TESTS_AND_MUTANTS_LINE_0660
+4 new tests pin both fixes — including that `unheard` stays reachable in the two cases where it is true — and 7 new mutants show each guard is load-bearing. Full run: 681 killed, 0 survived, 9 equivalent.
 
 ## 0.65.0
 
