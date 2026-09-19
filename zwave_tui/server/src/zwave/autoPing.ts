@@ -1251,7 +1251,23 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // labels and 35 false self-proven credits into a persisted, never-decaying
       // counter, once per boot, fleet-wide. Say what is actually known instead,
       // and credit nothing (v0.40.2).
-      const attributionUnknown = heardRecently && (attributed == null || (inReconnectBurst && spokeOnItsOwn));
+      //
+      // …in BOTH directions (v0.66.0). v0.40.2 fixed the positive arm and left
+      // the negative one standing: `echoOnly` cannot be computed without
+      // `attributed`, so with none the four-way chain fell through to
+      // `unheard` — and `unheard` is not a shrug. It is the dossier's claim
+      // that this node "is genuinely silent", stated there as the OPPOSITE
+      // reading of echo-only, and counted into a ledger that is persisted and
+      // never decays. The 2026-09-17 log review measured the cost: at the
+      // 07:11 boot 24 nodes were booked `unheard`, and all 24 were classified
+      // `echo-only` at their very next sweep — each had answered the very
+      // probe its mark was written against. Missing attribution is missing
+      // attribution whichever direction it would have pointed.
+      //
+      // `seenAt != null` keeps the honest negative reachable: a node with
+      // NOTHING on record has no attribution question to be unsure about.
+      const attributionUnknown = (attributed == null && seenAt != null)
+        || (heardRecently && inReconnectBurst && spokeOnItsOwn);
       // ONE VALUE, in the SAME precedence the label below uses (v0.49.0). The
       // sweep's judgment is FOUR-way and only the `self-proven` arm was ever
       // recorded — the other three were computed, described in the log line,
@@ -1267,7 +1283,13 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
         (attributionUnknown
           ? (inReconnectBurst && attributed != null
             ? `(heard ${silence} ago, inside the driver's own restart burst — not attributable, not credited)`
-            : `(heard ${silence} ago, but this run has no probe attribution yet — not credited)`)
+            : heardRecently
+              ? `(heard ${silence} ago, but this run has no probe attribution yet — not credited)`
+              // Past the threshold and unattributable is NOT the same statement
+              // as heard-just-now and unattributable, and collapsing the two
+              // would hide a genuinely quiet node behind the fix for the
+              // fabricated ones (v0.66.0).
+              : `(nothing heard for ${silence}, past the ${Math.round(o.config.staleMs / 60_000)}m threshold, but this run has no probe attribution to tell silence from our own echo — not credited)`)
           : selfProven
             ? `(already heard ${silence} ago on its own — confirming)`
             : echoOnly

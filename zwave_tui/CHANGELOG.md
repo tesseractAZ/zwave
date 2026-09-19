@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.66.0
+
+### Fixed — the degraded sensor could not fail, and a dead add-on looked healthy
+
+`binary_sensor.zwave_tui_degraded` is the one boolean this add-on offers an
+automation, and it failed OPEN. Home Assistant fast-paths a write whose state
+and attributes both match what it already holds: `last_reported` moves in
+place, `last_changed` and `last_updated` do not, the event is excluded from
+match-all and from `subscribe_entities`, the recorder never sees it, and the
+REST payload is served from a cached dict the fast path never invalidates. A
+healthy mesh publishes the same two bytes every 30 s forever — and so does an
+add-on that died three days ago.
+
+The 2026-09-17 log review measured it: `off`, `reason: none`, `last_updated`
+frozen for two days, across a full add-on restart the entity never registered.
+Nothing an operator could write — template, trigger, history, or the
+`/api/health` monitor — could tell the two apart.
+
+The sensor now carries `published_at`, a heartbeat that describes the
+PUBLISHER rather than the mesh. A value that moves each cycle makes HA build a
+fresh state, so `last_updated` advances on every surface, while `last_changed`
+survives by construction and still answers "how long has it been off". It is
+quantized to the minute: the recorder writes a row per change, and a per-tick
+stamp would book 2 880 rows a day on a Raspberry Pi for a freshness signal
+nothing reads faster than the ten-minute dead-feed watchdog. A staleness check
+is now a one-line template, and it fires whether the add-on is wedged, stopped,
+unable to publish, or gone.
+
+### Fixed — a boot called 24 nodes silent, and every one of them answered
+
+`unheard` is not a shrug. The node dossier states it as the OPPOSITE reading of
+echo-only — "this node is genuinely silent" against "it never speaks except to
+answer us" — and books it into a ledger that is persisted and never decays.
+Deciding it requires `attributed`, the record of our own answered probes, which
+is per-PROCESS. At a boot there is none, so the four-way ladder fell through to
+its last arm and wrote the most negative verdict it has by default.
+
+v0.65.0 fixed exactly this in the positive direction, after an audit found 28
+fabricated `self-proven` credits: an advance nobody can attribute credits
+nothing. The negative arm was left standing. The 2026-09-17 log review found
+what it cost — at the 07:11 boot 24 nodes were booked `unheard`, and all 24
+were classified `echo-only` at their very next sweep. Each had answered the
+very probe its mark was written against.
+
+Missing attribution is now missing attribution whichever way it would have
+pointed. The honest negative stays reachable, and is still written: a node with
+nothing at all on record has no attribution question to be unsure about, and a
+node that spoke on its own and then went quiet past the threshold is silent on
+the evidence. The log line keeps the measured silence and the threshold in both
+cases, so a genuinely quiet node is not hidden behind the fix for the
+fabricated ones.
+
+4 new tests pin both fixes — including that `unheard` stays reachable in the two cases where it is true — and 7 new mutants show each guard is load-bearing. Full run: 681 killed, 0 survived, 9 equivalent.
+
 ## 0.65.0
 
 ### Fixed — the engine went blind after a Z-Wave JS reload, and said nothing

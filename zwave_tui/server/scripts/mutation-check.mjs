@@ -854,8 +854,10 @@ const MUTANTS = [
     equivalent: true,
   },
   { id: 'reconnect-burst-is-attribution-unknown', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
-    find: '      const attributionUnknown = heardRecently && (attributed == null || (inReconnectBurst && spokeOnItsOwn));',
-    repl: '      const attributionUnknown = heardRecently && attributed == null;',
+    // Re-pointed in v0.66.0: the expression is two arms on two lines now, and
+    // this mutant removes the burst arm — the same rule it always pinned.
+    find: '        || (heardRecently && inReconnectBurst && spokeOnItsOwn);',
+    repl: '        || false;',
     what: 'a restart-burst advance says what is known, rather than falling through to unheard' },
   { id: 'reconnect-burst-has-a-deadline', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     find: '        && seenAt >= reconnAt - DRIVER_BURST_LEAD_MS && seenAt <= reconnAt + DRIVER_BURST_MS;',
@@ -1982,8 +1984,10 @@ const MUTANTS = [
     equivalent: true,
   },
   { id: 'boot-attribution-says-so', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
-    find: '      const attributionUnknown = heardRecently && (attributed == null || (inReconnectBurst && spokeOnItsOwn));',
-    repl: '      const attributionUnknown = inReconnectBurst && spokeOnItsOwn;',
+    // Re-pointed in v0.66.0: removes the unattributed arm, leaving only the
+    // burst arm — the same rule it always pinned.
+    find: '      const attributionUnknown = (attributed == null && seenAt != null)',
+    repl: '      const attributionUnknown = false',
     what: 'the first sweep of a run says its attribution is unknown' },
   { id: 'judgment-bookkeeping-pruned', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     find: '  for (const id of [...state.missStreak.keys()]) if (!seen.has(id)) state.missStreak.delete(id);',
@@ -3847,6 +3851,45 @@ const MUTANTS = [
     find: '    unverifiableCount: (k) => zd.unverifiableCount(k),',
     repl: '    unverifiableCount: () => 0,',
     what: 'the production bridge forwards unverifiableCount to the data layer' },
+  /* ── v0.66.0: the 2026-09-17 log review ──────────────────────────────── */
+  { id: 'unattributed-silence-is-not-unheard', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Restores the fall-through: at the 07:11 boot 24 nodes were booked
+    // "genuinely silent", and all 24 were echo-only at their next sweep.
+    find: '      const attributionUnknown = (attributed == null && seenAt != null)',
+    repl: '      const attributionUnknown = (heardRecently && attributed == null)',
+    what: 'missing attribution past the threshold is attribution-unknown, never unheard' },
+  { id: 'never-heard-stays-unheard', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // The fix must not make its own negative unreachable: a node with nothing
+    // on record has no attribution question to be unsure about.
+    find: '      const attributionUnknown = (attributed == null && seenAt != null)',
+    repl: '      const attributionUnknown = (attributed == null)',
+    what: 'a node never heard at all is still unheard' },
+  { id: 'unattributed-past-threshold-keeps-the-silence', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
+    // Collapsing the two unattributed lines would hide a genuinely quiet node
+    // behind the fix for the fabricated ones.
+    find: '            : heardRecently\n              ? `(heard ${silence} ago, but this run has no probe attribution yet',
+    repl: '            : true\n              ? `(heard ${silence} ago, but this run has no probe attribution yet',
+    what: 'an unattributed node past the threshold is logged with its measured silence and the threshold' },
+  { id: 'heartbeat-published', file: 'src/haStates.ts', tests: ['haStates'],
+    // Without it HA fast-paths every healthy publish and the entity cannot go
+    // stale: a dead add-on and a healthy mesh are byte-identical.
+    find: '        published_at: new Date(Math.floor(now / 60_000) * 60_000).toISOString(),',
+    repl: '',
+    what: 'the degraded sensor carries a heartbeat that moves on an unchanged mesh' },
+  { id: 'heartbeat-moves', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '        published_at: new Date(Math.floor(now / 60_000) * 60_000).toISOString(),',
+    repl: "        published_at: '1970-01-01T00:00:00.000Z',",
+    what: 'the heartbeat moves with the clock — a constant is the fast path again' },
+  { id: 'heartbeat-quantized', file: 'src/haStates.ts', tests: ['haStates'],
+    // 2 880 recorder rows a day at the 30 s cadence, for a signal nothing reads
+    // faster than the ten-minute watchdog.
+    find: '        published_at: new Date(Math.floor(now / 60_000) * 60_000).toISOString(),',
+    repl: '        published_at: new Date(now).toISOString(),',
+    what: 'the heartbeat is quantized to the minute, so it cannot flood the recorder' },
+  { id: 'one-clock-per-publish', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '  const statsSilentMs = statsAt == null ? null : now - statsAt;',
+    repl: '  const statsSilentMs = statsAt == null ? null : Date.now() - statsAt;',
+    what: 'the silence and the heartbeat are measured from the same instant' },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

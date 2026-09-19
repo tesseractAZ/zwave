@@ -569,10 +569,14 @@ test('the probe log line reports MEASURED silence, never just the threshold', as
   const probe = lines.find((l) => l.includes('liveness sweep'));
   assert.ok(probe, 'a stale node past the threshold must be probed');
   const silence = 700 + BOOT_WINDOW_MS / MIN + 1;
-  assert.ok(probe!.includes(`unheard for ${Math.round(silence)}m`),
+  // v0.66.0 moved this fixture — a fresh run, so no probe attribution yet —
+  // out of the `unheard` arm, and the wording moved with it. What this test
+  // pins did NOT move: the line must carry the node's MEASURED silence, with
+  // the threshold alongside and labelled as the threshold.
+  assert.ok(probe!.includes(`nothing heard for ${Math.round(silence)}m`),
     `measured silence (~${silence}m) must appear, got: ${probe}`);
-  assert.ok(probe!.includes('threshold 240m'), 'the threshold is context, labelled as such');
-  assert.ok(!/unheard for 240m/.test(probe!), 'the measured value must not equal-by-construction the threshold');
+  assert.ok(probe!.includes('past the 240m threshold'), 'the threshold is context, labelled as such');
+  assert.ok(!/heard for 240m/.test(probe!), 'the measured value must not equal-by-construction the threshold');
 });
 
 test('a node that proved itself since the last sweep is labelled CONFIRMING, not unheard', async () => {
@@ -2264,6 +2268,86 @@ test("the driver's own restart burst is not the node's voice — it credits noth
   assert.ok(DRIVER_BURST_LEAD_MS > 0 && DRIVER_BURST_LEAD_MS <= MIN,
     'the driver pings as it comes up, so the window leads the anchor — by seconds, not minutes');
   h.stop();
+});
+
+test('a run with no attribution yet cannot call a node genuinely silent (v0.66.0)', async () => {
+  // `unheard` is not a shrug. The dossier states it as the OPPOSITE reading of
+  // echo-only — "this node is genuinely silent" against "it never speaks except
+  // to answer us" — and books it into a ledger that is persisted and never
+  // decays. Deciding it needs `attributed`, which is per-PROCESS, so at a boot
+  // the four-way chain fell through to it by default. The 2026-09-17 log review
+  // measured that default: 24 nodes were booked `unheard` at the 07:11 boot and
+  // all 24 came back `echo-only` at their very next sweep — each had answered
+  // the very probe its mark was written against.
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  const STALE = 240 * MIN;
+  const harness = (n: NodeSnapshot) => {
+    // Created AT T so the boot window is anchored there, then advanced past it
+    // — startAutoPing stamps the window when it is called, and a handle built
+    // after the window has notionally passed is still inside its own.
+    let clock = T;
+    const results: { nodeId: number; cls: string }[] = [];
+    const lines: string[] = [];
+    const h = startAutoPing({
+      nodes: () => [node(1, { isController: true }), n], controller: () => null, ready: () => true,
+      ping: async () => {}, probe: async () => {}, log: (_s, _n, text) => { lines.push(text); },
+      config: cfg({ staleMs: STALE }), tickMs: 1_000_000, now: () => clock,
+      onProbeResult: (nodeId, _answered, cls) => results.push({ nodeId, cls }),
+    });
+    clock = T + BOOT_WINDOW_MS + MIN;
+    const seen = (v: number | null) => { (n.stats as unknown as { lastSeen: number | null }).lastSeen = v; };
+    // A class is decided when the probe is LAUNCHED and reported when it is
+    // JUDGED, so each phase sends one and then lets it mature into an answer.
+    const sweepThenAnswer = (): void => {
+      h.tick();
+      clock += 2 * MIN;
+      seen(clock - 1_000);
+      h.tick();
+    };
+    return { results, lines, h, seen, sweepThenAnswer, at: () => clock, wait: (ms: number) => { clock += ms; } };
+  };
+
+  // 1. THE FIX. A node silent past the threshold, on a run that has not yet had
+  //    a probe answered: the echo-only discriminator cannot be computed, so the
+  //    honest answer is that attribution is unknown — NOT that the node is
+  //    silent. This is the live case: every one of the 24 answered next sweep.
+  {
+    const t = harness(node(7, { stats: { lastSeen: T - 300 * MIN } as never }));
+    t.sweepThenAnswer();
+    assert.equal(t.results.at(-1)?.cls, 'attribution-unknown',
+      'no attribution yet ⇒ the silence cannot be told from our own echo');
+    assert.ok(t.lines.some((l) => /nothing heard for \d+m, past the 240m threshold/.test(l)),
+      `the measured silence must survive the reclassification: ${t.lines.join(' | ')}`);
+    t.h.stop();
+  }
+
+  // 2. REACHABILITY — nothing on record at all. A node that has never been
+  //    heard has no attribution question to be unsure about, so the negative
+  //    stays available. A guard that makes its own negative unreachable is its
+  //    own defect in this engine.
+  {
+    const t = harness(node(8));
+    t.sweepThenAnswer();
+    assert.equal(t.results.at(-1)?.cls, 'unheard',
+      'never heard at all is genuinely unheard, attribution or no attribution');
+    t.h.stop();
+  }
+
+  // 3. REACHABILITY — the honest negative, earned. Once a probe of OURS has
+  //    been answered, `attributed` exists; a node that then speaks on its own
+  //    and afterwards goes quiet past the threshold is silent on evidence, and
+  //    is still called silent.
+  {
+    const t = harness(node(9, { stats: { lastSeen: T } as never }));
+    t.sweepThenAnswer();                       // establishes attribution for this run
+    assert.equal(t.results.at(-1)?.cls, 'attribution-unknown', 'setup: the first sweep is unattributable');
+    t.seen(t.at() + 1_000);                    // the node speaks on its own, past our answer
+    t.wait(STALE + 10 * MIN);                  // …and then goes quiet, past the threshold
+    t.sweepThenAnswer();
+    assert.equal(t.results.at(-1)?.cls, 'unheard',
+      'spoke on its own, then nothing for longer than the threshold — silent on the evidence');
+    t.h.stop();
+  }
 });
 
 test('a driver restart the driver-WS never reconnects to still refuses attribution (v0.65.0 review)', async () => {

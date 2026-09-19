@@ -4432,7 +4432,7 @@ triggering on state can never disagree about the mesh:
 
   | entity | state | notable attributes |
   |---|---|---|
-  | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason` |
+  | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
   | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_total` |
   | `sensor.zwave_tui_summons` | count | `node_ids` |
   | `sensor.zwave_tui_symptoms` | count | `critical`, `warning`, `kinds` |
@@ -4479,6 +4479,31 @@ automation:
           message: >-
             {{ state_attr('binary_sensor.zwave_tui_degraded', 'reason') }}
             (nodes: {{ state_attr('sensor.zwave_tui_summons', 'node_ids') }})
+```
+
+**`published_at` is how you know the add-on is still there** (v0.66.0). Home
+Assistant ignores a write whose state and attributes both match what it already
+holds, so on a healthy mesh — publishing `off` / `none` every 30 s — the entity
+never changed, and a stopped add-on looked exactly the same. `published_at` is
+a heartbeat: the time of the last publish, rounded to the minute so it costs
+one recorder row a minute rather than two. It makes `last_updated` advance on
+every publish; `last_changed` still moves only when the state flips, so the
+`for:` above still measures how long it has been `on`. Watch for silence:
+
+```yaml
+  - alias: Z-Wave TUI has stopped reporting
+    trigger:
+      - platform: template
+        value_template: >-
+          {{ states.binary_sensor.zwave_tui_degraded is none
+             or now() - states.binary_sensor.zwave_tui_degraded.last_updated
+                > timedelta(minutes=10) }}
+        for: "00:02:00"          # a Core restart republishes within 30 s
+    action:
+      - service: notify.mobile_app_iphone
+        data:
+          title: Z-Wave TUI is not reporting
+          message: The mesh verdict has not been refreshed for 10 minutes.
 ```
 
 **These are unmanaged states**: created over the REST API, with no device and no

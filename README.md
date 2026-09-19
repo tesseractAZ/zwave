@@ -248,8 +248,8 @@ has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
 Headlines, each stated as narrowly as it was measured: the slowest screen
 redraw is **412 µs** against a 1 000 ms frame budget; the container holds
 **93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
-RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.65.0 release
-run, **1 186 tests in 12.5 s** and **683 mutants in ~29 min** gated the release.
+RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.66.0 release
+run, **1 190 tests in 12.6 s** and **690 mutants in ~30 min** gated the release.
 A TUI session costs
 **4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
 rate but one whole-frame redraw per second.
@@ -273,7 +273,7 @@ re-asserted every 30 seconds:
 
 | entity | state | notable attributes |
 | --- | --- | --- |
-| `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason` |
+| `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
 | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_total` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
@@ -318,6 +318,31 @@ automation:
           message: >-
             {{ state_attr('binary_sensor.zwave_tui_degraded', 'reason') }}
             (nodes: {{ state_attr('sensor.zwave_tui_summons', 'node_ids') }})
+```
+
+**`published_at` is how you know the add-on is still there** (v0.66.0). Home
+Assistant ignores a write whose state and attributes both match what it already
+holds, so on a healthy mesh — publishing `off` / `none` every 30 s — the entity
+never changed, and a stopped add-on looked exactly the same. `published_at` is
+a heartbeat: the time of the last publish, rounded to the minute so it costs
+one recorder row a minute rather than two. It makes `last_updated` advance on
+every publish; `last_changed` still moves only when the state flips, so the
+`for:` above still measures how long it has been `on`. Watch for silence:
+
+```yaml
+  - alias: Z-Wave TUI has stopped reporting
+    trigger:
+      - platform: template
+        value_template: >-
+          {{ states.binary_sensor.zwave_tui_degraded is none
+             or now() - states.binary_sensor.zwave_tui_degraded.last_updated
+                > timedelta(minutes=10) }}
+        for: "00:02:00"          # a Core restart republishes within 30 s
+    action:
+      - service: notify.mobile_app_iphone
+        data:
+          title: Z-Wave TUI is not reporting
+          message: The mesh verdict has not been refreshed for 10 minutes.
 ```
 
 These are *unmanaged* states — created over the REST API, with no device and no
