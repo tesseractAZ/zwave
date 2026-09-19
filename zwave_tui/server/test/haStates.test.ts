@@ -155,5 +155,8 @@ test('the heartbeat reports the PUBLISHER, not the mesh — it moves even while 
   const a = by(buildStates(sick, 1_760_000_000_000), ENTITY_DEGRADED);
   const b = by(buildStates(sick, 1_760_000_000_000 + 61_000), ENTITY_DEGRADED);
   assert.equal(a.state, 'on', 'fixture guard: this fixture must really be degraded');
+  // ONE clock per publish: the silence in the reason and the heartbeat beside it
+  // are measured from the same instant, or the two disagree on the same entity.
+  assert.match(String(a.attrs.reason), /statistics feed silent 42m/, 'the silence is measured against the injected clock');
   assert.notEqual(a.attrs.published_at, b.attrs.published_at, 'the heartbeat does not stop when the mesh is sick');
 });
