@@ -19,7 +19,7 @@ already being passed in. This module typed its sink as a bare function, which
 discarded the severity. The sink stays optional: a plain function, as the tests
 and bare dev pass, is still called exactly as before.
 
-TESTS_AND_MUTANTS_LINE_0661
+Two tests pin it — the failure reaches `warn`, and a bare function sink still receives it — and two mutants show both halves are load-bearing. Full run: 683 killed, 0 survived, 9 equivalent.
 
 ## 0.66.0
 
