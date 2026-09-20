@@ -160,3 +160,36 @@ test('the heartbeat reports the PUBLISHER, not the mesh — it moves even while 
   assert.match(String(a.attrs.reason), /statistics feed silent 42m/, 'the silence is measured against the injected clock');
   assert.notEqual(a.attrs.published_at, b.attrs.published_at, 'the heartbeat does not stop when the mesh is sick');
 });
+
+test('a publish failure is logged at WARN — the one line that must outlive log_level: warning (v0.66.1)', async () => {
+  // The add-on logger is a callable with `.warn` hung off it, and this module
+  // typed its sink as a bare function — so the severity was dropped and the
+  // line went out at info. `log_level: warning` is exactly what an operator
+  // sets to quiet a chatty add-on, and it filtered out the only notice that
+  // the engine's conclusions had stopped reaching HA. Three real failures in
+  // the 24 h after v0.66.0 shipped were invisible at that level.
+  const plain: string[] = [], warned: string[] = [];
+  const log = Object.assign((m: string) => plain.push(m), { warn: (m: string) => warned.push(m) });
+  const h = startHaStates({
+    data: data(), token: 't', log, intervalMs: 1_000_000,
+    fetchImpl: (async () => ({ ok: false, status: 502 })) as never,
+  });
+  await h.publishNow();
+  h.stop();
+  assert.equal(warned.length, 1, `the failure must reach warn, got plain=${plain.length} warn=${warned.length}`);
+  assert.match(warned[0], /publish failed \(HTTP 502\)/);
+  assert.equal(plain.length, 0, 'and it must NOT also go out at info — one failure is one line');
+});
+
+test('a bare log function still works — the warn sink is optional (v0.66.1)', async () => {
+  // Tests and bare dev pass a plain function; it must be called exactly as before.
+  const plain: string[] = [];
+  const h = startHaStates({
+    data: data(), token: 't', log: (m: string) => plain.push(m), intervalMs: 1_000_000,
+    fetchImpl: (async () => ({ ok: false, status: 400 })) as never,
+  });
+  await h.publishNow();
+  h.stop();
+  assert.equal(plain.length, 1, 'a sink without .warn is still called');
+  assert.match(plain[0], /publish failed \(HTTP 400\)/);
+});

@@ -42,7 +42,10 @@ export interface HaStatesOptions {
   /** Base of HA's REST API. Absent (bare dev) ⇒ the publisher no-ops. */
   baseUrl?: string;
   token?: string;
-  log?: (msg: string) => void;
+  /** The add-on logger, or any bare sink. `warn` is used when the caller has
+   *  one: a publish failure is the one line here that must outlive
+   *  `log_level: warning` (v0.66.1). */
+  log?: ((msg: string) => void) & { warn?: (msg: string) => void };
   fetchImpl?: typeof fetch;
   intervalMs?: number;
 }
@@ -205,7 +208,7 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
 export function startHaStates(
   opts: HaStatesOptions,
 ): { stop: () => void; publishNow: () => Promise<void> } {
-  const log = opts.log ?? ((): void => {});
+  const log: NonNullable<HaStatesOptions['log']> = opts.log ?? ((): void => {});
   const doFetch = opts.fetchImpl ?? fetch;
   const base = opts.baseUrl ?? 'http://supervisor/core/api';
   let lastErr: string | null = null;
@@ -228,7 +231,14 @@ export function startHaStates(
         const msg = e instanceof Error ? e.message : String(e);
         if (msg !== lastErr) {
           lastErr = msg;
-          log(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);
+          // WARN, not info (v0.66.1). "Engine conclusions are not reaching HA"
+          // is the whole product failing, and at `log_level: warning` — the
+          // setting an operator picks to quiet a chatty add-on — it was the one
+          // thing filtered out. It fired three times in the 24 h after v0.66.0
+          // shipped (two 502s and a 400 around a Core restart) and nothing said
+          // so at the configured level. The sink stays optional: tests and bare
+          // dev pass a plain function, which is called exactly as before.
+          (log.warn ?? log)(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);
         }
         return;
       }

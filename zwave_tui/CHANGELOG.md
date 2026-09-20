@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.66.1
+
+### Fixed — the one line that had to survive `log_level: warning` did not
+
+When a publish fails, the add-on logs that the engine's conclusions are not
+reaching Home Assistant. That line went out at `info`, and `log_level: warning`
+is exactly what an operator sets to quiet a chatty add-on — so the notice that
+the whole product had stopped reporting was the one thing filtered out.
+
+It is not hypothetical. In the 24 hours after v0.66.0 shipped, three publishes
+failed — two HTTP 502s and an HTTP 400 around a Core restart — and at the
+configured level nothing said so. The v0.66.0 heartbeat makes the silence
+visible from Home Assistant; this makes the CAUSE visible in the log.
+
+The add-on's logger is already a callable with `.warn` hung off it, and it was
+already being passed in. This module typed its sink as a bare function, which
+discarded the severity. The sink stays optional: a plain function, as the tests
+and bare dev pass, is still called exactly as before.
+
+Two tests pin it — the failure reaches `warn`, and a bare function sink still receives it — and two mutants show both halves are load-bearing. Full run: 683 killed, 0 survived, 9 equivalent.
+
 ## 0.66.0
 
 ### Fixed — the degraded sensor could not fail, and a dead add-on looked healthy
