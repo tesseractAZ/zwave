@@ -3851,6 +3851,21 @@ const MUTANTS = [
     find: '    unverifiableCount: (k) => zd.unverifiableCount(k),',
     repl: '    unverifiableCount: () => 0,',
     what: 'the production bridge forwards unverifiableCount to the data layer' },
+  /* ── v0.66.1 ─────────────────────────────────────────────────────────── */
+  { id: 'publish-failure-is-warn', file: 'src/haStates.ts', tests: ['haStates'],
+    // At `log_level: warning` — what an operator sets to quiet a chatty add-on
+    // — info is filtered, so the only notice that conclusions had stopped
+    // reaching HA was the one thing removed. Three real failures in the 24 h
+    // after v0.66.0 shipped went unseen at that level.
+    find: '          (log.warn ?? log)(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
+    repl: '          log(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
+    what: 'a publish failure is logged at warn, so it survives log_level: warning' },
+  { id: 'bare-log-sink-still-called', file: 'src/haStates.ts', tests: ['haStates'],
+    // Tests and bare dev pass a plain function with no `.warn`; requiring one
+    // would silence the failure entirely for them.
+    find: '          (log.warn ?? log)(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
+    repl: '          log.warn?.(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
+    what: 'a sink without .warn still receives the failure' },
   /* ── v0.66.0: the 2026-09-17 log review ──────────────────────────────── */
   { id: 'unattributed-silence-is-not-unheard', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Restores the fall-through: at the 07:11 boot 24 nodes were booked
