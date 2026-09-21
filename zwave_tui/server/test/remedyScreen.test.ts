@@ -26,7 +26,7 @@ function data(symptoms: Symptom[], efficacyFor: DataProvider['efficacyFor'] = ()
     scoreFor: () => ({ score: 90, grade: 'A', state: 'ok', flags: [] }),
     noiseFloor: () => -100, hasRealNoise: () => true, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
     lastUpdated: () => now - 1000, ready: () => true, lastError: () => null, symptoms: () => symptoms,
-    engineStatus: () => ({ enabled: true, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 0, bands: 6 }), efficacyFor, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
+    engineStatus: () => ({ enabled: true, ready: 3, total: 3, timeoutReady: 3, timeoutWindowBlind: 0, rttReady: 3, rssiReady: 3, band: 0, bands: 6 }), efficacyFor, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
   openEpisodes: () => [],
   controlArm: () => null,
   autoPingState: () => null,
@@ -44,7 +44,7 @@ const engCtx = (cols: number, rows: number, eng: ReturnType<DataProvider['engine
 const engCtx2 = (cols: number, rows: number, syms: Symptom[]): ScreenCtx =>
   ({ view: mkView(cols, rows), data: data(syms), visibleNodes: nodes, filtering: false, actionsEnabled: true });
 const CAVEAT_RE = /deletes|discards|priority route|half-interviewed|comes back|re-churn/i;
-const ENG = { enabled: true as const, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 3, bands: 6 };
+const ENG = { enabled: true as const, ready: 3, total: 3, timeoutReady: 3, timeoutWindowBlind: 0, rttReady: 3, rssiReady: 3, band: 3, bands: 6 };
 
 const sym = (over: Partial<Symptom> = {}): Symptom => ({
   kind: 'return-path-degraded', nodeId: 6, severity: 'warn', sinceMs: now - 20 * 60_000, basis: 'measured',
@@ -486,7 +486,7 @@ test('a narrow terminal DROPS a baseline count rather than clipping it mid-numbe
   // prefix-truncated line ("… rssi 1", or a severed "rss") fails this outright.
   for (let cols = 40; cols <= 120; cols += 1) {
     const lines = plain(renderRemedy(engCtx(cols, 24,
-      { ...ENG, total: 39, timeoutReady: 39, rttReady: 1, rssiReady: 12 }))).split('\n');
+      { ...ENG, total: 39, timeoutReady: 39, timeoutWindowBlind: 0, rttReady: 1, rssiReady: 12 }))).split('\n');
     const counts = lines.find((l) => /timeouts/.test(l));
     assert.ok(counts != null, `${cols} cols: the counts line vanished entirely`);
     assert.match(counts,
@@ -527,13 +527,13 @@ test('an engine with an EMPTY roster does not render an all-clear (v0.43.1)', ()
   // measurement band from zero observations — the state at boot, before the
   // first roster poll returns.
   const joined = plain(renderRemedy(engCtx(120, 30,
-    { enabled: true, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 2, bands: 6 })));
+    { enabled: true, ready: 0, total: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0, band: 2, bands: 6 })));
   assert.doesNotMatch(joined, /All clear/, 'nothing measured cannot be cleared');
   assert.doesNotMatch(joined, /graduated timeout, rtt and rssi/, 'nor claimed as graduated');
   assert.match(joined, /No nodes yet/);
   for (const [cols, rows] of [[40, 12], [200, 50]] as const) {
     const lines = renderRemedy(engCtx(cols, rows,
-      { enabled: true, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 2, bands: 6 }));
+      { enabled: true, ready: 0, total: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0, band: 2, bands: 6 }));
     assert.equal(lines.length, rows, `${cols}x${rows}: exact rows`);
     for (const l of lines) assert.ok(plain([l]).length <= cols, `${cols}x${rows}: fits`);
   }
@@ -853,7 +853,7 @@ test('partial baseline coverage is NOT rendered as "Learning" forever (v0.46.0)'
   // resets both across all six bands and they fold only on FRESH samples
   // (~1.5-3.3 per band per day against MIN_OBS 20). "Learning" implied a
   // convergence that never arrives; the honest state names the blind detectors.
-  const joined = plain(renderRemedy(engCtx(200, 40, { ...ENG, total: 3, timeoutReady: 3, rttReady: 1, rssiReady: 1 })));
+  const joined = plain(renderRemedy(engCtx(200, 40, { ...ENG, total: 3, timeoutReady: 3, timeoutWindowBlind: 0, rttReady: 1, rssiReady: 1 })));
   assert.doesNotMatch(joined, /All clear/, 'still not the green all-clear');
   assert.match(joined, /partial detector coverage/);
   // Only the DETECTOR-arming series count as blindness (v0.47.0) — rssi arms
@@ -867,7 +867,7 @@ test('partial baseline coverage is NOT rendered as "Learning" forever (v0.46.0)'
 test('zero coverage says LEARNING and makes no symptom claim at all (v0.46.0)', () => {
   // With no detector able to fire, "no symptoms" would describe the instrument,
   // not the mesh.
-  const joined = plain(renderRemedy(engCtx(200, 40, { ...ENG, total: 3, timeoutReady: 0, rttReady: 0, rssiReady: 0 })));
+  const joined = plain(renderRemedy(engCtx(200, 40, { ...ENG, total: 3, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0 })));
   assert.match(joined, /no detector has a yardstick yet/);
   assert.doesNotMatch(joined, /No symptoms/, 'nothing detectable ⇒ no symptom claim');
   assert.doesNotMatch(joined, /All clear/);
@@ -877,7 +877,7 @@ test('the open-episode disclosure survives PARTIAL coverage (v0.46.0)', () => {
   // The v0.43.1 disclosure sat only in the green branch — behind a gate this
   // mesh cannot pass, so in production it was unreachable. Same shape as the
   // v0.36 inert learning loop: a feature wired, tested, and structurally dead.
-  const eng = { ...ENG, total: 3, timeoutReady: 3, rttReady: 1, rssiReady: 1 };
+  const eng = { ...ENG, total: 3, timeoutReady: 3, timeoutWindowBlind: 0, rttReady: 1, rssiReady: 1 };
   const ctxP: ScreenCtx = { view: mkView(200, 40),
     data: { ...data([]), engineStatus: () => eng,
       openEpisodes: () => ([{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded' as SymptomKind,
@@ -892,10 +892,10 @@ test('the open-episode disclosure survives PARTIAL coverage (v0.46.0)', () => {
 
 test('every empty state holds the row contract at all sizes (v0.46.0)', () => {
   const states = [
-    { ...ENG, total: 3, timeoutReady: 0, rttReady: 0, rssiReady: 0 },  // zero coverage
-    { ...ENG, total: 3, timeoutReady: 3, rttReady: 1, rssiReady: 1 },  // partial
-    { ...ENG, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3 },  // full
-    { enabled: true as const, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 2, bands: 6 },
+    { ...ENG, total: 3, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0 },  // zero coverage
+    { ...ENG, total: 3, timeoutReady: 3, timeoutWindowBlind: 0, rttReady: 1, rssiReady: 1 },  // partial
+    { ...ENG, total: 3, timeoutReady: 3, timeoutWindowBlind: 0, rttReady: 3, rssiReady: 3 },  // full
+    { enabled: true as const, ready: 0, total: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0, band: 2, bands: 6 },
   ];
   for (const eng of states) {
     for (const [cols, rows] of [[40, 12], [56, 20], [80, 24], [120, 40], [200, 50]] as const) {
@@ -971,12 +971,12 @@ test('the REMEDY title rule never contradicts the empty state its own body rende
   // 39-node mesh at v0.51.0: `── REMEDY ──… all clear` over
   // `◑ No symptoms — partial detector coverage for the 16:00-20:00 band`.
   const E = (over: Partial<ReturnType<DataProvider['engineStatus']>>) =>
-    ({ enabled: true, ready: 3, total: 3, timeoutReady: 3, rttReady: 3, rssiReady: 3, band: 0, bands: 6, ...over });
+    ({ enabled: true, ready: 3, total: 3, timeoutReady: 3, timeoutWindowBlind: 0, rttReady: 3, rssiReady: 3, band: 0, bands: 6, ...over });
   const CASES: Array<[string, ReturnType<DataProvider['engineStatus']>, RegExp, RegExp]> = [
     ['engine off',  E({ enabled: false }),                              /engine off/,      /Engine disabled/],
-    ['no roster',   E({ total: 0, ready: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0 }), /no roster/, /No nodes yet/],
-    ['learning',    E({ timeoutReady: 0, rttReady: 0, rssiReady: 0 }),  /learning/,        /Learning/],
-    ['partial',     E({ timeoutReady: 3, rttReady: 1, rssiReady: 1 }),  /partial coverage/, /partial detector coverage/],
+    ['no roster',   E({ total: 0, ready: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0 }), /no roster/, /No nodes yet/],
+    ['learning',    E({ timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0 }),  /learning/,        /Learning/],
+    ['partial',     E({ timeoutReady: 3, timeoutWindowBlind: 0, rttReady: 1, rssiReady: 1 }),  /partial coverage/, /partial detector coverage/],
     ['all clear',   E({}),                                              /all clear/,       /All clear/],
   ];
   for (const [label, eng, titleRe, bodyRe] of CASES) {

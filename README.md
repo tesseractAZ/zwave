@@ -248,8 +248,8 @@ has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
 Headlines, each stated as narrowly as it was measured: the slowest screen
 redraw is **412 µs** against a 1 000 ms frame budget; the container holds
 **93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
-RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.66.1 release
-run, **1 192 tests in 12.4 s** and **692 mutants in ~30 min** gated the release.
+RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.67.0 release
+run, **1 195 tests in 12.3 s** and **698 mutants in ~31 min** gated the release.
 A TUI session costs
 **4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
 rate but one whole-frame redraw per second.
@@ -274,7 +274,7 @@ re-asserted every 30 seconds:
 | entity | state | notable attributes |
 | --- | --- | --- |
 | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_total` |
+| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
 

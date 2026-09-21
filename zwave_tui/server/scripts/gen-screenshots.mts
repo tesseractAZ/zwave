@@ -223,7 +223,7 @@ const DATA: DataProvider = {
   ready: () => true,
   lastError: () => null,
   symptoms: () => SYMPTOMS,
-  engineStatus: () => ({ enabled: true, ready: 10, total: 11, timeoutReady: 10, rttReady: 10, rssiReady: 10, band: 0, bands: 6 }),
+  engineStatus: () => ({ enabled: true, ready: 10, total: 11, timeoutReady: 10, timeoutWindowBlind: 0, rttReady: 10, rssiReady: 10, band: 0, bands: 6 }),
   efficacyFor: (_k, a) =>
     a === 'ping' ? { expectedEfficacy: 0.71, n: 7, baseRate: 0.22, nodes: 3, ready: true, lowerBound: null, bar: null, minN: 4, baseN: 0, baseNodes: 0, harmed: 0, baseHarmed: 0 }
     // healNode is emitted BLOCKED on every arm that mentions it, so this is the

@@ -66,7 +66,7 @@ import {
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
-import { detectSymptoms, symptomaticNodes, armingNodes, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { isPingCandidate, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin } from './zwaveActions';
@@ -179,6 +179,10 @@ const ENTITY_REFRESH_MS = 10 * 60_000;
  *  still true and 38 node feeds still on the books. Ten minutes is the same
  *  threshold the TUI already calls a stale statistics feed (telnet/chrome.ts). */
 const STATS_FEED_DEAD_MS = 10 * 60_000;
+/** How long after a (re)subscribe its replayed snapshots keep arriving. 39
+ *  nodes land within seconds; generous, and bounded so a wedged rebuild cannot
+ *  suppress the liveness stamp indefinitely (v0.67.0). */
+const STATS_REPLAY_GRACE_MS = 15_000;
 const COARSE_INTERVAL_MS = 60_000;
 /** v0.22: min gap before a FAILED config-param fetch is retried, so a Detail
  *  screen that re-requests every frame can't hammer a flaky device. */
@@ -809,6 +813,9 @@ class ZwaveDataImpl implements ZwaveData {
    *  cleared in a `finally` around a body whose every await is bounded by the WS
    *  client's 10 s command timeout, so it cannot stick. */
   private rebuildInFlight = false;
+  /** A (re)subscribe REPLAYS every node's snapshot, so events inside this
+   *  window prove nothing about the feed being alive (v0.67.0). */
+  private statsReplayUntil = 0;
   /** When the driver-WS link last completed its version handshake (v0.65.0) —
    *  i.e. when the driver last (re)started under us. */
   private driverWsConnAt: number | null = null;
@@ -1772,7 +1779,7 @@ class ZwaveDataImpl implements ZwaveData {
     const now = Date.now();
     const band = bandOf(now);
     if (!this.baselines) {
-      return { enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band, bands: N_BANDS };
+      return { enabled: false, ready: 0, total: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0, band, bands: N_BANDS };
     }
     // Three series, not one (v0.43.1). The single timeout count was rendered as
     // a universal "every node has a graduated baseline"; RSSI in particular can
@@ -1780,6 +1787,11 @@ class ZwaveDataImpl implements ZwaveData {
     let timeoutReady = 0;
     let rttReady = 0;
     let rssiReady = 0;
+    // A node too quiet to evaluate reads as CLEAR everywhere else (v0.67.0):
+    // `windowTimeoutRate` returns null under MIN_WINDOW_TX and all three
+    // consumers skip silently, so "38/38 ready" concealed nodes nothing was
+    // measuring. Unmeasured is a third state, and it is now published.
+    let timeoutWindowBlind = 0;
     let total = 0;
     for (const n of this.lastNodes) {
       if (n.isController) continue;
@@ -1787,8 +1799,9 @@ class ZwaveDataImpl implements ZwaveData {
       if (this.baselines.timeoutNormal(n.nodeId, now)?.ready) timeoutReady += 1;
       if (this.baselines.rttNormal(n.nodeId, now)?.ready) rttReady += 1;
       if (this.baselines.rssiNormal(n.nodeId, now)?.ready) rssiReady += 1;
+      if (windowTimeoutRate(this.evidence(n.nodeId), now) == null) timeoutWindowBlind += 1;
     }
-    return { enabled: true, ready: timeoutReady, total, timeoutReady, rttReady, rssiReady, band, bands: N_BANDS };
+    return { enabled: true, ready: timeoutReady, total, timeoutReady, timeoutWindowBlind, rttReady, rssiReady, band, bands: N_BANDS };
   }
 
   /** Fold each node's since-last-tick interval mean into its coarse ring. */
@@ -2561,6 +2574,9 @@ class ZwaveDataImpl implements ZwaveData {
       // way rather than tearing the handles out from under it (v0.65.0 review).
       // INSIDE the try, so the `finally` below is the only way out of it.
       this.rebuildInFlight = true;
+      // Everything the replay delivers in the next few seconds describes the
+      // PAST, not a living feed (v0.67.0).
+      this.statsReplayUntil = Date.now() + STATS_REPLAY_GRACE_MS;
       const entryId = await this.ensureEntryId();
       if (!entryId) { this.statsSubscribed = false; return; }
       await this.ensureRegistries();
@@ -3095,8 +3111,18 @@ class ZwaveDataImpl implements ZwaveData {
       this.log(`node ${nodeId}: malformed statistics event (non-numeric counters) — ignored`);
       return;
     }
-    this.lastStatsAt = Date.now();
-    this.statsArrivedAt.set(nodeId, this.lastStatsAt);
+    // FLEET LIVENESS (v0.67.0). This stamp is what the dead-feed watchdog AND
+    // `binary_sensor.zwave_tui_degraded` both measure silence against, and it
+    // was written unconditionally — including for the snapshots a re-subscribe
+    // REPLAYS. So a re-arm that did NOT revive the feed still zeroed the
+    // blindness clock, and sustained blindness became a 10-minute sawtooth the
+    // alarm could never latch on: exactly the 2026-09-15 failure this sensor
+    // exists to catch, failing open again at a slower cadence. The display
+    // stamp below has had the replay discipline since v0.26; the fleet stamp
+    // one line above it never got it.
+    const arrivedAt = Date.now();
+    if (arrivedAt >= this.statsReplayUntil) this.lastStatsAt = arrivedAt;
+    this.statsArrivedAt.set(nodeId, arrivedAt);
     const prev = this.statsByNode.get(nodeId);
     // DISPLAYED lastSeen (v0.26, assessment fix). Every (re)subscribe REPLAYS
     // each node's current snapshot, and stamping arrival time unconditionally
@@ -3216,7 +3242,10 @@ class ZwaveDataImpl implements ZwaveData {
       }
       return;
     }
-    this.lastStatsAt = Date.now();
+    // Replay-gated for the same reason as the per-node stamp (v0.67.0): the
+    // controller's snapshot is replayed by every re-subscribe too.
+    const ctrlAt = Date.now();
+    if (ctrlAt >= this.statsReplayUntil) this.lastStatsAt = ctrlAt;
     this.ctrlStats = mapped;
   }
 

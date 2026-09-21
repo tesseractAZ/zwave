@@ -17,7 +17,7 @@ const sym = (over: Partial<Symptom> = {}): Symptom =>
 
 const data = (over: Partial<DataProvider> = {}): DataProvider => ({
   symptoms: () => [],
-  engineStatus: () => ({ enabled: true, ready: 3, total: 38, timeoutReady: 38, rttReady: 22, rssiReady: 22, band: 0, bands: 6 }),
+  engineStatus: () => ({ enabled: true, ready: 3, total: 38, timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 22, rssiReady: 22, band: 0, bands: 6 }),
   autoPingState: () => AP() as never,
   ...over,
 } as never);
@@ -192,4 +192,13 @@ test('a bare log function still works — the warn sink is optional (v0.66.1)', 
   h.stop();
   assert.equal(plain.length, 1, 'a sink without .warn is still called');
   assert.match(plain[0], /publish failed \(HTTP 400\)/);
+});
+
+test('the engine sensor publishes how many nodes are UNMEASURED (v0.67.0)', () => {
+  // A skipped timeout window read as clear. detectors_ready said 38/38 while
+  // three detectors were silently skipping quiet nodes.
+  const s = buildStates(data({ engineStatus: () => ({ enabled: true, ready: 35, total: 38,
+    timeoutReady: 35, timeoutWindowBlind: 7, rttReady: 20, rssiReady: 20, band: 0, bands: 6 }) } as never));
+  assert.equal(by(s, ENTITY_ENGINE).attrs.detectors_unmeasured, 7,
+    'the unmeasured count reaches HA, or a quiet node reads as a healthy one');
 });
