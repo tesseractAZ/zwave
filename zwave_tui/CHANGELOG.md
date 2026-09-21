@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.67.0
+
+### Fixed — a replayed snapshot counted as proof the statistics feed was alive
+
+`lastStatsAt` is the single stamp both the dead-feed watchdog and
+`binary_sensor.zwave_tui_degraded` measure silence against, and every incoming
+statistics event wrote it unconditionally. Subscribing REPLAYS each node's
+current snapshot, so the first act of the v0.65.0 cure was to zero the very
+clock that proves the cure worked. A re-arm that did not revive the feed still
+reset it: sustained blindness became a ten-minute sawtooth — re-arm, clock
+zeroed, wait ten minutes, re-arm again — and the alarm could never latch. That
+is the 2026-09-15 failure this sensor exists to catch, failing open again at a
+slower cadence.
+
+Events arriving inside a short window after a (re)subscribe no longer stamp the
+fleet clock. The window is bounded, so a wedged rebuild cannot suppress the
+stamp indefinitely, and ordinary traffic a moment later still proves the feed
+alive — a guard that swallowed real events would false-alarm on a healthy mesh,
+so both directions are pinned. The controller feed carries the same guard,
+because its snapshot is replayed too.
+
+The per-node display stamp has had this replay discipline since v0.26. The
+fleet stamp sat one line above it and never got it.
+
+### Fixed — a node too quiet to measure read as a node that was fine
+
+`windowTimeoutRate` returns nothing when a node's ten-minute window holds fewer
+than twenty transmissions, and all three of its consumers — `return-path-degraded`,
+`chronic-return-path` and the timeout corroboration inside `weak-signal` — skip
+silently. So `detectors_ready` could read 38/38 while quiet nodes were being
+measured by nothing at all, and absence of a symptom read as an all-clear.
+
+The floor stays where it is. It is a confidence threshold, not a bug: at five
+transmissions a single lost probe is a twenty-percent rate, which clears the
+alerting threshold, and on a mesh whose only per-node traffic is a two-hourly
+sweep ping that turns ordinary transient loss into recurring pages. Unmeasured
+is simply a third state, and it is now counted and published as
+`detectors_unmeasured` beside `detectors_ready`.
+
+TESTS_AND_MUTANTS_LINE_0670
+
 ## 0.66.1
 
 ### Fixed — the one line that had to survive `log_level: warning` did not

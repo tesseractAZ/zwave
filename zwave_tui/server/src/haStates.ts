@@ -194,6 +194,9 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
         // Coverage is a statement about the INSTRUMENT, and an operator
         // deciding whether to trust a quiet screen needs it (v0.46.0).
         detectors_ready: eng.timeoutReady,
+        // Not clear — unmeasured. Three detectors skip a node whose 10-minute
+        // window holds too few transmissions to rate (v0.67.0).
+        detectors_unmeasured: eng.timeoutWindowBlind,
         detectors_total: eng.total,
         rtt_ready: eng.rttReady,
       },

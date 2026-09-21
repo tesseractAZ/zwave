@@ -274,7 +274,7 @@ re-asserted every 30 seconds:
 | entity | state | notable attributes |
 | --- | --- | --- |
 | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_total` |
+| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
 

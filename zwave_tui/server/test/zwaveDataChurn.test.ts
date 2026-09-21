@@ -1789,3 +1789,92 @@ test('a feed that has never delivered anything is NOT re-armed in a loop (v0.65.
     zd.stop();
   }
 });
+
+test('a REPLAYED statistics snapshot is not proof the feed is alive (v0.67.0)', async () => {
+  // `lastStatsAt` is what the dead-feed watchdog AND the degraded sensor both
+  // measure silence against, and it was stamped unconditionally — including
+  // for the snapshots every (re)subscribe replays. So a re-arm that did NOT
+  // revive the feed still zeroed the blindness clock: sustained blindness
+  // became a 10-minute sawtooth that the alarm could never latch on.
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha, { refreshMs: 60 });
+  const feed = 'zwave_js/subscribe_node_statistics';
+  try {
+    await waitFor(() => (ha.handlers.get(feed)?.length ?? 0) >= 1);
+    const priv = zd as unknown as { lastStatsAt: number | null; statsReplayUntil: number };
+    const fire = (tx: number): void => {
+      for (const h of ha.handlers.get(feed) ?? []) {
+        h({ event: { source: 'node', node_id: 7, nodeId: 7, commands_tx: tx, commands_rx: 1,
+          commands_dropped_tx: 0, commands_dropped_rx: 0, timeout_response: 0 } } as never);
+      }
+    };
+    // The window is opened by the SUBSCRIBE path itself, not only by this test
+    // poking the field — boot just subscribed, so it must already be armed.
+    assert.ok(priv.statsReplayUntil > 0, 'subscribeStatistics must open the replay window');
+    // 1. INSIDE the replay window: the snapshot describes the past.
+    priv.lastStatsAt = Date.now() - 20 * 60_000;
+    const stale = priv.lastStatsAt;
+    priv.statsReplayUntil = Date.now() + 15_000;
+    fire(11);
+    assert.equal(priv.lastStatsAt, stale,
+      'a replayed snapshot must not zero the blindness clock — that is the sawtooth');
+    // 2. OUTSIDE it, the very same event is the feed proving itself alive.
+    priv.statsReplayUntil = 0;
+    fire(12);
+    assert.ok(priv.lastStatsAt != null && priv.lastStatsAt > stale,
+      'a real post-replay event must still mark the feed alive, or the alarm false-fires');
+    // 3. The CONTROLLER's snapshot is replayed by every re-subscribe too, and
+    //    it writes the same fleet clock — so it carries the same guard.
+    const ctrlFeed = 'zwave_js/subscribe_controller_statistics';
+    await waitFor(() => (ha.handlers.get(ctrlFeed)?.length ?? 0) >= 1);
+    const fireCtrl = (tx: number): void => {
+      for (const h of ha.handlers.get(ctrlFeed) ?? []) {
+        h({ event: { source: 'controller', messages_tx: tx, messages_rx: 1, messages_dropped_tx: 0,
+          messages_dropped_rx: 0, nak: 0, can: 0, timeout_ack: 0, timeout_response: 0, timeout_callback: 0 } } as never);
+      }
+    };
+    priv.lastStatsAt = stale;
+    priv.statsReplayUntil = Date.now() + 15_000;
+    fireCtrl(5);
+    assert.equal(priv.lastStatsAt, stale, "the controller's replay must not zero the clock either");
+    priv.statsReplayUntil = 0;
+    fireCtrl(6);
+    assert.ok(priv.lastStatsAt != null && priv.lastStatsAt > stale,
+      'and a real controller event still marks the feed alive');
+  } finally {
+    zd.stop();
+  }
+});
+
+test('a node too quiet to rate is reported as UNMEASURED, not clear (v0.67.0)', async () => {
+  // `windowTimeoutRate` returns null below MIN_WINDOW_TX and all three of its
+  // consumers skip silently, so "38/38 ready" concealed nodes that nothing was
+  // measuring. Unmeasured is a third state and it has to be published.
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha, { refreshMs: 60 });
+  try {
+    await waitFor(() => zd.snapshot().length > 0);
+    const inner = zd as unknown as { evidence: (id: number) => unknown[]; baselines: unknown };
+    const realEv = inner.evidence;
+    const realBl = inner.baselines;
+    try {
+      // The engine reports `enabled: false` without a baselines store, and that
+      // shape has no per-node loop at all.
+      inner.baselines = { timeoutNormal: () => ({ ready: true }), rttNormal: () => ({ ready: true }),
+        rssiNormal: () => ({ ready: true }) };
+      inner.evidence = () => [];                       // no traffic at all to rate
+      const blind = zd.engineStatus();
+      assert.ok(blind.total > 0, 'fixture guard: there are scoreable nodes');
+      assert.equal(blind.timeoutWindowBlind, blind.total, 'every unrateable node is counted');
+      const now = Date.now();
+      // …and a node with real traffic past the floor is NOT counted.
+      inner.evidence = () => Array.from({ length: 25 }, (_, i) => ({ t: now - i * 1000, dTx: 1, dTimeout: 0 }));
+      assert.equal(zd.engineStatus().timeoutWindowBlind, 0, 'a node above the floor is measured, not blind');
+    } finally {
+      inner.evidence = realEv;
+      inner.baselines = realBl;
+    }
+  } finally {
+    zd.stop();
+  }
+});

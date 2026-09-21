@@ -1005,7 +1005,9 @@ const MUTANTS = [
     repl: '      if (arrived != null && now - arrived < STATS_SETTLE_MS) {',
     what: 'a node that talks continuously cannot starve its own evidence' },
   { id: 'stats-arrival-stamped', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
-    find: '    this.statsArrivedAt.set(nodeId, this.lastStatsAt);',
+    // Re-pointed in v0.67.0: the fleet stamp is now replay-gated and the
+    // arrival stamp reads its own local, so the line moved. Same rule.
+    find: '    this.statsArrivedAt.set(nodeId, arrivedAt);',
     repl: '',
     what: 'every statistics event stamps its arrival for the settle rule' },
   { id: 'legacy-discard-on-identity-reaches-the-log-ring', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
@@ -3851,6 +3853,35 @@ const MUTANTS = [
     find: '    unverifiableCount: (k) => zd.unverifiableCount(k),',
     repl: '    unverifiableCount: () => 0,',
     what: 'the production bridge forwards unverifiableCount to the data layer' },
+  /* ── v0.67.0: detector reachability ───────────────────────────────────── */
+  { id: 'replay-does-not-prove-liveness', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // Restores the sawtooth: a re-arm that never revived the feed still zeroed
+    // the blindness clock, so the alarm could not latch.
+    find: '    if (arrivedAt >= this.statsReplayUntil) this.lastStatsAt = arrivedAt;',
+    repl: '    this.lastStatsAt = arrivedAt;',
+    what: 'a replayed snapshot does not stamp the fleet liveness clock' },
+  { id: 'real-events-still-prove-liveness', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    // The guard must not swallow ordinary traffic, or the alarm false-fires on
+    // a healthy mesh.
+    find: '    if (arrivedAt >= this.statsReplayUntil) this.lastStatsAt = arrivedAt;',
+    repl: '    if (arrivedAt < this.statsReplayUntil) this.lastStatsAt = arrivedAt;',
+    what: 'an event outside the replay window still marks the feed alive' },
+  { id: 'replay-window-is-opened-by-the-subscribe', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: '      this.statsReplayUntil = Date.now() + STATS_REPLAY_GRACE_MS;',
+    repl: '      void STATS_REPLAY_GRACE_MS;',
+    what: 'the guard is wired to the real subscribe path, not merely implemented' },
+  { id: 'controller-replay-does-not-prove-liveness', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: '    if (ctrlAt >= this.statsReplayUntil) this.lastStatsAt = ctrlAt;',
+    repl: '    this.lastStatsAt = ctrlAt;',
+    what: "the controller's replayed snapshot does not stamp the fleet liveness clock either" },
+  { id: 'unmeasured-windows-counted', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
+    find: '      if (windowTimeoutRate(this.evidence(n.nodeId), now) == null) timeoutWindowBlind += 1;',
+    repl: '      void n;',
+    what: 'a node whose timeout window cannot be rated is counted as unmeasured' },
+  { id: 'unmeasured-reaches-ha', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '        detectors_unmeasured: eng.timeoutWindowBlind,',
+    repl: '        detectors_unmeasured: 0,',
+    what: 'the unmeasured count reaches HA, where an operator can see it' },
   /* ── v0.66.1 ─────────────────────────────────────────────────────────── */
   { id: 'publish-failure-is-warn', file: 'src/haStates.ts', tests: ['haStates'],
     // At `log_level: warning` — what an operator sets to quiet a chatty add-on
