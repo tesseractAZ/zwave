@@ -39,7 +39,7 @@ sweep ping that turns ordinary transient loss into recurring pages. Unmeasured
 is simply a third state, and it is now counted and published as
 `detectors_unmeasured` beside `detectors_ready`.
 
-TESTS_AND_MUTANTS_LINE_0670
+3 new tests pin both fixes — a replayed snapshot leaves the blindness clock alone while a real event still marks the feed alive, for the node and the controller feeds alike, and a quiet node is counted as unmeasured — and 6 new mutants show each guard is load-bearing. Full run: 689 killed, 0 survived, 9 equivalent.
 
 ## 0.66.1
 

@@ -11,7 +11,7 @@ same rule the screens themselves keep.
 Reproduce any of it with the commands given; each section names its own method.
 
 - **Measured at:** each figure section states when it was measured — a
-  version, a date or both; the newest is §3, v0.66.1 (2026-09-20), and §8
+  version, a date or both; the newest is §3, v0.67.0 (2026-09-21), and §8
   lists every re-measurement
 - **Reference mesh:** 39 nodes (38 + controller), Zooz ZST39 LR 800-series,
   ~14 days of continuous evidence
@@ -106,18 +106,18 @@ session and transport layers. That means:
 
 ## 3. Verification cost
 
-The tables and run figures below are from the v0.66.1 release run, 2026-09-20.
+The tables and run figures below are from the v0.67.0 release run, 2026-09-21.
 
 | | measured |
 | --- | --- |
-| Mutation harness | **692 mutants, 1791 s wall · 812 s user · 101 s sys** |
-| Source | 26 223 lines TypeScript · 21 432 lines of tests |
-| Test suite | **1 192 tests, 12.4 s** (`npm test`) |
+| Mutation harness | **698 mutants, 1842 s wall · 799 s user · 97 s sys** |
+| Source | 26 259 lines TypeScript · 21 530 lines of tests |
+| Test suite | **1 195 tests, 12.3 s** (`npm test`) |
 
-Latest full run: **683 killed · 0 survived · 9 equivalent · 0 missing ·
+Latest full run: **689 killed · 0 survived · 9 equivalent · 0 missing ·
 0 ambiguous · 0 invalid · 0 relabel.**
 
-### Where the 1791 seconds actually go
+### Where the 1842 seconds actually go
 
 `node scripts/mutation-check.mjs --profile` reports a per-phase breakdown; the
 run below was taken under `/usr/bin/time -l` so the user/sys split is real
@@ -126,38 +126,38 @@ rather than inferred.
 | phase | wall | share | runs | each |
 | --- | ---: | ---: | ---: | ---: |
 | baseline typecheck | 0.2 s | 0.0 % | 1 | 0.20 s |
-| baseline full suite | 12.9 s | 0.7 % | 1 | 12.9 s |
-| per-mutant typecheck | 143.7 s | 8.1 % | 692 | 0.21 s |
-| **targeted test runs** | **1498.1 s** | **84.1 %** | 691 | **2.17 s** |
-| full-suite fallbacks | 126.9 s | 7.1 % | 10 | 12.69 s |
-| total | 1781.9 s | | | |
+| baseline full suite | 12.4 s | 0.7 % | 1 | 12.4 s |
+| per-mutant typecheck | 139.2 s | 7.6 % | 698 | 0.20 s |
+| **targeted test runs** | **1556.2 s** | **84.9 %** | 697 | **2.23 s** |
+| full-suite fallbacks | 124.4 s | 6.8 % | 10 | 12.44 s |
+| total | 1832.4 s | | | |
 
 ### The startup-bound hypothesis is REFUTED
 
 Earlier revisions of this document flagged "startup-bound" as an untested guess
 and declined to assert it. Measured, it is wrong:
 
-- **`sys` is 100.6 s — 5.6 % of 1790.9 s real.** `user` is 811.6 s, **45 %**.
+- **`sys` is 97.0 s — 5.3 % of 1842.0 s real.** `user` is 799.0 s, **43 %**.
 - The harness now measures its own **process-startup floor** directly, by timing
-  one bare invocation of each subprocess: `tsc` 65 ms, `tsx` 73 ms. Against the
-  observed counts that is `65 ms × 692 + 73 ms × 701` = **96.2 s, 5.4 %** of the
+  one bare invocation of each subprocess: `tsc` 59 ms, `tsx` 72 ms. Against the
+  observed counts that is `59 ms × 698 + 72 ms × 707` = **92.1 s, 5.0 %** of the
   run spent before any work begins. Two consecutive runs agreed to within half a
   point, so this is a stable property and not one run's weather.
 
 Two independent measurements agree at ~10 %. The harness is **CPU-bound on real
 work**, not on launching processes.
 
-The cost centre is the **targeted test runs: 84 % of the run**, at 2.17 s each
-across 691 invocations — of which only ~73 ms is startup. The harness times
-each run whole, so how the other ~2.10 s splits between transpiling, module
+The cost centre is the **targeted test runs: 85 % of the run**, at 2.23 s each
+across 697 invocations — of which only ~72 ms is startup. The harness times
+each run whole, so how the other ~2.16 s splits between transpiling, module
 loading and running the tests is not measured; `tsx` also keeps an on-disk
 transform cache, so an unchanged source is not necessarily transpiled again.
 So the lever is not "spawn fewer processes"; precompiling once and running
 plain JS, or keeping a warm worker, are candidates this profile has not tested.
 
-Two smaller levers, for scale: the per-mutant typecheck is 8.1 % (31 % of which
+Two smaller levers, for scale: the per-mutant typecheck is 7.6 % (30 % of which
 *is* startup, so an incremental/`--watch` tsc server would help there), and the
-full-suite fallbacks are 7.1 % from only **10** runs at 12.7 s each. A mutant
+full-suite fallbacks are 6.8 % from only **10** runs at 12.4 s each. A mutant
 falls back to the full suite whenever its targeted files leave it alive, or when
 it has no targeted file to run (`fastTestsFor()` in `scripts/mutation-check.mjs`
 drops a named test file that does not exist). In this run 9 of the 10 are the 9
@@ -192,7 +192,7 @@ time, larger than anything in the phase table above.
 marked `equivalent` that the suite now kills) are all failures. An anchor
 pre-flight checks every mutant's target text against its file before any
 *mutant's* tests run — it runs after the baseline, so a stale entry costs the
-baseline (~13 s) rather than a full run (~30 minutes; 1791 s in the v0.66.1
+baseline (~12 s) rather than a full run (~31 minutes; 1842 s in the v0.67.0
 run). It fired nine times during the v0.51–v0.64.3 work, each on an anchor one
 of my own edits had moved — most recently in v0.64.3, `MISSING` on both
 outage-clock mutants after the dating line they target was rewritten, and
@@ -510,6 +510,7 @@ previously listed here, which wrongly implied open work.
 
 | date | version | what changed |
 | --- | --- | --- |
+| 2026-09-21 | v0.67.0 | §3 re-measured: 698 mutants (689 killed · 9 equivalent), 1842 s wall · 799 s user · 97 s sys, 1 195 tests in 12.3 s; replay-gated feed liveness and the unmeasured-window count added 6 mutants and 3 tests |
 | 2026-09-20 | v0.66.1 | §3 re-measured: 692 mutants (683 killed · 9 equivalent), 1791 s wall · 812 s user · 101 s sys, 1 192 tests in 12.4 s; two tests and two mutants for the publish-failure severity |
 | 2026-09-19 | v0.66.0 | §3 re-measured: 690 mutants (681 killed · 9 equivalent), 1783 s wall · 804 s user · 99 s sys, 1 190 tests in 12.6 s; the log-review fixes added 7 mutants and 4 tests |
 | 2026-09-16 | v0.65.0 | §3 re-measured: 683 mutants (674 killed · 9 equivalent), 1757 s wall · 742 s user · 81 s sys, 1 186 tests in 12.5 s; the live-audit fixes added 38 mutants and 26 tests |
