@@ -202,3 +202,54 @@ test('the engine sensor publishes how many nodes are UNMEASURED (v0.67.0)', () =
   assert.equal(by(s, ENTITY_ENGINE).attrs.detectors_unmeasured, 7,
     'the unmeasured count reaches HA, or a quiet node reads as a healthy one');
 });
+
+test('one entity HA rejects does not stop the other three publishing (v0.68.0)', async () => {
+  // The loop used to `return` on the first failure, so a 400 on one payload
+  // silently muted every conclusion behind it for as long as it kept failing.
+  const posted: string[] = [];
+  const h = startHaStates({
+    data: data(), token: 't', log: () => {}, intervalMs: 1_000_000,
+    fetchImpl: (async (url: string) => {
+      posted.push(url);
+      return url.endsWith(ENTITY_DEGRADED) ? { ok: false, status: 400 } : { ok: true, status: 200 };
+    }) as never,
+  });
+  await h.publishNow();
+  h.stop();
+  assert.ok(posted[0].endsWith(ENTITY_DEGRADED), 'fixture guard: the rejected entity is the FIRST one published');
+  assert.equal(posted.length, 4, `every entity must still be attempted, got ${posted.length}`);
+});
+
+test('a steady outage logs once — the latch is the message, not the count beside it (v0.68.0)', async () => {
+  // A count that wobbles between ticks would defeat a latch keyed on it and
+  // re-log the same outage every 30 s.
+  let tick = 0;
+  const warned: string[] = [];
+  const log = Object.assign(() => {}, { warn: (m: string) => warned.push(m) });
+  const h = startHaStates({
+    data: data(), token: 't', log, intervalMs: 1_000_000,
+    fetchImpl: (async (url: string) =>
+      // tick 1 fails all four; tick 2 fails only the first — same cause, new count
+      (tick === 1 || url.endsWith(ENTITY_DEGRADED)) ? { ok: false, status: 502 } : { ok: true, status: 200 }) as never,
+  });
+  tick = 1; await h.publishNow();
+  tick = 2; await h.publishNow();
+  h.stop();
+  assert.equal(warned.length, 1, `one outage, one line: ${JSON.stringify(warned)}`);
+  assert.match(warned[0], /for \d of 4 entities/, 'and the line says how much of the publish failed');
+});
+
+test('a publish requested mid-tick joins that tick instead of doubling it (v0.68.0)', async () => {
+  let calls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const h = startHaStates({
+    data: data(), token: 't', log: () => {}, intervalMs: 1_000_000,
+    fetchImpl: (async () => { calls += 1; await gate; return { ok: true, status: 200 }; }) as never,
+  });
+  const joined = h.publishNow();                 // arrives while the start-up tick is in flight
+  release();
+  await joined;
+  h.stop();
+  assert.equal(calls, 4, `one tick of four entities, not two overlapping ticks: ${calls} posts`);
+});

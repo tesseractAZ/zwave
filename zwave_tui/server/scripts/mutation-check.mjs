@@ -3853,6 +3853,19 @@ const MUTANTS = [
     find: '    unverifiableCount: (k) => zd.unverifiableCount(k),',
     repl: '    unverifiableCount: () => 0,',
     what: 'the production bridge forwards unverifiableCount to the data layer' },
+  /* ── v0.68.0: the publish loop ────────────────────────────────────────── */
+  { id: 'one-rejected-entity-does-not-mute-the-rest', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '        tickErr ??= e instanceof Error ? e.message : String(e);',
+    repl: '        tickErr ??= e instanceof Error ? e.message : String(e); break;',
+    what: 'a rejected entity does not stop the others publishing' },
+  { id: 'publish-latch-is-the-message', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '    if (tickErr !== lastErr) {',
+    repl: '    if (`${tickErr}/${failed}` !== lastErr) {',
+    what: 'a steady outage logs once even when the failing count moves' },
+  { id: 'concurrent-publish-joins-the-tick', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '  const publishNow = (): Promise<void> => (current ??= publishOnce().finally(() => { current = null; }));',
+    repl: '  const publishNow = (): Promise<void> => { void current; return publishOnce(); };',
+    what: 'a publish requested mid-tick joins it rather than doubling it' },
   /* ── v0.67.0: detector reachability ───────────────────────────────────── */
   { id: 'replay-does-not-prove-liveness', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     // Restores the sawtooth: a re-arm that never revived the feed still zeroed
@@ -3888,14 +3901,14 @@ const MUTANTS = [
     // — info is filtered, so the only notice that conclusions had stopped
     // reaching HA was the one thing removed. Three real failures in the 24 h
     // after v0.66.0 shipped went unseen at that level.
-    find: '          (log.warn ?? log)(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
-    repl: '          log(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
+    find: '      (log.warn ?? log)(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);',
+    repl: '      log(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);',
     what: 'a publish failure is logged at warn, so it survives log_level: warning' },
   { id: 'bare-log-sink-still-called', file: 'src/haStates.ts', tests: ['haStates'],
     // Tests and bare dev pass a plain function with no `.warn`; requiring one
     // would silence the failure entirely for them.
-    find: '          (log.warn ?? log)(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
-    repl: '          log.warn?.(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
+    find: '      (log.warn ?? log)(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);',
+    repl: '      log.warn?.(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);',
     what: 'a sink without .warn still receives the failure' },
   /* ── v0.66.0: the 2026-09-17 log review ──────────────────────────────── */
   { id: 'unattributed-silence-is-not-unheard', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],

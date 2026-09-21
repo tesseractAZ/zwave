@@ -30,6 +30,10 @@ import type { DataProvider } from './types';
 /** How often the states are re-asserted (also the Core-restart self-heal window). */
 export const HA_STATE_PUBLISH_MS = 30_000;
 
+/** A publish that neither answers nor refuses is abandoned after this long, so
+ *  a hung Core cannot hold a tick open past the next one (v0.68.0). */
+export const HA_STATE_PUBLISH_TIMEOUT_MS = 7_000;
+
 /** The entity ids this add-on owns. Renaming one BREAKS every automation built
  *  on it — treat these as published API, not as internal names. */
 export const ENTITY_DEGRADED = 'binary_sensor.zwave_tui_degraded';
@@ -216,37 +220,54 @@ export function startHaStates(
   const base = opts.baseUrl ?? 'http://supervisor/core/api';
   let lastErr: string | null = null;
 
-  const publishNow = async (): Promise<void> => {
+  const publishOnce = async (): Promise<void> => {
     if (!opts.token) return;
+    let tickErr: string | null = null;
+    let failed = 0;
+    let total = 0;
     for (const s of buildStates(opts.data)) {
+      total += 1;
       try {
         const res = await doFetch(`${base}/states/${s.entity}`, {
           method: 'POST',
           headers: { authorization: `Bearer ${opts.token}`, 'content-type': 'application/json' },
           body: JSON.stringify({ state: s.state, attributes: s.attrs }),
+          signal: AbortSignal.timeout(HA_STATE_PUBLISH_TIMEOUT_MS),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        lastErr = null;
       } catch (e) {
-        // Report only when the message CHANGES: a Core restart makes every tick
-        // fail, and an ERROR per entity per 30 s would bury the log this add-on
-        // spent three releases making readable (cf. the store save-failure latch).
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg !== lastErr) {
-          lastErr = msg;
-          // WARN, not info (v0.66.1). "Engine conclusions are not reaching HA"
-          // is the whole product failing, and at `log_level: warning` — the
-          // setting an operator picks to quiet a chatty add-on — it was the one
-          // thing filtered out. It fired three times in the 24 h after v0.66.0
-          // shipped (two 502s and a 400 around a Core restart) and nothing said
-          // so at the configured level. The sink stays optional: tests and bare
-          // dev pass a plain function, which is called exactly as before.
-          (log.warn ?? log)(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);
-        }
-        return;
+        // KEEP GOING (v0.68.0). This used to `return`, so one entity HA
+        // rejected — a 400 on one payload — silently stopped the other three
+        // from publishing for as long as it kept failing. Each entity is an
+        // independent conclusion; one bad write must not mute the rest.
+        failed += 1;
+        tickErr ??= e instanceof Error ? e.message : String(e);
       }
     }
+    if (tickErr == null) { lastErr = null; return; }
+    // Report only when the message CHANGES: a Core restart makes every tick
+    // fail, and a line per tick would bury the log this add-on spent three
+    // releases making readable (cf. the store save-failure latch). The latch is
+    // the MESSAGE, never the count beside it — a count that wobbles between
+    // ticks would defeat it and re-log the same outage every 30 s.
+    if (tickErr !== lastErr) {
+      lastErr = tickErr;
+      // WARN, not info (v0.66.1). "Engine conclusions are not reaching HA"
+      // is the whole product failing, and at `log_level: warning` — the
+      // setting an operator picks to quiet a chatty add-on — it was the one
+      // thing filtered out. The sink stays optional: tests and bare dev pass a
+      // plain function, which is called exactly as before.
+      (log.warn ?? log)(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);
+    }
   };
+
+  // ONE TICK AT A TIME (v0.68.0). The loop now tries every entity, so a Core
+  // that hangs rather than refuses costs up to four timeouts per tick — longer
+  // than the interval — and ticks would pile up. A call that arrives while one
+  // is in flight JOINS it rather than being dropped: a caller awaiting a
+  // publish must see that publish finish, not return before it started.
+  let current: Promise<void> | null = null;
+  const publishNow = (): Promise<void> => (current ??= publishOnce().finally(() => { current = null; }));
 
   const timer = setInterval(() => { void publishNow(); }, opts.intervalMs ?? HA_STATE_PUBLISH_MS);
   timer.unref?.();
