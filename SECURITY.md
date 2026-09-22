@@ -40,14 +40,17 @@ seriously.
   `auto_ping_enabled` defaults **off** *and* it independently obeys
   `write_actions_enabled`, so both must be turned on deliberately before it can
   do anything. With both on, a **mains-powered** node still Dead after the dwell
-  is probed with no keypress, as is a node silent past `auto_ping_stale_min`. A
+  is probed with no keypress, as is every non-Dead mains-powered node once per
+  `auto_ping_stale_min` (the liveness sweep) and a node an open outcome episode
+  needs a verification reading from. A
   ping transmits, so this is a genuine automatic path and is named here as one.
   It is bounded: `auto_ping_max_attempts` per outage on a widening backoff, and
-  suppressed during storms, route rebuilds and restarts. Nothing else — refresh,
+  suppressed during storms, route rebuilds, restarts and while the controller
+  reports its radio off (the nightly NVM backup). Nothing else — refresh,
   re-interview, rebuild-routes, remove-failed, device control, config writes —
   has any automatic path whatsoever.
 - **One decision is answerable without write actions.** `write_actions_enabled`
-  gates mesh mutations. The mesh-identity decision above mutates nothing on the
+  gates mesh mutations. The mesh-identity decision below mutates nothing on the
   mesh — it answers a question about the add-on's own `/data` — so it is
   offered in read-only installs too. Gating it there would leave a read-only
   monitor that swapped a stick held indefinitely: no learned state, the HA
@@ -95,10 +98,10 @@ seriously.
   because U+009B is an 8-bit CSI and U+009D an 8-bit OSC, and xterm.js executes
   both. Inbound console WebSocket frames are size-capped.
 - **What the add-on writes to Home Assistant, and what it does not.** Besides
-  operator-initiated mesh actions, the add-on publishes four *diagnostic* states
+  operator-initiated mesh actions, the add-on publishes five *diagnostic* states
   over the Core REST API — a degraded flag, a count of nodes needing attention,
-  a live symptom count, and the engine's own run state. They carry node ids,
-  counts and symptom kinds; **no credentials, no device state, and nothing about
+  a live symptom count, the engine's own run state, and a week's route failures
+  ranked by link. They carry node ids, counts, symptom kinds and timestamps; **no credentials, no device state, and nothing about
   the network beyond what the TUI already shows an authenticated operator.** A
   held mesh-identity decision raises the same `degraded` flag with the two home
   ids in its `reason` — a home id is a network identifier, not a secret, and it
