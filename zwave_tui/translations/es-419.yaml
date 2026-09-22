@@ -168,7 +168,9 @@ configuration:
     description: >-
       Déjelo en el valor predeterminado ws://supervisor/core/websocket para una
       instalación normal. Cámbielo solo para apuntar la capa de datos a otro
-      Home Assistant Core o a otro WebSocket del controlador.
+      Home Assistant Core, nunca al WebSocket del controlador (para eso está la
+      URL del controlador, a continuación): la capa de datos usa los comandos
+      zwave_js de Home Assistant, que el servidor del controlador no atiende.
   driver_ws_url:
     name: Avanzado · URL del WebSocket del controlador Z-Wave JS (telemetría de solo lectura)
     description: >-

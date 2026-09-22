@@ -62,8 +62,8 @@ configuration:
       devices are never touched — asleep is not dead, and a ping cannot reach
       one before its own wakeup. Requires "Enable write actions". Suppressed
       during a route rebuild, in the restart window (for a Dead node, only until
-      the roster is ready), while the controller's radio is off for its
-      nightly NVM backup, and whenever a quarter of
+      the roster is ready), while the controller's radio is off (as during
+      its nightly NVM backup), and whenever a quarter of
       the mesh is down at once (that is a controller problem, not a device one).
       Every attempt is recorded, so REMEDY shows whether it actually works.
   auto_ping_after_min:
@@ -156,8 +156,10 @@ configuration:
     name: Advanced · Home Assistant WebSocket URL
     description: >-
       Leave at the default ws://supervisor/core/websocket for a normal install.
-      Override only to point the data layer at a different HA Core / driver
-      WebSocket.
+      Override only to point the data layer at a different HA Core
+      WebSocket — never at the driver socket (that is the Z-Wave JS driver
+      WebSocket URL option below): the data layer speaks Home Assistant's
+      zwave_js commands, which the driver server does not serve.
   driver_ws_url:
     name: Advanced · Z-Wave JS driver WebSocket URL (read-only telemetry)
     description: >-

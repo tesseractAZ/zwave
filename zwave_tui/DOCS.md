@@ -69,7 +69,7 @@ before it (source: `main()` in `server/src/index.ts`):
 | 7 | Telnet transport | `startTelnetServer` | The raw-TCP TUI on `:2324`, opt-in via `telnet_enabled`. |
 | 7b | Home Assistant states | `startHaStates` | Publishes the engine's conclusions as five HA entities every 30 s, after Fastify binds (§12.11); a no-op without `SUPERVISOR_TOKEN`. |
 
-Stages 1–4 are the data spine; 4b–7 are consumers of it. Note that stage 4
+Stages 1–4 are the data spine; 4b–7b are consumers of it. Note that stage 4
 (`provider`) and stage 2 (`zwaveData`) have **independent lifecycles**: whoever
 built the provider calls `stopProvider()`, but the underlying data layer is
 stopped separately by its owner (`zwaveData.stop()`), which matters for the
@@ -748,7 +748,7 @@ The telnet parser (`server.ts`, `parseInput`) strips IAC framing, decodes NAWS w
 
 **Mutating keys are recognized but inert when write actions are off.** `applyKey`'s `p/i/h/R/x` case logs *"'x' is a mutating action — enable write_actions_enabled in the add-on config to unlock"* and returns no-redraw, so the muscle-memory is correct even though nothing actuates. When `write_actions_enabled` is set, the session intercepts these **before** `applyKey` and routes them through `beginAction()` → the type-CONFIRM modal. This is the engine's owner-mandated **advisory** posture in the UI layer: every operator-initiated mutating path terminates at a human typing the confirm word. (The one non-UI exception, auto-ping, is documented in §11.12.)
 
-**The Actions Menu (v0.23) — mesh actions + device control + config.** Opening the menu (`a`) on a node builds a frozen snapshot (`openMenu`) of four labelled groups: **DEVICE ACTIONS** (the mesh-maintenance catalog), **SYSTEM-WIDE** (rebuild-all / stop), **DEVICE CONTROLS** (one row per controllable entity × verb, from `buildEntityRows(data.entityStates(node))`), and **CONFIGURATION** (one row per *writeable* parameter, from `buildConfigRows(data.configParams(node).params)`). Each `MenuItem` carries a `payload` (`catalog` | `entity` | `config`) that `selectMenuItem` dispatches on: a catalog/entity row arms the type-CONFIRM directly; a **config** row first opens the **value picker** (`ParamEdit`) — an enum parameter lists its `states` (↑↓ to choose, cursor starting on the current value); a numeric one accepts typed digits validated against `min`/`max` (with a signed-32-bit sanity floor when the device reports no bounds) — and only then arms the CONFIRM. The menu window-scrolls around the cursor so a long list (many entities + parameters) always keeps the highlight on screen. A degenerate enum (empty/non-numeric `states`) safely falls back to numeric entry rather than presenting an empty option list.
+**The Actions Menu (v0.23) — mesh actions + device control + config.** Opening the menu (`a`) on a node builds a frozen snapshot (`openMenu`) of the **DEVICE ACTIONS** menu, in three labelled groups: **MAINTENANCE** (the mesh-maintenance catalog), **DEVICE CONTROLS** (one row per controllable entity × verb, from `buildEntityRows(data.entityStates(node))`), and **CONFIGURATION** (one row per *writeable* parameter, from `buildConfigRows(data.configParams(node).params)`). On the Controller screen the same key opens the **NETWORK ACTIONS** menu instead: a separate frozen snapshot holding only the **MESH-WIDE** group (rebuild-all or stop, plus the mesh-identity answers while a decision is pending). The two menus never mix (§2.8). Each `MenuItem` carries a `payload` (`catalog` | `entity` | `config`) that `selectMenuItem` dispatches on: a catalog/entity row arms the type-CONFIRM directly; a **config** row first opens the **value picker** (`ParamEdit`) — an enum parameter lists its `states` (↑↓ to choose, cursor starting on the current value); a numeric one accepts typed digits validated against `min`/`max` (with a signed-32-bit sanity floor when the device reports no bounds) — and only then arms the CONFIRM. The menu window-scrolls around the cursor so a long list (many entities + parameters) always keeps the highlight on screen. A degenerate enum (empty/non-numeric `states`) safely falls back to numeric entry rather than presenting an empty option list.
 
 **Filter-capture mode** is session-owned (`this.filtering`, not in `ViewState`) so it survives independent of screen state. `handleFilterKey` appends printable chars (`' '..'~'`) to `view.filter`, Backspace/DEL deletes, Enter commits (and clamps the selection), Esc cancels and clears; every mutation resets `view.selected = 0`. While capturing, Overview's `rightStatus` renders a live `FILTER "…"▏` token with a blinking cursor bar.
 
@@ -1318,7 +1318,7 @@ These are module-level `const`s, not runtime config options — tuning them is a
 
 The route rebuild worth restating from the engine's constraints: none of these score signals ever triggers an automatic action. A low grade, an `R` flag, or a `W` flag is surfaced to the operator; any remediation flows through the type-CONFIRM Actions Menu (Chapter 7). In particular a route rebuild is never offered as a fix for a poor Route-lane score — it cannot repair a physical link, it deletes manual priority routes, and it throws on Long-Range nodes.
 
-## 4.15 ENGINE — the engine's own runtime (v0.41)
+### 4.15 ENGINE — the engine's own runtime (v0.41)
 
 The learned-remediation engine grew faster than its screens. A gap analysis of
 this TUI found 83 verified gaps between what the engine computes and what an
@@ -2720,7 +2720,7 @@ The REMEDY render enforces the same rule inline (§8.8): a subsumed symptom's ro
 
   **Why this changed.** The runnable-only rule was written as a correctness guard — a green "✓ helped" must never sit under advice saying NOT recommended — and it *is* right about that risk. But it suppressed the measurement rather than reframing it, and `route-churn`'s only executable candidate is hardcoded `blocked` (§8.4), so the ledger's measurement of that action could **never reach the screen at all**. The block reason is `lore`; the ledger is `measured`. A learning loop that silences measurement whenever it contradicts a prior is not a learning loop — overturning priors is what it is for. The blocked voice keeps the original guard intact: a blocked candidate reports what was measured while stating that the block still applies — never an endorsement of an action the screen just told you not to run, and never a judgment of the block itself.
 
-**Honest overflow footer.** The screen does not scroll. `renderRemedy` computes `bodyCap = max(0, view.rows - 3)` (frame reserves masthead + title-rule + command-bar) and appends symptom blocks worst-first until the next block would overflow, reserving one line for a footer whenever blocks remain unshown. If any symptom is dropped, it emits a yellow footer — `▾ N more symptom(s) not shown — worst are listed first; widen/heighten the terminal to see all` — and, in the degenerate case where one oversized block already filled the screen, it *trims the body* (`body.length = max(0, bodyCap - 1)`) so the footer is guaranteed to be the last visible line. The design principle: an honest "N more" footer beats silently dropping a critical off the bottom.
+**Honest overflow footer.** The screen scrolls by its symptom cursor (`↑↓`/`j`/`k`, `g`/`G`): `renderRemedy` computes `bodyCap = max(0, view.rows - 3)` (frame reserves masthead + title-rule + command-bar), takes the smallest window start that both fits and contains the cursor, and appends symptom blocks from there until the next block would overflow, reserving one line for a footer whenever blocks remain unshown. If any symptom is not shown, it emits a yellow footer — `▾ N more symptom(s) not shown — actionable first, then worst; ↑↓ to reach them`, reading `▴N ▾M more …` once cards have scrolled off the top — and, in the degenerate case where one oversized block already filled the screen, it *trims the body* (`body.length = max(0, bodyCap - 1)`) so the footer is guaranteed to be the last visible line. The design principle: an honest "N more" footer beats silently dropping a critical off the bottom.
 
 **Nothing clips into a plausible lie (v0.45.0).** `shedLine` in `src/telnet/chrome.ts` is the shared composer for rows made of a protected head plus individually load-bearing tail tokens. Overflow drops **whole** tokens right-to-left with a dim `+N`, never a character clip — the rule `detail.ts`'s `pushRoute` already followed and `chrome.ts` already stated (*"an undisclosed drop is a smaller lie than a clipped `NOISE -9`, which reads as a plausible, wrong measurement"*). `fieldStrip` cannot serve the same role: it measures against `view.cols` with no indent budget and no protected head, and returns one row. Where the tail is the entire point of the row — a blocked-reason chip — `wrapTail` carries it to a continuation row instead of dropping it.
 
@@ -3104,7 +3104,7 @@ A detector is allowed to fire on evidence the verifier is forbidden to accept. O
 
 > **A burst must also START promptly.** Releasing one node per tick is FIFO, so each burst stays contiguous — but node B's burst does not begin until node A's five probes finish, five minutes later. A confirmation burst is timed to land in one specific window; starting it late puts every probe past the edge. Tight but late is exactly as useless as spread out.
 
-The verifier's floor of 3 **plus margin** (v0.37.2; it was exactly 3, and production showed that choosing exactly the floor leaves no room for the ordinary: three readings must all land, be sampled, and carry a non-null RTT inside one 300 s window, from a burst already spanning ~240 s at the tick-rounded spacing, so one lost probe — ~2 % of probes here — fails the verdict closed) — spaced `VERIFY_SPACING_MS` (30 s, below the 60 s tick, so the tick sets a 60 s effective spacing; v0.36 requested 70 s) so each is a separate observation rather than three packets carrying one reading's worth of information. Requests **top up**, never stack: a symptom that flaps ten times still owes one burst. They are drained through `drainVerifyRequests` — which returns `{ id, first }`, `first` read off the queue's own budget bookkeeping so the log's `burst start` label is ground truth rather than a clock heuristic (v0.38.2; two generations of time threshold each mislabeled a boundary in an audit: a per-node gap conflated inter-burst pauses with stretched bursts, then a 4-minute cutoff stamped `+180s` on a genuine boundary whenever a symptom cleared mid-burst and shortened the open→confirm pause below it) — and cleared by `decideAutoPings`, so they pass the **same** gate ladder as every other autonomous write — master switch, boot window, rebuild, controller RF off (v0.65.0), missing capability data, storm — and a Dead node is never verification-probed, because the remediation path owns it with its own dwell, backoff and attempt budget.
+The verifier's floor of 3 **plus margin** (v0.37.2; it was exactly 3, and production showed that choosing exactly the floor leaves no room for the ordinary: three readings must all land, be sampled, and carry a non-null RTT inside one 300 s window, from a burst already spanning ~240 s at the tick-rounded spacing, so one lost probe — ~2 % of probes here — fails the verdict closed) — spaced at the 60 s effective spacing stated above so each is a separate observation rather than three packets carrying one reading's worth of information. Requests **top up**, never stack: a symptom that flaps ten times still owes one burst. They are drained through `drainVerifyRequests` — which returns `{ id, first }`, `first` read off the queue's own budget bookkeeping so the log's `burst start` label is ground truth rather than a clock heuristic (v0.38.2; two generations of time threshold each mislabeled a boundary in an audit: a per-node gap conflated inter-burst pauses with stretched bursts, then a 4-minute cutoff stamped `+180s` on a genuine boundary whenever a symptom cleared mid-burst and shortened the open→confirm pause below it) — and cleared by `decideAutoPings`, so they pass the **same** gate ladder as every other autonomous write — master switch, boot window, rebuild, controller RF off (v0.65.0), missing capability data, storm — and a Dead node is never verification-probed, because the remediation path owns it with its own dwell, backoff and attempt budget.
 3. **`refineBefore`** folds the newly-probed evidence into the open episode's before-window each tick *while the symptom is still live*. Strictly-better only (never fewer readings) and never on a scored episode. The live-ness gate is load-bearing: an episode inside its confirmation window has already recovered, and folding those readings into `before` would quietly compare the node against itself healthy.
 
 **And the silence is now legible.** `OutcomeStore.unverifiable(kind)` counts every episode the ledger could not score, and REMEDY renders it per card (`○ N past episodes of this kind could not be scored — too few readings to judge recovery`). An empty efficacy table reads exactly like a patient one; this is the number that tells an inert ledger from a patient one, and it is suppressed at zero.
@@ -3732,7 +3732,7 @@ All values are HA add-on options (`zwave_tui/config.yaml`), bridged to env by th
 | `users` | list of `{username,password}` | `[]` | `ZWAVE_USERS` (compact JSON) | Login credentials; plaintext or `scrypt:salt:hash` |
 | `write_actions_enabled` | bool | `false` | `WRITE_ACTIONS_ENABLED` | Master gate for all nine mutating verbs (the seven mesh-maintenance verbs, device control and config writes) and for auto-ping; off = read-only monitor |
 
-Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEYLEN = 32`; backoff `BASE = 5_000 ms`, `CAP = 300_000 ms`; `MAX_THROTTLE_ENTRIES = 4096`; menu `LABEL_W = 20`, badge field 13 cells; view clamps `cols ∈ [60,200]`, `rows ∈ [16,80]`.
+Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEYLEN = 32`; backoff `BASE = 5_000 ms`, `CAP = 300_000 ms`; `MAX_THROTTLE_ENTRIES = 4096`; menu `LABEL_W = MENU_LABEL_W = 28`, badge field 13 cells; view clamps `cols ∈ [60,200]`, `rows ∈ [16,80]`.
 
 ### 11.11 Edge-case guard summary
 
@@ -3843,9 +3843,9 @@ Everything else in this reference is advisory: the engine detects, explains, and
 
 **Observability.** The runner emits a decision trace — `auto-ping: candidates=N dead=N stale-due=N [stalest=Nm] -> probing N | suppressed: <reason>` — to both the event ring and the server log, on every state change plus a 30-minute heartbeat, so "there was nothing to do" and "this is broken" never produce identical (empty) logs. Every probe line reports the node's **measured** silence with the threshold alongside (v0.32.1) — never the threshold alone, which once masked a timestamp-parsing skew by printing a constant. The remediation lane's outcomes are recorded through the M5 ledger (the sweep and verification probes pass `learn: false`, v0.38.1; the ordinary outage, `node-down`, opens no episode, §9.7a), so `efficacyFor('dead-flap','ping')` turns "usually wakes them up" into a measured recovery rate on the REMEDY screen; if the rate comes back poor, the honest response is to switch the feature off — and the data will say so.
 
-## 11.5 Mesh Identity: Tagging Learned State, and Asking Before Acting (v0.64.0)
+### 11.13 Mesh Identity: Tagging Learned State, and Asking Before Acting (v0.64.0)
 
-### The problem
+#### The problem
 
 Three stores persist what the engine has learned: the outcome ledger
 (`outcomes.json`), the per-node baselines (`baselines.json`) and the history
@@ -3866,7 +3866,7 @@ mesh-identity guard that wiped the learned stores, but it is gated on
 
 The second row is the more likely one — you power down, swap, power up.
 
-### The tag
+#### The tag
 
 Each envelope gained an **optional** `homeId`, at the **same schema version**.
 That is deliberate: `outcomes`' guard is `if (!o || o.v !== 1) return;`, a silent
@@ -3877,7 +3877,7 @@ way for the same reason. **Absent means UNKNOWN, and unknown is adopted** — ev
 file written before this release is untagged, and treating untagged as foreign
 would make a data-preserving feature open by discarding everyone's data.
 
-### The tag is read BEFORE the gates that reject the payload
+#### The tag is read BEFORE the gates that reject the payload
 
 This is the part that is easy to get wrong, and an adversarial review of the
 first design caught it. Every one of these `load()`s has early returns that
@@ -3892,7 +3892,7 @@ overwrites the previous network's file. **Loading data and identifying data are
 separate questions.** `readHomeTag` answers the second from the raw parsed
 object, before any gate that can reject the first.
 
-### What happens on a mismatch: nothing, until asked
+#### What happens on a mismatch: nothing, until asked
 
 `bindHomeId(id)` is called from one site in `zwaveData`, hoisted **above** the
 legacy wipe branch — order is load-bearing, because that branch calls
@@ -3910,7 +3910,7 @@ Two triggers, not one. The obvious one is a conflicting tag. The other is a
 B, swap back to A. `loadedHomeId` is null there, so a conflict-only test finds
 nothing and A's own archived learning is never offered.
 
-### The three answers
+#### The three answers
 
 Offered as mesh-wide rows on the Controller screen's Actions menu (`3` then `A`),
 gated to appear only while a decision is pending — the same shape as
@@ -3929,7 +3929,7 @@ re-stamping and a later move to C parks the file as `home-A`, a mislabelled
 archive of B's learning, which is worse than no archive because it reads as
 authoritative.
 
-### Nothing is ever deleted
+#### Nothing is ever deleted
 
 Archives are renames: `/data/outcomes.json` → `/data/outcomes.home-3586281591.json`,
 then `.2.json`, `.3.json`. `archivePathFor` walks a counter until it finds a free
@@ -3949,7 +3949,7 @@ saves stay latched so the file survives, and the decision stays pending for a
 retry. Wiping anyway and letting the next flush overwrite would be a purge
 wearing a warning label.
 
-### How the operator finds out
+#### How the operator finds out
 
 The console is not where anyone is at 3 am, so the held decision is published as
 Home Assistant state (§12.11): `binary_sensor.zwave_tui_degraded` goes `on` with
@@ -3959,7 +3959,7 @@ engine is structurally unable to do its job — and it is the only engine
 condition here that **never resolves on its own**, which is exactly what an
 alert is for.
 
-### Answerable in read-only
+#### Answerable in read-only
 
 `write_actions_enabled` gates **mesh** mutations. This decision mutates nothing
 on the mesh, so it is offered without it — otherwise a read-only monitor that
@@ -4523,7 +4523,7 @@ triggering on state can never disagree about the mesh:
 one node is the resting state of a real mesh, and an alert that is always on is
 not an alert. It fires on a summons (the ladder gave up and is asking for a
 person), a critical symptom, or the engine being structurally unable to do its
-job — a pending mesh-identity decision (v0.64.0, §11.5), `storm`,
+job — a pending mesh-identity decision (v0.64.0; see the Mesh Identity chapter), `storm`,
 `no-capability-data` where the driver-WS flag dump is dark and the candidate
 set is empty by construction, or a statistics feed that has gone silent for ten
 minutes (v0.65.0). That last one is the strongest form of
