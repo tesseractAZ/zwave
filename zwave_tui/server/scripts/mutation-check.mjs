@@ -2662,7 +2662,7 @@ const MUTANTS = [
     find: "        text: `${sym.kind}${subsumptionLabel(sym.subsumedBy, ' ')}: ${firstSentence(sym.narrative)}` });",
     repl: "        text: `${sym.kind}${sym.subsumedBy ? ' (under mesh event)' : ''}: ${firstSentence(sym.narrative)}` });",
     what: 'the log names the same subsumption REMEDY does' },
-  { id: 'sentence-split-spares-decimals', file: 'src/telnet/ledgerText.ts', tests: ['zwaveData', 'ledgerText'],
+  { id: 'sentence-split-spares-decimals', file: 'src/telnet/ledgerText.ts', tests: ['zwaveData'],
     // `split('.')[0]` cut a one-decimal number in half: a node silent 7.2 h
     // logged "…has not been heard from in 7".
     find: '  const m = /^(.*?[.!?])(\\s|$)/s.exec(text);',
@@ -2691,7 +2691,7 @@ const MUTANTS = [
     find: "blocked: 'RF-link symptom — will not repair it'",
     repl: "blocked: 'RF-link symptom — re-interviewing will not repair it and it is not the right tool'",
     what: 'every blocked reason stays inside the chip budget the renderer can carry' },
-  { id: 'rebuild-names-what-it-destroys', file: 'src/telnet/actionsCatalog.ts', tests: ['actionsMenu'],
+  { id: 'rebuild-names-what-it-destroys', file: 'src/telnet/actionsCatalog.ts', tests: ['actionsCatalog'],
     find: 'It also DISCARDS any manually-set priority route for this node — you must set it again afterwards.',
     repl: '',
     what: 'the confirm box says a route rebuild deletes manually-set priority routes' },
@@ -4326,11 +4326,29 @@ const restore = () => {
     const src = readFileSync(join(ROOT, m.file), 'utf8');
     const n = src.split(m.find).length - 1;
     if (n !== 1) bad.push(`${n === 0 ? 'MISSING  ' : `AMBIGUOUS(${n})`} ${m.id} — ${m.file}`);
+    // A test name somebody WROTE must exist (2026-09-22). `fastTestsFor`
+    // drops unresolvable names without a word, so a typo or a renamed test
+    // silently turned a targeted mutant into a full-suite fallback — the
+    // `tests: ['actionsMenu']` entry cost one full run every run for weeks, and
+    // the only trace was a line of prose in PERFORMANCE.md. The basename
+    // default is exempt: many sources have no same-name test by design.
+    const named = (Array.isArray(m.tests) && m.tests.length ? m.tests : null) ?? MUTANT_TESTS[m.id] ?? null;
+    for (const t of named ?? []) {
+      if (!existsSync(join(TEST_DIR, `${t}.test.ts`))) bad.push(`UNMAPPED  ${m.id} — tests names '${t}', but there is no test/${t}.test.ts`);
+    }
+  }
+  // The shared table is checked whole: one stale entry misroutes EVERY mutant
+  // on that source, including ones not in this run.
+  for (const [src, names] of Object.entries(SOURCE_TESTS)) {
+    for (const t of names) {
+      if (!existsSync(join(TEST_DIR, `${t}.test.ts`))) bad.push(`UNMAPPED  SOURCE_TESTS['${src}'] names '${t}', but there is no test/${t}.test.ts`);
+    }
   }
   if (bad.length) {
-    console.log(`\nAnchor pre-flight failed for ${bad.length} of ${run.length} mutants:`);
+    console.log(`\nPre-flight failed (${bad.length} problem${bad.length === 1 ? '' : 's'} across ${run.length} mutants):`);
     for (const b of bad) console.log(`  ${b}`);
-    console.log('\nEvery anchor must match its file EXACTLY once. Fix these before running;');
+    console.log('\nEvery anchor must match its file EXACTLY once, and every test a mutant names must exist.');
+    console.log('Fix these before running;');
     console.log('a run that skips mutants publishes a count it did not earn.\n');
     process.exit(2);
   }
