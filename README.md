@@ -215,12 +215,14 @@ the engine probes a mains node that has been **Dead past a dwell** (default
 default 3 only the 10 and 30 min waits are reached, so the engine hands the node
 to you about 50 min after death, or about 40 min if it died with a liveness
 probe to it unanswered, since that skips the dwell), and issues a **liveness
-probe** to a mains node **silent past a threshold** (default 120 min — Z-Wave JS
+probe** to every listening mains node not marked Dead **on a fixed per-node cadence** (default every 120 min, however chatty the node — Z-Wave JS
 marks Dead only reactively, so an unplugged device can read "Alive" for hours until
 something talks to it). It is restricted to ping because ping is idempotent and
 has nothing to undo; battery/sleeping devices are never probed; a boot window,
-a rebuild suppressor, and a mesh-storm guard (≥25 % dead ⇒ stand down) bound it.
-Off by default; every decision is traced to the log and every outcome feeds the
+a rebuild suppressor, a controller RF-off hold (the nightly NVM backup turns the
+radio off for about ten seconds), and a mesh-storm guard (≥25 % dead ⇒ stand
+down) bound it.
+Off by default; every decision is traced to the log. Auto-ping's liveness probes and the ledger's verification probes are measurements, never recorded as a remediation (v0.38.1); only its dead-node pings count as an action in the
 learning ledger.
 
 **Swapping the controller — you are asked, nothing is discarded (v0.64.0).** The
@@ -257,7 +259,7 @@ rate but one whole-frame redraw per second.
 That document also carries what is *not* measured, and why most of it does not
 need to be — and, for the two items that did earn measuring, what the numbers
 overturned. The mutation harness is **not** startup-bound, as had been guessed:
-sys is 5 % and the measured spawn floor 6 %, against 85 % spent in the 682
+sys is 5 % and the measured spawn floor 5 %, against 85 % spent in the 715
 targeted test runs themselves — a phase the harness times whole, so how it splits
 between transpiling, module loading and running the tests is not measured.
 
@@ -277,7 +279,7 @@ re-asserted every 30 seconds:
 | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
-| `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |
+| `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind or before the roster has loaded) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |
 
 The engine sensor's states are listed in the order the code checks them:
 `awaiting-identity-decision` (a mesh identity decision is pending; it outranks
@@ -433,7 +435,10 @@ both required status checks on every PR to `main`.
   not compile — a broken build makes every test fail to load, so counting it as a
   kill would prove nothing — and `RELABEL` is a mutant still marked equivalent
   that the suite now kills, so its label is stale. All five fail the run; an
-  anchor pre-flight rejects `MISSING` and `AMBIGUOUS` before any mutant runs.
+  anchor pre-flight rejects `MISSING` and `AMBIGUOUS` before any mutant runs,
+  and the same pre-flight rejects `UNMAPPED` — a test name a mutant or
+  `SOURCE_TESTS` writes down that has no test file, which the targeted run
+  would otherwise drop without a word.
   It also checks the suite is green before it starts (on an already-red tree
   every mutant would falsely report `killed`) and refuses to run twice at once.
 - The browser console (`/console`) vendors xterm.js from `node_modules` — no CDN,

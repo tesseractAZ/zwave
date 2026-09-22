@@ -885,8 +885,10 @@ via n7 @ 9.6k, F+R flags, RSSI improving) and #3 South Patio Light (77, "DROP
    route objects, including `repeaters` (as HA `device_id`s, mapped back to node
    ids by `zwaveData.mapRoute`), `protocolDataRate`, `repeaterRSSI` and
    `routeFailedBetween`. Per-hop localization and rate diagnosis were built on
-   it and ship; the TOPOLOGY route tree and DETAIL's LWR/NLWR rows are the
-   consumers. **Caveat that survived:** `repeaters` arrives as device ids, not
+   it and ship; the TOPOLOGY route tree, DETAIL's LWR/NLWR rows and, since
+   v0.68.0, `sensor.zwave_tui_route_failures` (a week of latched
+   `routeFailedBetween` events, ranked by link) are the consumers.
+   **Caveat that survived:** `repeaters` arrives as device ids, not
    node ids — a mesh whose registry join is incomplete silently maps to node `0`.
 2. ~~**Background RSSI / SNR is unreachable via HA**~~ — **CLOSED by the
    driver-WS phase (v0.13), not by an HA change.** The premise still holds — HA

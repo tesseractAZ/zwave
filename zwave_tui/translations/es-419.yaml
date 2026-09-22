@@ -44,10 +44,12 @@ configuration:
     name: Seguridad · Habilitar acciones de escritura
     description: >-
       Desbloquea el menú de acciones (presione A en la TUI): ping, actualizar
-      valores, volver a entrevistar, reconstruir rutas y eliminar un nodo
-      fallido. Desactivado, el complemento es un monitor de solo lectura. Es
-      seguro dejarlo activado: cada comando debe armarse escribiendo la palabra
-      CONFIRM antes de ejecutarse.
+      valores, volver a entrevistar, reconstruir rutas, eliminar un nodo
+      fallido, control de dispositivos (encender/apagar, abrir/cerrar,
+      bloquear/desbloquear) y escritura de configuración. Desactivado, el
+      complemento es un monitor de solo lectura. Es seguro dejarlo activado:
+      cada comando, salvo el atajo de ping de una sola tecla (p), debe armarse
+      escribiendo la palabra CONFIRM antes de ejecutarse.
   # ── Autorreparación (auto-ping) ─────────────────────────────────────────────
   auto_ping_enabled:
     name: Seguridad · Hacer ping automático a un nodo caído
@@ -59,7 +61,9 @@ configuration:
       alcanzarlos antes de su propio despertar. Requiere "Habilitar acciones de
       escritura". Se suspende durante una reconstrucción de rutas, en la ventana
       de reinicio (para un nodo caído, solo hasta que el listado de nodos esté
-      listo) y cuando una cuarta parte de la malla está caída a la vez (eso
+      listo), mientras la radio del controlador está apagada (como durante su
+      respaldo nocturno de NVM) y cuando una cuarta parte de la malla está caída
+      a la vez (eso
       es un problema del controlador, no de un dispositivo). Cada intento queda
       registrado, así que la pantalla REMEDY muestra si realmente funciona.
   auto_ping_after_min:
@@ -78,14 +82,15 @@ configuration:
       nuestro propio sondeo de vida). Después de eso el motor se detiene y le
       deja el nodo a usted. Una recuperación reinicia la cuenta.
   auto_ping_stale_min:
-    name: Seguridad · Sondeo de vida después de (minutos en silencio)
+    name: Seguridad · Intervalo del sondeo de vida (minutos)
     description: >-
-      Sondea un nodo alimentado por red este tiempo después de SU PROPIO último
-      contacto (0 lo desactiva). Z-Wave marca un nodo como caído (Dead) solo
-      cuando un envío hacia él FALLA, de modo que un dispositivo al que nadie le
-      habla nunca se comprueba: un tomacorriente desenchufado puede figurar como
-      Alive indefinidamente. Se mide desde la última vez que se vio a cada nodo,
-      así que un dispositivo conversador reinicia su reloj y nunca se sondea. Un
+      Sondea cada nodo alimentado por red que no esté ya caído una vez cada
+      tantos minutos como indica este valor (0 lo desactiva). Z-Wave marca un
+      nodo como caído (Dead) solo cuando un envío hacia él FALLA, de modo que
+      un dispositivo al que nadie le habla nunca se comprueba: un tomacorriente
+      desenchufado puede figurar como Alive indefinidamente. Todos los nodos se
+      consultan con la misma cadencia, conversadores o no, así que su
+      proporción de respuestas mide si son alcanzables y no cuánto hablan. Un
       sondeo por ciclo, empezando por el más antiguo, con las mismas
       suspensiones que el ping automático.
   # ── Acceso por telnet ───────────────────────────────────────────────────────
@@ -163,7 +168,9 @@ configuration:
     description: >-
       Déjelo en el valor predeterminado ws://supervisor/core/websocket para una
       instalación normal. Cámbielo solo para apuntar la capa de datos a otro
-      Home Assistant Core o a otro WebSocket del controlador.
+      Home Assistant Core, nunca al WebSocket del controlador (para eso está la
+      URL del controlador, a continuación): la capa de datos usa los comandos
+      zwave_js de Home Assistant, que el servidor del controlador no atiende.
   driver_ws_url:
     name: Avanzado · URL del WebSocket del controlador Z-Wave JS (telemetría de solo lectura)
     description: >-

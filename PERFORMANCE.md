@@ -144,7 +144,7 @@ and declined to assert it. Measured, it is wrong:
   run spent before any work begins. Two consecutive runs agreed to within half a
   point, so this is a stable property and not one run's weather.
 
-Two independent measurements agree at ~10 %. The harness is **CPU-bound on real
+Two independent measurements agree at ~5 %. The harness is **CPU-bound on real
 work**, not on launching processes.
 
 The cost centre is the **targeted test runs: 85 % of the run**, at 2.18 s each
@@ -169,15 +169,15 @@ paid a full ~12 s suite for a mutant its own test file kills in 0.17 s. The
 kill-fast mapping-miss report lists only mutants whose targeted files ran and
 missed, so it could never flag that case. The mutant now names `actionsCatalog`,
 and the pre-flight refuses any test name a mutant or `SOURCE_TESTS` writes down
-that has no file (`UNMAPPED`, exit 2) before a single test runs.
+that has no file (`UNMAPPED`, exit 2) before any mutant's tests run.
 
 **The run nearly doubled in v0.65.0, and it is the tests, not the harness.** A
-targeted run averaged 1.10 s at v0.64.7 and 2.17 s here, which is the whole
+targeted run averaged 1.10 s at v0.64.7 and 2.17 s at v0.65.0, which is the whole
 increase from ~16 to ~29 minutes. Two files carry it: `zwaveDataChurn.test.ts`
 (11.3 s) and `driverWsClient.test.ts` (10.5 s) are real-timer integration tests
 against a mock zwave-js-server, and 59 and 26 mutants respectively name them, so
-each mutant pays the file's whole runtime. About 7.7 s of the churn file is this
-release's work, 5.1 s of it in the single test that drives the driver-WS readings
+each mutant pays the file's whole runtime. About 7.7 s of the churn file is
+v0.65.0's work, 5.1 s of it in the single test that drives the driver-WS readings
 through `createZwaveData` — the only way to pin the producer side of both new
 readings, and worth its cost once, not 59 times. `npm test` is unaffected (12.5 s)
 because it runs files concurrently while the harness runs one at a time. Making
@@ -192,7 +192,7 @@ time, larger than anything in the phase table above.
 marked `equivalent` that the suite now kills) are all failures. An anchor
 pre-flight checks every mutant's target text against its file before any
 *mutant's* tests run — it runs after the baseline, so a stale entry costs the
-baseline (~13 s) rather than a full run (~31 minutes; 1842 s in the v0.69.0
+baseline (~13 s) rather than a full run (~31 minutes; 1842 s in the v0.69.0-tree
 run). It fired nine times during the v0.51–v0.64.3 work, each on an anchor one
 of my own edits had moved — most recently in v0.64.3, `MISSING` on both
 outage-clock mutants after the dating line they target was rewritten, and
@@ -451,7 +451,7 @@ As of v0.63.2, 2026-09-06:
 
 | | measured |
 | --- | --- |
-| HA state re-publish | every **30 s** (five entities) |
+| HA state re-publish | every **30 s** (four entities at v0.63.2; five since v0.68.0) |
 | Release image build (CI, multi-arch) | ~**90 s** after the tag |
 
 The 30 s cadence is also the self-heal window: the entities are unmanaged
@@ -472,7 +472,7 @@ no, so it is recorded as a known gap rather than carried as pending work.
   `--profile` now reports the phase breakdown on any run. The result overturned
   the standing guess: the harness is CPU-bound on real work, most of it in the
   targeted test runs (70 % of the run when measured in v0.64.0; §3 carries the
-  current figure), not startup-bound (~10 % by two independent measurements).
+  current figure), not startup-bound (~10 % by two independent measurements then; ~5 % in §3's current run).
 - ~~**Per-session bandwidth.**~~ **MEASURED in v0.64.0 — see §5a.** 4.96 KB/s at
   80×24 and 17.22 KB/s at 200×60. The withdrawn zero is refuted and its cause
   identified; the 17 KB/s figure this document already carried is confirmed.
@@ -510,7 +510,7 @@ previously listed here, which wrongly implied open work.
 
 | date | version | what changed |
 | --- | --- | --- |
-| 2026-09-22 | v0.69.0 tree | §3 re-measured: 715 mutants (706 killed · 9 equivalent), 1842 s wall · 796 s user · 97 s sys, 1 212 tests in 12.7 s; the harness now refuses a test name with no file; the one stale name fixed, so full-suite fallbacks fell from 10 to the 9 equivalents |
+| 2026-09-22 | v0.69.0 tree | §3 re-measured: 715 mutants (706 killed · 9 equivalent), 1842 s wall · 796 s user · 97 s sys, 1 212 tests in 12.7 s; the harness now refuses a test name with no file; both stale test names fixed (only one had forced a full-suite fallback), so full-suite fallbacks fell from 10 to the 9 equivalents |
 | 2026-09-22 | v0.69.0 | §3 re-measured: 715 mutants (706 killed · 9 equivalent), 1840 s wall · 786 s user · 93 s sys, 1 212 tests in 13.0 s; weak-signal on an unmeasured window and the refusal reason added 7 mutants and 9 tests |
 | 2026-09-22 | v0.68.1 | §3 re-measured: 708 mutants (699 killed · 9 equivalent), 2266 s wall · 1299 s user · 151 s sys, 1 203 tests in 16.0 s; the route-failure boot guard added 2 mutants and 1 test |
 | 2026-09-21 | v0.68.0 | §3 re-measured: 706 mutants (697 killed · 9 equivalent), 1854 s wall · 824 s user · 102 s sys, 1 202 tests in 12.4 s; route failures published and the publish loop hardened: 8 mutants and 7 tests |
