@@ -169,6 +169,10 @@ const TIMEOUT_RATE_MULT = 3; // relative: window rate ≫ this × baseline
 const CHRONIC_DAYS_MS = 2 * 24 * 60_000 * 60; // 2 days sustained → chronic
 const RTT_Z = 4; // z-score over route-stratified baseline
 const WEAK_MARGIN_DB = 7; // direct-node weak-signal margin
+const WEAK_TIMEOUT_RATE = 0.05; // weak-signal corroboration on a MEASURED window (≥ MIN_WINDOW_TX sends)
+// weak-signal corroboration on an UNMEASURED window: a delivery-failure EVENT this recent.
+// = MAX_DETECTOR_WINDOW_MS in evidenceStore, so the fine ring is guaranteed to hold it.
+const WEAK_EVENT_LOOKBACK_MS = 30 * 60_000;
 const FLAPS_WINDOW = 3; // ≥3 Alive↔Dead transitions in the window
 // Route churn: the mesh re-deciding how to reach a node. A single change is
 // normal (that IS the mesh healing); repeated changes inside one window mean it
@@ -605,13 +609,27 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // non-breaching tick, so gating on the newest sample would let one `lwr`
       // blink (the v0.47.0 nullable-routeKey shape) reset the dwell and stop
       // this detector maturing at all.
-      const routeKey = latestFresh(samples, now, (s) => s.routeKey);
+      const w = windowTimeoutRate(samples, now);
+      // UNMEASURED IS NOT "NOT SUFFERING". Under MIN_WINDOW_TX sends there is no
+      // rate, and on a mesh whose per-node traffic is the sweep ping that is every
+      // node, always — so `w != null &&` made this detector unreachable. A failed
+      // delivery is still an EVENT the store records: a send that exhausted its
+      // retries marks the node Dead (dFlaps — RESEARCH §0's reliable RF-failure
+      // signal; it moves no counter), and an ACKed reply-expecting send that went
+      // unanswered moves dTimeout. One such event inside the lookback corroborates,
+      // and the level inputs read the same lookback so the breach does not clear
+      // ten minutes after the one fresh sample a sparse node produces. A measured
+      // window still decides on its rate. Never for a node that is Dead now:
+      // node-down owns that, and two cards for one fault is noise.
+      const lookback = w != null ? WINDOW_MS : WEAK_EVENT_LOOKBACK_MS;
+      const routeKey = latestFresh(samples, now, (s) => s.routeKey, lookback);
       const routed = routeKey !== 'direct';
-      const rssi = latestFresh(samples, now, (s) => s.rssi);
+      const rssi = latestFresh(samples, now, (s) => s.rssi, lookback);
       const floor = representativeFloor(input);
       const margin = rssi != null ? rssi - floor : null;
-      const w = windowTimeoutRate(samples, now);
-      const timeoutCorrob = w != null && w.rate >= 0.05; // deliveries actually suffering
+      let failures = 0;
+      for (const s of samples) if (now - s.t <= WEAK_EVENT_LOOKBACK_MS) failures += s.dFlaps + (s.dTimeout ?? 0);
+      const timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE : failures > 0 && node.status !== NS.Dead;
       const b = !routed && !node.isLongRange && margin != null && margin < WEAK_MARGIN_DB && timeoutCorrob;
       const since = dwell(state, key(id, 'weak-signal'), b, now);
       if (since != null) {
@@ -622,7 +640,9 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
           basis: realFloor ? 'measured' : 'inferred',
           evidence: [
             { label: 'SNR margin', value: `${Math.round(margin!)}dB${realFloor ? '' : ' (vs assumed −95 floor)'}` },
-            { label: 'timeouts', value: `${(w!.rate * 100).toFixed(0)}%` },
+            w != null
+              ? { label: 'timeouts', value: `${(w.rate * 100).toFixed(0)}%` }
+              : { label: 'failed deliveries', value: `${failures} in 30m (too few sends for a rate)` },
           ],
           narrative: `${node.name} (direct route) has a thin signal margin over the noise floor and is losing replies — the classic RF-marginal-link pattern for a device far from the controller or behind an RF-hostile wall.`,
         });

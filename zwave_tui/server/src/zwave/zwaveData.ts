@@ -1788,9 +1788,12 @@ class ZwaveDataImpl implements ZwaveData {
     let rttReady = 0;
     let rssiReady = 0;
     // A node too quiet to evaluate reads as CLEAR everywhere else (v0.67.0):
-    // `windowTimeoutRate` returns null under MIN_WINDOW_TX and all three
-    // consumers skip silently, so "38/38 ready" concealed nodes nothing was
-    // measuring. Unmeasured is a third state, and it is now published.
+    // `windowTimeoutRate` returns null under MIN_WINDOW_TX and its consumers
+    // skipped silently, so "38/38 ready" concealed nodes nothing was measuring.
+    // Unmeasured is a third state, and it is now published. (Since v0.69.0
+    // `weak-signal` no longer skips: on an unmeasured window it corroborates
+    // on a recent failed delivery instead. The two return-path detectors still
+    // need a rate and still skip.)
     let timeoutWindowBlind = 0;
     let total = 0;
     for (const n of this.lastNodes) {

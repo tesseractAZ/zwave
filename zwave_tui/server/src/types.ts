@@ -237,7 +237,8 @@ export interface EngineStatus {
   timeoutReady: number;
   /** Nodes whose timeout-rate window could not be evaluated this tick because
    *  the 10-minute window held fewer than the minimum transmissions. They are
-   *  NOT clear — they are unmeasured, and three detectors skip them (v0.67.0). */
+   *  NOT clear — they are unmeasured. The two return-path detectors skip them;
+   *  `weak-signal` falls back to a recent failed delivery (v0.67.0, v0.69.0). */
   timeoutWindowBlind: number;
   /** Nodes whose RTT baseline has graduated in `band`. */
   rttReady: number;

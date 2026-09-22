@@ -3326,9 +3326,29 @@ const MUTANTS = [
     // dwell() clears on any non-breaching tick, so gating on the raw newest
     // sample would let one `lwr` blink reset the dwell and stop this detector
     // maturing — the v0.47.0 nullable-routeKey shape, one layer up.
-    find: '      const routeKey = latestFresh(samples, now, (s) => s.routeKey);',
+    find: '      const routeKey = latestFresh(samples, now, (s) => s.routeKey, lookback);',
     repl: '      const routeKey = last?.routeKey ?? null;',
     what: 'the route is resolved from the newest FRESH sample, not the raw last' },
+  { id: 'weak-signal-unmeasured-needs-a-failure', file: 'src/zwave/symptoms.ts', tests: ['weakSignal'],
+    find: '      const timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE : failures > 0 && node.status !== NS.Dead;',
+    repl: '      const timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE : node.status !== NS.Dead;',
+    what: 'an unmeasured window still needs a delivery-failure event — a thin margin alone does not fire' },
+  { id: 'weak-signal-unmeasured-can-fire', file: 'src/zwave/symptoms.ts', tests: ['weakSignal'],
+    find: '      const timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE : failures > 0 && node.status !== NS.Dead;',
+    repl: '      const timeoutCorrob = w != null && w.rate >= WEAK_TIMEOUT_RATE;',
+    what: 'unmeasured is not "not suffering" — the v0.68.1 rule, unreachable on a sweep-only mesh' },
+  { id: 'weak-signal-unmeasured-excludes-dead', file: 'src/zwave/symptoms.ts', tests: ['weakSignal'],
+    find: '      const timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE : failures > 0 && node.status !== NS.Dead;',
+    repl: '      const timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE : failures > 0;',
+    what: 'a node that is Dead now belongs to node-down, not weak-signal' },
+  { id: 'weak-signal-unmeasured-level-lookback', file: 'src/zwave/symptoms.ts', tests: ['weakSignal'],
+    find: '      const lookback = w != null ? WINDOW_MS : WEAK_EVENT_LOOKBACK_MS;',
+    repl: '      const lookback = WINDOW_MS;',
+    what: 'the level inputs read the event lookback, so the breach outlives the one fresh sample' },
+  { id: 'weak-signal-measured-decides', file: 'src/zwave/symptoms.ts', tests: ['weakSignal'],
+    find: '      const timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE : failures > 0 && node.status !== NS.Dead;',
+    repl: '      const timeoutCorrob = (w != null && w.rate >= WEAK_TIMEOUT_RATE) || (failures > 0 && node.status !== NS.Dead);',
+    what: 'a measured window decides on its rate; a flap does not override a clean one' },
   { id: 'reliability-rate-has-a-floor', file: 'src/zwave/health.ts', tests: ['health'],
     // The driver's counters reset on restart, so a 1-6 tx denominator is
     // routine — and unfloored, ONE timeout of two sends read 50%, raised F, and
@@ -3854,6 +3874,15 @@ const MUTANTS = [
     find: '    unverifiableCount: (k) => zd.unverifiableCount(k),',
     repl: '    unverifiableCount: () => 0,',
     what: 'the production bridge forwards unverifiableCount to the data layer' },
+  /* ── v0.69.0 ─────────────────────────────────────────────────────────── */
+  { id: 'publish-failure-names-the-reason', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '        if (!res.ok) throw new Error(`HTTP ${res.status}${await failureReason(res)}`);',
+    repl: '        if (!res.ok) throw new Error(`HTTP ${res.status}`);',
+    what: "a refused publish carries the refusal's own reason into the warning" },
+  { id: 'failure-reason-prefers-json-message', file: 'src/haStates.ts', tests: ['haStates'],
+    find: "      if (typeof j?.message === 'string') msg = j.message;",
+    repl: '      void j;',
+    what: 'a JSON refusal is reduced to its message, not dumped whole' },
   /* ── v0.68.1 ─────────────────────────────────────────────────────────── */
   { id: 'route-failures-unknown-before-roster', file: 'src/haStates.ts', tests: ['haStates'],
     // Restores the boot-time false zero: 0 for ~30 s after every restart.
