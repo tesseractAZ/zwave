@@ -60,6 +60,9 @@ export interface RouteFailureTally {
   /** A full ring whose oldest entry is still inside the window may already
    *  have evicted older in-window failures: the count is then a floor. */
   lowerBound: boolean;
+  /** At least one non-controller node was on the roster. Without one there is
+   *  nothing to have counted failures FOR, so zero would not be a reading. */
+  rosterLoaded: boolean;
 }
 
 /** Route failures in the window, tallied by link. Every value is a pure
@@ -67,12 +70,13 @@ export interface RouteFailureTally {
  *  iteration order — so an unchanged week republishes byte-identically and
  *  costs the recorder nothing (v0.68.0). */
 export function routeFailureTally(data: DataProvider, now: number): RouteFailureTally {
-  const out: RouteFailureTally = { events: 0, links: [], linkCount: 0, nodeIds: [], lastAt: null, lowerBound: false };
+  const out: RouteFailureTally = { events: 0, links: [], linkCount: 0, nodeIds: [], lastAt: null, lowerBound: false, rosterLoaded: false };
   if (typeof data.routeFailures !== 'function' || typeof data.nodes !== 'function') return out;
   const byPair = new Map<string, { between: [number, number]; failures: number }>();
   const nodes = new Set<number>();
   for (const n of data.nodes()) {
     if (n.isController) continue;
+    out.rosterLoaded = true;
     const ring = data.routeFailures(n.nodeId) ?? [];
     for (const f of ring) {
       if (now - f.t >= ROUTE_FAIL_WINDOW_MS) continue;
@@ -269,7 +273,11 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
     {
       entity: ENTITY_ROUTE_FAILURES,
       // A blind feed records nothing, so its zero would be a false all-clear.
-      state: statsBlind ? 'unknown' : String(rf.events),
+      // NOR does a roster that has not loaded yet (v0.68.1): the first publish
+      // after every restart runs before the first roster poll, and v0.68.0
+      // sent `0` for ~30 s each boot — a false all-clear written into HA
+      // history on every restart, then "corrected" to the real count.
+      state: statsBlind || !rf.rosterLoaded ? 'unknown' : String(rf.events),
       attrs: {
         friendly_name: 'Z-Wave TUI route failures (7 d)',
         unit_of_measurement: 'failures',

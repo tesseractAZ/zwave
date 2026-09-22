@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.68.1
+
+### Fixed — route failures read zero for the first half-minute after every restart
+
+The first publish after a restart runs before the first roster poll, so
+v0.68.0 had no nodes to count failures for and published `0`. Thirty seconds
+later the real count arrived. Every restart therefore wrote a false all-clear
+into Home Assistant's history and then corrected it — the live deploy of 0.68.0
+read `0` at 00:42:26 and `23` at 00:42:56.
+
+`sensor.zwave_tui_route_failures` now reads `unknown` until a node other than
+the controller is on the roster, exactly as it already did while the
+statistics feed was blind. Zero is published only when there is something it
+could have been a count of.
+
+The mutation harness caught the fix hiding an older test: the blind-feed test
+used a roster holding only the controller, so once this guard existed it passed
+whether or not the feed was blind. Its fixture now carries a real node, so
+blindness is the only reason left for `unknown`.
+
+One new test pins it and 2 new mutants show both halves of the guard are load-bearing. Full run: 699 killed, 0 survived, 9 equivalent.
+
 ## 0.68.0
 
 ### Added — route failures reach Home Assistant

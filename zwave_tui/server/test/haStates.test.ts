@@ -296,9 +296,11 @@ test('an unchanged week republishes byte-identically — no recorder churn (v0.6
 
 test('a blind feed publishes unknown, never a false zero (v0.68.0)', () => {
   // A dead statistics feed records no route failures, so its 0 is not a reading.
-  const d = rfData({}, { lastStatsUpdated: () => NOW - 42 * 60_000 } as never);
+  // A node IS on the roster, so blindness is the ONLY reason left for unknown —
+  // with a controller-only roster the boot guard (v0.68.1) would mask it.
+  const d = rfData({ 16: [] }, { lastStatsUpdated: () => NOW - 42 * 60_000 } as never);
   assert.equal(by(buildStates(d, NOW), ENTITY_ROUTE_FAILURES).state, 'unknown');
-  assert.equal(by(buildStates(rfData({}), NOW), ENTITY_ROUTE_FAILURES).state, '0', 'a healthy feed with no failures IS zero');
+  assert.equal(by(buildStates(rfData({ 16: [] }), NOW), ENTITY_ROUTE_FAILURES).state, '0', 'a healthy feed with no failures IS zero');
 });
 
 test('a full ring still inside the window marks the count as a floor (v0.68.0)', () => {
@@ -308,4 +310,16 @@ test('a full ring still inside the window marks the count as a floor (v0.68.0)',
   const old = full.map((f, i) => ({ ...f, t: NOW - (i === 19 ? 10 * DAY : (i + 1) * 3_600_000) }));
   assert.equal(by(buildStates(rfData({ 16: old }), NOW), ENTITY_ROUTE_FAILURES).attrs.lower_bound, false,
     'a full ring whose oldest entry predates the window lost nothing inside it');
+});
+
+test('before the roster loads, route failures read unknown — never a boot-time zero (v0.68.1)', () => {
+  // v0.68.0 live: the first publish after a restart ran before the first
+  // roster poll and sent 0 for ~30 s, then 23 — a false all-clear written into
+  // HA history on every restart.
+  assert.equal(by(buildStates(rfData({}), NOW), ENTITY_ROUTE_FAILURES).state, 'unknown',
+    'a roster holding only the controller has nothing to have counted failures for');
+  const empty = data({ nodes: () => [], routeFailures: () => [] } as never);
+  assert.equal(by(buildStates(empty, NOW), ENTITY_ROUTE_FAILURES).state, 'unknown', 'an empty roster is not a reading');
+  assert.equal(by(buildStates(rfData({ 16: [] }), NOW), ENTITY_ROUTE_FAILURES).state, '0',
+    'once a node is on the roster, no failures IS zero');
 });
