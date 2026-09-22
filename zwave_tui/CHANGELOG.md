@@ -38,7 +38,16 @@ The reason was in the response body all along. It is bounded, a JSON `message`
 is preferred, and an odd or unreadable body never makes a failing publish fail
 harder.
 
-TESTS_AND_MUTANTS_LINE_0690
+### Documented — the nightly RF blackout guard is seen working
+
+The v0.65.0 guard against probing through the controller's nightly NVM backup
+was observed firing on 2026-09-21 at 07:00:08 UTC, inside the ten-second window,
+against zwave-js 15.29.0 — which still emits both log lines it matches. The
+manual now says so, and why a night without a suppression line is not a failure:
+the gate is read on the sixty-second tick, so it only shows when a tick lands in
+the window.
+
+9 new tests pin these — weak-signal fires on an unmeasured window only with a real failed delivery, never on a thin margin alone, never for a node Dead now or a routed one, and a measured window still decides on its rate; a refusal's reason reaches the warning and an odd body never makes a publish fail harder — and 7 new mutants show each guard is load-bearing. Full run: 706 killed, 0 survived, 9 equivalent.
 
 ## 0.68.1
 
