@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.68.0
+
+### Added — route failures reach Home Assistant
+
+The engine has recorded every failed route per node since the evidence store
+was built, and the topology screen ranks them by link. None of it was
+published, so the most specific link-level evidence this add-on holds was
+invisible to every automation and dashboard. The reference mesh logs about 3.3
+route failures a day — 128 in 66 days, reported by 25 of 39 nodes — and in the
+last day of the review, five of them landed while every published entity read
+healthy.
+
+`sensor.zwave_tui_route_failures` counts them over a week and ranks the links
+(`links`, top ten), with the reporting `node_ids`, the `last_failure_at` event
+time, and `lower_bound` when a full per-node ring may have evicted older
+failures inside the window. A week rather than a day, because a 24-hour count
+is non-zero 95 % of the time there and never lifts the chronic link above the
+noise; ranking the link to go and look at is the point. Every attribute is a
+pure function of the events inside the window — no ages, no tick time — so an
+unchanged week republishes byte-identically and costs the recorder about seven
+rows a day. It reads `unknown` while the statistics feed is blind, because a
+dead feed records nothing and its zero would be a false all-clear.
+
+It does NOT feed `binary_sensor.zwave_tui_degraded`. Any threshold low enough to
+catch one bad link would be on most of the time, and a failure followed by a
+working reroute is the mesh healing itself; the outcomes worth a page already
+raise `degraded` through their own symptoms. Route failures say where to look,
+not how bad things are.
+
+### Fixed — one rejected entity silently muted the others
+
+A publish failure `return`ed out of the loop, so an entity Home Assistant
+rejected — a 400 on one payload — stopped every entity behind it from
+publishing for as long as it kept failing. Each entity is now attempted every
+tick. The warning is latched per tick on the failure message, never on the
+count beside it, so a steady outage still logs once; each request is bounded at
+seven seconds so a hung Core cannot hold a tick open past the next; and a
+publish requested while one is in flight joins it instead of doubling it.
+
+### Not changed — the sweep's burst cadence
+
+The review found the liveness sweep running as rigid bursts: 35 probes a minute
+apart, then 86 minutes idle. That is exactly what it is, and it stays. Every
+node is still probed every 120 minutes to within a second, so per-node
+detection time is unchanged, total airtime is identical, and even spacing would
+cost roughly 800 extra log lines a day. The one real cost — first sweep evidence
+for a multi-node failure arrives about 18 minutes later in expectation — is
+covered by the mesh-wide gates that exist for exactly that case.
+
+7 new tests pin these — the tally counts only the week and ranks ties by the link itself, an unchanged week republishes byte-identically, a blind feed reads unknown rather than zero, one rejected entity no longer mutes the rest, and a steady outage logs once — and 8 new mutants show each guard is load-bearing. Full run: 697 killed, 0 survived, 9 equivalent.
+
 ## 0.67.0
 
 ### Fixed — a replayed snapshot counted as proof the statistics feed was alive

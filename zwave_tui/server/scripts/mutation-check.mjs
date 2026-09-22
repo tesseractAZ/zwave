@@ -3239,8 +3239,9 @@ const MUTANTS = [
   { id: 'ha-publish-failure-is-latched', file: 'src/haStates.ts', tests: ['haStates'],
     // An HA Core restart fails every POST at once; an ERROR per entity per 30s
     // would bury the log three releases went into making readable.
-    find: '        if (msg !== lastErr) {',
-    repl: '        if (msg !== null) {',
+    // Re-pointed in v0.68.0: the latch moved to the end of the tick.
+    find: '    if (tickErr !== lastErr) {',
+    repl: '    if (tickErr !== null) {',
     what: 'a repeated publish failure is reported once, not every tick' },
   { id: 'peak-explanation-is-a-tail-token', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
     // shedLine's HEAD has no whole-token path, so putting the explanation there
@@ -3853,6 +3854,41 @@ const MUTANTS = [
     find: '    unverifiableCount: (k) => zd.unverifiableCount(k),',
     repl: '    unverifiableCount: () => 0,',
     what: 'the production bridge forwards unverifiableCount to the data layer' },
+  /* ── v0.68.0: the publish loop ────────────────────────────────────────── */
+  { id: 'route-failures-windowed', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '      if (now - f.t >= ROUTE_FAIL_WINDOW_MS) continue;',
+    repl: '      void f;',
+    what: 'only route failures inside the week are counted' },
+  { id: 'route-failure-links-tie-break', file: 'src/haStates.ts', tests: ['haStates'],
+    // Without it the ranking follows iteration order, which is not a property
+    // of the mesh and would reorder the attribute for no reason.
+    find: '    b.failures - a.failures || a.between[0] - b.between[0] || a.between[1] - b.between[1]);',
+    repl: '    b.failures - a.failures);',
+    what: 'tied links are ranked by the link itself, deterministically' },
+  { id: 'route-failures-unknown-when-blind', file: 'src/haStates.ts', tests: ['haStates'],
+    find: "      state: statsBlind ? 'unknown' : String(rf.events),",
+    repl: '      state: String(rf.events),',
+    what: 'a blind feed publishes unknown, not a false all-clear zero' },
+  { id: 'route-failure-time-is-the-event', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '        last_failure_at: rf.lastAt == null ? null : new Date(rf.lastAt).toISOString(),',
+    repl: '        last_failure_at: new Date(now).toISOString(),',
+    what: 'last_failure_at is the event time, so the entity does not churn the recorder' },
+  { id: 'route-failure-floor-needs-a-full-in-window-ring', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '    if (ring.length >= ROUTE_FAIL_RING && now - Math.min(...ring.map((f) => f.t)) < ROUTE_FAIL_WINDOW_MS) out.lowerBound = true;',
+    repl: '    if (ring.length >= ROUTE_FAIL_RING) out.lowerBound = true;',
+    what: 'the count is marked a floor only when eviction could have lost in-window failures' },
+  { id: 'one-rejected-entity-does-not-mute-the-rest', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '        tickErr ??= e instanceof Error ? e.message : String(e);',
+    repl: '        tickErr ??= e instanceof Error ? e.message : String(e); break;',
+    what: 'a rejected entity does not stop the others publishing' },
+  { id: 'publish-latch-is-the-message', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '    if (tickErr !== lastErr) {',
+    repl: '    if (`${tickErr}/${failed}` !== lastErr) {',
+    what: 'a steady outage logs once even when the failing count moves' },
+  { id: 'concurrent-publish-joins-the-tick', file: 'src/haStates.ts', tests: ['haStates'],
+    find: '  const publishNow = (): Promise<void> => (current ??= publishOnce().finally(() => { current = null; }));',
+    repl: '  const publishNow = (): Promise<void> => { void current; return publishOnce(); };',
+    what: 'a publish requested mid-tick joins it rather than doubling it' },
   /* ── v0.67.0: detector reachability ───────────────────────────────────── */
   { id: 'replay-does-not-prove-liveness', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     // Restores the sawtooth: a re-arm that never revived the feed still zeroed
@@ -3888,14 +3924,14 @@ const MUTANTS = [
     // — info is filtered, so the only notice that conclusions had stopped
     // reaching HA was the one thing removed. Three real failures in the 24 h
     // after v0.66.0 shipped went unseen at that level.
-    find: '          (log.warn ?? log)(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
-    repl: '          log(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
+    find: '      (log.warn ?? log)(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);',
+    repl: '      log(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);',
     what: 'a publish failure is logged at warn, so it survives log_level: warning' },
   { id: 'bare-log-sink-still-called', file: 'src/haStates.ts', tests: ['haStates'],
     // Tests and bare dev pass a plain function with no `.warn`; requiring one
     // would silence the failure entirely for them.
-    find: '          (log.warn ?? log)(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
-    repl: '          log.warn?.(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);',
+    find: '      (log.warn ?? log)(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);',
+    repl: '      log.warn?.(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);',
     what: 'a sink without .warn still receives the failure' },
   /* ── v0.66.0: the 2026-09-17 log review ──────────────────────────────── */
   { id: 'unattributed-silence-is-not-unheard', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],

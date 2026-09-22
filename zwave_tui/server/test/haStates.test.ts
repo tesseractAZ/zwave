@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStates, startHaStates, ENTITY_DEGRADED, ENTITY_SUMMONS, ENTITY_ENGINE } from '../src/haStates';
+import { buildStates, startHaStates, ENTITY_DEGRADED, ENTITY_SUMMONS, ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ROUTE_FAIL_WINDOW_MS } from '../src/haStates';
 import type { DataProvider, Symptom } from '../src/types';
 
 const AP = (over: Record<string, unknown> = {}) => ({
@@ -201,4 +201,111 @@ test('the engine sensor publishes how many nodes are UNMEASURED (v0.67.0)', () =
     timeoutReady: 35, timeoutWindowBlind: 7, rttReady: 20, rssiReady: 20, band: 0, bands: 6 }) } as never));
   assert.equal(by(s, ENTITY_ENGINE).attrs.detectors_unmeasured, 7,
     'the unmeasured count reaches HA, or a quiet node reads as a healthy one');
+});
+
+test('one entity HA rejects does not stop the other three publishing (v0.68.0)', async () => {
+  // The loop used to `return` on the first failure, so a 400 on one payload
+  // silently muted every conclusion behind it for as long as it kept failing.
+  const posted: string[] = [];
+  const h = startHaStates({
+    data: data(), token: 't', log: () => {}, intervalMs: 1_000_000,
+    fetchImpl: (async (url: string) => {
+      posted.push(url);
+      return url.endsWith(ENTITY_DEGRADED) ? { ok: false, status: 400 } : { ok: true, status: 200 };
+    }) as never,
+  });
+  await h.publishNow();
+  h.stop();
+  assert.ok(posted[0].endsWith(ENTITY_DEGRADED), 'fixture guard: the rejected entity is the FIRST one published');
+  assert.equal(posted.length, buildStates(data()).length, `every entity must still be attempted, got ${posted.length}`);
+});
+
+test('a steady outage logs once — the latch is the message, not the count beside it (v0.68.0)', async () => {
+  // A count that wobbles between ticks would defeat a latch keyed on it and
+  // re-log the same outage every 30 s.
+  let tick = 0;
+  const warned: string[] = [];
+  const log = Object.assign(() => {}, { warn: (m: string) => warned.push(m) });
+  const h = startHaStates({
+    data: data(), token: 't', log, intervalMs: 1_000_000,
+    fetchImpl: (async (url: string) =>
+      // tick 1 fails all four; tick 2 fails only the first — same cause, new count
+      (tick === 1 || url.endsWith(ENTITY_DEGRADED)) ? { ok: false, status: 502 } : { ok: true, status: 200 }) as never,
+  });
+  tick = 1; await h.publishNow();
+  tick = 2; await h.publishNow();
+  h.stop();
+  assert.equal(warned.length, 1, `one outage, one line: ${JSON.stringify(warned)}`);
+  assert.match(warned[0], /for \d+ of \d+ entities/, 'and the line says how much of the publish failed');
+});
+
+test('a publish requested mid-tick joins that tick instead of doubling it (v0.68.0)', async () => {
+  let calls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const h = startHaStates({
+    data: data(), token: 't', log: () => {}, intervalMs: 1_000_000,
+    fetchImpl: (async () => { calls += 1; await gate; return { ok: true, status: 200 }; }) as never,
+  });
+  const joined = h.publishNow();                 // arrives while the start-up tick is in flight
+  release();
+  await joined;
+  h.stop();
+  assert.equal(calls, buildStates(data()).length, `one tick, not two overlapping ticks: ${calls} posts`);
+});
+
+
+// ── route failures (v0.68.0) ─────────────────────────────────────────────
+const NOW = 1_760_000_000_000;
+const DAY = 86_400_000;
+const rfData = (rings: Record<number, { t: number; between: [number, number] }[]>, over: Partial<DataProvider> = {}) =>
+  data({
+    nodes: () => [{ nodeId: 1, isController: true }, ...Object.keys(rings).map((id) => ({ nodeId: Number(id), isController: false }))] as never,
+    routeFailures: (id: number) => rings[id] ?? [],
+    ...over,
+  } as never);
+
+test('route failures reach HA as a 7-day tally, ranked by link (v0.68.0)', () => {
+  // Recorded and shown on the topology screen since v0.3x, but never published:
+  // the richest link-level evidence the engine holds was invisible to HA.
+  const d = rfData({
+    31: [{ t: NOW - 1 * DAY, between: [3, 31] }, { t: NOW - 2 * DAY, between: [3, 31] }, { t: NOW - 9 * DAY, between: [3, 31] }],
+    // [6,16] recorded FIRST, so insertion order disagrees with link order and
+    // only a real tie-break puts [5,16] ahead of it.
+    16: [{ t: NOW - 3 * DAY + 60_000, between: [6, 16] }, { t: NOW - 3 * DAY, between: [5, 16] }],
+  });
+  const e = by(buildStates(d, NOW), ENTITY_ROUTE_FAILURES);
+  assert.equal(e.state, '4', 'only failures INSIDE the window count — the 9-day-old one is out');
+  assert.deepEqual(e.attrs.links, [
+    { between: [3, 31], failures: 2 }, { between: [5, 16], failures: 1 }, { between: [6, 16], failures: 1 },
+  ], 'ranked by count, ties broken by the link itself — never by recency or iteration order');
+  assert.deepEqual(e.attrs.node_ids, [16, 31], 'reporting nodes, sorted');
+  assert.equal(e.attrs.last_failure_at, new Date(NOW - 1 * DAY).toISOString(), 'the newest EVENT time, not the tick');
+  assert.equal(e.attrs.lower_bound, false);
+  assert.ok(ROUTE_FAIL_WINDOW_MS === 7 * DAY, 'the window is a week');
+});
+
+test('an unchanged week republishes byte-identically — no recorder churn (v0.68.0)', () => {
+  // HA writes a recorder row per attribute change. Anything tick-derived here
+  // (an age, a now-stamp) would book a row every 30 s for nothing.
+  const d = rfData({ 31: [{ t: NOW - DAY, between: [3, 31] }] });
+  const a = by(buildStates(d, NOW), ENTITY_ROUTE_FAILURES);
+  const b = by(buildStates(d, NOW + 90_000), ENTITY_ROUTE_FAILURES);
+  assert.deepEqual({ s: a.state, ...a.attrs }, { s: b.state, ...b.attrs }, 'nothing about the entity may move with the clock alone');
+});
+
+test('a blind feed publishes unknown, never a false zero (v0.68.0)', () => {
+  // A dead statistics feed records no route failures, so its 0 is not a reading.
+  const d = rfData({}, { lastStatsUpdated: () => NOW - 42 * 60_000 } as never);
+  assert.equal(by(buildStates(d, NOW), ENTITY_ROUTE_FAILURES).state, 'unknown');
+  assert.equal(by(buildStates(rfData({}), NOW), ENTITY_ROUTE_FAILURES).state, '0', 'a healthy feed with no failures IS zero');
+});
+
+test('a full ring still inside the window marks the count as a floor (v0.68.0)', () => {
+  const full = Array.from({ length: 20 }, (_, i) => ({ t: NOW - (i + 1) * 3_600_000, between: [5, 16] as [number, number] }));
+  assert.equal(by(buildStates(rfData({ 16: full }), NOW), ENTITY_ROUTE_FAILURES).attrs.lower_bound, true,
+    'twenty entries all inside the week may have evicted older ones in it');
+  const old = full.map((f, i) => ({ ...f, t: NOW - (i === 19 ? 10 * DAY : (i + 1) * 3_600_000) }));
+  assert.equal(by(buildStates(rfData({ 16: old }), NOW), ENTITY_ROUTE_FAILURES).attrs.lower_bound, false,
+    'a full ring whose oldest entry predates the window lost nothing inside it');
 });

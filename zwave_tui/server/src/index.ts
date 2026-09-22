@@ -310,7 +310,7 @@ async function main(): Promise<void> {
     log,
   });
   log(config.supervisorToken
-    ? `HA states: publishing ${ENTITY_DEGRADED} + 3 sensors every ${HA_STATE_PUBLISH_MS / 1000}s`
+    ? `HA states: publishing ${ENTITY_DEGRADED} + 4 sensors every ${HA_STATE_PUBLISH_MS / 1000}s`
     : 'HA states: no SUPERVISOR_TOKEN — engine conclusions stay local (bare dev)');
 
   // 8) Graceful shutdown — stop the transports, timers, and sockets in order.

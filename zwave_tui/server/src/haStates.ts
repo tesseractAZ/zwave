@@ -24,11 +24,16 @@
  */
 
 import type { DataProvider } from './types';
+import { ROUTE_FAIL_RING } from './zwave/evidenceStore';
 
 // (constants below are re-exported through index.ts's startup banner too)
 
 /** How often the states are re-asserted (also the Core-restart self-heal window). */
 export const HA_STATE_PUBLISH_MS = 30_000;
+
+/** A publish that neither answers nor refuses is abandoned after this long, so
+ *  a hung Core cannot hold a tick open past the next one (v0.68.0). */
+export const HA_STATE_PUBLISH_TIMEOUT_MS = 7_000;
 
 /** The entity ids this add-on owns. Renaming one BREAKS every automation built
  *  on it — treat these as published API, not as internal names. */
@@ -36,6 +41,58 @@ export const ENTITY_DEGRADED = 'binary_sensor.zwave_tui_degraded';
 export const ENTITY_SUMMONS = 'sensor.zwave_tui_summons';
 export const ENTITY_SYMPTOMS = 'sensor.zwave_tui_symptoms';
 export const ENTITY_ENGINE = 'sensor.zwave_tui_engine';
+export const ENTITY_ROUTE_FAILURES = 'sensor.zwave_tui_route_failures';
+
+/** Route failures are counted over a WEEK (v0.68.0). A 24 h window is non-zero
+ *  95 % of the time on the reference mesh and never ranks the chronic link above
+ *  one or two, which loses the one thing this data is for: telling an operator
+ *  which link to go and look at. The window's length does not change recorder
+ *  cost — each event is one change entering it and one leaving. */
+export const ROUTE_FAIL_WINDOW_MS = 7 * 86_400_000;
+const ROUTE_FAIL_LINKS_MAX = 10;
+
+export interface RouteFailureTally {
+  events: number;
+  links: { between: [number, number]; failures: number }[];
+  linkCount: number;
+  nodeIds: number[];
+  lastAt: number | null;
+  /** A full ring whose oldest entry is still inside the window may already
+   *  have evicted older in-window failures: the count is then a floor. */
+  lowerBound: boolean;
+}
+
+/** Route failures in the window, tallied by link. Every value is a pure
+ *  function of the events INSIDE the window — no tick time, no ages, no
+ *  iteration order — so an unchanged week republishes byte-identically and
+ *  costs the recorder nothing (v0.68.0). */
+export function routeFailureTally(data: DataProvider, now: number): RouteFailureTally {
+  const out: RouteFailureTally = { events: 0, links: [], linkCount: 0, nodeIds: [], lastAt: null, lowerBound: false };
+  if (typeof data.routeFailures !== 'function' || typeof data.nodes !== 'function') return out;
+  const byPair = new Map<string, { between: [number, number]; failures: number }>();
+  const nodes = new Set<number>();
+  for (const n of data.nodes()) {
+    if (n.isController) continue;
+    const ring = data.routeFailures(n.nodeId) ?? [];
+    for (const f of ring) {
+      if (now - f.t >= ROUTE_FAIL_WINDOW_MS) continue;
+      out.events += 1;
+      nodes.add(n.nodeId);
+      if (out.lastAt == null || f.t > out.lastAt) out.lastAt = f.t;
+      const key = `${f.between[0]}>${f.between[1]}`;
+      const link = byPair.get(key) ?? { between: [f.between[0], f.between[1]] as [number, number], failures: 0 };
+      link.failures += 1;
+      byPair.set(key, link);
+    }
+    if (ring.length >= ROUTE_FAIL_RING && now - Math.min(...ring.map((f) => f.t)) < ROUTE_FAIL_WINDOW_MS) out.lowerBound = true;
+  }
+  const ranked = [...byPair.values()].sort((a, b) =>
+    b.failures - a.failures || a.between[0] - b.between[0] || a.between[1] - b.between[1]);
+  out.links = ranked.slice(0, ROUTE_FAIL_LINKS_MAX);
+  out.linkCount = ranked.length;
+  out.nodeIds = [...nodes].sort((a, b) => a - b);
+  return out;
+}
 
 export interface HaStatesOptions {
   data: DataProvider;
@@ -113,6 +170,7 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
   const statsAt = data.lastStatsUpdated?.() ?? null;
   const statsSilentMs = statsAt == null ? null : now - statsAt;
   const statsBlind = statsSilentMs != null && statsSilentMs > STATS_FEED_DEAD_MS;
+  const rf = routeFailureTally(data, now);
   const degraded = summonsNodes.length > 0
     || crit > 0
     || ident != null
@@ -201,6 +259,29 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
         rtt_ready: eng.rttReady,
       },
     },
+    // ROUTE FAILURES (v0.68.0). Recorded per node since v0.3x and shown on the
+    // topology screen, but never published — so the richest link-level evidence
+    // this engine holds was invisible to every automation and dashboard. The
+    // reference mesh logs ~3.3 a day (128 in 66 days, 25 of 39 nodes). It does
+    // NOT feed `degraded`: any threshold low enough to catch one bad link is on
+    // most of the time there, and a failure followed by a working reroute is
+    // the mesh healing itself. It says WHERE to look, not how bad things are.
+    {
+      entity: ENTITY_ROUTE_FAILURES,
+      // A blind feed records nothing, so its zero would be a false all-clear.
+      state: statsBlind ? 'unknown' : String(rf.events),
+      attrs: {
+        friendly_name: 'Z-Wave TUI route failures (7 d)',
+        unit_of_measurement: 'failures',
+        window_days: ROUTE_FAIL_WINDOW_MS / 86_400_000,
+        links: rf.links,
+        link_count: rf.linkCount,
+        node_ids: rf.nodeIds,
+        // An EVENT time, not the tick: it moves only when a failure arrives.
+        last_failure_at: rf.lastAt == null ? null : new Date(rf.lastAt).toISOString(),
+        lower_bound: rf.lowerBound,
+      },
+    },
   ];
 }
 
@@ -216,37 +297,54 @@ export function startHaStates(
   const base = opts.baseUrl ?? 'http://supervisor/core/api';
   let lastErr: string | null = null;
 
-  const publishNow = async (): Promise<void> => {
+  const publishOnce = async (): Promise<void> => {
     if (!opts.token) return;
+    let tickErr: string | null = null;
+    let failed = 0;
+    let total = 0;
     for (const s of buildStates(opts.data)) {
+      total += 1;
       try {
         const res = await doFetch(`${base}/states/${s.entity}`, {
           method: 'POST',
           headers: { authorization: `Bearer ${opts.token}`, 'content-type': 'application/json' },
           body: JSON.stringify({ state: s.state, attributes: s.attrs }),
+          signal: AbortSignal.timeout(HA_STATE_PUBLISH_TIMEOUT_MS),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        lastErr = null;
       } catch (e) {
-        // Report only when the message CHANGES: a Core restart makes every tick
-        // fail, and an ERROR per entity per 30 s would bury the log this add-on
-        // spent three releases making readable (cf. the store save-failure latch).
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg !== lastErr) {
-          lastErr = msg;
-          // WARN, not info (v0.66.1). "Engine conclusions are not reaching HA"
-          // is the whole product failing, and at `log_level: warning` — the
-          // setting an operator picks to quiet a chatty add-on — it was the one
-          // thing filtered out. It fired three times in the 24 h after v0.66.0
-          // shipped (two 502s and a 400 around a Core restart) and nothing said
-          // so at the configured level. The sink stays optional: tests and bare
-          // dev pass a plain function, which is called exactly as before.
-          (log.warn ?? log)(`ha-states: publish failed (${msg}) — engine conclusions are not reaching HA`);
-        }
-        return;
+        // KEEP GOING (v0.68.0). This used to `return`, so one entity HA
+        // rejected — a 400 on one payload — silently stopped the other three
+        // from publishing for as long as it kept failing. Each entity is an
+        // independent conclusion; one bad write must not mute the rest.
+        failed += 1;
+        tickErr ??= e instanceof Error ? e.message : String(e);
       }
     }
+    if (tickErr == null) { lastErr = null; return; }
+    // Report only when the message CHANGES: a Core restart makes every tick
+    // fail, and a line per tick would bury the log this add-on spent three
+    // releases making readable (cf. the store save-failure latch). The latch is
+    // the MESSAGE, never the count beside it — a count that wobbles between
+    // ticks would defeat it and re-log the same outage every 30 s.
+    if (tickErr !== lastErr) {
+      lastErr = tickErr;
+      // WARN, not info (v0.66.1). "Engine conclusions are not reaching HA"
+      // is the whole product failing, and at `log_level: warning` — the
+      // setting an operator picks to quiet a chatty add-on — it was the one
+      // thing filtered out. The sink stays optional: tests and bare dev pass a
+      // plain function, which is called exactly as before.
+      (log.warn ?? log)(`ha-states: publish failed (${tickErr}) for ${failed} of ${total} entities — engine conclusions are not reaching HA`);
+    }
   };
+
+  // ONE TICK AT A TIME (v0.68.0). The loop now tries every entity, so a Core
+  // that hangs rather than refuses costs up to four timeouts per tick — longer
+  // than the interval — and ticks would pile up. A call that arrives while one
+  // is in flight JOINS it rather than being dropped: a caller awaiting a
+  // publish must see that publish finish, not return before it started.
+  let current: Promise<void> | null = null;
+  const publishNow = (): Promise<void> => (current ??= publishOnce().finally(() => { current = null; }));
 
   const timer = setInterval(() => { void publishNow(); }, opts.intervalMs ?? HA_STATE_PUBLISH_MS);
   timer.unref?.();
