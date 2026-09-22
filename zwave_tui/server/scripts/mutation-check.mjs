@@ -3239,8 +3239,9 @@ const MUTANTS = [
   { id: 'ha-publish-failure-is-latched', file: 'src/haStates.ts', tests: ['haStates'],
     // An HA Core restart fails every POST at once; an ERROR per entity per 30s
     // would bury the log three releases went into making readable.
-    find: '        if (msg !== lastErr) {',
-    repl: '        if (msg !== null) {',
+    // Re-pointed in v0.68.0: the latch moved to the end of the tick.
+    find: '    if (tickErr !== lastErr) {',
+    repl: '    if (tickErr !== null) {',
     what: 'a repeated publish failure is reported once, not every tick' },
   { id: 'peak-explanation-is-a-tail-token', file: 'src/telnet/screens/interference.ts', tests: ['interferenceScreen'],
     // shedLine's HEAD has no whole-token path, so putting the explanation there
