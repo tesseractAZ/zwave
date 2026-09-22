@@ -106,18 +106,18 @@ session and transport layers. That means:
 
 ## 3. Verification cost
 
-The tables and run figures below are from the v0.69.0 release run, 2026-09-22.
+The tables and run figures below are from a full harness run on the v0.69.0 tree, 2026-09-22 — not a release run (no version bump, no `src/` behaviour change).
 
 | | measured |
 | --- | --- |
-| Mutation harness | **715 mutants, 1840 s wall · 786 s user · 93 s sys** |
+| Mutation harness | **715 mutants, 1842 s wall · 796 s user · 97 s sys** |
 | Source | 26 411 lines TypeScript · 21 761 lines of tests |
-| Test suite | **1 212 tests, 13.0 s** (`npm test`) |
+| Test suite | **1 212 tests, 12.7 s** (`npm test`) |
 
 Latest full run: **706 killed · 0 survived · 9 equivalent · 0 missing ·
 0 ambiguous · 0 invalid · 0 relabel.**
 
-### Where the 1840 seconds actually go
+### Where the 1842 seconds actually go
 
 `node scripts/mutation-check.mjs --profile` reports a per-phase breakdown; the
 run below was taken under `/usr/bin/time -l` so the user/sys split is real
@@ -126,50 +126,50 @@ rather than inferred.
 | phase | wall | share | runs | each |
 | --- | ---: | ---: | ---: | ---: |
 | baseline typecheck | 0.2 s | 0.0 % | 1 | 0.20 s |
-| baseline full suite | 12.4 s | 0.7 % | 1 | 12.4 s |
-| per-mutant typecheck | 142.6 s | 7.8 % | 715 | 0.20 s |
-| **targeted test runs** | **1550.0 s** | **84.7 %** | 714 | **2.17 s** |
-| full-suite fallbacks | 124.9 s | 6.8 % | 10 | 12.49 s |
-| total | 1830.1 s | | | |
+| baseline full suite | 12.8 s | 0.7 % | 1 | 12.8 s |
+| per-mutant typecheck | 147.0 s | 8.0 % | 715 | 0.21 s |
+| **targeted test runs** | **1559.0 s** | **85.1 %** | 715 | **2.18 s** |
+| full-suite fallbacks | 112.6 s | 6.1 % | 9 | 12.51 s |
+| total | 1831.7 s | | | |
 
 ### The startup-bound hypothesis is REFUTED
 
 Earlier revisions of this document flagged "startup-bound" as an untested guess
 and declined to assert it. Measured, it is wrong:
 
-- **`sys` is 93.4 s — 5.1 % of 1840.4 s real.** `user` is 786.2 s, **43 %**.
+- **`sys` is 97.3 s — 5.3 % of 1841.6 s real.** `user` is 795.9 s, **43 %**.
 - The harness now measures its own **process-startup floor** directly, by timing
-  one bare invocation of each subprocess: `tsc` 62 ms, `tsx` 68 ms. Against the
-  observed counts that is `62 ms × 715 + 68 ms × 724` = **93.6 s, 5.1 %** of the
+  one bare invocation of each subprocess: `tsc` 60 ms, `tsx` 74 ms. Against the
+  observed counts that is `60 ms × 715 + 74 ms × 724` = **96.5 s, 5.3 %** of the
   run spent before any work begins. Two consecutive runs agreed to within half a
   point, so this is a stable property and not one run's weather.
 
 Two independent measurements agree at ~10 %. The harness is **CPU-bound on real
 work**, not on launching processes.
 
-The cost centre is the **targeted test runs: 85 % of the run**, at 2.17 s each
-across 714 invocations — of which only ~68 ms is startup. The harness times
-each run whole, so how the other ~2.10 s splits between transpiling, module
+The cost centre is the **targeted test runs: 85 % of the run**, at 2.18 s each
+across 715 invocations — of which only ~74 ms is startup. The harness times
+each run whole, so how the other ~2.11 s splits between transpiling, module
 loading and running the tests is not measured; `tsx` also keeps an on-disk
 transform cache, so an unchanged source is not necessarily transpiled again.
 So the lever is not "spawn fewer processes"; precompiling once and running
 plain JS, or keeping a warm worker, are candidates this profile has not tested.
 
-Two smaller levers, for scale: the per-mutant typecheck is 7.8 % (31 % of which
+Two smaller levers, for scale: the per-mutant typecheck is 8.0 % (29 % of which
 *is* startup, so an incremental/`--watch` tsc server would help there), and the
-full-suite fallbacks are 6.8 % from only **10** runs at 12.5 s each. A mutant
+full-suite fallbacks are 6.1 % from only **9** runs at 12.5 s each. A mutant
 falls back to the full suite whenever its targeted files leave it alive, or when
-it has no targeted file to run (`fastTestsFor()` in `scripts/mutation-check.mjs`
-drops a named test file that does not exist). In this run 9 of the 10 are the 9
+it has no targeted file to run. In this run every fallback is one of the
 `equivalent` mutants: none is killed by its targeted files (that would report
-`RELABEL`), so each must face the whole suite, and that cost is structural. The
-tenth is `rebuild-names-what-it-destroys`, whose `tests: ['actionsMenu']` names
-no existing test file, so its targeted set is empty and the full suite kills it.
-The kill-fast mapping-miss report lists only mutants whose targeted files ran
-and missed; it reported **zero** for this run (seven were harvested from it
-during v0.64.0) and cannot flag that tenth mutant. Pointing its `tests` at a
-file that catches it would save one ~12 s run; the nine equivalent fallbacks
-cannot be removed.
+`RELABEL`), so each must face the whole suite, and that cost is structural and
+cannot be removed. Until 2026-09-22 there was one more: `rebuild-names-what-it-destroys`
+named `tests: ['actionsMenu']`, a file that does not exist, and `fastTestsFor()`
+in `scripts/mutation-check.mjs` dropped the name without a word — so every run
+paid a full ~12 s suite for a mutant its own test file kills in 0.17 s. The
+kill-fast mapping-miss report lists only mutants whose targeted files ran and
+missed, so it could never flag that case. The mutant now names `actionsCatalog`,
+and the pre-flight refuses any test name a mutant or `SOURCE_TESTS` writes down
+that has no file (`UNMAPPED`, exit 2) before a single test runs.
 
 **The run nearly doubled in v0.65.0, and it is the tests, not the harness.** A
 targeted run averaged 1.10 s at v0.64.7 and 2.17 s here, which is the whole
@@ -192,7 +192,7 @@ time, larger than anything in the phase table above.
 marked `equivalent` that the suite now kills) are all failures. An anchor
 pre-flight checks every mutant's target text against its file before any
 *mutant's* tests run — it runs after the baseline, so a stale entry costs the
-baseline (~12 s) rather than a full run (~31 minutes; 1840 s in the v0.69.0
+baseline (~13 s) rather than a full run (~31 minutes; 1842 s in the v0.69.0
 run). It fired nine times during the v0.51–v0.64.3 work, each on an anchor one
 of my own edits had moved — most recently in v0.64.3, `MISSING` on both
 outage-clock mutants after the dating line they target was rewritten, and
@@ -510,6 +510,7 @@ previously listed here, which wrongly implied open work.
 
 | date | version | what changed |
 | --- | --- | --- |
+| 2026-09-22 | v0.69.0 tree | §3 re-measured: 715 mutants (706 killed · 9 equivalent), 1842 s wall · 796 s user · 97 s sys, 1 212 tests in 12.7 s; the harness now refuses a test name with no file; the one stale name fixed, so full-suite fallbacks fell from 10 to the 9 equivalents |
 | 2026-09-22 | v0.69.0 | §3 re-measured: 715 mutants (706 killed · 9 equivalent), 1840 s wall · 786 s user · 93 s sys, 1 212 tests in 13.0 s; weak-signal on an unmeasured window and the refusal reason added 7 mutants and 9 tests |
 | 2026-09-22 | v0.68.1 | §3 re-measured: 708 mutants (699 killed · 9 equivalent), 2266 s wall · 1299 s user · 151 s sys, 1 203 tests in 16.0 s; the route-failure boot guard added 2 mutants and 1 test |
 | 2026-09-21 | v0.68.0 | §3 re-measured: 706 mutants (697 killed · 9 equivalent), 1854 s wall · 824 s user · 102 s sys, 1 202 tests in 12.4 s; route failures published and the publish loop hardened: 8 mutants and 7 tests |
