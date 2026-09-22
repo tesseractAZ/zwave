@@ -49,7 +49,7 @@ cost roughly 800 extra log lines a day. The one real cost — first sweep eviden
 for a multi-node failure arrives about 18 minutes later in expectation — is
 covered by the mesh-wide gates that exist for exactly that case.
 
-TESTS_AND_MUTANTS_LINE_0680
+7 new tests pin these — the tally counts only the week and ranks ties by the link itself, an unchanged week republishes byte-identically, a blind feed reads unknown rather than zero, one rejected entity no longer mutes the rest, and a steady outage logs once — and 8 new mutants show each guard is load-bearing. Full run: 697 killed, 0 survived, 9 equivalent.
 
 ## 0.67.0
 
