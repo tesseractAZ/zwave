@@ -3854,6 +3854,17 @@ const MUTANTS = [
     find: '    unverifiableCount: (k) => zd.unverifiableCount(k),',
     repl: '    unverifiableCount: () => 0,',
     what: 'the production bridge forwards unverifiableCount to the data layer' },
+  /* ── v0.68.1 ─────────────────────────────────────────────────────────── */
+  { id: 'route-failures-unknown-before-roster', file: 'src/haStates.ts', tests: ['haStates'],
+    // Restores the boot-time false zero: 0 for ~30 s after every restart.
+    find: "      state: statsBlind || !rf.rosterLoaded ? 'unknown' : String(rf.events),",
+    repl: "      state: statsBlind ? 'unknown' : String(rf.events),",
+    what: 'route failures read unknown until the roster has loaded' },
+  { id: 'roster-loaded-only-by-a-real-node', file: 'src/haStates.ts', tests: ['haStates'],
+    // The controller alone is not a roster to count failures for.
+    find: '    out.rosterLoaded = true;',
+    repl: '    void 0;',
+    what: 'a non-controller node on the roster is what makes zero a reading' },
   /* ── v0.68.0: the publish loop ────────────────────────────────────────── */
   { id: 'route-failures-windowed', file: 'src/haStates.ts', tests: ['haStates'],
     find: '      if (now - f.t >= ROUTE_FAIL_WINDOW_MS) continue;',
@@ -3866,8 +3877,9 @@ const MUTANTS = [
     repl: '    b.failures - a.failures);',
     what: 'tied links are ranked by the link itself, deterministically' },
   { id: 'route-failures-unknown-when-blind', file: 'src/haStates.ts', tests: ['haStates'],
-    find: "      state: statsBlind ? 'unknown' : String(rf.events),",
-    repl: '      state: String(rf.events),',
+    // Re-pointed in v0.68.1: the state now also waits for the roster.
+    find: "      state: statsBlind || !rf.rosterLoaded ? 'unknown' : String(rf.events),",
+    repl: "      state: !rf.rosterLoaded ? 'unknown' : String(rf.events),",
     what: 'a blind feed publishes unknown, not a false all-clear zero' },
   { id: 'route-failure-time-is-the-event', file: 'src/haStates.ts', tests: ['haStates'],
     find: '        last_failure_at: rf.lastAt == null ? null : new Date(rf.lastAt).toISOString(),',
