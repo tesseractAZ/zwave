@@ -20,7 +20,7 @@ used a roster holding only the controller, so once this guard existed it passed
 whether or not the feed was blind. Its fixture now carries a real node, so
 blindness is the only reason left for `unknown`.
 
-TESTS_AND_MUTANTS_LINE_0681
+One new test pins it and 2 new mutants show both halves of the guard are load-bearing. Full run: 699 killed, 0 survived, 9 equivalent.
 
 ## 0.68.0
 
