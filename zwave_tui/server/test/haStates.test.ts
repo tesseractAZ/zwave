@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStates, startHaStates, ENTITY_DEGRADED, ENTITY_SUMMONS, ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ROUTE_FAIL_WINDOW_MS } from '../src/haStates';
+import { buildStates, startHaStates, failureReason, ENTITY_DEGRADED, ENTITY_SUMMONS, ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ROUTE_FAIL_WINDOW_MS } from '../src/haStates';
 import type { DataProvider, Symptom } from '../src/types';
 
 const AP = (over: Record<string, unknown> = {}) => ({
@@ -322,4 +322,28 @@ test('before the roster loads, route failures read unknown — never a boot-time
   assert.equal(by(buildStates(empty, NOW), ENTITY_ROUTE_FAILURES).state, 'unknown', 'an empty roster is not a reading');
   assert.equal(by(buildStates(rfData({ 16: [] }), NOW), ENTITY_ROUTE_FAILURES).state, '0',
     'once a node is on the roster, no failures IS zero');
+});
+
+test('a refused publish names the REASON the refusal gave (v0.69.0)', async () => {
+  // Three HTTP 400s logged bare; the Supervisor's body said why all along:
+  // "System is not ready with state: shutdown" during a host reboot.
+  const warned: string[] = [];
+  const log = Object.assign(() => {}, { warn: (m: string) => warned.push(m) });
+  const h = startHaStates({
+    data: data(), token: 't', log, intervalMs: 1_000_000,
+    fetchImpl: (async () => ({ ok: false, status: 400,
+      text: async () => JSON.stringify({ result: 'error', message: 'System is not ready with state: shutdown' }) })) as never,
+  });
+  await h.publishNow();
+  h.stop();
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /publish failed \(HTTP 400: System is not ready with state: shutdown\)/);
+});
+
+test('an odd or empty refusal body never makes a failing publish fail harder (v0.69.0)', async () => {
+  assert.equal(await failureReason({}), '', 'no body reader');
+  assert.equal(await failureReason({ text: async () => '' }), '', 'empty body');
+  assert.equal(await failureReason({ text: async () => { throw new Error('boom'); } }), '', 'a reader that throws');
+  assert.equal(await failureReason({ text: async () => '<html>Bad\n  Gateway</html>' }), ': <html>Bad Gateway</html>', 'plain text, whitespace collapsed');
+  assert.ok((await failureReason({ text: async () => 'x'.repeat(5_000) })).length <= 162, 'bounded');
 });

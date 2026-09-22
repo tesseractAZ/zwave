@@ -256,8 +256,8 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
         // Coverage is a statement about the INSTRUMENT, and an operator
         // deciding whether to trust a quiet screen needs it (v0.46.0).
         detectors_ready: eng.timeoutReady,
-        // Not clear — unmeasured. Three detectors skip a node whose 10-minute
-        // window holds too few transmissions to rate (v0.67.0).
+        // Not clear — unmeasured: the return-path detectors skip a node whose
+        // 10-minute window holds too few transmissions to rate (v0.67.0).
         detectors_unmeasured: eng.timeoutWindowBlind,
         detectors_total: eng.total,
         rtt_ready: eng.rttReady,
@@ -297,6 +297,28 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
  * Start the publisher. Returns a stop handle; no-ops without a token, so bare
  * dev and the test suite never reach the network.
  */
+/** The reason a refusal gives, if it gives one (v0.69.0). A bare "HTTP 400"
+ *  took a full investigation to identify as the Supervisor's own "System is not
+ *  ready with state: shutdown" during a host reboot — the answer was in the body
+ *  all along. Bounded, JSON `message` preferred, never throws: a failing publish
+ *  must not fail harder because its error page is odd. */
+export async function failureReason(res: { text?: () => Promise<string> }): Promise<string> {
+  try {
+    if (typeof res.text !== 'function') return '';
+    const body = (await res.text()).slice(0, 2_000).trim();
+    if (!body) return '';
+    let msg = body;
+    try {
+      const j = JSON.parse(body) as { message?: unknown };
+      if (typeof j?.message === 'string') msg = j.message;
+    } catch { /* not JSON — use the text */ }
+    msg = msg.replace(/\s+/g, ' ').trim().slice(0, 160);
+    return msg ? `: ${msg}` : '';
+  } catch {
+    return '';
+  }
+}
+
 export function startHaStates(
   opts: HaStatesOptions,
 ): { stop: () => void; publishNow: () => Promise<void> } {
@@ -319,7 +341,7 @@ export function startHaStates(
           body: JSON.stringify({ state: s.state, attributes: s.attrs }),
           signal: AbortSignal.timeout(HA_STATE_PUBLISH_TIMEOUT_MS),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}${await failureReason(res)}`);
       } catch (e) {
         // KEEP GOING (v0.68.0). This used to `return`, so one entity HA
         // rejected — a 400 on one payload — silently stopped the other three

@@ -2240,11 +2240,14 @@ A routed node's RSSI is its *last hop*, not the device, so this fires only on di
 ```ts
 routed        = (last.routeKey ?? 'direct') !== 'direct'
 margin        = rssi - floor
-timeoutCorrob = w != null && w.rate >= 0.05           // deliveries actually suffering
+lookback      = w != null ? WINDOW_MS : WEAK_EVENT_LOOKBACK_MS (30 min)
+failures      = Σ (dFlaps + dTimeout) over the last 30 min
+timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE (0.05)          // a measured window decides on its rate
+                          : failures > 0 && status !== Dead             // unmeasured: a failed delivery corroborates
 b = !routed && !isLongRange && margin < WEAK_MARGIN_DB (7) && timeoutCorrob
 ```
 
-The timeout corroboration is required by design: a thin margin that isn't costing deliveries is not yet a problem. **Basis is honest about its floor** — `measured` only when `input.hasRealNoise()` (the driver-WS noise reading, Chapter 6/M2.5) is available; against the −95 fallback the row is `inferred` and the evidence value reads `"… (vs assumed −95 floor)"`. `markDegrading(id, true)` fires only once the symptom matures.
+Corroboration is required by design: a thin margin that isn't costing deliveries is not yet a problem. **Until v0.69.0 it could never be met on a quiet mesh.** It needed a timeout *rate*, which needs 20 sends to one node in ten minutes, and the reference mesh's whole traffic is about 6 sends per ten minutes combined — so every node was unmeasured, always, and this detector could not start its dwell. Unmeasured is not "not suffering": on an unmeasured window, one failed delivery in the last 30 minutes corroborates — a send that exhausted its retries (a Dead transition, `dFlaps`) or an acknowledged reply-expecting send that went unanswered (`dTimeout`). The RSSI and route inputs read the same lookback, so the breach does not clear ten minutes after the single fresh sample a sparse node produces. A node that is Dead *now* is excluded — `node-down` owns it. The margin bar is unchanged. **Basis is honest about its floor** — `measured` only when `input.hasRealNoise()` (the driver-WS noise reading, Chapter 6/M2.5) is available; against the −95 fallback the row is `inferred` and the evidence value reads `"… (vs assumed −95 floor)"`. `markDegrading(id, true)` fires only once the symptom matures.
 
 **`ghost-suspect` — coverage-proven, zero comms (warn, inferred).**
 Deliberately the most conservative detector, because its eventual remediation (`remove_failed_node`) is destructive. It keys on *cumulative* coverage:
@@ -2429,7 +2432,9 @@ All `symptoms.ts` thresholds ship as documented compile-time constants (shareabi
 | `S2_WINDOW_MS` | 30 min | S2 SPAN-resync lookback (sparser than counter signals) |
 | `TIMEOUT_RATE_ABS` | 0.15 | Chronic / absolute timeout-rate threshold |
 | `TIMEOUT_RATE_MULT` | 3 | Relative multiplier over own baseline |
+| `WEAK_EVENT_LOOKBACK_MS` | 30 min | How recent a failed delivery must be to corroborate `weak-signal` on an unmeasured window (v0.69.0) |
 | `WEAK_MARGIN_DB` | 7 | Direct-node weak-signal SNR margin |
+| `WEAK_TIMEOUT_RATE` | 0.05 | Timeout rate that corroborates `weak-signal` on a measured window |
 | `WINDOW_MS` | 10 min | Windowed-rate / flap lookback |
 
 Rate-fallback's two companion constants live where they act (§7.2.4): `RATE_FALLBACK_MIN_GAP_MS = 30 s` (`evidenceStore.ts`; a below-100k reading closer than this to the previous counted one is the same exchange) and `STATS_SETTLE_MS = 300 ms` (`zwaveData.ts`; a node whose latest statistics event is younger is sampled one tick later, at most one tick in a row).

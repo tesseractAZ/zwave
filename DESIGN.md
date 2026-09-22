@@ -297,7 +297,7 @@ verbatim where one exists — §3.5):
 | `return-path-degraded` | windowed per-command timeout **rate** (ΣdTimeout/ΣdTx, min denominator) ≫ own baseline, dwell ≥ D | tiny samples; traffic-volume shifts (rate not count — DR); unsupervised-SET-only nodes that need no nonce exchange, and traffic-mix shifts between reply-expecting commands and unsupervised Sets — either direction moves the rate (toward reply-expecting commands can inflate it, toward unsupervised Sets can mask a breach) *(§0)* — supervised Sets DO accrue timeouts, and so does a secure send whose nonce Get is acknowledged but never answered (source-traced on zwave-js 15.27.1; empirical repro still open — RESEARCH §7 item 11) |
 | `route-churn` | routeKey churn ≫ baseline + rate/RTT corroboration (**routeSchemeState does not exist on either WS — dropped**; explorer detection only ever as a labelled best-effort log parse) | one legit re-route after topology change *(§2.1, DR)* |
 | `rtt-degraded` | RTT median over **fresh** samples ≫ route-stratified baseline, dwell | route change (settle window); EMA lag; wake latency *(§1.11, DR)* |
-| `weak-signal` | low RSSI **on a direct (non-routed) node** + timeout corroboration | routed node (RSSI = last hop, not the device) *(§1.3)* |
+| `weak-signal` | low RSSI **on a direct (non-routed) node** + delivery corroboration: a ≥5 % timeout rate, or — when too few sends to rate — a failed delivery in the last 30 min (v0.69.0) | routed node (RSSI = last hop, not the device) *(§1.3)*; a node Dead now (node-down owns it) |
 
 **Detection vs advice — two layers, never conflated** *(DR)*:
 

@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.69.0
+
+### Fixed — `weak-signal` could never fire on a quiet mesh
+
+`weak-signal` flags a direct node whose signal sits too close to the noise
+floor, but only when deliveries are actually suffering — a thin margin that
+costs nothing is not yet a problem, and RSSI alone swings several decibels on
+its own. That corroboration was a timeout RATE, and a rate needs twenty sends
+to one node inside ten minutes. The reference mesh sends about six per ten
+minutes in total, so every node's window was unmeasured, always: v0.67.0
+published it as `detectors_unmeasured` reading 38 of 38. The detector could not
+even start its dwell. It was an all-clear by construction.
+
+Unmeasured is not "not suffering". On an unmeasured window a failed delivery in
+the last thirty minutes now corroborates: a send that exhausted its retries and
+marked the node Dead, or an acknowledged reply-expecting send that went
+unanswered. The signal and route inputs read the same lookback, so the breach
+does not clear ten minutes after the single fresh sample a quiet node produces.
+A measured window still decides on its rate. A node that is Dead right now is
+left to `node-down`, so one fault does not raise two cards. The margin bar is
+unchanged.
+
+Measured against the live noise floor (−102.5 dBm, not the −95 fallback), no
+direct node on the reference mesh is currently thin enough to trip it — the
+change makes the detector able to fire, not fire today. The weakest direct link,
+node 18, dropped to Dead after four attempts on 2026-09-21 and returned 57 s
+later; that is exactly the event this detector could not count.
+
+### Changed — a refused publish says why
+
+When Home Assistant refuses a publish, the warning now carries the reason the
+refusal gave. Three `HTTP 400`s were logged bare and took a full investigation
+to identify: each was the Supervisor itself answering "System is not ready with
+state: shutdown" while the host rebooted, with Home Assistant never involved.
+The reason was in the response body all along. It is bounded, a JSON `message`
+is preferred, and an odd or unreadable body never makes a failing publish fail
+harder.
+
+TESTS_AND_MUTANTS_LINE_0690
+
 ## 0.68.1
 
 ### Fixed — route failures read zero for the first half-minute after every restart
