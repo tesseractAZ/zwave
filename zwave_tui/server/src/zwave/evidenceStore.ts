@@ -498,7 +498,7 @@ const DEFAULT_BOOT_GRACE_MS = 180 * 1000;
 const DEFAULT_MAX_DELTA_PER_SEC = 40;
 /** Max-window bound = this many cadences without a sample ⇒ deltas not attributable. */
 const MAX_WINDOW_CADENCES = 3;
-const ROUTE_FAIL_RING = 20;
+export const ROUTE_FAIL_RING = 20;
 const CTRL_MAX_SAMPLES = 240;
 
 interface CounterSnapshot {

@@ -277,6 +277,7 @@ re-asserted every 30 seconds:
 | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
+| `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |
 
 The engine sensor's states are listed in the order the code checks them:
 `awaiting-identity-decision` (a mesh identity decision is pending; it outranks

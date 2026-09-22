@@ -4436,6 +4436,7 @@ triggering on state can never disagree about the mesh:
   | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total` |
   | `sensor.zwave_tui_summons` | count | `node_ids` |
   | `sensor.zwave_tui_symptoms` | count | `critical`, `warning`, `kinds` |
+  | `sensor.zwave_tui_route_failures` | failures in 7 d | `links`, `node_ids`, `last_failure_at`, `lower_bound` |
 
   The engine sensor's states are listed in the order the code checks them:
   `awaiting-identity-decision` (a mesh identity decision is pending; it outranks

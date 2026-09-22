@@ -451,7 +451,7 @@ As of v0.63.2, 2026-09-06:
 
 | | measured |
 | --- | --- |
-| HA state re-publish | every **30 s** (four entities) |
+| HA state re-publish | every **30 s** (five entities) |
 | Release image build (CI, multi-arch) | ~**90 s** after the tag |
 
 The 30 s cadence is also the self-heal window: the entities are unmanaged

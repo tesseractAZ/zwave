@@ -24,6 +24,7 @@
  */
 
 import type { DataProvider } from './types';
+import { ROUTE_FAIL_RING } from './zwave/evidenceStore';
 
 // (constants below are re-exported through index.ts's startup banner too)
 
@@ -40,6 +41,58 @@ export const ENTITY_DEGRADED = 'binary_sensor.zwave_tui_degraded';
 export const ENTITY_SUMMONS = 'sensor.zwave_tui_summons';
 export const ENTITY_SYMPTOMS = 'sensor.zwave_tui_symptoms';
 export const ENTITY_ENGINE = 'sensor.zwave_tui_engine';
+export const ENTITY_ROUTE_FAILURES = 'sensor.zwave_tui_route_failures';
+
+/** Route failures are counted over a WEEK (v0.68.0). A 24 h window is non-zero
+ *  95 % of the time on the reference mesh and never ranks the chronic link above
+ *  one or two, which loses the one thing this data is for: telling an operator
+ *  which link to go and look at. The window's length does not change recorder
+ *  cost — each event is one change entering it and one leaving. */
+export const ROUTE_FAIL_WINDOW_MS = 7 * 86_400_000;
+const ROUTE_FAIL_LINKS_MAX = 10;
+
+export interface RouteFailureTally {
+  events: number;
+  links: { between: [number, number]; failures: number }[];
+  linkCount: number;
+  nodeIds: number[];
+  lastAt: number | null;
+  /** A full ring whose oldest entry is still inside the window may already
+   *  have evicted older in-window failures: the count is then a floor. */
+  lowerBound: boolean;
+}
+
+/** Route failures in the window, tallied by link. Every value is a pure
+ *  function of the events INSIDE the window — no tick time, no ages, no
+ *  iteration order — so an unchanged week republishes byte-identically and
+ *  costs the recorder nothing (v0.68.0). */
+export function routeFailureTally(data: DataProvider, now: number): RouteFailureTally {
+  const out: RouteFailureTally = { events: 0, links: [], linkCount: 0, nodeIds: [], lastAt: null, lowerBound: false };
+  if (typeof data.routeFailures !== 'function' || typeof data.nodes !== 'function') return out;
+  const byPair = new Map<string, { between: [number, number]; failures: number }>();
+  const nodes = new Set<number>();
+  for (const n of data.nodes()) {
+    if (n.isController) continue;
+    const ring = data.routeFailures(n.nodeId) ?? [];
+    for (const f of ring) {
+      if (now - f.t >= ROUTE_FAIL_WINDOW_MS) continue;
+      out.events += 1;
+      nodes.add(n.nodeId);
+      if (out.lastAt == null || f.t > out.lastAt) out.lastAt = f.t;
+      const key = `${f.between[0]}>${f.between[1]}`;
+      const link = byPair.get(key) ?? { between: [f.between[0], f.between[1]] as [number, number], failures: 0 };
+      link.failures += 1;
+      byPair.set(key, link);
+    }
+    if (ring.length >= ROUTE_FAIL_RING && now - Math.min(...ring.map((f) => f.t)) < ROUTE_FAIL_WINDOW_MS) out.lowerBound = true;
+  }
+  const ranked = [...byPair.values()].sort((a, b) =>
+    b.failures - a.failures || a.between[0] - b.between[0] || a.between[1] - b.between[1]);
+  out.links = ranked.slice(0, ROUTE_FAIL_LINKS_MAX);
+  out.linkCount = ranked.length;
+  out.nodeIds = [...nodes].sort((a, b) => a - b);
+  return out;
+}
 
 export interface HaStatesOptions {
   data: DataProvider;
@@ -117,6 +170,7 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
   const statsAt = data.lastStatsUpdated?.() ?? null;
   const statsSilentMs = statsAt == null ? null : now - statsAt;
   const statsBlind = statsSilentMs != null && statsSilentMs > STATS_FEED_DEAD_MS;
+  const rf = routeFailureTally(data, now);
   const degraded = summonsNodes.length > 0
     || crit > 0
     || ident != null
@@ -203,6 +257,29 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
         detectors_unmeasured: eng.timeoutWindowBlind,
         detectors_total: eng.total,
         rtt_ready: eng.rttReady,
+      },
+    },
+    // ROUTE FAILURES (v0.68.0). Recorded per node since v0.3x and shown on the
+    // topology screen, but never published — so the richest link-level evidence
+    // this engine holds was invisible to every automation and dashboard. The
+    // reference mesh logs ~3.3 a day (128 in 66 days, 25 of 39 nodes). It does
+    // NOT feed `degraded`: any threshold low enough to catch one bad link is on
+    // most of the time there, and a failure followed by a working reroute is
+    // the mesh healing itself. It says WHERE to look, not how bad things are.
+    {
+      entity: ENTITY_ROUTE_FAILURES,
+      // A blind feed records nothing, so its zero would be a false all-clear.
+      state: statsBlind ? 'unknown' : String(rf.events),
+      attrs: {
+        friendly_name: 'Z-Wave TUI route failures (7 d)',
+        unit_of_measurement: 'failures',
+        window_days: ROUTE_FAIL_WINDOW_MS / 86_400_000,
+        links: rf.links,
+        link_count: rf.linkCount,
+        node_ids: rf.nodeIds,
+        // An EVENT time, not the tick: it moves only when a failure arrives.
+        last_failure_at: rf.lastAt == null ? null : new Date(rf.lastAt).toISOString(),
+        lower_bound: rf.lowerBound,
       },
     },
   ];
