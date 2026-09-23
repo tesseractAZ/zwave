@@ -4,7 +4,9 @@
  * outcome into the event ring (source 'you') so the Log screen closes the loop.
  *
  * The exact WS command shapes were probed against the live driver:
- *   ping                 call_service button.press { entity_id }   (safe/idempotent)
+ *   ping                 call_service button.press { entity_id }   (one ACK-only NoOp; an unanswered one marks the node Dead)
+ *   routed read          call_service zwave_js.refresh_value { entity_id, refresh_all_values: false }
+ *                        (one Get; the ladder's follow-up since v0.70.0, the sweep/verification probe since v0.71.0)
  *   refresh values       zwave_js/refresh_node_values { device_id }
  *   re-interview         zwave_js/refresh_node_info { device_id }   (heavy)
  *   heal (rebuild node)  zwave_js/rebuild_node_routes { device_id } (mutating)
@@ -272,9 +274,10 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     // state. HA returns before the frame is on the air, so success here proves
     // only that the request was queued: the answer is judged from lastSeen.
     // Never learned: the ledger is first-action-wins, and the ladder's ping is
-    // always that first action.
-    routedRead: (n) =>
-      run('routedRead', n, `routed read node ${n}`, async () => {
+    // always that first action; in the measurement lanes (v0.71.0, purpose
+    // 'probe') the read is the instrument, which v0.38.1 keeps off the ledger.
+    routedRead: (n, purpose = 'revive') =>
+      run('routedRead', n, purpose === 'probe' ? `probe node ${n} (routed read)` : `routed read node ${n}`, async () => {
         const ent = o.readEntityOf?.(n) ?? null;
         if (!ent) throw new Error(`node ${n} has no switch/light value to read`);
         await o.client.send({ type: 'call_service', domain: 'zwave_js', service: 'refresh_value', service_data: { entity_id: ent, refresh_all_values: false } });

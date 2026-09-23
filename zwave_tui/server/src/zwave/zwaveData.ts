@@ -62,13 +62,14 @@ import {
   type NodeCoverage,
   isRouteChange,
   type ProbeClassLite,
+  type ProbeFrameLite,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
 import { detectSymptoms, symptomaticNodes, armingNodes, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
-import { isPingCandidate, type AutoPingSnapshot } from './autoPing';
+import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin } from './zwaveActions';
 import type { DriverWsState } from './driverWsClient';
 import type { OpenEpisodeView } from './outcomes';
@@ -303,6 +304,22 @@ interface DeviceRec {
   model: string | null;
 }
 
+/**
+ * The episode kinds a route change can clear BY ITSELF (v0.71.0): their
+ * recovery metric — data rate, RTT, ACK RSSI, reply timeouts — moves when the
+ * controller starts using a better route. Since the measurement lanes send a
+ * routed read, OUR probe can be what moved it, and a recovery we caused must
+ * not be booked to the control arm. `dead-flap` and `route-churn` are left out
+ * because a flap and a route change are their own measured signal (the v0.40
+ * rule); `quiet-node` and `s2-desync` do not depend on the route.
+ */
+const MEASUREMENT_REROUTE_KINDS: ReadonlySet<SymptomKind> = new Set<SymptomKind>([
+  'rate-fallback', 'rtt-degraded', 'weak-signal', 'return-path-degraded', 'chronic-return-path',
+]);
+/** Alive→Dead transitions kept for the auto-ping runner between drains
+ *  (v0.71.0); the runner drains every tick, so this only bounds a stall. */
+const DEAD_EVENTS_MAX = 200;
+
 export interface ZwaveDataOptions {
   /** How long a node must be absent from the roster before its learning is
    *  discarded (default 5 min). Injectable ONLY so a test can drive the
@@ -452,11 +469,17 @@ export interface ZwaveData {
    *  used a TIME heuristic before, and it lied: a symptom clearing mid-burst
    *  makes the open→confirm pause ~180s, under the 240s threshold, so a burst
    *  BOUNDARY printed as "+180s" and read as slow spacing in an audit. */
-  drainVerifyRequests(now?: number): { id: number; first: boolean }[];
+  /** `skip` (v0.71.0): nodes whose probes stay OWED this call, not drained. */
+  drainVerifyRequests(now?: number, skip?: (nodeId: number) => boolean): { id: number; first: boolean }[];
   /** How many nodes have an outstanding verification burst (v0.37.1). */
   verifyOwedCount(): number;
-  /** Record one liveness-probe outcome for the persisted reply rate (v0.37). */
-  recordProbeResult(nodeId: number, answered: boolean, cls: ProbeClassLite): void;
+  /** Record one liveness-probe outcome for the persisted reply rate (v0.37);
+   *  `frame` (v0.71.0) is what the probe sent. */
+  recordProbeResult(nodeId: number, answered: boolean, cls: ProbeClassLite, frame?: ProbeFrameLite): void;
+  /** A sweep or verification probe is about to be sent (v0.71.0). */
+  noteMeasurementProbe(nodeId: number, at: number, lane: 'sweep' | 'verify', frame: ProbeFrameLite): void;
+  /** Drain the Alive→Dead transitions seen since the last call (v0.71.0). */
+  drainDeadEvents(): { nodeId: number; at: number }[];
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** The learned RTT yardstick for this node's CURRENT time-of-day band (v0.48.0). */
   rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
@@ -675,6 +698,16 @@ class ZwaveDataImpl implements ZwaveData {
    *  Cleared at the end of each engine pass. */
   private flapsThisTick = new Map<number, number>();
   private routeChangeAccum = new Map<number, number>();
+  /** nodeId → the latest sweep or verification probe the runner sent (v0.71.0),
+   *  so a route change can be tested against it. */
+  private readonly measurementSent = new Map<number, { at: number; lane: 'sweep' | 'verify'; frame: ProbeFrameLite }>();
+  /** Nodes whose route our own routed read changed since the last engine pass
+   *  (v0.71.0) — consumed by the confound guard in updateEpisodes. */
+  private readonly measurementReroutes = new Set<number>();
+  /** Alive→Dead transitions for the auto-ping runner (v0.71.0), from the same
+   *  sources that count flaps: the status feed, or the roster diff for a node
+   *  without one. See `drainDeadEvents`. */
+  private deadEvents: { nodeId: number; at: number }[] = [];
   /** S2 SPAN-resync log events per node since the last evidence sample (v0.26).
    *  Fed by the driver-ws log listener; drains beside flapAccum. Nonce desync
    *  appears ONLY in driver logs — no statistics counter moves — so without
@@ -1233,6 +1266,7 @@ class ZwaveDataImpl implements ZwaveData {
     this.updateEpisodes(symptoms, now);
     // Consumed by the confound guard inside updateEpisodes; one pass only.
     this.flapsThisTick.clear();
+    this.measurementReroutes.clear();
     // Fold the freshest sample per node into the baselines, quarantining nodes
     // that are SYMPTOMATIC OR ARMING (any active dwell) — folding the pre-dwell
     // breach would ratchet the baseline toward the pathology (v0.14 review).
@@ -1333,6 +1367,8 @@ class ZwaveDataImpl implements ZwaveData {
         // it happened to straddle a sample boundary.
         const flapped = (this.flapsThisTick.get(ep.nodeId) ?? 0) > 0;
         if (flapped || (nd && nd.status === NodeStatus.Dead)) oc.markConfounded(ep.nodeId, ep.kind);
+        // …or our own measurement read re-routed the node (v0.71.0) — see onNodeStats.
+        if (this.measurementReroutes.has(ep.nodeId) && MEASUREMENT_REROUTE_KINDS.has(ep.kind)) oc.markConfounded(ep.nodeId, ep.kind);
       }
     }
     // Keep improving each LIVE episode's before-window as probe evidence lands
@@ -1535,8 +1571,8 @@ class ZwaveDataImpl implements ZwaveData {
   /** Record one liveness-probe outcome (v0.37) — the per-node reply rate the
    *  driver's reactive Dead flag cannot supply. No-op without an evidence
    *  store, like every other persisted counter here. */
-  recordProbeResult(nodeId: number, answered: boolean, cls: ProbeClassLite): void {
-    this.evidenceStore?.recordProbe(nodeId, answered, cls);
+  recordProbeResult(nodeId: number, answered: boolean, cls: ProbeClassLite, frame?: ProbeFrameLite): void {
+    this.evidenceStore?.recordProbe(nodeId, answered, cls, undefined, frame);
   }
 
   /** Episodes of this kind the ledger could not score at all (v0.36). */
@@ -1621,11 +1657,14 @@ class ZwaveDataImpl implements ZwaveData {
    * packets in one second (which would be one observation's worth of
    * information and three times the airtime).
    */
-  drainVerifyRequests(now = Date.now()): { id: number; first: boolean }[] {
+  drainVerifyRequests(now = Date.now(), skip?: (nodeId: number) => boolean): { id: number; first: boolean }[] {
     const due: number[] = [];
     for (const [id, st] of this.verifyOwed) {
       if (st.left <= 0) { this.verifyOwed.delete(id); continue; }
       if (now < st.nextAt) continue;
+      // Held by the runner (v0.71.0): left OWED, not handed out — handing it
+      // out would spend the burst on a probe the runner will not send.
+      if (skip?.(id)) continue;
       due.push(id);
     }
     if (due.length === 0) return [];
@@ -2083,6 +2122,7 @@ class ZwaveDataImpl implements ZwaveData {
         if (!this.statusSubbed.has(n.nodeId)) {
           const crossedDead = (prev === NodeStatus.Dead) !== (n.status === NodeStatus.Dead);
           if (crossedDead) this.flapAccum.set(n.nodeId, (this.flapAccum.get(n.nodeId) ?? 0) + 1);
+          if (crossedDead && n.status === NodeStatus.Dead) this.noteDeadEvent(n.nodeId);
         }
       }
       this.prevStatus.set(n.nodeId, n.status);
@@ -2137,6 +2177,8 @@ class ZwaveDataImpl implements ZwaveData {
           this.flapAccum.delete(id);
           this.routeChangeAccum.delete(id);
           this.s2Accum.delete(id);
+          this.measurementSent.delete(id);
+          this.measurementReroutes.delete(id);
           this.subStatus.delete(id);
           this.statusSubbed.delete(id);
           this.statsSubbedNodes.delete(id);
@@ -2241,6 +2283,9 @@ class ZwaveDataImpl implements ZwaveData {
         this.flapAccum.clear();
         this.routeChangeAccum.clear();
         this.s2Accum.clear();
+        this.measurementSent.clear();
+        this.measurementReroutes.clear();
+        this.deadEvents = [];
         this.subStatus.clear();
         this.prevSampleSig.clear();
         this.missingSince.clear();
@@ -2823,6 +2868,31 @@ class ZwaveDataImpl implements ZwaveData {
     if (prev == null) return; // first observation — no transition yet
     const crossedDead = (prev === NodeStatus.Dead) !== (next === NodeStatus.Dead);
     if (crossedDead) this.flapAccum.set(nodeId, (this.flapAccum.get(nodeId) ?? 0) + 1);
+    if (crossedDead && next === NodeStatus.Dead) this.noteDeadEvent(nodeId);
+  }
+
+  /** Queue one Alive→Dead transition for the auto-ping runner (v0.71.0). */
+  private noteDeadEvent(nodeId: number): void {
+    this.deadEvents.push({ nodeId, at: Date.now() });
+    if (this.deadEvents.length > DEAD_EVENTS_MAX) this.deadEvents.splice(0, this.deadEvents.length - DEAD_EVENTS_MAX);
+  }
+
+  /**
+   * The Alive→Dead transitions seen since the last call (v0.71.0). The runner
+   * level-samples status once a tick, so without this it cannot see a death
+   * that clears before the next tick — which a Get can cause and a NoOp cannot:
+   * the node takes the frame, its ACK is lost, the driver marks it Dead, and the
+   * node's own Report marks it Alive again, all inside a second.
+   */
+  drainDeadEvents(): { nodeId: number; at: number }[] {
+    const out = this.deadEvents;
+    this.deadEvents = [];
+    return out;
+  }
+
+  /** The runner is about to send a sweep or verification probe (v0.71.0). */
+  noteMeasurementProbe(nodeId: number, at: number, lane: 'sweep' | 'verify', frame: ProbeFrameLite): void {
+    this.measurementSent.set(nodeId, { at, lane, frame });
   }
 
   /**
@@ -3256,8 +3326,33 @@ class ZwaveDataImpl implements ZwaveData {
     // reappearance would score two changes for zero re-routing, and route-churn
     // fires at four.
     if (isRouteChange(prev?.lwr, stats.lwr)) {
-      this.pushEvent('net', 'info', 'route', nodeId, `route → ${fmtRoute(stats.lwr)}`);
-      this.routeChangeAccum.set(nodeId, (this.routeChangeAccum.get(nodeId) ?? 0) + 1);
+      // OUR READ MOVED IT (v0.71.0) only when all three hold: the node's latest
+      // measurement probe was a routed read (a NoOp cannot compute a route), it
+      // went out inside the answer grace, and THIS transmission failed over —
+      // `routeFailedBetween` is set by the driver only on a TX report whose
+      // route failed on the way. A route change that is merely first SEEN on our
+      // probe (an owner's route rebuild, a priority route, the controller's own
+      // re-route earlier) is revealed, not caused: statistics move only on a TX
+      // report, and on a quiet node our sweep is often the next frame.
+      const sent = this.measurementSent.get(nodeId);
+      const sinceMs = sent == null ? null : Date.now() - sent.at;
+      const ours = sent != null && sent.frame === 'read' && sinceMs != null && sinceMs >= 0 &&
+        sinceMs <= ANSWER_GRACE_MS && stats.lwr?.routeFailedBetween != null;
+      const lane = sent?.lane === 'verify' ? 'verification' : 'sweep';
+      this.pushEvent('net', 'info', 'route', nodeId, `route → ${fmtRoute(stats.lwr)}` +
+        (ours ? ` (our ${lane} routed read failed over ${Math.round(sinceMs! / 1000)}s after it went out)` : ''));
+      if (ours) {
+        // Not route CHURN: route-churn fires at four changes in ten minutes,
+        // and a verification burst whose reads keep failing over between two
+        // routes would feed it by itself — an episode our probing opens and
+        // then asks to verify with more probing.
+        this.measurementReroutes.add(nodeId);
+        if (sent!.lane === 'sweep') this.evidenceStore?.recordProbeReroute(nodeId);
+        this.log(`auto-ping: node ${nodeId}'s stored route failed on our ${lane} routed read and the controller ` +
+          `delivered it by another (${fmtRoute(stats.lwr)}) — its open rate, RTT, signal and return-path episodes are confounded`);
+      } else {
+        this.routeChangeAccum.set(nodeId, (this.routeChangeAccum.get(nodeId) ?? 0) + 1);
+      }
     }
   }
 

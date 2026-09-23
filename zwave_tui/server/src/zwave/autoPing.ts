@@ -5,10 +5,28 @@
  * recommends, and a human presses the key. This module breaks that rule on
  * purpose and narrowly, so the rule stays meaningful everywhere else.
  *
- * Why ping, and only ping. It is already the one action the TUI runs WITHOUT a
- * typed CONFIRM, because it is idempotent and has nothing to undo: a ping to a
- * live node is a no-op, and a ping to a dead one is a probe. Nothing here can
- * remove a node, rewrite a route, or change a device's configuration.
+ * Which frames, and why (v0.71.0). Nothing here can remove a node or change a
+ * device's configuration, and the frames are chosen per lane:
+ *
+ *  - the dead-node ladder and an operator's `p` press Home Assistant's ping
+ *    button: a NoOp with transmit options 0x01 (ACK only) and one attempt, so
+ *    the controller can use only its stored routes;
+ *  - the liveness sweep and the verification bursts send one ROUTED READ:
+ *    `zwave_js.refresh_value` on the node's own switch/light value, a single
+ *    Get with the driver's default options (0x25: ACK, AutoRoute, Explore),
+ *    one attempt, at NodeQuery priority.
+ *
+ * The measurement lanes changed because an unanswered frame marks a working
+ * node Dead. On the reference mesh 100 of 106 mains Dead episodes in 67 days
+ * began 0.11–3.49 s after one of this module's own unanswered pings — 63 on a
+ * sweep probe, 35 on a verification probe. A read adds a controller-computed
+ * route to the attempts and was never seen to go unanswered in 170 frames of
+ * the 39 h driver log (95 % upper bound ≈1.8 %); it CAN still go unanswered,
+ * and then it marks the node Dead exactly as a ping does, so the kill
+ * containment below (`probeDeath`, `probeHoldFrom`) stays. Unlike a ping, a
+ * read can make the controller keep a new working route — zwaveData
+ * confounds the episodes such a re-route could clear by itself — and its
+ * Report can correct a stale Home Assistant state, which may fire automations.
  *
  * WHY THE DWELL IS 10 MINUTES — measured, not guessed.
  *
@@ -72,12 +90,14 @@ export interface AutoPingConfig {
   /** Attempts per dead episode, after which we stop and leave it to a human. */
   maxAttempts: number;
   /**
-   * Probe a MAINS node this long after its own last contact (0 = off).
+   * Probe every MAINS node once per this interval (0 = off).
    *
-   * Measured from each node's `lastSeen`, so it is self-balancing: a device that
-   * reports on its own keeps resetting the clock and is never probed, while a
-   * silent one is checked on a fixed cadence. On the live mesh 10 of 38 nodes
-   * had been silent for 35.7 HOURS while all reporting Alive.
+   * A fixed per-node cadence on `lastStaleAt` since v0.37 — NOT measured from
+   * `lastSeen` (this said so until v0.71.0): a reply rate is a fact about a
+   * device only if every device is asked at the same interval. It doubles as
+   * the silence threshold the sweep line and self-proven attribution are judged
+   * against. (Why a sweep at all: on the live mesh 10 of 38 nodes had been
+   * silent for 35.7 HOURS while all reporting Alive.)
    */
   staleMs: number;
 }
@@ -106,8 +126,9 @@ export interface AutoPingState {
    */
   seenAlive: Set<number>;
   /**
-   * Nodes whose CURRENT Dead episode began while a liveness-SWEEP probe of ours
-   * to them was still unanswered (v0.64.4). The dwell does not apply to them.
+   * Nodes whose CURRENT Dead episode began while a MEASUREMENT probe of ours to
+   * them — a liveness sweep (v0.64.4) or a verification probe (v0.71.0) — was
+   * still unanswered, mapped to that probe's lane. The dwell does not apply.
    *
    * The ping verb is a single-attempt NoOp with no route exploration, so on a
    * marginal hop the probe itself fails and the driver marks the node Dead on
@@ -121,10 +142,14 @@ export interface AutoPingState {
    * Dead, a critical `node-down` symptom and six minutes of `degraded`, about
    * 2.5 times a day.
    *
-   * SWEEP ONLY, deliberately. A verification burst keeps probing its node every
-   * tick, so an immediate retry after a burst kill hands the burst a live node
-   * to kill again — and kill, revive, kill is enough Dead crossings for a
-   * critical `dead-flap`, whose episode requests another burst.
+   * VERIFICATION KILLS TOO, since v0.71.0. v0.64.4 kept them out: a burst
+   * keeps probing its node every tick, so an immediate retry handed the burst a
+   * live node to kill again, and kill, revive, kill is enough Dead crossings
+   * for a critical `dead-flap`, whose episode requests another burst. The dwell
+   * was the only brake, and it cost the availability it guarded: on 2026-09-22
+   * a verification kill was filed as talking on the burst's OWN earlier
+   * answers, and a working outlet read Dead for 101 minutes. The loop is now
+   * bounded by `probeHoldFrom` instead, so the retry is safe for both lanes.
    *
    * A manual ping stays out too. v0.64.4's reason — its entry was stamped after
    * the HA call returned — is gone: since v0.64.5 it carries the launch stamp,
@@ -145,7 +170,7 @@ export interface AutoPingState {
    * sees stays true; the dwell gate and the traffic check read this set.
    * Cleared on recovery and on roster departure.
    */
-  probeDeath: Set<number>;
+  probeDeath: Map<number, 'sweep' | 'verify'>;
   /** nodeId → epoch ms of the last STALE (liveness) probe. */
   lastStaleAt: Map<number, number>;
   /**
@@ -172,7 +197,7 @@ export interface AutoPingState {
    * lanes (dead-remediation, verification) carry `self: false`: the flag
    * means "spoke on its own since the last sweep", which only a sweep asks.
    */
-  awaitingAnswer: Map<number, { at: number; cls: ProbeClass; lane: ProbeLane }[]>;
+  awaitingAnswer: Map<number, { at: number; cls: ProbeClass; lane: ProbeLane; frame?: ProbeFrame }[]>;
   /** nodeId → the `lastSeen` value most recently ATTRIBUTED to one of our own
    *  probe answers (v0.40). The sweep's self-proven flag compares against it:
    *  a lastSeen that has not advanced past our probe's answer is the app
@@ -246,6 +271,39 @@ export interface AutoPingState {
    * is told why.
    */
   readRevivals: Map<number, number[]>;
+  /**
+   * Nodes whose outstanding routed read was sent in an episode that began on
+   * our own MEASUREMENT probe (v0.71.0). Its revival is not counted against
+   * `READ_REVIVAL_CAP`: that cap bounds a loop in which a NoOp keeps killing a
+   * device the read keeps reviving, and a measurement kill is bounded by
+   * `probeHoldFrom` and announced by `probeKills` instead. Set or cleared at
+   * each read's launch, consumed at its judgment.
+   */
+  readAfterOwnKill: Set<number>;
+  /**
+   * nodeId → when a node REVIVED from a death on our own measurement probe
+   * (v0.71.0). For `PROBE_KILL_HOLD_MS` after it the sweep does not select the
+   * node and its verification probes are not handed out — left owed, not
+   * drained. Timed from the recovery, not from the kill: a kill and its revival
+   * are two Dead crossings, and a late revival timed from the kill would leave
+   * room for a third inside one `dead-flap` window. The ladder is never held.
+   */
+  probeHoldFrom: Map<number, number>;
+  /** nodeId → deaths on our own measurement probes, epoch ms, aged out after
+   *  `PROBE_KILL_WINDOW_MS` (v0.71.0). Kept across recoveries: recovery ends
+   *  each episode, and this counts episodes. */
+  probeKills: Map<number, number[]>;
+  /** Nodes whose own-probe kill count reached `PROBE_KILL_WARN_AT` since the
+   *  runner last looked, waiting for its one warning (v0.71.0). */
+  probeKillWarn: Set<number>;
+  /**
+   * nodeId → when a measurement READ to it could not be sent (v0.71.0). For
+   * `READ_LAUNCH_FALLBACK_MS` its sweep and verification probes use the NoOp
+   * ping. The v0.40.2 refund gives a refused sweep its cadence slot back, which
+   * keeps the node at the head of the one-per-tick queue, so one refusing entity
+   * would otherwise stall the sweep for every other node.
+   */
+  readLaunchFailedAt: Map<number, number>;
 }
 
 /** Which lane issued a probe (v0.40.2). Only the fixed-cadence SWEEP feeds the
@@ -264,6 +322,16 @@ export interface AutoPingState {
  * human actually asked for, so `p` reported "sent" and then said nothing.
  */
 export type ProbeLane = 'sweep' | 'dead' | 'verify' | 'manual' | 'read';
+
+/**
+ * What a probe put on the air (v0.71.0). `'ping'` is Home Assistant's ping
+ * button — a NoOp, ACK-only (0x01), one attempt, stored routes only. `'read'`
+ * is one `zwave_js.refresh_value` Get with the driver's default options (0x25),
+ * one attempt, which may also be delivered on a route the controller computes.
+ * Both are judged the same way (`lastSeen` past the launch); what an ANSWER
+ * means differs, and the persisted reply rate keeps the read subset apart.
+ */
+export type ProbeFrame = 'read' | 'ping';
 
 /**
  * What the sweep concluded about ONE probe's evidence (v0.49.0).
@@ -295,10 +363,10 @@ function ordinal(n: number): string {
 
 /** Append a probe to the node's pending-judgment list (v0.40) — every probe
  *  gets its own entry, so a burst leaves several in flight at once. */
-export function pendProbe(state: AutoPingState, nodeId: number, t: number, lane: ProbeLane, cls: ProbeClass = 'unheard'): void {
+export function pendProbe(state: AutoPingState, nodeId: number, t: number, lane: ProbeLane, cls: ProbeClass = 'unheard', frame: ProbeFrame = 'ping'): void {
   const pending = state.awaitingAnswer.get(nodeId);
-  if (pending) pending.push({ at: t, cls, lane });
-  else state.awaitingAnswer.set(nodeId, [{ at: t, cls, lane }]);
+  if (pending) pending.push({ at: t, cls, lane, frame });
+  else state.awaitingAnswer.set(nodeId, [{ at: t, cls, lane, frame }]);
 }
 
 /**
@@ -365,9 +433,52 @@ export function unpendProbe(state: AutoPingState, nodeId: number, t: number): vo
 }
 
 /** How long to wait before judging whether a probe was answered (v0.36).
- *  A ping is a round trip plus a stats push; 90 s is generous for a routed
- *  mesh hop and still well inside one tick of slack. */
-const ANSWER_GRACE_MS = 90_000;
+ *  A ping is a round trip plus a stats push, a routed read its ACK plus the
+ *  Report; 90 s is generous for a routed mesh hop and still well inside one
+ *  tick of slack. Exported (v0.71.0): zwaveData attributes a route change to
+ *  our measurement read inside the same window. */
+export const ANSWER_GRACE_MS = 90_000;
+
+/** How long a node revived from a death on our own measurement probe gets no
+ *  sweep or verification probe (v0.71.0). Longer than `dead-flap`'s 10-minute
+ *  window, so a kill and its revival — two crossings — cannot be joined by a
+ *  third from our own probing inside one window. */
+export const PROBE_KILL_HOLD_MS = 15 * 60_000;
+/** How long an own-probe kill counts against its node (v0.71.0). */
+export const PROBE_KILL_WINDOW_MS = 24 * 60 * 60_000;
+/** Own-probe kills of one node inside the window that raise ONE warning
+ *  (v0.71.0): once is a lost frame, twice a day is a marginal route. */
+export const PROBE_KILL_WARN_AT = 2;
+/** How long a node whose measurement read could not be SENT is probed with the
+ *  NoOp ping instead (v0.71.0). See `readLaunchFailedAt`. */
+export const READ_LAUNCH_FALLBACK_MS = 30 * 60_000;
+/** Why a routed read's launch was withdrawn, for the "could not be probed" line. */
+const READ_REJECT_WHY = 'no switch/light value to read, or transport error';
+
+/** Is this node inside the post-kill measurement hold at `now` (v0.71.0)? */
+export function inProbeHold(state: AutoPingState, nodeId: number, now: number): boolean {
+  const at = state.probeHoldFrom.get(nodeId);
+  return at != null && now - at < PROBE_KILL_HOLD_MS;
+}
+
+/** Own-probe kills of this node inside the window ending at `now` (v0.71.0). */
+export function probeKillsWithin(state: AutoPingState, nodeId: number, now: number): number {
+  return (state.probeKills.get(nodeId) ?? []).filter((at) => now - at < PROBE_KILL_WINDOW_MS).length;
+}
+
+/** Book one death on our own measurement probe (v0.71.0), aging the ring, and
+ *  queue the node's one warning when the count reaches `PROBE_KILL_WARN_AT`. */
+function recordProbeKill(state: AutoPingState, nodeId: number, at: number): void {
+  const kills = [...(state.probeKills.get(nodeId) ?? []).filter((k) => at - k < PROBE_KILL_WINDOW_MS), at];
+  state.probeKills.set(nodeId, kills);
+  if (kills.length === PROBE_KILL_WARN_AT) state.probeKillWarn.add(nodeId);
+}
+
+/** Is this node's measurement frame the NoOp fallback at `now` (v0.71.0)? */
+export function readFallbackActive(state: AutoPingState, nodeId: number, now: number): boolean {
+  const at = state.readLaunchFailedAt.get(nodeId);
+  return at != null && now - at < READ_LAUNCH_FALLBACK_MS;
+}
 
 /** How long a routed-read revival counts against its node (v0.70.0). */
 export const READ_REVIVAL_WINDOW_MS = 24 * 60 * 60_000;
@@ -383,7 +494,7 @@ export function readRevivalsWithin(state: AutoPingState, nodeId: number, now: nu
 }
 
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map(), launchFailures: new Map(), launchGaveUpAnnounced: new Set(), talkingAnnounced: new Set(), seenAlive: new Set(), probeDeath: new Set(), readOwed: new Set(), reads: new Map(), readRevivals: new Map() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map(), launchFailures: new Map(), launchGaveUpAnnounced: new Set(), talkingAnnounced: new Set(), seenAlive: new Set(), probeDeath: new Map(), readOwed: new Set(), reads: new Map(), readRevivals: new Map(), readAfterOwnKill: new Set(), probeHoldFrom: new Map(), probeKills: new Map(), probeKillWarn: new Set(), readLaunchFailedAt: new Map() };
 }
 
 export interface AutoPingInput {
@@ -658,8 +769,9 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
     // its judgment like any other pending probe. One frame per node per tick;
     // the dwell, talking-while-dead and launch-failure checks above all apply.
     // Withheld once the node has been revived this way `READ_REVIVAL_CAP` times
-    // in the window: it answers Gets but not pings, and reviving it again would
-    // only hand the next NoOp another kill.
+    // in the window: its stored routes keep failing, and reviving it again would
+    // only hand the next ping another kill (since v0.71.0 the next ping is the
+    // ladder's or an operator's; the measurement lanes read).
     if (input.state.readOwed.has(n.nodeId) && (input.canRead?.(n.nodeId) ?? false) &&
         readRevivalsWithin(input.state, n.nodeId, now) < READ_REVIVAL_CAP) {
       read.push(n.nodeId);
@@ -720,6 +832,9 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   if (config.staleMs > 0) {
     const due = listeningNodes
       .filter((n) => n.status !== NodeStatus.Dead) // the dead path owns those
+      // …and a node revived from a death on our own probe is left alone for a
+      // while (v0.71.0). See `probeHoldFrom`.
+      .filter((n) => !inProbeHold(input.state, n.nodeId, now))
       .map((n) => ({ id: n.nodeId, seen: n.stats?.lastSeen ?? null }))
       // EVERY listening node, on a fixed cadence — not only the ones that have
       // gone quiet (v0.37). Skipping talkative nodes saved a little traffic and
@@ -760,6 +875,10 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
    * belong to the remediation path above, with its own dwell and backoff.
    */
   const candidates = new Set(listeningNodes.filter((n) => n.status !== NodeStatus.Dead).map((n) => n.nodeId));
+  // …nor inside a post-kill hold (v0.71.0). The runner's thunk already leaves a
+  // held node's burst OWED rather than drained; this is the backstop for a
+  // queue that does not honour the skip.
+  for (const id of [...candidates]) if (inProbeHold(input.state, id, now)) candidates.delete(id);
   // Resolved HERE, past every suppressor, so a gated tick never spends the
   // ledger's budget on a probe it is not going to send.
   const verifyEntries = (input.verifyDue?.() ?? []).filter((e) => candidates.has(e.id));
@@ -769,7 +888,8 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
 
   // One measurement probe per node per tick (v0.40 review): a node owed a
   // verification probe this tick is dropped from the sweep — the verify probe
-  // is the same NoOp ping and satisfies the sweep's question, while twin
+  // is the same frame (both lanes use the runner's `frameOf`, v0.71.0) and
+  // satisfies the sweep's question, while twin
   // same-tick probes shared one `at`, let a transport failure on one lane
   // withdraw the OTHER lane's pending entry, and double-counted one silent
   // instant as two consecutive misses. The node stays due (lastStaleAt is not
@@ -794,10 +914,10 @@ export function judgeProbeAnswers(
   nodes: NodeSnapshot[],
   now: number,
   graceMs = ANSWER_GRACE_MS,
-): { nodeId: number; answered: boolean; misses: number; cls: ProbeClass; lane: ProbeLane }[] {
+): { nodeId: number; answered: boolean; misses: number; cls: ProbeClass; lane: ProbeLane; frame: ProbeFrame }[] {
   const seenOf = new Map<number, number | null>();
   for (const n of nodes) seenOf.set(n.nodeId, n.stats?.lastSeen ?? null);
-  const out: { nodeId: number; answered: boolean; misses: number; cls: ProbeClass; lane: ProbeLane }[] = [];
+  const out: { nodeId: number; answered: boolean; misses: number; cls: ProbeClass; lane: ProbeLane; frame: ProbeFrame }[] = [];
   for (const [nodeId, pending] of [...state.awaitingAnswer]) {
     // Judge EVERY matured probe, oldest first (v0.40) — the entries are
     // appended as registered, which is chronological except for a manual ping
@@ -813,7 +933,7 @@ export function judgeProbeAnswers(
     // rather than call a roster gap a failed probe.
     if (!seenOf.has(nodeId)) continue;
     const seen = seenOf.get(nodeId) ?? null;
-    for (const { at, cls, lane } of mature) {
+    for (const { at, cls, lane, frame } of mature) {
       const answered = seen != null && seen >= at;
       // The streak is CONSECUTIVE: one answer resets it, so "3rd miss" always
       // means three in a row rather than three since the beginning of time.
@@ -826,7 +946,7 @@ export function judgeProbeAnswers(
       } else {
         state.missStreak.set(nodeId, misses);
       }
-      out.push({ nodeId, answered, misses, cls, lane });
+      out.push({ nodeId, answered, misses, cls, lane, frame: frame ?? 'ping' });
     }
   }
   return out;
@@ -874,7 +994,7 @@ export const DRIVER_BURST_MS = 120_000;
 export const DRIVER_BURST_LEAD_MS = 5_000;
 
 /** A probe booked as a MISS because its node went Dead on it (v0.64.4). */
-export interface ProbeDeathMiss { nodeId: number; misses: number; cls: ProbeClass; lane: ProbeLane }
+export interface ProbeDeathMiss { nodeId: number; misses: number; cls: ProbeClass; lane: ProbeLane; frame: ProbeFrame }
 
 /**
  * Settle the probes a newly Dead node never answered (v0.64.4).
@@ -891,7 +1011,9 @@ export interface ProbeDeathMiss { nodeId: number; misses: number; cls: ProbeClas
  * "Unanswered" is the judgment's own test, applied early: not heard since the
  * probe went out. A probe the node answered before dying did not kill it, and
  * stays pending for the ordinary judgment. Every lane's unanswered probe is
- * booked; only a SWEEP kill exempts the node from the dwell (see `probeDeath`).
+ * booked; a MEASUREMENT kill — sweep, or verification since v0.71.0 — exempts
+ * the node from the dwell (see `probeDeath`) and counts in `probeKills`; a
+ * manual or ladder probe's does neither.
  */
 function settleProbeDeath(state: AutoPingState, nodeId: number, lastHeard: number | null, now: number): ProbeDeathMiss[] {
   const pending = state.awaitingAnswer.get(nodeId);
@@ -904,18 +1026,22 @@ function settleProbeDeath(state: AutoPingState, nodeId: number, lastHeard: numbe
   // The NEWEST settled probe decides (entries are appended as registered, which
   // is send order for the engine's lanes): the death followed it most closely.
   // Deciding on "any sweep" let an older sweep entry, still pending after an
-  // ordinary lost reply, lend its exemption to a verification-burst kill — the
-  // kill–revive–kill loop sweep-only exists to stop. A manual ping registers
+  // ordinary lost reply, lend its exemption to a MANUAL kill, which keeps the
+  // dwell (see `probeDeath`). A manual ping registers
   // after its call returns, so a sweep sent to the same node during that call
   // can sit before it though sent later (v0.64.5); the manual entry then
   // decides and keeps the dwell — the conservative reading of two frames sent
   // close together (normally milliseconds apart, up to ~10 s while the HA
   // WebSocket re-authenticates).
-  if (killed[killed.length - 1].lane === 'sweep') state.probeDeath.add(nodeId);
-  return killed.map(({ cls, lane }) => {
+  const newest = killed[killed.length - 1];
+  if (newest.lane === 'sweep' || newest.lane === 'verify') {
+    state.probeDeath.set(nodeId, newest.lane);
+    recordProbeKill(state, nodeId, now);
+  }
+  return killed.map(({ cls, lane, frame }) => {
     const misses = (state.missStreak.get(nodeId) ?? 0) + 1;
     state.missStreak.set(nodeId, misses);
-    return { nodeId, misses, cls, lane };
+    return { nodeId, misses, cls, lane, frame: frame ?? 'ping' };
   });
 }
 
@@ -972,6 +1098,9 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
       state.launchGaveUpAnnounced.delete(n.nodeId);
       state.talkingAnnounced.delete(n.nodeId);
       // …and the probe-death mark (v0.64.4): it described the episode that ended.
+      // An episode that began on our own measurement probe starts the hold
+      // first (v0.71.0) — from the RECOVERY, see `probeHoldFrom`.
+      if (state.probeDeath.has(n.nodeId)) state.probeHoldFrom.set(n.nodeId, now);
       state.probeDeath.delete(n.nodeId);
       // …and the routed-read bookkeeping (v0.70.0). NOT `readRevivals`: that
       // spans episodes by design, to bound a kill–revive loop.
@@ -1002,12 +1131,19 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
   // nodeId must not inherit the departed node's "we saw it alive".
   for (const id of [...state.seenAlive]) if (!seen.has(id)) state.seenAlive.delete(id);
   // …and the probe-death mark (v0.64.4), for the same reason.
-  for (const id of [...state.probeDeath]) if (!seen.has(id)) state.probeDeath.delete(id);
+  for (const id of [...state.probeDeath.keys()]) if (!seen.has(id)) state.probeDeath.delete(id);
   // …and the routed-read state (v0.70.0), revivals included: a device
   // re-included on the same id is a different device.
   for (const id of [...state.readOwed]) if (!seen.has(id)) state.readOwed.delete(id);
   for (const id of [...state.reads.keys()]) if (!seen.has(id)) state.reads.delete(id);
   for (const id of [...state.readRevivals.keys()]) if (!seen.has(id)) state.readRevivals.delete(id);
+  for (const id of [...state.readAfterOwnKill]) if (!seen.has(id)) state.readAfterOwnKill.delete(id);
+  // …and the kill containment (v0.71.0): a re-included device must not inherit
+  // a departed node's hold, kill history or NoOp fallback.
+  for (const id of [...state.probeHoldFrom.keys()]) if (!seen.has(id)) state.probeHoldFrom.delete(id);
+  for (const id of [...state.probeKills.keys()]) if (!seen.has(id)) state.probeKills.delete(id);
+  for (const id of [...state.probeKillWarn]) if (!seen.has(id)) state.probeKillWarn.delete(id);
+  for (const id of [...state.readLaunchFailedAt.keys()]) if (!seen.has(id)) state.readLaunchFailedAt.delete(id);
   return settled;
 }
 
@@ -1050,8 +1186,25 @@ export interface AutoPingRunnerOptions {
    *  tests and callers behave as before, but production must wire it: with the
    *  learning verb, every probe stamps `ping` onto any open episode and the
    *  control arm can never accrue. Only the dead-node remediation ladder keeps
-   *  the learning verb, because there the ping genuinely IS the treatment. */
+   *  the learning verb, because there the ping genuinely IS the treatment.
+   *  Since v0.71.0 it is the measurement lanes' FALLBACK frame: `probeRead`
+   *  goes out instead wherever the node has a value to read. */
   probe?: (nodeId: number) => Promise<unknown>;
+  /** The measurement lanes' frame (v0.71.0): the same single Get as `read`,
+   *  logged as a probe and never learned. Used for a sweep or verification
+   *  probe when `canRead` says the node has a value and no launch of it failed
+   *  in the last `READ_LAUNCH_FALLBACK_MS`. Absent ⇒ every measurement probe is
+   *  the NoOp ping, exactly v0.70.0. */
+  probeRead?: (nodeId: number) => Promise<unknown>;
+  /** Called BEFORE each sweep or verification probe is sent (v0.71.0), so the
+   *  data layer can tell a route change our frame caused from one it merely
+   *  revealed. Never for the ladder, its read, or a manual ping. */
+  onMeasurementSent?: (nodeId: number, at: number, lane: 'sweep' | 'verify', frame: ProbeFrame) => void;
+  /** Drain the Dead transitions the event feed saw since the last call, epoch
+   *  ms (v0.71.0). A death that clears between two ticks is invisible to the
+   *  level-sampled roster, and a Get can make one; see the runner. Optional:
+   *  absent, only tick-visible deaths are attributed, as before. */
+  deaths?: () => { nodeId: number; at: number }[];
   /** One routed read for a Dead node whose ladder ping went unanswered
    *  (v0.70.0): a single Get on the node's own switch/light value. Non-learning,
    *  read-only. Absent ⇒ no reads (the v0.69.0 ladder). */
@@ -1084,8 +1237,11 @@ export interface AutoPingRunnerOptions {
   tickMs?: number;
   now?: () => number;
   /** Drain the outcome ledger's pending verification probes (v0.36). Optional:
-   *  without it the runner behaves exactly as it did before. */
-  verifyRequests?: (now: number) => { id: number; first: boolean }[];
+   *  without it the runner behaves exactly as it did before. `skip` (v0.71.0)
+   *  names nodes whose probes must stay OWED rather than be drained — the
+   *  post-kill hold — so the ledger's burst budget is not spent on packets
+   *  that are never sent (the v0.36.2 disease). */
+  verifyRequests?: (now: number, skip?: (nodeId: number) => boolean) => { id: number; first: boolean }[];
   /** Nodes with an outstanding verification burst, for the probe line (v0.37.1). */
   verifyOwedCount?: () => number;
   /** When the controller's receiver went off and has not come back (v0.65.0),
@@ -1100,8 +1256,10 @@ export interface AutoPingRunnerOptions {
    *  `selfProven` = the node had already communicated on its own since the
    *  previous sweep, so the probe was confirming rather than discovering. */
   /** `cls` is the FOUR-way verdict (v0.49.0), not a self-proven boolean — the
-   *  other three arms were computed and discarded on every tick. */
-  onProbeResult?: (nodeId: number, answered: boolean, cls: ProbeClass) => void;
+   *  other three arms were computed and discarded on every tick. `frame`
+   *  (v0.71.0) is what the probe put on the air, because an answered read and
+   *  an answered ping are different facts. */
+  onProbeResult?: (nodeId: number, answered: boolean, cls: ProbeClass, frame: ProbeFrame) => void;
 }
 
 /**
@@ -1160,6 +1318,21 @@ export interface AutoPingNodeState {
   readOwed: boolean;
   /** Times a routed read revived this node in the last 24 h (v0.70.0). */
   readRevivals24h: number;
+  /** Deaths on our own sweep or verification probes in the last 24 h (v0.71.0). */
+  probeKills24h: number;
+  /** When the post-kill measurement hold lifts, epoch ms, or null (v0.71.0). */
+  probeHeldUntilMs: number | null;
+}
+
+/** How a lane reads in a probe line (v0.71.0). */
+const LANE_WORD: Record<ProbeLane, string> = { sweep: 'sweep', verify: 'verification', dead: 'ladder', manual: 'manual', read: 'ladder' };
+/** How a frame reads in a probe line (v0.71.0). */
+function frameWord(frame: ProbeFrame): string {
+  return frame === 'read' ? 'routed read' : 'NoOp ping';
+}
+/** The suffix every miss line carries (v0.71.0): which lane, which frame. */
+function probeWord(lane: ProbeLane, frame: ProbeFrame): string {
+  return ` — ${LANE_WORD[lane]} ${frameWord(frame)}`;
 }
 
 export function startAutoPing(o: AutoPingRunnerOptions): {
@@ -1180,6 +1353,28 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
   let lastTrace = '';
   let lastTraceAt = 0;
 
+  /** The frame a MEASUREMENT probe of this node sends at `at` (v0.71.0). The
+   *  sweep and the verification lanes both ask here, so the twin-lane dedup
+   *  still holds: whichever lane goes, it asks the same question. */
+  const frameOf = (id: number, at: number): ProbeFrame =>
+    o.probeRead != null && (o.canRead?.(id) ?? false) && !readFallbackActive(state, id, at) ? 'read' : 'ping';
+  const measure = (frame: ProbeFrame, id: number): Promise<unknown> =>
+    frame === 'read' ? o.probeRead!(id) : (o.probe ?? o.ping)(id);
+  /** What each measurement line says it sent, and why a ping when reads are on. */
+  const frameNote = (frame: ProbeFrame, id: number, at: number): string =>
+    frame === 'read' ? ' — routed read'
+      : o.probeRead == null ? ''
+      : readFallbackActive(state, id, at)
+        ? ` — NoOp ping (a routed read could not be sent in the last ${Math.round(READ_LAUNCH_FALLBACK_MS / 60_000)}m)`
+        : ' — NoOp ping (no switch/light value to read)';
+  const readLaunchFailed = (id: number, at: number): void => {
+    state.readLaunchFailedAt.set(id, at);
+    const m = `auto-ping: node ${id}: a routed read could not be sent — its sweep and verification probes ` +
+      `use the NoOp ping for the next ${Math.round(READ_LAUNCH_FALLBACK_MS / 60_000)}m`;
+    o.log('info', id, m);
+    o.log2?.(m);
+  };
+
   const tick = (): void => {
     const t = now();
     const nodes = o.nodes();
@@ -1188,12 +1383,43 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     // here exactly as the judgment loop below reports any other miss.
     for (const s of trackEpisodes(state, nodes, t)) {
       // Only the fixed-cadence sweep feeds the persisted reply rate (v0.40.2).
-      if (s.lane === 'sweep') o.onProbeResult?.(s.nodeId, false, s.cls);
+      if (s.lane === 'sweep') o.onProbeResult?.(s.nodeId, false, s.cls, s.frame);
       const m = `auto-ping: node ${s.nodeId} did NOT answer its probe ` +
-        `(${ordinal(s.misses)} consecutive miss — the node has since been marked Dead)`;
+        `(${ordinal(s.misses)} consecutive miss — the node has since been marked Dead)` + probeWord(s.lane, s.frame);
       o.log(s.misses >= 2 ? 'warn' : 'info', s.nodeId, m);
       (s.misses >= 2 ? (o.log2?.warn ?? o.log2) : o.log2)?.(m);
     }
+    // DEATHS BETWEEN TICKS (v0.71.0). trackEpisodes LEVEL-samples status once a
+    // tick, so a node that goes Dead and comes back inside one tick never reaches
+    // it. A lost NoOp cannot do that — nothing answers it — but a Get can: the
+    // node takes the frame, its ACK is lost, the driver marks it Dead on the
+    // NoAck, and the node's own Report then marks it Alive again. The event feed
+    // counts both crossings into dead-flap and the confound guard, so the
+    // containment must count them too, or a burst could make such pairs without
+    // the hold ever arming. The probe itself stays pending and is judged as
+    // usual: the Report proves the Get arrived, so it is ANSWERED.
+    for (const d of o.deaths?.() ?? []) {
+      if (state.deadSince.has(d.nodeId)) continue; // Dead at this tick: trackEpisodes owns it
+      const before = (state.awaitingAnswer.get(d.nodeId) ?? []).filter((p) => p.at <= d.at && d.at - p.at <= ANSWER_GRACE_MS);
+      const newest = before[before.length - 1];
+      if (newest == null || (newest.lane !== 'sweep' && newest.lane !== 'verify')) continue;
+      recordProbeKill(state, d.nodeId, d.at);
+      state.probeHoldFrom.set(d.nodeId, t);
+      const m = `auto-ping: node ${d.nodeId} went Dead on our ${LANE_WORD[newest.lane]} ${frameWord(newest.frame ?? 'ping')} ` +
+        `and was Alive again before the next tick (a lost ACK; its own reply revives it) — ` +
+        `no sweep or verification probe for ${Math.round(PROBE_KILL_HOLD_MS / 60_000)}m`;
+      o.log('info', d.nodeId, m);
+      o.log2?.(m);
+    }
+    // ONE warning when a node's own-probe kills reach the threshold (v0.71.0).
+    for (const id of state.probeKillWarn) {
+      const w = `auto-ping: node ${id} went Dead on this add-on's own probes ${PROBE_KILL_WARN_AT} times in 24 h ` +
+        `(each retried at once, then left alone for ${Math.round(PROBE_KILL_HOLD_MS / 60_000)}m) — ` +
+        `its routes are marginal; consider rebuilding its routes, or moving it or a repeater`;
+      o.log('warn', id, w);
+      (o.log2?.warn ?? o.log2)?.(w);
+    }
+    state.probeKillWarn.clear();
     lastTickMs = t;
     const decision = lastDecision = decideAutoPings({
       now: t,
@@ -1205,7 +1431,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // post-start window, so it counts as booting rather than as "no nodes".
       booting: !o.ready() || t - startedAt < BOOT_WINDOW_MS,
       bootDeadLane: o.ready(),
-      verifyDue: () => o.verifyRequests?.(t) ?? [],
+      verifyDue: () => o.verifyRequests?.(t, (id) => inProbeHold(state, id, t)) ?? [],
       verifyOwedCount: () => o.verifyOwedCount?.() ?? 0,
       rfOffSince: o.rfOffSince?.() ?? null,
       canRead: (id) => o.read != null && (o.canRead?.(id) ?? false),
@@ -1273,6 +1499,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // hands back the value this sweep just booked (v0.40.2) — the same
       // capture-order trap the dead lane's attempt refund fell into.
       const priorStale = state.lastStaleAt.get(nodeId);
+      const frame = frameOf(nodeId, t);
       noteStale(state, nodeId, t);
       // MEASURED silence, never the threshold. This line used to print
       // `config.staleMs` — so every probe claimed exactly "240m" regardless of
@@ -1381,7 +1608,8 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
             ? `(already heard ${silence} ago on its own — confirming)`
             : echoOnly
               ? `(nothing heard past our last probe's answer ${silence} ago — probing for its own voice)`
-              : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`);
+              : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`) +
+        frameNote(frame, nodeId, t);
       // DELIBERATELY still info on BOTH sinks (re-affirmed v0.50.0).
       //
       // 941 of these in 50 hours is 71.6% of the add-on log, and an audit
@@ -1401,9 +1629,12 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       o.log2?.(msg);
       // The service call resolving proves only that HA ACCEPTED the request —
       // its ping button returns a boolean and raises nothing when the node
-      // stays silent, so the answer is judged from evidence a moment later
+      // stays silent, and refresh_value returns before its Get is on the air —
+      // so the answer is judged from evidence a moment later
       // (judgeProbeAnswers). The catch here is left for what it can actually
-      // catch: no ping button, or a WS transport fault.
+      // catch: no ping button or value to read, or a WS transport fault. A read
+      // that could not be sent also moves this node to the NoOp for a while
+      // (v0.71.0), or its refunded slot would hold the queue's head.
       //
       // MEASUREMENT lane: the non-learning probe (v0.38.1). With the learning
       // verb, every sweep stamped `ping` onto any open episode and the control
@@ -1411,11 +1642,13 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // `noteStale` above booked the cadence clock; a launch that never left
       // must give it back too, or the node waits a full staleMs having never
       // been asked (v0.40.2).
-      pendProbe(state, nodeId, t, 'sweep', cls);
-      settleProbe(o, state, nodeId, t, (o.probe ?? o.ping)(nodeId), () => {
+      pendProbe(state, nodeId, t, 'sweep', cls, frame);
+      o.onMeasurementSent?.(nodeId, t, 'sweep', frame);
+      settleProbe(o, state, nodeId, t, measure(frame, nodeId), () => {
         if (priorStale == null) state.lastStaleAt.delete(nodeId);
         else state.lastStaleAt.set(nodeId, priorStale);
-      });
+        if (frame === 'read') readLaunchFailed(nodeId, t);
+      }, frame === 'read' ? READ_REJECT_WHY : undefined);
     }
 
     for (const nodeId of decision.ping) {
@@ -1430,9 +1663,10 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // v0.64.4: a sweep kill skips the dwell, so do not claim the dwell ran —
       // and say only what was measured (the node went Dead with our probe to it
       // unanswered), which is a correlation, not a verdict on the cause.
+      const killedBy = state.probeDeath.get(nodeId);
       const msg = state.probeDeath.has(nodeId)
         ? (attempt === 1
-          ? `auto-ping: node ${nodeId} went Dead with our sweep probe to it unanswered — probing without the dwell `
+          ? `auto-ping: node ${nodeId} went Dead with our ${killedBy === 'verify' ? 'verification' : 'sweep'} probe to it unanswered — probing without the dwell `
           : `auto-ping: node ${nodeId} is still Dead after the immediate retry — probing `) +
           `(attempt ${attempt}/${o.config.maxAttempts})`
         : `auto-ping: node ${nodeId} has been Dead past the dwell — ` +
@@ -1466,6 +1700,10 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     // spends neither the attempt budget nor `launchFailures`.
     for (const nodeId of decision.read) {
       state.readOwed.delete(nodeId);
+      // Its revival is judged later, after recovery has cleared `probeDeath`, so
+      // whether this episode began on our own measurement probe is captured now.
+      if (state.probeDeath.has(nodeId)) state.readAfterOwnKill.add(nodeId);
+      else state.readAfterOwnKill.delete(nodeId);
       state.reads.set(nodeId, (state.reads.get(nodeId) ?? 0) + 1);
       const m = `auto-ping: node ${nodeId} did not answer its ladder ping — sending one routed read ` +
         `(a single Get with the driver's default routing, which may auto-route; a ping can use only the stored routes)`;
@@ -1507,23 +1745,29 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // down the wrong path a second time. The queue knows which probe starts
       // a burst; the label now comes from its bookkeeping and cannot drift.
       const prevVerify = state.lastVerifyAt.get(nodeId);
+      const frame = frameOf(nodeId, t);
       const sinceMs = prevVerify == null ? null : t - prevVerify;
       state.lastVerifyAt.set(nodeId, t);
       const gap = decision.verifyFirst.includes(nodeId) || sinceMs == null
         ? 'burst start'
         : `+${Math.round(sinceMs / 1000)}s`;
-      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)`;
+      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)` + frameNote(frame, nodeId, t);
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       // MEASUREMENT lane too (v0.38.1) — a verification probe exists to fill
       // the evidence window, and recording it as the remediation would make
       // the verdict about the measurement rather than the recovery.
-      const priorVerify = state.lastVerifyAt.get(nodeId);
-      pendProbe(state, nodeId, t, 'verify');
-      settleProbe(o, state, nodeId, t, (o.probe ?? o.ping)(nodeId), () => {
-        if (priorVerify == null) state.lastVerifyAt.delete(nodeId);
-        else state.lastVerifyAt.set(nodeId, priorVerify);
-      });
+      // The refund restores the stamp from BEFORE this probe (v0.71.0). It read
+      // the map after the set above, so it put back this probe's own stamp and
+      // the next burst gap was measured from a probe that never left — the
+      // capture-order trap the sweep and ladder refunds document.
+      pendProbe(state, nodeId, t, 'verify', 'unheard', frame);
+      o.onMeasurementSent?.(nodeId, t, 'verify', frame);
+      settleProbe(o, state, nodeId, t, measure(frame, nodeId), () => {
+        if (prevVerify == null) state.lastVerifyAt.delete(nodeId);
+        else state.lastVerifyAt.set(nodeId, prevVerify);
+        if (frame === 'read') readLaunchFailed(nodeId, t);
+      }, frame === 'read' ? READ_REJECT_WHY : undefined);
     }
 
     /* ── nodes the engine has given up on (v0.36.4) ──────────────────────
@@ -1567,8 +1811,8 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // no switch/light value, or reads are off) the pre-v0.70.0 text stands.
       const m = revived >= READ_REVIVAL_CAP
         ? `auto-ping: node ${nodeId} did not answer ${pl(tries, 'ping')} — giving up. ` +
-          `A routed read has revived it ${revived} times in the last 24 h and it keeps failing pings, so the read is withheld: ` +
-          `it answers Gets but not the stored routes a ping uses. Consider rebuilding its routes, or moving it or a repeater.`
+          `A routed read has revived it ${revived} times in the last 24 h after its pings went unanswered, so the read is withheld: ` +
+          `its stored routes keep failing where a computed one got through. Consider rebuilding its routes, or moving it or a repeater.`
         : reads > 0
           ? `auto-ping: node ${nodeId} did not answer ${pl(tries, 'ping')} or ${pl(reads, 'routed read')} — giving up. ` +
             `That means it ignored ${pl(tries, 'NOP frame')} and ${pl(reads, 'single-attempt Get')} that could auto-route, NOT that it is unreachable: ` +
@@ -1601,13 +1845,22 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     } else if (lastRfOffLogged !== null) {
       lastRfOffLogged = null;
     }
-    for (const { nodeId, answered, misses, cls, lane } of judgeProbeAnswers(state, nodes, t)) {
+    for (const { nodeId, answered, misses, cls, lane, frame } of judgeProbeAnswers(state, nodes, t)) {
       // An unanswered LADDER ping earns one routed read (v0.70.0). Only the dead
       // lane: sweep and verification probes target live nodes, and a miss there
       // hands the node to the ladder, whose own ping comes first.
       if (lane === 'dead' && !answered) state.readOwed.add(nodeId);
       if (lane === 'read') {
-        if (answered) {
+        const ownKill = state.readAfterOwnKill.delete(nodeId);
+        if (answered && ownKill) {
+          // A death on our own measurement probe (v0.71.0): bounded by the hold
+          // and counted in `probeKills`, so it does not spend the cap below.
+          const m = `auto-ping: node ${nodeId} answered our routed read after its ping went unanswered — ` +
+            `its stored routes are suspect (the controller found another); it went Dead on our own probe, so this ` +
+            `revival does not count against the ${READ_REVIVAL_CAP}-per-24 h read cap`;
+          o.log('info', nodeId, m);
+          o.log2?.(m);
+        } else if (answered) {
           const revivals = [...(state.readRevivals.get(nodeId) ?? []).filter((at) => t - at < READ_REVIVAL_WINDOW_MS), t];
           state.readRevivals.set(nodeId, revivals);
           const m = `auto-ping: node ${nodeId} answered our routed read after its ping went unanswered — ` +
@@ -1615,9 +1868,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
           o.log('info', nodeId, m);
           o.log2?.(m);
           if (revivals.length === READ_REVIVAL_CAP) {
-            const w = `auto-ping: node ${nodeId} has now been revived by a routed read ${revivals.length} times in 24 h — ` +
-              `it answers Gets but not pings. Further routed reads are withheld for the rest of the window, so its next ` +
-              `death ends in a summons; consider rebuilding its routes.`;
+            const w = `auto-ping: node ${nodeId} has now been revived by a routed read ${revivals.length} times in 24 h ` +
+              `after its ladder pings went unanswered — its stored routes keep failing. Further routed reads are withheld ` +
+              `for the rest of the window, so its next death ends in a summons; consider rebuilding its routes.`;
             o.log('warn', nodeId, w);
             (o.log2?.warn ?? o.log2)?.(w);
           }
@@ -1636,20 +1889,21 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // the signal, and it is warn on both destinations.
       if (answered) {
         // Only the fixed-cadence sweep feeds the persisted reply rate (v0.40.2).
-        if (lane === 'sweep') o.onProbeResult?.(nodeId, true, cls);
+        if (lane === 'sweep') o.onProbeResult?.(nodeId, true, cls, frame);
         o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`);
         continue;
       }
       // A FIRST miss is information; a streak is a warning. Measured on the live
-      // mesh, healthy nodes drop about 2% of probes to ordinary transient loss,
+      // mesh, healthy nodes drop some probes to ordinary transient loss (about
+      // 2 % of NoOps in v0.36.5's sample; 0.24 % — 2 of 817 — in v0.71.0's),
       // so warning on every one of those would put a steady drip of false alarm
       // beside the genuine article and teach an operator to skim past both. The
       // count is in the text either way — this suppresses nothing, it only
       // stops calling a single lost packet a warning.
-      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, cls);
+      if (lane === 'sweep') o.onProbeResult?.(nodeId, false, cls, frame);
       const ord = ordinal(misses);
       const m = `auto-ping: node ${nodeId} did NOT answer its probe ` +
-        `(${ord} consecutive miss, lastSeen did not advance)`;
+        `(${ord} consecutive miss, lastSeen did not advance)` + probeWord(lane, frame);
       o.log(misses >= 2 ? 'warn' : 'info', nodeId, m);
       (misses >= 2 ? (o.log2?.warn ?? o.log2) : o.log2)?.(m);
     }
@@ -1660,6 +1914,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       ...state.deadSince.keys(), ...state.attempts.keys(), ...state.missStreak.keys(),
       ...state.launchFailures.keys(), ...state.awaitingAnswer.keys(), ...state.gaveUpAnnounced,
       ...state.launchGaveUpAnnounced, ...state.talkingAnnounced, ...state.readOwed, ...state.reads.keys(),
+      ...state.probeHoldFrom.keys(), ...state.probeKills.keys(),
     ]);
     const nodes: AutoPingNodeState[] = [...ids].sort((a, b) => a - b).map((nodeId) => {
       const attempts = state.attempts.get(nodeId) ?? 0;
@@ -1682,6 +1937,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
         reads: state.reads.get(nodeId) ?? 0,
         readOwed: state.readOwed.has(nodeId),
         readRevivals24h: lastTickMs == null ? 0 : readRevivalsWithin(state, nodeId, lastTickMs),
+        probeKills24h: lastTickMs == null ? 0 : probeKillsWithin(state, nodeId, lastTickMs),
+        probeHeldUntilMs: lastTickMs != null && inProbeHold(state, nodeId, lastTickMs)
+          ? state.probeHoldFrom.get(nodeId)! + PROBE_KILL_HOLD_MS : null,
       };
     });
     return {

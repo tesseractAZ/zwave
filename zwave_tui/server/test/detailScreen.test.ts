@@ -931,3 +931,37 @@ test('the revival-credit caveat is never cut mid-claim (v0.64.4)', () => {
     assert.ok(visLen(row!) <= cols, `${cols} cols: overflow`);
   }
 });
+
+/* ── v0.71.0: what the sweep sent, and the stored-route failovers it survived ─ */
+
+test('the Frame row tells a routed-read history from a NoOp one, and splits a mixed one with each rate toned (v0.71.0)', () => {
+  const frameRow = (p: Record<string, number>, raw = false): string => {
+    const d = withProbes({ probesAsked: 30, probesAnswered: 27, ...p } as never);
+    const lines = renderDetail(ctx(mkView(120, 60), d.data, d.nodes));
+    return (raw ? lines : lines.map(strip)).find((l) => /Frame/.test(strip(l))) ?? '';
+  };
+  assert.match(frameRow({ probesReadAsked: 0, probesReadAnswered: 0 }), /all NoOp pings: answered = reached on a stored route/);
+  assert.match(frameRow({ probesAsked: 30, probesAnswered: 30, probesReadAsked: 30, probesReadAnswered: 30 }), /all routed reads: answered = reached by any route/);
+  assert.match(frameRow({ probesReadAsked: 10, probesReadAnswered: 10 }), /read 10\/10 \(100%, any route\) · ping 17\/20 \(85%, stored routes\)/,
+    'the lifetime tally split by frame');
+  const raw = frameRow({ probesReadAsked: 10, probesReadAnswered: 10 }, true);
+  assert.ok(raw.includes('\x1b[92m') && raw.includes('\x1b[93m'), 'each rate carries its own tone');
+  assert.match(frameRow({}), /all NoOp pings/, 'a provider predating the counters reads as all NoOp');
+});
+
+test('the Frame and Rerouted rows are never cut mid-claim, 60 to 200 columns (v0.71.0)', () => {
+  const d = withProbes({ probesAsked: 1234, probesAnswered: 1200, probesReadAsked: 1000, probesReadAnswered: 999, probeReroutes: 3 } as never);
+  for (const cols of [60, 66, 73, 80, 87, 100, 120, 160, 200]) {
+    const lines = renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip);
+    const frame = lines.find((l) => /^\s*Frame/.test(l));
+    assert.ok(frame, `${cols} cols: the Frame row renders`);
+    assert.match(frame!, /read 999\/1000( \(100%(, any route)?\))? · ping 201\/234( \(86%(, stored routes)?\))?\s*$/, `${cols} cols: "${frame!.trim()}"`);
+    assert.ok(visLen(frame!) <= cols, `${cols} cols: overflow`);
+    const rr = lines.find((l) => /^\s*Rerouted/.test(l));
+    assert.ok(rr, `${cols} cols: the Rerouted row renders`);
+    assert.match(rr!, /3 (sweep reads failed over from a stored route to another|stored-route failovers on our sweep)\s*$/, `${cols} cols: "${rr!.trim()}"`);
+    assert.ok(visLen(rr!) <= cols, `${cols} cols: overflow`);
+  }
+  const none = evidenceLines(withProbes({ probesAsked: 5, probesAnswered: 5, probeReroutes: 0 } as never));
+  assert.ok(!none.some((l) => /Rerouted/.test(l)), 'no failovers, no row');
+});

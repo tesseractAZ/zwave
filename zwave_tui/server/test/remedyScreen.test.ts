@@ -360,7 +360,7 @@ test('the transient-blink line is silent at zero (v0.39)', () => {
 test('a confounded closure renders its own credited-to-neither-arm row (v0.40)', () => {
   const cx = ctx(140, 40, [sym()]);
   (cx.data as { confoundedCount?: (k: SymptomKind) => number }).confoundedCount = () => 2;
-  assert.match(plain(renderRemedy(cx)), /2 confounded by a mid-episode death or remediation — credited to neither arm/);
+  assert.match(plain(renderRemedy(cx)), /2 confounded by a mid-episode death, remediation or probe re-route — credited to neither arm/);
 });
 
 test('the confounded line is silent at zero (v0.40)', () => {

@@ -25,7 +25,7 @@ import { createAuthPolicy, describeTelnetAuth } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
 import { createActionRunner } from './zwave/zwaveActions';
-import { startAutoPing, type AutoPingSnapshot } from './zwave/autoPing';
+import { startAutoPing, PROBE_KILL_HOLD_MS, type AutoPingSnapshot } from './zwave/autoPing';
 import { buildZwaveDataSource, createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
 import { registerWsConsole } from './telnet/wsConsole';
 import { startTelnetServer } from './telnet/server';
@@ -114,7 +114,7 @@ async function main(): Promise<void> {
 
   // 4c) Auto-ping — the ONE thing this engine does without a human pressing a
   //     key. Off unless BOTH its own switch and write_actions_enabled are on;
-  //     see autoPing.ts for why ping specifically, and for every suppressor.
+  //     see autoPing.ts for which frame each lane sends, and every suppressor.
   // The FULL return type (v0.47.0). A hand-maintained subset of a
   // single-implementation type buys nothing and is exactly how v0.33 shipped a
   // dead key: this annotation already omitted `tick`, and would have silently
@@ -132,10 +132,17 @@ async function main(): Promise<void> {
       // v0.70.0: one routed read after an unanswered ladder ping.
       read: (n) => actions.routedRead(n),
       canRead: (n) => zwaveData.readEntityOf(n) != null,
+      // v0.71.0: the MEASUREMENT lanes' frame — the same single Get, logged as a
+      // probe — so our own sweep stops marking working nodes Dead; the stamp
+      // lets the data layer tell a route our read changed from one it revealed,
+      // and the death feed shows the containment a death that clears between ticks.
+      probeRead: (n) => actions.routedRead(n, 'probe'),
+      onMeasurementSent: (n, at, lane, frame) => zwaveData.noteMeasurementProbe(n, at, lane, frame),
+      deaths: () => zwaveData.drainDeadEvents(),
       // v0.36: the outcome ledger's verification probes ride the same runner,
       // so they inherit every gate auto-ping already applies rather than
       // opening a second, less-guarded path to the mesh.
-      verifyRequests: (now) => zwaveData.drainVerifyRequests(now),
+      verifyRequests: (now, skip) => zwaveData.drainVerifyRequests(now, skip),
       verifyOwedCount: () => zwaveData.verifyOwedCount(),
       // v0.65.0 (live audit): the controller's receiver goes down for ~10 s
       // every night for the NVM backup, and the driver pings the whole mesh
@@ -143,7 +150,7 @@ async function main(): Promise<void> {
       // are indistinguishable from mesh behaviour without these two readings.
       rfOffSince: () => zwaveData.controllerRfOffSince(),
       driverReconnectedAt: () => zwaveData.driverReconnectedAt(),
-      onProbeResult: (nodeId, answered, cls) => zwaveData.recordProbeResult(nodeId, answered, cls),
+      onProbeResult: (nodeId, answered, cls, frame) => zwaveData.recordProbeResult(nodeId, answered, cls, frame),
       // v0.41: the ENGINE's own writes, not the operator's — the Log screen
       // rendered every autonomous probe as "operator" before this.
       log: (sev, nodeId, text) => zwaveData.logEngineAction(sev, nodeId, text),
@@ -166,14 +173,16 @@ async function main(): Promise<void> {
     zwaveData.setProbeNotePending((n, sentAt) => autoPing?.notePending(n, 'manual', sentAt));
     log(
       `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed, ` +
-        `or at once if it went Dead with our sweep probe to it unanswered ` +
-        `(max ${config.autoPing.maxAttempts}/outage, waits 10/30/60m between attempts — at the default 3 that is 10m dwell + 10m + 30m, so ~50m to "needs a human", ~40m after a sweep kill; ` +
+        `or at once if it went Dead with our sweep or verification probe to it unanswered — and once it revives it gets ` +
+        `no sweep or verification probe for ${Math.round(PROBE_KILL_HOLD_MS / 60_000)}m ` +
+        `(max ${config.autoPing.maxAttempts}/outage, waits 10/30/60m between attempts — at the default 3 that is 10m dwell + 10m + 30m, so ~50m to "needs a human", ~40m after a probe kill; ` +
         `suppressed on storm and rebuild, and for 5m after start — the dead ladder only until the roster is ready); ` +
         `an unanswered ladder ping is followed by one routed read (zwave_js.refresh_value on the node's own switch/light value — a Get, read-only), ` +
         `which adds ~4m before "needs a human"` +
         (config.autoPing.staleMs > 0
-          ? `; liveness probe after ${Math.round(config.autoPing.staleMs / 60_000)}m of silence`
-          : '; liveness probe off'),
+          ? `; liveness sweep of every mains node every ${Math.round(config.autoPing.staleMs / 60_000)}m by one routed read ` +
+            `(the same Get; a NoOp ping only for a node with no switch/light value), and verification bursts send the same frame`
+          : '; liveness sweep off'),
     );
   } else if (config.autoPing.enabled) {
     // Its own switch is on but the master gate is not. Say so, rather than

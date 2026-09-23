@@ -255,3 +255,12 @@ test('Refresh values is blocked on a Dead node — the driver would send nothing
   assert.ok(refresh, 'fixture guard: the card is still offered, so the reason is visible');
   assert.match(String(refresh!.blocked), /node is Dead — zwave-js skips a value refresh on a Dead node/);
 });
+
+test('the quiet-node ping card no longer claims pings are never automatic (v0.71.0)', () => {
+  const p = planFor(sym('quiet-node', { nodeId: 7 }), node(7), ON);
+  const ping = p.candidates.find((c) => c.action === 'ping');
+  assert.ok(ping, 'the quiet-node plan offers a consented ping');
+  assert.doesNotMatch(ping!.rationale, /not run automatically/, 'the sweep has probed every mains node since v0.37');
+  assert.match(ping!.rationale, /one ACK-only attempt on the stored routes, so on a marginal link it can itself mark the node Dead/);
+  assert.match(ping!.rationale, /by a routed read where the node has a switch\/light value/);
+});

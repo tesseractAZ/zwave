@@ -493,6 +493,40 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           ? c.grey(inner - KV_GUTTER >= caveatLong.trim().length ? caveatLong : caveatShort)
           : '';
         body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${pct}%)`) + self, inner));
+        // THE FRAME (v0.71.0). The sweep sends a routed read wherever the node
+        // has a switch/light value, and an answered read is a different fact
+        // from an answered ping: the ping could use only the stored routes, the
+        // read any route the controller finds in one send. The lifetime ratio
+        // above blends both on an upgraded install, so the split rides beside it
+        // — each form whole, never cut, from the longest that fits.
+        {
+          const ra = Math.min(cov.probesReadAsked ?? 0, cov.probesAsked);
+          const rk = Math.min(cov.probesReadAnswered ?? 0, ra, cov.probesAnswered);
+          const na = cov.probesAsked - ra;
+          const nk = cov.probesAnswered - rk;
+          const room = inner - KV_GUTTER;
+          const pctOf = (k: number, a: number): number => Math.round((k / a) * 100);
+          const toneOf = (p: number): ((s: string) => string) => (p >= 95 ? c.green : p >= 75 ? c.yellow : c.red);
+          let frameText: string;
+          if (ra === 0) {
+            const long = 'all NoOp pings: answered = reached on a stored route';
+            frameText = c.grey(room >= long.length ? long : 'all NoOp pings (stored routes only)');
+          } else if (na === 0) {
+            const long = 'all routed reads: answered = reached by any route';
+            frameText = c.grey(room >= long.length ? long : 'all routed reads (any route)');
+          } else {
+            const p = pctOf(rk, ra);
+            const q = pctOf(nk, na);
+            const forms: [string, string][] = [
+              [`read ${rk}/${ra} (${p}%, any route)`, `ping ${nk}/${na} (${q}%, stored routes)`],
+              [`read ${rk}/${ra} (${p}%)`, `ping ${nk}/${na} (${q}%)`],
+              [`read ${rk}/${ra}`, `ping ${nk}/${na}`],
+            ];
+            const [a, b] = forms.find(([x, y]) => x.length + 3 + y.length <= room) ?? forms[forms.length - 1];
+            frameText = toneOf(p)(a) + c.grey(' · ') + toneOf(q)(b);
+          }
+          body.push(kv('Frame', frameText, inner));
+        }
         // THE VERIFICATION DEBT FOR *THIS* NODE (v0.62.0). ENGINE carries one
         // fleet number, which cannot answer the question an operator asks while
         // looking at a dossier: is THIS node's evidence going to be confirmed,
@@ -519,6 +553,18 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         const creditShort = ' — pre-v0.64.4 a killing probe may read answered';
         if (preCredit) {
           body.push(kv('', c.grey((inner - KV_GUTTER >= creditLong.trim().length ? creditLong : creditShort).trim()), inner));
+        }
+        // STORED-ROUTE FAILOVERS (v0.71.0). A NoOp sweep turned a failing
+        // stored route into a missed probe and a Dead episode; a read survives
+        // it, so the reply rate above no longer shows it. This does: each is a
+        // sweep read whose stored route failed on the way and was delivered by
+        // another. Rendered only above zero, like the other disclosures here.
+        if ((cov.probeReroutes ?? 0) > 0) {
+          const rr = cov.probeReroutes!;
+          const s = rr === 1 ? '' : 's';
+          const long = `${rr} sweep read${s} failed over from a stored route to another`;
+          const short = `${rr} stored-route failover${s} on our sweep`;
+          body.push(kv('Rerouted', c.yellow(inner - KV_GUTTER >= long.length ? long : short), inner));
         }
         // THE OTHER THREE ARMS (v0.49.0). The sweep's judgment is four-way and
         // only `self-proven` was ever recorded; the rest were computed,

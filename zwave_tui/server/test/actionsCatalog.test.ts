@@ -262,3 +262,13 @@ test('the CONFIRM modal never cuts a description, at any width', () => {
     }
   }
 });
+
+test('the Ping node note says an unanswered ping marks the node Dead — never "harmless" (v0.71.0)', () => {
+  // On the reference mesh 100 of 106 mains Dead episodes in 67 days began on
+  // one of this add-on's own unanswered pings; the note called it harmless.
+  const ping = describeAction('ping');
+  assert.ok(ping, 'ping is in the catalog');
+  assert.doesNotMatch(ping.impactNote, /harmless/i);
+  assert.match(ping.impactNote, /ONE ACK-only attempt on the stored routes: if it goes unanswered the driver marks the node Dead — even a working one/);
+  assert.match(ping.impactNote, /request was SENT, not that the node answered/, 'and it keeps the result caveat');
+});

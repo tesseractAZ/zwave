@@ -1042,7 +1042,7 @@ test('a skipped (confirmation-window) action CONFOUNDS the episode — no contro
   assert.equal(o.confounded('rtt-degraded'), 1, 'counted as confounded');
   assert.equal(o.baseRate('rtt-degraded'), null, 'and the control arm gained nothing');
   const line = logged.find((l) => /episode 57:rtt-degraded/.test(l));
-  assert.match(line!, /\(confounded — the node died or was remediated mid-episode; credited to neither arm\)/,
+  assert.match(line!, /\(confounded — the node died, was remediated, or was re-routed by our own probe mid-episode; credited to neither arm\)/,
     `the closure names the confound: ${line}`);
 });
 

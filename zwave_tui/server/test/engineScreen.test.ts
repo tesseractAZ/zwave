@@ -61,7 +61,7 @@ const plain = (lines: string[]): string => lines.map((l) => l.replace(/\x1b\[[0-
 
 test('ENGINE holds EXACTLY view.rows lines within view.cols at every size', () => {
   const rich: Partial<DataProvider> = {
-    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 1_800_000, attempts: 2, nextEligibleMs: NOW + 600_000, missStreak: 3, launchFailures: 0, pending: 1, gaveUp: false, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0 }] }),
+    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 1_800_000, attempts: 2, nextEligibleMs: NOW + 600_000, missStreak: 3, launchFailures: 0, pending: 1, gaveUp: false, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0, probeKills24h: 0, probeHeldUntilMs: null }] }),
     openEpisodes: () => ([{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded' as SymptomKind, onsetMs: NOW - 300_000, actionKind: null, confounded: false, beforeFreshN: 4, confirming: true }]),
     controlArm: () => ({ n: 6.2, ok: 5.1, bad: 0, nodes: 3, minN: 4 }),
   };
@@ -78,7 +78,7 @@ test('at the MODAL 80x24 the operator sees auto-ping state, the live ledger, and
   // The v0.35 lesson: a disclosure that only fits at 200 columns is not a
   // disclosure. Everything load-bearing must survive the default terminal.
   const joined = plain(renderEngine(ctx(80, 24, {
-    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 1_800_000, attempts: 2, nextEligibleMs: NOW + 600_000, missStreak: 0, launchFailures: 0, pending: 0, gaveUp: false, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0 }] }),
+    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 1_800_000, attempts: 2, nextEligibleMs: NOW + 600_000, missStreak: 0, launchFailures: 0, pending: 0, gaveUp: false, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0, probeKills24h: 0, probeHeldUntilMs: null }] }),
     openEpisodes: () => ([{ key: '7:rtt-degraded', nodeId: 7, kind: 'rtt-degraded' as SymptomKind, onsetMs: NOW - 300_000, actionKind: null, confounded: false, beforeFreshN: 4, confirming: false }]),
     controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, bad: 0, nodes: 3, minN: 4 } : null),
   })));
@@ -121,7 +121,7 @@ test('the confirmation window is called out — a node being scored is recoverin
 
 test('a node the add-on cannot SEND to is blamed on us, not on the device (v0.40.2)', () => {
   const joined = plain(renderEngine(ctx(100, 30, {
-    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 600_000, attempts: 0, nextEligibleMs: null, missStreak: 0, launchFailures: 3, pending: 0, gaveUp: false, launchGaveUp: true, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0 }] }),
+    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 600_000, attempts: 0, nextEligibleMs: null, missStreak: 0, launchFailures: 3, pending: 0, gaveUp: false, launchGaveUp: true, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0, probeKills24h: 0, probeHeldUntilMs: null }] }),
   })));
   assert.match(joined, /3 unsent/);
   assert.match(joined, /CANNOT SEND — our fault, not the node's/);
@@ -149,7 +149,7 @@ test('a GAVE UP alarm survives the modal 80x24 — an alarm dropped to truncatio
   // The first cut put the two human-summoning flags LAST, so at 80 cols they
   // vanished entirely while cosmetic context survived.
   const joined = plain(renderEngine(ctx(80, 24, {
-    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 9_000_000, attempts: 3, nextEligibleMs: NOW + 600_000, missStreak: 7, launchFailures: 2, pending: 3, gaveUp: true, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0 }] }),
+    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 9_000_000, attempts: 3, nextEligibleMs: NOW + 600_000, missStreak: 7, launchFailures: 2, pending: 3, gaveUp: true, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0, probeKills24h: 0, probeHeldUntilMs: null }] }),
   })));
   assert.match(joined, /GAVE UP — needs a human/, 'the alarm survives a narrow terminal');
 });
@@ -189,7 +189,7 @@ test('a suppressed pass reports its queues as NOT COMPUTED, never as measured ze
 
 test('a node the ladder has ABANDONED shows no next retry — it has no next attempt', () => {
   const joined = plain(renderEngine(ctx(120, 30, {
-    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 9_000_000, attempts: 3, nextEligibleMs: NOW + 3_000_000, missStreak: 0, launchFailures: 0, pending: 0, gaveUp: true, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0 }] }),
+    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 9_000_000, attempts: 3, nextEligibleMs: NOW + 3_000_000, missStreak: 0, launchFailures: 0, pending: 0, gaveUp: true, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0, probeKills24h: 0, probeHeldUntilMs: null }] }),
   })));
   assert.match(joined, /GAVE UP/);
   assert.ok(!/next in/.test(joined), 'a given-up node is not promised a retry');
@@ -218,7 +218,7 @@ test('an arm whose node provenance was never recorded says so — 0 is unknown, 
 
 test('ENGINE shows a node whose Dead flag its own traffic contradicts (v0.42.0)', () => {
   const joined = plain(renderEngine(ctx(120, 30, {
-    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 600_000, attempts: 0, nextEligibleMs: null, missStreak: 0, launchFailures: 0, pending: 0, gaveUp: false, launchGaveUp: false, talkingWhileDead: true, reads: 0, readOwed: false, readRevivals24h: 0 }] }),
+    autoPingState: () => AP({ nodes: [{ nodeId: 49, deadSinceMs: NOW - 600_000, attempts: 0, nextEligibleMs: null, missStreak: 0, launchFailures: 0, pending: 0, gaveUp: false, launchGaveUp: false, talkingWhileDead: true, reads: 0, readOwed: false, readRevivals24h: 0, probeKills24h: 0, probeHeldUntilMs: null }] }),
   })));
   assert.match(joined, /reads Dead but TALKING — stale flag/);
 });
@@ -518,4 +518,18 @@ test('ENGINE says WHY the S2 lane is dark, not just that the socket is live (v0.
     driverWsStatus: () => 'live (schema 41)', driverWsState: () => 'live', s2LaneFault: () => null,
   })));
   assert.doesNotMatch(ok, /S2 lane/, 'a live lane raises no row');
+});
+
+test('ENGINE shows a node held after an own-probe kill, and its own-probe kills in 24 h (v0.71.0)', () => {
+  const ap = (over: Record<string, unknown>) => AP({ nodes: [{ nodeId: 49, deadSinceMs: null, attempts: 0, nextEligibleMs: null, missStreak: 0,
+    launchFailures: 0, pending: 0, gaveUp: false, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false,
+    readRevivals24h: 0, probeKills24h: 0, probeHeldUntilMs: null, ...over }] });
+  const held = plain(renderEngine(ctx(120, 30, { autoPingState: () => ap({ probeKills24h: 2, probeHeldUntilMs: NOW + 9 * 60_000 }) })));
+  assert.match(held, /#49 .*2 own-probe kills 24h/, 'a node our probes knocked Dead is tracked, with the count');
+  assert.match(held, /probes held (8|9)m/, 'and the hold says how long it has left');
+  const once = plain(renderEngine(ctx(120, 30, { autoPingState: () => ap({ probeKills24h: 1, probeHeldUntilMs: NOW - 1 }) })));
+  assert.match(once, /#49 .*1 own-probe kill 24h/, 'singular, and still tracked after the hold lifts');
+  assert.doesNotMatch(once, /probes held/, 'a lifted hold is not shown');
+  const quiet = plain(renderEngine(ctx(120, 30, { autoPingState: () => ap({}) })));
+  assert.doesNotMatch(quiet, /#49/, 'a node with nothing to show is not a tracked row');
 });

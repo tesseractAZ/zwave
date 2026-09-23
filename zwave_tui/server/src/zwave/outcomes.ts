@@ -938,7 +938,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         : ep.transient
         ? ' (transient — degraded state ended before its evidence floor)'
         : ep.confounded && ep.action == null && ep.verdict !== 'unverifiable' && ep.verdict !== 'refused-misdiagnosis'
-          ? ' (confounded — the node died or was remediated mid-episode; credited to neither arm)'
+          ? ' (confounded — the node died, was remediated, or was re-routed by our own probe mid-episode; credited to neither arm)'
           : '';
       log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]${tag}`);
       return ep;

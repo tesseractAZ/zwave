@@ -166,7 +166,10 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     // bury the two that matter.
     const tracked = ap.nodes.filter((n) =>
       n.deadSinceMs != null || n.attempts > 0 || n.missStreak > 0 ||
-      n.launchFailures > 0 || n.gaveUp || n.launchGaveUp);
+      n.launchFailures > 0 || n.gaveUp || n.launchGaveUp ||
+      // v0.71.0: a node our own probe knocked Dead today, or one held from
+      // measurement probes after such a death, is tracked too.
+      (n.probeKills24h ?? 0) > 0 || (n.probeHeldUntilMs != null && n.probeHeldUntilMs > now));
     if (tracked.length === 0) {
       // NOT an all-clear when the population is empty by construction
       // (v0.52.0): with the driver-WS flag dump missing, every node's
@@ -198,6 +201,8 @@ export function renderEngine(ctx: ScreenCtx): string[] {
         if (!n.gaveUp && n.nextEligibleMs != null && n.nextEligibleMs > now) {
           bits.push(c.grey(`next in ${age(n.nextEligibleMs - now)}`));
         }
+        if ((n.probeKills24h ?? 0) > 0) bits.push(c.yellow(`${n.probeKills24h} own-probe kill${n.probeKills24h === 1 ? '' : 's'} 24h`));
+        if (n.probeHeldUntilMs != null && n.probeHeldUntilMs > now) bits.push(c.grey(`probes held ${age(n.probeHeldUntilMs - now)}`));
         if (n.pending > 0) bits.push(c.grey(`${n.pending} awaiting`));
         push(fitBits('  ' + c.cyan(`#${n.nodeId} ${wide ? name : name.slice(0, 16)}`) + '  ', bits, view.cols));
       }

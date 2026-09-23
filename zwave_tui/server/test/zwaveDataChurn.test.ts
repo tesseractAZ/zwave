@@ -1910,3 +1910,157 @@ test('a routed read targets the node\'s own switch value, and nothing that merel
     }
   }
 });
+
+/* ── v0.71.0: a route our own read changed, and the runner's death feed ──── */
+
+/** A zwaveData with an evidence store and a ledger, plus the private handles
+ *  the v0.71.0 tests drive. */
+async function rerouteZd(prefix: string) {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const logged: string[] = [];
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+    log: (m: string) => { logged.push(m); },
+  });
+  await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+  const priv = zd as unknown as {
+    measurementReroutes: Set<number>;
+    routeChangeAccum: Map<number, number>;
+    statusSubbed: Set<number>;
+    lastOkAt: number | null;
+    sampleEvidence: () => void;
+    snapshot: () => NodeSnapshot[];
+    updateEpisodes: (s: unknown[], now: number) => void;
+    outcomes: { markConfounded: (n: number | null, k: string) => void };
+  };
+  const direct = { repeaters: [], rssi: -80, repeater_rssi: [], route_failed_between: null, protocol_data_rate: 2 };
+  const failedOver = { repeaters: ['dev-9'], rssi: -60, repeater_rssi: [-58], route_failed_between: [DEV_ID, 'dev-9'], protocol_data_rate: 3 };
+  const quietChange = { repeaters: ['dev-9'], rssi: -60, repeater_rssi: [-58], route_failed_between: null, protocol_data_rate: 3 };
+  let tx = 10;
+  const route = (lwr: Record<string, unknown>) => { tx += 1; pushStats(ha, statsEvent({ commands_tx: tx, commands_rx: tx, lwr })); };
+  route(direct);                                                       // the first event is a replay: the baseline route
+  return { ha, dir, zd, priv, logged, route, direct, failedOver, quietChange,
+    stop: () => { zd.stop(); rmSync(dir, { recursive: true, force: true }); } };
+}
+
+test('a SWEEP routed read that fails over is ours: logged, counted into the node\'s reroutes, and kept out of route churn (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-');
+  try {
+    const churn0 = R.priv.routeChangeAccum.get(7) ?? 0;
+    R.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    R.route(R.failedOver);
+    assert.equal(R.priv.measurementReroutes.has(7), true, 'marked for the confound guard');
+    assert.equal(R.priv.routeChangeAccum.get(7) ?? 0, churn0, 'not route CHURN: our own failover is not the mesh re-routing');
+    assert.equal(R.zd.evidenceCoverage(7)?.probeReroutes, 1, 'counted into the persisted stored-route failovers');
+    assert.ok(R.logged.some((l) => /auto-ping: node 7's stored route failed on our sweep routed read and the controller delivered it by another/.test(l)),
+      JSON.stringify(R.logged));
+  } finally { R.stop(); }
+});
+
+test('a route change our read did NOT cause — a NoOp probe, a read past the grace, a read that did not fail over, or no probe at all — is route churn as before and confounds nothing (v0.71.0)', async () => {
+  const cases: Array<[string, (zd: ZwaveData) => void, 'failedOver' | 'quietChange']> = [
+    ['a NoOp cannot compute a route', (zd) => zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'ping'), 'failedOver'],
+    ['a read long past the answer grace', (zd) => zd.noteMeasurementProbe(7, Date.now() - 100_000, 'sweep', 'read'), 'failedOver'],
+    ['a read that did not fail over only REVEALED the change', (zd) => zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read'), 'quietChange'],
+    ['no probe of ours at all', () => {}, 'failedOver'],
+  ];
+  for (const [label, arrange, lwr] of cases) {
+    const R = await rerouteZd('zwtui-reroute-not-');
+    try {
+      const churn0 = R.priv.routeChangeAccum.get(7) ?? 0;
+      arrange(R.zd);
+      R.route(lwr === 'failedOver' ? R.failedOver : R.quietChange);
+      assert.equal(R.priv.routeChangeAccum.get(7) ?? 0, churn0 + 1, `${label}: still route churn`);
+      assert.equal(R.priv.measurementReroutes.has(7), false, `${label}: not ours`);
+      assert.equal(R.zd.evidenceCoverage(7)?.probeReroutes ?? 0, 0, `${label}: not a stored-route failover of ours`);
+    } finally { R.stop(); }
+  }
+});
+
+test('a VERIFICATION read that fails over is ours, but only the sweep feeds the persisted reroute count (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-verify-');
+  try {
+    R.zd.noteMeasurementProbe(7, Date.now(), 'verify', 'read');
+    R.route(R.failedOver);
+    assert.equal(R.priv.measurementReroutes.has(7), true, 'it still confounds');
+    assert.equal(R.zd.evidenceCoverage(7)?.probeReroutes ?? 0, 0, 'a symptom-correlated burst stays out of the comparable count');
+    assert.ok(R.logged.some((l) => /failed on our verification routed read/.test(l)));
+  } finally { R.stop(); }
+});
+
+test('our read\'s failover confounds the node\'s open rate, RTT, signal and return-path episodes — not dead-flap, route-churn, quiet-node or s2-desync — and is consumed by one engine pass (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-confound-');
+  try {
+    const real = R.priv.snapshot();
+    const asAlive = real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+    R.priv.snapshot = () => asAlive;
+    const marked: Array<[number | null, string]> = [];
+    const orig = R.priv.outcomes.markConfounded.bind(R.priv.outcomes);
+    R.priv.outcomes.markConfounded = (n, k) => { marked.push([n, k]); orig(n, k); };
+    const t0 = 1_800_000_000_000;
+    const kinds = ['rate-fallback', 'rtt-degraded', 'weak-signal', 'return-path-degraded', 'chronic-return-path',
+      'dead-flap', 'route-churn', 'quiet-node', 's2-desync'];
+    const syms = kinds.map((kind) => ({ kind, nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }));
+    R.priv.updateEpisodes(syms, t0);                                    // episodes open, nothing re-routed
+    assert.equal(marked.length, 0, 'fixture guard: nothing is confounded before the failover');
+    const open = new Set((R.zd.openEpisodes() ?? []).filter((e) => e.nodeId === 7).map((e) => e.kind));
+    R.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    R.route(R.failedOver);
+    R.priv.updateEpisodes(syms, t0 + 60_000);
+    assert.deepEqual([...open].sort(), [...kinds].sort(), 'fixture guard: every kind has an open episode');
+    const hit = [...new Set(marked.filter(([n]) => n === 7).map(([, k]) => k))].sort();
+    assert.deepEqual(hit, ['chronic-return-path', 'rate-fallback', 'return-path-degraded', 'rtt-degraded', 'weak-signal'],
+      'exactly the kinds a new route can clear by itself');
+    R.priv.lastOkAt = Date.now();
+    R.priv.sampleEvidence();
+    assert.equal(R.priv.measurementReroutes.size, 0, 'consumed by the engine pass, not latched');
+  } finally { R.stop(); }
+});
+
+test('recordProbeResult forwards the frame, and evidenceCoverage carries the read counters (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-probe-frame-');
+  try {
+    R.zd.recordProbeResult(7, true, 'echo-only', 'read');
+    R.zd.recordProbeResult(7, false, 'echo-only', 'read');
+    R.zd.recordProbeResult(7, true, 'echo-only', 'ping');
+    const cov = R.zd.evidenceCoverage(7)!;
+    assert.deepEqual([cov.probesAsked, cov.probesAnswered, cov.probesReadAsked, cov.probesReadAnswered], [3, 2, 2, 1]);
+  } finally { R.stop(); }
+});
+
+test('each Alive→Dead transition reaches the runner once — from the status feed, or the roster diff for a node without one (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-deaths-');
+  try {
+    R.zd.drainDeadEvents();
+    const feed = (event: string) => { for (const h of R.ha.handlers.get('zwave_js/subscribe_node_status') ?? []) h({ event: { event } } as never); };
+    feed('alive'); feed('dead'); feed('alive'); feed('alive');
+    const first = R.zd.drainDeadEvents();
+    assert.deepEqual(first.map((d) => d.nodeId), [7], 'one death, one entry — a revival is not a death');
+    assert.ok(Math.abs(first[0].at - Date.now()) < 5_000, 'stamped when it was seen');
+    assert.deepEqual(R.zd.drainDeadEvents(), [], 'drained, not latched');
+    // The roster-diff fallback, for a node whose status subscription failed.
+    R.priv.statusSubbed.delete(7);
+    rosterNodes = [{ ...NODE7, status: 3 }];
+    await waitFor(() => R.zd.snapshot().find((n) => n.nodeId === 7)?.status === NodeStatus.Dead, 4000);
+    assert.deepEqual(R.zd.drainDeadEvents().map((d) => d.nodeId), [7], 'the fallback feeds it too');
+  } finally {
+    rosterNodes = [NODE7];
+    R.stop();
+  }
+});
+
+test('drainVerifyRequests leaves a SKIPPED node\'s burst owed, and hands it out once the skip lifts (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-verify-skip-');
+  try {
+    (R.zd as unknown as { requestVerification: (n: number) => void }).requestVerification(7);
+    const t0 = 1_800_000_000_000;
+    for (let i = 0; i < 10; i++) assert.deepEqual(R.zd.drainVerifyRequests(t0 + i * 80_000, (id) => id === 7), [], 'held: nothing handed out');
+    assert.equal(R.zd.verifyOwedCount(), 1, 'and nothing spent — the burst is still owed');
+    const got: number[] = [];
+    for (let i = 10; i < 20; i++) got.push(...R.zd.drainVerifyRequests(t0 + i * 80_000).map((e) => e.id));
+    assert.equal(got.length, 5, `the whole burst goes out after the hold: ${JSON.stringify(got)}`);
+  } finally { R.stop(); }
+});

@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.70.0"
+version: "0.71.0"
 slug: zwave_tui
 description: "Control-room TUI for Z-Wave mesh health — telnet + sidebar console, a learned advisory engine, and its conclusions as HA entities"
 url: https://github.com/tesseractAZ/zwave
@@ -59,7 +59,8 @@ map:
   - data:rw
 # Request access to Home Assistant's Core WebSocket/REST API so the add-on can
 # issue zwave_js/* commands (network_status, node/controller statistics
-# subscriptions, node_status/metadata) and call_service (button.press for ping).
+# subscriptions, node_status/metadata) and call_service (button.press for ping;
+# zwave_js.refresh_value for the routed read).
 # Without this flag SUPERVISOR_TOKEN is not granted access to /core/* and every
 # zwave_js call fails.
 homeassistant_api: true
