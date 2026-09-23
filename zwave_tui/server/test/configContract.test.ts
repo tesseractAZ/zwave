@@ -462,6 +462,7 @@ test('index.ts wires the measurement read, its stamp, the death feed, the verify
   assert.match(index, /probeRead: \(n\) => actions\.routedRead\(n, 'probe'\)/, 'the measurement lanes must read');
   assert.match(index, /onMeasurementSent: \(n, at, lane, frame\) => zwaveData\.noteMeasurementProbe\(n, at, lane, frame\)/);
   assert.match(index, /deaths: \(\) => zwaveData\.drainDeadEvents\(\)/);
+  assert.match(index, /onMeasurementWithdrawn: \(n, at\) => zwaveData\.clearMeasurementProbe\(n, at\)/);
   assert.match(index, /verifyRequests: \(now, skip\) => zwaveData\.drainVerifyRequests\(now, skip\)/);
   assert.match(index, /onProbeResult: \(nodeId, answered, cls, frame\) => zwaveData\.recordProbeResult\(nodeId, answered, cls, frame\)/);
 });

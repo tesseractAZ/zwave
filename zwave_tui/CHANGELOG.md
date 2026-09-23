@@ -53,10 +53,12 @@ failure a NoOp sweep used to turn into a Dead episode. Such a failover is logged
 as caused by that read, left out of `route-churn`'s count, and confounds the
 node's open rate-fallback, rtt-degraded, weak-signal and return-path episodes,
 since a new route can clear those by itself, and its open route-churn episode,
-whose after-window those reads fill. Only the statistics event that carries the
-read's own transmit report can be attributed to it, so a route change merely
-first seen on a probe (after a route rebuild, for example), or made by another
-frame inside the same minute, is not. The cost is about 500
+whose after-window those reads fill. Only the read's own transmit report — the
+first one for the node after the read was queued, whose route zwave-js's
+statistics throttle usually delivers about 250 ms after its counters — can be
+attributed to it, so a route change merely first seen on a probe (after a route
+rebuild, for example), or made by another frame inside the same minute, is not;
+a read whose launch was refused attributes nothing. The cost is about 500
 Get-and-Report exchanges a day in place of the same number of NoOps: roughly
 30 s more controller transmit time a day, S2 encapsulation on secure nodes, and
 about 7 % more Z-Wave JS driver log.

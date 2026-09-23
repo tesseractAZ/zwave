@@ -2726,7 +2726,7 @@ test('a SWEEP miss never earns a routed read — only a judged ladder ping does 
 
 /* ── v0.71.0: the measurement lanes send a routed read; our own kills are contained ── */
 
-type RigCall = { verb: 'ping' | 'probe' | 'probeRead' | 'read' | 'sent'; id: number; at: number; lane?: string; frame?: string };
+type RigCall = { verb: 'ping' | 'probe' | 'probeRead' | 'read' | 'sent' | 'withdrawn'; id: number; at: number; lane?: string; frame?: string };
 
 /** The real runner with every v0.71.0 hook recorded. The clock starts past the
  *  boot window, so the measurement lanes are open from the first tick. */
@@ -2758,6 +2758,7 @@ async function rig(over: {
     }),
     canRead: over.canRead ?? (() => true),
     onMeasurementSent: (id, at, lane, frame) => { calls.push({ verb: 'sent', id, at, lane, frame }); },
+    onMeasurementWithdrawn: (id, at) => { calls.push({ verb: 'withdrawn', id, at }); },
     verifyRequests: over.verify,
     deaths: over.deaths,
     log: () => {}, log2,
@@ -2988,6 +2989,7 @@ test('a routed read that could not be sent is withdrawn and refunded, the node f
   await R.step();                                                     // 7 is read — and refused
   assert.deepEqual(R.of('probeRead').map((c) => c.id), [7]);
   assert.ok(R.lines.some((l) => /node 7: a routed read could not be sent — its sweep and verification probes use the NoOp ping for the next 30m/.test(l)));
+  assert.deepEqual(R.of('withdrawn').map((c) => [c.id, c.at]), [[7, R.of('sent', 7)[0].at]], 'its measurement stamp is withdrawn, so no later frame inherits it');
   await R.step();                                                     // refunded: 7 again, by NoOp
   assert.deepEqual(R.of('probe').map((c) => c.id), [7], 'the refunded slot goes out as the fallback NoOp');
   assert.ok(R.lines.some((l) => /node 7 liveness sweep .* — NoOp ping \(a routed read could not be sent in the last 30m\)$/.test(l)));
@@ -3127,6 +3129,8 @@ test('a verification probe that could not be sent gives back the PREVIOUS burst 
   const gaps = R.lines.filter((l) => /node 100 verification probe/.test(l)).map((l) => /\+(\d+)s/.exec(l)?.[1] ?? 'start');
   assert.deepEqual(gaps, ['start', '60', '120'], `the third gap is from the first probe, not the refused one: ${JSON.stringify(R.lines)}`);
   assert.deepEqual(R.of('probe').map((c) => c.id), [100], 'and a refused verification read moves the node to the NoOp fallback');
+  assert.deepEqual(R.of('withdrawn').map((c) => c.id), [100], 'and withdraws its measurement stamp');
+  assert.equal(R.of('withdrawn')[0].at, R.of('sent', 100)[1].at, 'the stamp of the probe that never left');
 });
 
 test('a read whose launch failed in an own-kill episode lends no cap exemption to a later, unprovoked one (v0.71.0)', async () => {
@@ -3199,7 +3203,7 @@ test('a between-tick NoOp kill is a MISS — the traffic that revived the node i
   assert.ok(R.snap(7)?.probeHeldUntilMs != null, 'and held');
   assert.deepEqual(R.results.map((r) => [r[0], r[1], r[3]]), [[7, false, 'ping']], 'booked unanswered, once — never later credited as answered');
   const miss = R.lines.find((l) => /did NOT answer its probe/.test(l)) ?? '';
-  assert.match(miss, /1st consecutive miss — it went Dead 0s after our sweep NoOp ping and was Alive again before the next tick, on traffic of its own\) — no sweep or verification probe for 15m — sweep NoOp ping$/);
+  assert.match(miss, /1st consecutive miss — it went Dead 0s after our sweep NoOp ping and was Alive again before the next tick; a NoOp gets no reply, so that was not an answer\) — no sweep or verification probe for 15m — sweep NoOp ping$/);
 });
 
 test('a burst whose first probe was answered and whose second killed the node counts ONE kill when the tick also saw it Dead (v0.71.0)', async () => {
@@ -3278,5 +3282,50 @@ test('a ladder READ settled on a later death is labelled a routed read, not a No
   await R.step();
   R.h.stop();
   assert.ok(R.lines.some((l) => /node 7 did NOT answer its probe \(\d+(st|nd|rd|th) consecutive miss — the node has since been marked Dead\) — ladder routed read$/.test(l)),
+    JSON.stringify(R.lines.filter((l) => /did NOT answer/.test(l))));
+});
+
+test('a between-tick kill is still judged when the node is Dead AGAIN at the tick on a later death (v0.71.0)', async () => {
+  // The first death cleared (the feed hands it over); a second, unrelated one
+  // left the node Dead at the tick. trackEpisodes reads the lastSeen the revival
+  // moved and books nothing, so only the feed can book the first death.
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null }[] = [];
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN, canRead: () => false,
+    deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step();
+  const sentAt = R.at() - MIN;
+  feed = [{ nodeId: 7, at: sentAt + 400, seen: T - 300 * MIN }];     // death 1, unanswered, then cleared
+  setSeen(n7, sentAt + 20_000);                                       // revived by its own report
+  setStatus(n7, NodeStatus.Dead);                                     // death 2, on something else
+  await R.step();
+  setStatus(n7, NodeStatus.Alive);
+  await R.step(3);
+  R.h.stop();
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'our kill is counted');
+  assert.deepEqual(R.results.map((r) => [r[0], r[1], r[3]]), [[7, false, 'ping']], 'the NoOp is a miss, never credited as answered');
+  assert.ok(R.lines.some((l) => /went Dead 0s after our sweep NoOp ping and came back, and is Dead again at this tick on something later/.test(l)),
+    JSON.stringify(R.lines.filter((l) => /went Dead/.test(l))));
+});
+
+test('a between-tick VERIFICATION NoOp kill stays out of the reply rate, and the miss streak carries into the next miss (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null }[] = [];
+  let due = true;
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 0, canRead: () => false,
+    verify: () => (due ? [{ id: 7, first: true }] : []), deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step(); due = false;
+  const sentAt = R.at() - MIN;
+  feed = [{ nodeId: 7, at: sentAt + 400, seen: null }];                // no lastSeen on record: nothing answered it
+  setSeen(n7, sentAt + 20_000);
+  await R.step();
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'a death with no lastSeen on record is still blamed');
+  assert.deepEqual(R.results, [], 'a verification probe is symptom-correlated: never in the comparable rate');
+  // A later judged miss continues the streak the between-tick miss started.
+  R.set(R.at() + 16 * MIN);
+  due = true; await R.step(); due = false;
+  await R.step(3);
+  R.h.stop();
+  assert.ok(R.lines.some((l) => /node 7 did NOT answer its probe \(2nd consecutive miss, lastSeen did not advance\)/.test(l)),
     JSON.stringify(R.lines.filter((l) => /did NOT answer/.test(l))));
 });

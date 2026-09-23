@@ -321,6 +321,12 @@ const MEASUREMENT_REROUTE_KINDS: ReadonlySet<SymptomKind> = new Set<SymptomKind>
 /** Alive→Dead transitions kept for the auto-ping runner between drains
  *  (v0.71.0); the runner drains every tick, so this only bounds a stall. */
 const DEAD_EVENTS_MAX = 200;
+/** How long after our measurement frame's TX counters arrive its route may
+ *  still arrive (v0.71.0). zwave-js throttles node statistics to one emit per
+ *  250 ms with a trailing call: on a quiet node the counter increment is emitted
+ *  at once, with the OLD route, and the route that TX report carried follows in
+ *  the trailing emit ~250 ms later. Two seconds covers that and HA's hop. */
+const OUR_TX_TRAIL_MS = 2_000;
 
 export interface ZwaveDataOptions {
   /** How long a node must be absent from the roster before its learning is
@@ -480,6 +486,8 @@ export interface ZwaveData {
   recordProbeResult(nodeId: number, answered: boolean, cls: ProbeClassLite, frame?: ProbeFrameLite): void;
   /** A sweep or verification probe is about to be sent (v0.71.0). */
   noteMeasurementProbe(nodeId: number, at: number, lane: 'sweep' | 'verify', frame: ProbeFrameLite): void;
+  /** That probe never left (v0.71.0): withdraw its stamp. */
+  clearMeasurementProbe(nodeId: number, at: number): void;
   /** Drain the Alive→Dead transitions the feed has since seen clear, with the
    *  node's lastSeen at the death (v0.71.0). */
   drainDeadEvents(): { nodeId: number; at: number; seen: number | null }[];
@@ -706,6 +714,10 @@ class ZwaveDataImpl implements ZwaveData {
    *  moment, so the ONE statistics event that carries its TX report can be told
    *  from every other frame's. Consumed by that event. */
   private readonly measurementSent = new Map<number, { at: number; lane: 'sweep' | 'verify'; frame: ProbeFrameLite; tx0: number | null }>();
+  /** nodeId → our measurement frame's TX report once its counters have arrived
+   *  (`txAt`), held open for the trailing statistics emit that carries its route,
+   *  until the counters move again or `until` passes (v0.71.0). */
+  private readonly ourTxReport = new Map<number, { txAt: number; lane: 'sweep' | 'verify'; frame: ProbeFrameLite; sinceMs: number; until: number }>();
   /** Nodes whose route our own routed read changed since the last engine pass
    *  (v0.71.0) — consumed by the confound guard in updateEpisodes. */
   private readonly measurementReroutes = new Set<number>();
@@ -2185,6 +2197,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.routeChangeAccum.delete(id);
           this.s2Accum.delete(id);
           this.measurementSent.delete(id);
+          this.ourTxReport.delete(id);
           this.measurementReroutes.delete(id);
           this.subStatus.delete(id);
           this.statusSubbed.delete(id);
@@ -2291,6 +2304,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.routeChangeAccum.clear();
         this.s2Accum.clear();
         this.measurementSent.clear();
+        this.ourTxReport.clear();
         this.measurementReroutes.clear();
         this.deadEvents = [];
         this.subStatus.clear();
@@ -2890,6 +2904,7 @@ class ZwaveDataImpl implements ZwaveData {
     // A frame that was not acknowledged was not delivered: whatever reaches this
     // node next is not our measurement probe's TX report.
     this.measurementSent.delete(nodeId);
+    this.ourTxReport.delete(nodeId);
   }
 
   /**
@@ -2911,6 +2926,12 @@ class ZwaveDataImpl implements ZwaveData {
   noteMeasurementProbe(nodeId: number, at: number, lane: 'sweep' | 'verify', frame: ProbeFrameLite): void {
     const s = this.statsByNode.get(nodeId);
     this.measurementSent.set(nodeId, { at, lane, frame, tx0: s == null ? null : s.commandsTX + s.commandsDroppedTX });
+  }
+
+  /** The probe stamped at `at` never left — HA refused it (v0.71.0). Its stamp
+   *  is withdrawn, or the next frame to reach the node would inherit it. */
+  clearMeasurementProbe(nodeId: number, at: number): void {
+    if (this.measurementSent.get(nodeId)?.at === at) this.measurementSent.delete(nodeId);
   }
 
   /**
@@ -3343,22 +3364,42 @@ class ZwaveDataImpl implements ZwaveData {
     // we have merely stopped watching it. Counting the disappearance and the
     // reappearance would score two changes for zero re-routing, and route-churn
     // fires at four.
-    // WHICH EVENT CARRIES OUR PROBE'S TX REPORT (v0.71.0): the first after the
-    // stamp in which the node's TX counters moved. zwave-js rewrites `lwr` from
-    // EVERY frame's TX report, so a window alone cannot say whose it was — the
-    // ladder's retry, an operator's ping or an automation's command inside the
-    // same 90 s would all look like our read's. The stamp is consumed here
-    // whether or not the route moved; a driver restart (counters backwards)
-    // voids it.
+    // WHICH EVENTS CARRY OUR PROBE'S TX REPORT (v0.71.0). zwave-js rewrites
+    // `lwr` from EVERY frame's TX report, so a time window alone cannot say whose
+    // it was — the ladder's retry, an operator's ping or an automation's command
+    // inside the same 90 s would all look like our read's. Ours is the first TX
+    // report for the node after the stamp: the first event in which the TX
+    // counters moved past the stamp's snapshot. zwave-js's statistics throttle
+    // (one emit per 250 ms, trailing) usually splits that one report in two on a
+    // quiet node — the counter increment emitted at once with the OLD route, and
+    // the new route in the trailing emit — so the attribution stays open across
+    // events with the SAME counters for `OUR_TX_TRAIL_MS`. It closes when the
+    // counters move again (another frame), when the window passes, or once a
+    // route change has been judged on it. A driver restart (counters backwards)
+    // voids it. (A frame to the node that was already queued or in flight when
+    // our read was stamped reports first and would be taken for ours; the read
+    // waits at NodeQuery priority, so that is possible, and bounded to one.)
     let ourFrame: { lane: 'sweep' | 'verify'; frame: ProbeFrameLite; sinceMs: number } | null = null;
     {
+      const txNow = counters.tx + counters.dropTx;
       const sent = this.measurementSent.get(nodeId);
-      if (sent != null && (counterReset || sent.tx0 == null)) this.measurementSent.delete(nodeId);
-      else if (sent != null && sent.tx0 != null && counters.tx + counters.dropTx > sent.tx0) {
+      if (counterReset) {
+        this.measurementSent.delete(nodeId);
+        this.ourTxReport.delete(nodeId);
+      } else if (sent != null && sent.tx0 == null) {
+        this.measurementSent.delete(nodeId);
+      } else if (sent != null && sent.tx0 != null && txNow > sent.tx0) {
         this.measurementSent.delete(nodeId);
         const sinceMs = Date.now() - sent.at;
-        if (sinceMs >= 0 && sinceMs <= ANSWER_GRACE_MS) ourFrame = { lane: sent.lane, frame: sent.frame, sinceMs };
+        if (sinceMs >= 0 && sinceMs <= ANSWER_GRACE_MS) {
+          this.ourTxReport.set(nodeId, { txAt: txNow, lane: sent.lane, frame: sent.frame, sinceMs, until: Date.now() + OUR_TX_TRAIL_MS });
+        } else this.ourTxReport.delete(nodeId);
+      } else {
+        const held = this.ourTxReport.get(nodeId);
+        if (held != null && (txNow !== held.txAt || Date.now() > held.until)) this.ourTxReport.delete(nodeId);
       }
+      const held = this.ourTxReport.get(nodeId);
+      if (held != null) ourFrame = { lane: held.lane, frame: held.frame, sinceMs: held.sinceMs };
     }
     if (isRouteChange(prev?.lwr, stats.lwr)) {
       // OUR READ MOVED IT (v0.71.0) only when all three hold: this event carries
@@ -3371,6 +3412,8 @@ class ZwaveDataImpl implements ZwaveData {
       // report, and on a quiet node our sweep is often the next frame.
       const ours = ourFrame != null && ourFrame.frame === 'read' && stats.lwr?.routeFailedBetween != null;
       const lane = ourFrame?.lane === 'verify' ? 'verification' : 'sweep';
+      // One report, one route: judged, it cannot be ours again.
+      this.ourTxReport.delete(nodeId);
       this.pushEvent('net', 'info', 'route', nodeId, `route → ${fmtRoute(stats.lwr)}` +
         (ours ? ` (our ${lane} routed read failed over ${Math.round(ourFrame!.sinceMs / 1000)}s after it went out)` : ''));
       if (ours) {
@@ -3381,7 +3424,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.measurementReroutes.add(nodeId);
         if (ourFrame!.lane === 'sweep') this.evidenceStore?.recordProbeReroute(nodeId);
         this.log(`auto-ping: node ${nodeId}'s stored route failed on our ${lane} routed read and the controller ` +
-          `delivered it by another (${fmtRoute(stats.lwr)}) — its open rate, RTT, signal and return-path episodes are confounded`);
+          `delivered it by another (${fmtRoute(stats.lwr)}) — its open rate, RTT, signal, return-path and route-churn episodes are confounded`);
       } else {
         this.routeChangeAccum.set(nodeId, (this.routeChangeAccum.get(nodeId) ?? 0) + 1);
       }

@@ -220,7 +220,8 @@ marks Dead only reactively, so an unplugged device can read "Alive" for hours un
 something talks to it). The dead-node ladder and a manual `p` send Home
 Assistant's ping; the liveness sweep and the verification bursts send **one
 routed read** instead — `zwave_js.refresh_value` on the device's own
-switch/light value, a single Get that changes nothing — because a ping is one
+switch/light value, a single Get that changes nothing on the device (its Report
+can correct a stale Home Assistant state) — because a ping is one
 ACK-only attempt on the stored routes, and an unanswered one marks a working
 device Dead: on the reference mesh 100 of 106 mains Dead episodes in 67 days
 began on one of the add-on's own pings (v0.71.0). A read can still go unanswered;

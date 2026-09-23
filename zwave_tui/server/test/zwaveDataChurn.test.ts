@@ -1927,6 +1927,8 @@ async function rerouteZd(prefix: string) {
   });
   await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
   const priv = zd as unknown as {
+    ourTxReport: Map<number, { until: number }>;
+    noteDeadCrossing: (id: number, died: boolean) => void;
     measurementReroutes: Set<number>;
     routeChangeAccum: Map<number, number>;
     statusSubbed: Set<number>;
@@ -1940,9 +1942,19 @@ async function rerouteZd(prefix: string) {
   const failedOver = { repeaters: ['dev-9'], rssi: -60, repeater_rssi: [-58], route_failed_between: [DEV_ID, 'dev-9'], protocol_data_rate: 3 };
   const quietChange = { repeaters: ['dev-9'], rssi: -60, repeater_rssi: [-58], route_failed_between: null, protocol_data_rate: 3 };
   let tx = 10;
-  const route = (lwr: Record<string, unknown>) => { tx += 1; pushStats(ha, statsEvent({ commands_tx: tx, commands_rx: tx, lwr })); };
+  let last: Record<string, unknown> = direct;
+  const route = (lwr: Record<string, unknown>) => { tx += 1; last = lwr; pushStats(ha, statsEvent({ commands_tx: tx, commands_rx: tx, lwr })); };
+  /** The shape zwave-js's statistics throttle gives one TX report on a quiet
+   *  node: the counter increment at once, with the OLD route, then the route
+   *  that report carried in the trailing emit ~250 ms later, counters unchanged. */
+  const split = (lwr: Record<string, unknown>) => {
+    tx += 1;
+    pushStats(ha, statsEvent({ commands_tx: tx, commands_rx: tx - 1, lwr: last }));
+    last = lwr;
+    pushStats(ha, statsEvent({ commands_tx: tx, commands_rx: tx, lwr }));
+  };
   route(direct);                                                       // the first event is a replay: the baseline route
-  return { ha, dir, zd, priv, logged, route, direct, failedOver, quietChange,
+  return { ha, dir, zd, priv, logged, route, split, direct, failedOver, quietChange,
     stop: () => { zd.stop(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
@@ -2129,5 +2141,95 @@ test('a statistics event that moves no TX counter does not consume the stamp —
     pushStats(R.ha, statsEvent({ commands_tx: 11, commands_rx: 11, rssi: -55, lwr: R.direct }));   // no TX movement (an RSSI refresh)
     R.route(R.failedOver);                                             // then our read's own TX report
     assert.equal(R.priv.measurementReroutes.has(7), true, 'our read\'s failover is still ours');
+  } finally { R.stop(); }
+});
+
+test('our read\'s failover is attributed when the throttle SPLITS its TX report — counters first, the route 250 ms later (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-split-');
+  try {
+    const churn0 = R.priv.routeChangeAccum.get(7) ?? 0;
+    R.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    R.split(R.failedOver);
+    assert.equal(R.priv.measurementReroutes.has(7), true, 'the trailing emit carries our read\'s route');
+    assert.equal(R.priv.routeChangeAccum.get(7) ?? 0, churn0, 'and it is not route churn');
+    assert.equal(R.zd.evidenceCoverage(7)?.probeReroutes, 1);
+    assert.ok(R.logged.some((l) => /its open rate, RTT, signal, return-path and route-churn episodes are confounded$/.test(l)), JSON.stringify(R.logged));
+  } finally { R.stop(); }
+});
+
+test('the trailing window closes: once the counters move again, or after its deadline, a failover is not ours (v0.71.0)', async () => {
+  const moved = await rerouteZd('zwtui-reroute-moved-');
+  try {
+    const churn0 = moved.priv.routeChangeAccum.get(7) ?? 0;
+    moved.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    moved.split(moved.direct);                                          // our read: delivered on the stored route
+    moved.split(moved.failedOver);                                      // the next frame's report fails over
+    assert.equal(moved.priv.measurementReroutes.has(7), false, 'another frame\'s TX report is not ours');
+    assert.equal(moved.priv.routeChangeAccum.get(7) ?? 0, churn0 + 1);
+  } finally { moved.stop(); }
+  const late = await rerouteZd('zwtui-reroute-late-');
+  try {
+    late.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    pushStats(late.ha, statsEvent({ commands_tx: 12, commands_rx: 11, lwr: late.direct }));   // our counters…
+    late.priv.ourTxReport.get(7)!.until = Date.now() - 1;                                        // …and the window lapses
+    pushStats(late.ha, statsEvent({ commands_tx: 12, commands_rx: 12, lwr: late.failedOver }));
+    assert.equal(late.priv.measurementReroutes.has(7), false, 'a route arriving after the window is not attributed');
+  } finally { late.stop(); }
+});
+
+test('a read whose launch was refused withdraws its stamp — a later frame\'s failover is route churn (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-withdrawn-');
+  try {
+    const at = Date.now();
+    R.zd.noteMeasurementProbe(7, at, 'sweep', 'read');
+    R.zd.clearMeasurementProbe(7, at - 1);                              // a different stamp: kept
+    R.zd.clearMeasurementProbe(7, at);                                  // this one never left
+    R.route(R.failedOver);
+    assert.equal(R.priv.measurementReroutes.has(7), false);
+    assert.equal(R.zd.evidenceCoverage(7)?.probeReroutes ?? 0, 0);
+  } finally { R.stop(); }
+  const kept = await rerouteZd('zwtui-reroute-kept-');
+  try {
+    const at = Date.now();
+    kept.zd.noteMeasurementProbe(7, at, 'sweep', 'read');
+    kept.zd.clearMeasurementProbe(7, at - 1);
+    kept.route(kept.failedOver);
+    assert.equal(kept.priv.measurementReroutes.has(7), true, 'only the matching stamp is withdrawn');
+  } finally { kept.stop(); }
+});
+
+test('the stamp counts dropped TX too — an RX-only report on a node with past drops does not consume it (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-drops-');
+  try {
+    pushStats(R.ha, statsEvent({ commands_tx: 12, commands_rx: 12, commands_dropped_tx: 2, lwr: R.direct }));
+    R.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    pushStats(R.ha, statsEvent({ commands_tx: 12, commands_rx: 13, commands_dropped_tx: 2, lwr: R.direct }));   // the node's own report
+    pushStats(R.ha, statsEvent({ commands_tx: 13, commands_rx: 14, commands_dropped_tx: 2, lwr: R.failedOver })); // our read
+    assert.equal(R.priv.measurementReroutes.has(7), true);
+  } finally { R.stop(); }
+});
+
+test('a revival clears only THAT node\'s queued deaths (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-deaths-other-');
+  try {
+    R.zd.drainDeadEvents();
+    R.priv.noteDeadCrossing(9, true);                                   // node 9 dies and stays Dead
+    R.priv.noteDeadCrossing(7, true);
+    R.priv.noteDeadCrossing(7, false);                                  // node 7 revives
+    assert.deepEqual(R.zd.drainDeadEvents().map((d) => d.nodeId), [7], "node 9's death is not handed over by node 7's revival");
+  } finally { R.stop(); }
+});
+
+test('one TX report is judged once — a second route change inside its trailing window is route churn (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-once-');
+  try {
+    R.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    R.route(R.failedOver);                                              // ours, judged
+    const churn0 = R.priv.routeChangeAccum.get(7) ?? 0;
+    // Back to direct inside the window, still failed over (unknown repeater ids all resolve to 0, so a
+    // second repeater would read as the same route).
+    pushStats(R.ha, statsEvent({ commands_tx: 12, commands_rx: 12, lwr: { ...R.direct, route_failed_between: [DEV_ID, 'dev-9'] } }));
+    assert.equal(R.zd.evidenceCoverage(7)?.probeReroutes, 1, 'not counted twice');
+    assert.equal(R.priv.routeChangeAccum.get(7) ?? 0, churn0 + 1);
   } finally { R.stop(); }
 });
