@@ -51,7 +51,7 @@ success either way. The planner card is now blocked on a Dead node with that
 reason, and the menu action says so instead of claiming a refresh that never
 went out.
 
-TESTS_AND_MUTANTS_LINE_0700
+21 new tests pin these — the read waits for the ping's judgment, goes out once per rung, never for a sweep or verification miss, battery or FLiRS node or node with nothing to read, is owed again after a blackout, is not re-sent when it never left, holds the give-up until it is judged, and is capped at two revivals a day; the refresh guard refuses a Dead node in the plan and in the menu — and 23 new mutants show each guard is load-bearing. Full run: 729 killed, 0 survived, 9 equivalent.
 
 ## 0.69.0
 
