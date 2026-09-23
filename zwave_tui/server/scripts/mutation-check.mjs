@@ -623,7 +623,8 @@ const MUTANTS = [
     repl: "  if (booting) return { ...base, suppressed: 'boot-window' };",
     what: 'a node already Dead at start is probed once the roster is ready' },
   { id: 'autoping-boot-measurement-lanes-wait', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
-    find: "  if (booting) return { ...base, ping, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'boot-window' };",
+    // Re-pointed in v0.70.0: the boot return now carries the routed reads too.
+    find: "  if (booting) return { ...base, ping, read, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'boot-window' };",
     repl: '',
     what: 'the sweep and verification lanes still serve the whole boot window' },
   { id: 'autoping-boot-dead-lane-needs-ready', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
@@ -631,7 +632,8 @@ const MUTANTS = [
     repl: '      bootDeadLane: true,',
     what: 'the boot-window release waits for a ready roster' },
   { id: 'autoping-boot-trace-says-ladder-open', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
-    find: "          (decision.ping.length > 0 ? ` (dead ladder open, probing ${decision.ping.length})` : '')}`;",
+    // Re-pointed in v0.70.0: the ladder's count includes routed reads.
+    find: "          (decision.ping.length + decision.read.length > 0 ? ` (dead ladder open, probing ${decision.ping.length + decision.read.length})` : '')}`;",
     repl: "          ''}`;",
     what: 'the trace does not read plain "suppressed" beside a probe going out' },
   /* ── v0.64.4: revival credits are disclosed, and retire on their own stamp ─ */
@@ -2225,8 +2227,9 @@ const MUTANTS = [
   { id: 'giveup-claims-only-nops', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Back to asserting unreachability from unanswered NOPs — the claim node
     // 49 disproved by answering an ordinary command minutes later.
-    find: "        `That means it ignored ${tries} NOP frame${tries === 1 ? '' : 's'}, NOT that it is unreachable: ` +",
-    repl: "        `That means it is unreachable: ` +",
+    // Re-pointed in v0.70.0: the no-read branch of the give-up, same claim.
+    find: "            `That means it ignored ${pl(tries, 'NOP frame')}, NOT that it is unreachable: ` +",
+    repl: "            `That means it is unreachable: ` +",
     what: 'the give-up reports unanswered NOPs, never unreachability' },
   { id: 'engine-shows-stale-flag', file: 'src/telnet/screens/engine.ts', tests: ['engineScreen'],
     find: "        if (n.talkingWhileDead) bits.push(c.yellow('reads Dead but TALKING — stale flag'));",
