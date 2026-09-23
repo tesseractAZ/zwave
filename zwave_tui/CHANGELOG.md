@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.70.0
+
+### Fixed — the ladder pinged a working device and asked a human to fix it
+
+A ping from Home Assistant reaches the driver as an ACK-only NoOp: transmit
+options `0x01`, one attempt. It can use only the controller's stored routes — the
+last working route, the next-to-last, then direct. Every ordinary command goes
+out with the driver's default options, `0x25`, which let the controller also
+compute a route from its routing table. When every stored route to a node goes
+marginal at once, no number of pings reaches a device that any real command
+reaches immediately.
+
+That is what happened on the reference mesh on 2026-09-22. A plug-in outlet
+missed one verification ping and was marked Dead. The remediation ladder spent
+its three pings on it over fifty minutes, gave up, and raised the summons and
+`binary_sensor.zwave_tui_degraded`. The outlet had been working normally for its
+owner the whole time: a switch command then reached it in 340 ms through a
+repeater the stored routes did not use, and its next ping succeeded over that
+new route.
+
+Each ladder ping judged unanswered is now followed by **one routed read** on the
+next tick: `zwave_js.refresh_value` on the node's own switch or light value, with
+`refresh_all_values` off. At source that is a single Get — one attempt, default
+routing, no change to the device — and it is sent even to a node marked Dead. It
+is judged the same way as a ping, by the node's `lastSeen` moving past the moment
+it went out, because Home Assistant returns before the Get is sent. It spends none
+of the attempt budget, obeys every gate the ladder obeys, is owed again if the
+nightly radio blackout swallows it, and is never sent to battery or FLiRS nodes
+or to a node with no switch or light value. The give-up now waits for the last
+read, about four minutes later than before, and names what was ignored.
+
+A device that answers Gets but not pings would otherwise loop — revived by the
+read, killed by the next NoOp, with the ladder reset on every recovery and no one
+ever told. After two read revivals of one node inside 24 hours the read is
+withheld for the rest of that window, a warning names the pattern, and the next
+death ends in a summons that says why.
+
+Pings are not the failure here: across 67 days, 81 of 85 Dead episodes on mains
+nodes ended on one of this add-on's own pings. The read covers the narrower case
+where every stored route has gone bad together. The sweep and verification
+probes are unchanged; the sweep's reply rate is only comparable across nodes
+because every node gets the same frame.
+
+### Fixed — "Refresh values" on a Dead node reported success and sent nothing
+
+`zwave_js/refresh_node_values` runs the driver's refresh task, which returns
+before querying anything when the node is Dead — and Home Assistant reports
+success either way. The planner card is now blocked on a Dead node with that
+reason, and the menu action says so instead of claiming a refresh that never
+went out.
+
+TESTS_AND_MUTANTS_LINE_0700
+
 ## 0.69.0
 
 ### Fixed — `weak-signal` could never fire on a quiet mesh

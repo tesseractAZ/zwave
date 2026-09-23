@@ -81,6 +81,10 @@ configuration:
       50 minutos desde la caída hasta el aviso, unos 40 si el nodo cayó durante
       nuestro propio sondeo de vida). Después de eso el motor se detiene y le
       deja el nodo a usted. Una recuperación reinicia la cuenta.
+      Cada ping sin respuesta va seguido de una lectura con enrutamiento: un solo
+      Get sobre el valor de interruptor/luz del propio dispositivo, que no cambia
+      nada, porque un ping solo puede usar las rutas guardadas y un comando real
+      puede encontrar una nueva.
   auto_ping_stale_min:
     name: Seguridad · Intervalo del sondeo de vida (minutos)
     description: >-
