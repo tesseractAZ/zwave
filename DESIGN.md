@@ -398,8 +398,22 @@ even when execution is fully disabled.
 
 > **Since written (v0.30, 2026-08):** one narrow autonomous write ships OUTSIDE
 > this design — **auto-ping** (`autoPing.ts`, DOCS.md §11.12): opt-in, off by
-> default, ping-only, and it never reads the planner's recommendations. It is
-> not this executor; everything below about the executor tiers remains accurate.
+> default, and it never reads the planner's recommendations. It is not this
+> executor; everything below about the executor tiers remains accurate.
+>
+> **Amendment (v0.71.0, 2026-09).** Two statements in this document no longer
+> describe the shipped build. The liveness sweep has been a background prober of
+> every mains node since v0.37 (the §3.4 table's "never background" and the gate
+> stack's "never a background poller" describe the planner's consented ping, not
+> auto-ping). And auto-ping is no longer ping-only: since v0.70.0 the dead-node
+> ladder follows an unanswered ping with one routed read, and since v0.71.0 the
+> sweep and the verification bursts send that routed read
+> (`zwave_js.refresh_value` on the node's own switch/light value — a single Get,
+> read-only) instead of the ping, because an unanswered ping marks a working node
+> Dead and the add-on's own pings began 100 of 106 mains Dead episodes over 67
+> days on the reference mesh. The only background writes remain these probes and
+> the dead ladder, under the same gates; neither can remove a node or change a
+> device's configuration.
 
 > **As-built status.** M4 shipped the planner (§3.4) + advisory REMEDY surface;
 > **M5 (v0.16) shipped the learning loop (§3.6) — also advisory-only.** In

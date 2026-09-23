@@ -583,7 +583,12 @@ privileged and never proxy it to untrusted surfaces; the driver-WS URL must be
   `changeNodeStatusOnMissingACK:false` that the driver's own health check uses.
   So probing exactly the flaky nodes the engine cares about risks flipping them
   offline (and pollutes the stats being monitored). **Consented, rate-limited
-  only — never a background poller on flaky nodes.**
+  only — never a background poller on flaky nodes.** *(Dated note, v0.71.0: the
+  add-on's own liveness sweep became exactly that in v0.37 — a background NoOp
+  to every mains node every 120 min, through HA's ping button, which has the
+  same property — and 100 of 106 mains Dead episodes over 67 days on the
+  reference mesh began on one of its pings. The sweep and the verification
+  bursts now send one routed read instead; see §5.6.)*
 - **Powerlevel CC** (class 115): `startNodeTest` + poll `getNodeTestStatus` is
   reachable, but with S2-desync and dangling-test-state risk the driver otherwise
   manages. **Defer to driver-WS phase**; if ever done via `invoke_cc_api`, always
@@ -851,6 +856,17 @@ wake.
 - **`refresh_node_values` does nothing to a Dead node.** The driver's refresh task returns before querying any CC when the node is Dead, and HA still reports success.
 - **Observed** (reference mesh, 2026-09-22): three `0x01` pings to a Dead outlet NoAcked; one `0x25` Set reached it via Auto Route through a repeater in 340 ms; its next ping then succeeded over that route. No explorer frame appears in 37 h of driver log — AutoRoute, not Explore, did the work.
 
+**Added for v0.71.0** (same versions, plus zwave-js-server-python 0.73.1):
+
+- **A routed read is one Get at NodeQuery priority.** `Node.pollValue` wraps the CC API with `maxSendAttempts: 1` and `priority: MessagePriority.NodeQuery` (below Normal, above Poll); zwave-js-server's `node.poll_value` passes no send options, so the SendData keeps `TransmitOptions.DEFAULT` (`0x25`). Every Binary/Multilevel Switch Get in the 37 h log carried `transmit options: 0x25`. The report wait is the frame's RTT plus the 1 s report timeout.
+- **A Get's NoAck kills like a ping's.** It takes the same `handleMissingNodeACK` → `markAsDead` path; the difference is only that the controller keeps trying (Auto Route) after LWR, NLWR and direct fail. So a read makes a kill rarer, never impossible.
+- **An ACK without a Report is still an answer.** `lastSeen` is set on an OK TX report, and the node is marked Alive; the lost Report only moves `timeoutResponse`, and the report timeout is swallowed with a warning.
+- **A lost ACK can be followed by a Report.** The node can take the Get, its ACK can be lost, and its Report can still arrive — before the NoAck callback (zwave-js aborts the send and counts it a success: 3 of 170 `0x25` frames in the log) or after it (Dead, then Alive within a second, which a once-a-minute level sample never sees).
+- **No path to a harder-trying ping.** Nothing in HA or zwave-js-server calls `Node.ping(true)`. The WS `zwave_js/invoke_cc_api` with `wait_for_result` blocks and returns the Report (or error 204), but cannot pass send options, so it uses the default three attempts at Normal priority.
+- **A computed route does not reliably become the stored one.** One Auto Route delivery moved the outlet's last working route to the repeater it used (subsequent pings went that way); a second, via a different repeater, did not. The `lwr`/`nlwr` in zwave-js's node statistics is its own model, rewritten from every TX report — not a read of the controller's routing table.
+- **`routeFailedBetween` belongs to one transmission.** `updateRouteStatistics` sets it only when that TX report names a failed hop, and the next report without one replaces it; so a statistics event carrying it describes the send that produced it.
+- **The measurement:** over 67 days of recorder history, 100 of 106 mains Alive→Dead episodes began 0.11–3.49 s (median 0.33 s) after one of this add-on's own ping presses — 63 sweep, 35 verification, 2 not attributable. (An earlier count, 81 of 85, missed two nodes whose `node_status` entities carry a `_2` suffix.) Per-probe kill rate 0.46 % over the window, 0.39 % since v0.37, 0.18 % since v0.64.4; 0 genuine NoAcks in 170 `0x25` frames in the 39 h driver log (95 % upper bound ≈1.8 %).
+
 ---
 
 ## 6. Live symptom — worked diagnosis (patio-light switches)
@@ -1010,6 +1026,8 @@ via n7 @ 9.6k, F+R flags, RSSI improving) and #3 South Patio Light (77, "DROP
 8. **Probing is invasive.** NOP ping via `invoke_cc_api` can mark a flaky node
    **dead** — consented + rate-limited, never a background poller; no active link
    tests on battery/FLiRS; `backup_nvm` before any disruptive action. *(§3.4, §5.5, §3.8)*
+   *(v0.71.0: the background sweep that broke this rule from v0.37 on now reads
+   instead of pinging — §5.6.)*
 9. **Closed, tiered allowlist** (read / benign-active / disruptive / destructive)
    in the engine core — the same channel that rebuilds can factory-reset. *(§3.8)*
 10. **Advisory-first, honest nulls, shareable defaults** — the whole program

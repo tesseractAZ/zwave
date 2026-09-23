@@ -227,6 +227,9 @@ export interface RouteFailureEvent {
 /** The sweep's per-probe verdict, mirrored from autoPing's `ProbeClass` — kept
  *  structural rather than imported so the store does not depend on the runner. */
 export type ProbeClassLite = 'self-proven' | 'echo-only' | 'attribution-unknown' | 'unheard';
+/** What a sweep probe sent, mirrored from autoPing's `ProbeFrame` for the same
+ *  reason (v0.71.0). */
+export type ProbeFrameLite = 'read' | 'ping';
 
 export interface NodeCoverage {
   /** First time this node appeared on the roster (registerNode). */
@@ -280,6 +283,26 @@ export interface NodeCoverage {
   probesEchoOnly: number;
   probesAttribUnknown: number;
   probesUnheard: number;
+  /**
+   * The sweep probes sent as a ROUTED READ, and how many were answered — a
+   * subset of `probesAsked`/`probesAnswered` (v0.71.0).
+   *
+   * Kept apart because the two frames ask different questions. An answered
+   * NoOp means the controller reached the node on a STORED route; an answered
+   * read means it reached the node by any route it could find in one send,
+   * including one it computed. A lifetime ratio blending both would describe
+   * neither. The lifetime counters are deliberately not migrated (they never
+   * are); the split starts at the first read.
+   */
+  probesReadAsked: number;
+  probesReadAnswered: number;
+  /**
+   * Times a SWEEP routed read failed over — its stored route failed on the way
+   * and the controller delivered it by another (v0.71.0). The stored-route
+   * failures a NoOp sweep used to turn into a missed probe and a Dead episode,
+   * now counted without killing the node.
+   */
+  probeReroutes: number;
 }
 
 export type EvidenceMap = Map<number, EvidenceSample[]>;
@@ -352,7 +375,9 @@ export interface EvidenceStore {
   coverage(nodeId: number): NodeCoverage | null;
   /** Record one liveness-probe outcome for a node (v0.37). `selfProven` means
    *  the node had already communicated on its own since the previous sweep. */
-  recordProbe(nodeId: number, answered: boolean, cls: ProbeClassLite, at?: number): void;
+  recordProbe(nodeId: number, answered: boolean, cls: ProbeClassLite, at?: number, frame?: ProbeFrameLite): void;
+  /** One sweep routed read that failed over to another route (v0.71.0). */
+  recordProbeReroute(nodeId: number, at?: number): void;
   /** Store-level: when evidence collection first began (survives restarts). */
   recordingSince(): number | null;
   all(): EvidenceMap;
@@ -472,7 +497,7 @@ interface Persisted {
    *  noise-floor tier. Absent in a pre-tier v2 file ⇒ the tier loads empty. */
   controllerCoarse?: CtrlCoarseCols | null;
   routeFails: Record<string, { t: number[]; a: number[]; b: number[] }>;
-  meta: Record<string, { firstSeenAt: number; samples: number; fresh: number; pa?: number; pk?: number; ps?: number; pe?: number; pu?: number; pn?: number }>;
+  meta: Record<string, { firstSeenAt: number; samples: number; fresh: number; pa?: number; pk?: number; ps?: number; pe?: number; pu?: number; pn?: number; ra?: number; rk?: number; rr?: number }>;
   /** Per-node rate runs (v0.64.6 review). OPTIONAL, no schema bump: a sustained
    *  same-route fallback's 100k proof is older than the fine ring, so a restart
    *  that kept only the ring forgot the regression and could never re-arm while
@@ -606,6 +631,7 @@ function emptyMeta(t: number): NodeCoverage {
     firstSeenAt: t, samples: 0, freshSamples: 0,
     probesAsked: 0, probesAnswered: 0, probesSelfProven: 0,
     probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0,
+    probesReadAsked: 0, probesReadAnswered: 0, probeReroutes: 0,
   };
 }
 
@@ -968,11 +994,12 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     controllerSamples: () => ctrlRing,
     controllerCoarse: () => ctrlCoarse,
     routeFailures: (nodeId) => routeFails.get(nodeId) ?? [],
-    recordProbe(nodeId, answered, cls, at): void {
+    recordProbe(nodeId, answered, cls, at, frame): void {
       const t = at ?? now();
       const m = meta.get(nodeId) ?? emptyMeta(t);
       m.probesAsked += 1;
       if (answered) m.probesAnswered += 1;
+      if (frame === 'read') { m.probesReadAsked += 1; if (answered) m.probesReadAnswered += 1; }
       // Exactly one arm per probe: the four are mutually exclusive by
       // construction upstream, and counting two would make the shares sum past
       // the asked total.
@@ -980,6 +1007,12 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       else if (cls === 'echo-only') m.probesEchoOnly += 1;
       else if (cls === 'attribution-unknown') m.probesAttribUnknown += 1;
       else m.probesUnheard += 1;
+      meta.set(nodeId, m);
+      dirty = true;
+    },
+    recordProbeReroute(nodeId, at): void {
+      const m = meta.get(nodeId) ?? emptyMeta(at ?? now());
+      m.probeReroutes += 1;
       meta.set(nodeId, m);
       dirty = true;
     },
@@ -1077,7 +1110,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           for (const [k, v] of Object.entries(obj.meta)) {
             const id = Number(k);
             if (!Number.isInteger(id) || id <= 0 || !v || typeof v !== 'object') continue;
-            const fm = v as { firstSeenAt?: unknown; samples?: unknown; fresh?: unknown; pa?: unknown; pk?: unknown; ps?: unknown; pe?: unknown; pu?: unknown; pn?: unknown };
+            const fm = v as { firstSeenAt?: unknown; samples?: unknown; fresh?: unknown; pa?: unknown; pk?: unknown; ps?: unknown; pe?: unknown; pu?: unknown; pn?: unknown; ra?: unknown; rk?: unknown; rr?: unknown };
             if (typeof fm.firstSeenAt !== 'number') continue;
             const num = (x: unknown): number => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : 0);
             meta.set(id, {
@@ -1089,6 +1122,8 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
               // Absent in pre-v0.49.0 files — an older store starts these at 0
               // rather than being rejected, so an upgrade keeps its history.
               probesEchoOnly: num(fm.pe), probesAttribUnknown: num(fm.pu), probesUnheard: num(fm.pn),
+              // Absent in pre-v0.71.0 files — the read split starts at zero.
+              probesReadAsked: num(fm.ra), probesReadAnswered: num(fm.rk), probeReroutes: num(fm.rr),
             });
           }
         }
@@ -1347,6 +1382,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         const metaOut: Persisted['meta'] = {};
         for (const [id, m] of meta) {
           metaOut[String(id)] = { firstSeenAt: m.firstSeenAt, samples: m.samples, fresh: m.freshSamples, pa: m.probesAsked, pk: m.probesAnswered, ps: m.probesSelfProven, pe: m.probesEchoOnly, pu: m.probesAttribUnknown, pn: m.probesUnheard };
+          Object.assign(metaOut[String(id)], { ra: m.probesReadAsked, rk: m.probesReadAnswered, rr: m.probeReroutes });
         }
         const runsOut: NonNullable<Persisted['rateRuns']> = {};
         for (const [id, run] of rateRuns) {

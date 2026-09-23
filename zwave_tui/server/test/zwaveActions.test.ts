@@ -473,3 +473,18 @@ test('a routed read obeys the master gate and refuses a node with nothing to rea
   assert.match(r.message, /no switch\/light value to read/);
   assert.equal(none.sent.length, 0, 'and nothing reaches the mesh');
 });
+
+test('a MEASUREMENT read is the same ONE refresh_value, logged as "probe node N (routed read)" by the engine, never learned (v0.71.0)', async () => {
+  const { runner, sent, logs, outcomes } = mk(true);
+  const r = await runner.routedRead(18, 'probe');
+  assert.equal(r.ok, true);
+  assert.deepEqual(sent, [{ type: 'call_service', domain: 'zwave_js', service: 'refresh_value',
+    service_data: { entity_id: 'switch.node18', refresh_all_values: false } }], 'the very same Get as the ladder read');
+  assert.ok(logs.some((l) => /probe node 18 \(routed read\)/.test(l.text) && l.origin === 'engine'),
+    `named as a probe, and as the engine's: ${JSON.stringify(logs)}`);
+  assert.ok(!logs.some((l) => /^routed read node 18/.test(l.text)), 'not as the ladder\'s read');
+  assert.equal(outcomes.length, 0, 'the instrument is never the recorded treatment');
+  const ladder = mk(true);
+  await ladder.runner.routedRead(18);
+  assert.ok(ladder.logs.some((l) => /routed read node 18/.test(l.text)), 'the default purpose keeps the v0.70.0 line');
+});

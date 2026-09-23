@@ -213,16 +213,23 @@ are never fed to the learning ledger.
 the engine probes a mains node that has been **Dead past a dwell** (default
 10 min, then up to 3 attempts with 10/30/60 min waits between them — at the
 default 3 only the 10 and 30 min waits are reached, so the engine hands the node
-to you about 50 min after death, or about 40 min if it died with a liveness
-probe to it unanswered, since that skips the dwell), and issues a **liveness
-probe** to every listening mains node not marked Dead **on a fixed per-node cadence** (default every 120 min, however chatty the node — Z-Wave JS
+to you about 50 min after death, or about 40 min if it died on one of the
+engine's own probes, since that skips the dwell), and asks every listening mains
+node not marked Dead **on a fixed per-node cadence** (default every 120 min, however chatty the node — Z-Wave JS
 marks Dead only reactively, so an unplugged device can read "Alive" for hours until
-something talks to it). It is restricted to ping because ping is idempotent and
-has nothing to undo; battery/sleeping devices are never probed; a boot window,
-a rebuild suppressor, a controller RF-off hold (the nightly NVM backup turns the
-radio off for about ten seconds), and a mesh-storm guard (≥25 % dead ⇒ stand
-down) bound it.
-Off by default; every decision is traced to the log. Auto-ping's liveness probes and the ledger's verification probes are measurements, never recorded as a remediation (v0.38.1); only its dead-node pings count as an action in the
+something talks to it). The dead-node ladder and a manual `p` send Home
+Assistant's ping; the liveness sweep and the verification bursts send **one
+routed read** instead — `zwave_js.refresh_value` on the device's own
+switch/light value, a single Get that changes nothing on the device (its Report
+can correct a stale Home Assistant state) — because a ping is one
+ACK-only attempt on the stored routes, and an unanswered one marks a working
+device Dead: on the reference mesh 100 of 106 mains Dead episodes in 67 days
+began on one of the add-on's own pings (v0.71.0). A read can still go unanswered;
+the node is then retried at once and left alone by the sweep for 15 min.
+Battery/sleeping devices are never probed; a boot window, a rebuild suppressor,
+a controller RF-off hold (the nightly NVM backup turns the radio off for about
+ten seconds), and a mesh-storm guard (≥25 % dead ⇒ stand down) bound it.
+Off by default; every decision is traced to the log. Auto-ping's liveness probes and the ledger's verification probes are measurements, never recorded as a remediation (v0.38.1) — and because a read can re-route a node, an episode that re-route could clear by itself is credited to neither arm (v0.71.0); only its dead-node pings count as an action in the
 learning ledger.
 
 **Swapping the controller — you are asked, nothing is discarded (v0.64.0).** The
@@ -250,8 +257,8 @@ has actually learned on a live mesh: **[PERFORMANCE.md](./PERFORMANCE.md)**.
 Headlines, each stated as narrowly as it was measured: the slowest screen
 redraw is **412 µs** against a 1 000 ms frame budget; the container holds
 **93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
-RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.70.0 release
-run, **1 233 tests in 12.9 s** and **738 mutants in ~32 min** gated the release.
+RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.71.0 release
+run, **1 298 tests in 13.4 s** and **879 mutants in ~43 min** gated the release.
 A TUI session costs
 **4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
 rate but one whole-frame redraw per second.

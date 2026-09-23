@@ -254,7 +254,8 @@ interface Ledger {
   unverifiableTransient: (kind: SymptomKind) => number;
   /** Of those, undersampled by the node's own cadence (v0.41.2). */
   unverifiableUndersampled: (kind: SymptomKind) => number;
-  /** No-action closures confounded by a mid-episode death/remediation (v0.40). */
+  /** No-action closures confounded by a mid-episode death/remediation (v0.40),
+   *  or a re-route by our own measurement read (v0.71.0). */
   confounded: (kind: SymptomKind) => number;
   /** Can the liveness sweep probe this node at all (v0.47.0)? */
   probeable: (nodeId: number) => boolean | null;
@@ -360,7 +361,7 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     const conf = ledger.confounded(sym.kind);
     if (conf > 0) {
       rows.push(truncate(
-        '    ' + c.grey(`○ ${conf} confounded by a mid-episode death or remediation — ` +
+        '    ' + c.grey(`○ ${conf} confounded by a mid-episode death, remediation or probe re-route — ` +
           'credited to neither arm'), W));
     }
   }

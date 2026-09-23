@@ -14,6 +14,13 @@ import {
   readRevivalsWithin,
   READ_REVIVAL_CAP,
   READ_REVIVAL_WINDOW_MS,
+  PROBE_KILL_HOLD_MS,
+  PROBE_KILL_WINDOW_MS,
+  PROBE_KILL_WARN_AT,
+  READ_LAUNCH_FALLBACK_MS,
+  inProbeHold,
+  probeKillsWithin,
+  readFallbackActive,
   pendProbe,
   unpendProbe,
   noteStale,
@@ -679,7 +686,7 @@ test('a probe whose node lastSeen advanced is judged ANSWERED', () => {
   const s = createAutoPingState();
   s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T + 5_000 } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: true, misses: 0, cls: 'unheard' as const, lane: 'sweep' }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: true, misses: 0, cls: 'unheard' as const, lane: 'sweep', frame: 'ping' }]);
   assert.equal(s.awaitingAnswer.size, 0, 'and the pending entry is cleared');
 });
 
@@ -687,14 +694,14 @@ test('a probe whose node stayed silent is judged UNANSWERED — the signal that 
   const s = createAutoPingState();
   s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: T - 60_000 } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, cls: 'unheard' as const, lane: 'sweep' }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, cls: 'unheard' as const, lane: 'sweep', frame: 'ping' }]);
 });
 
 test('a node that has NEVER been heard from is unanswered, not silently skipped', () => {
   const s = createAutoPingState();
   s.awaitingAnswer.set(7, [{ at: T, cls: 'unheard' as const, lane: 'sweep' }]);
   const out = judgeProbeAnswers(s, [node(7, { stats: { lastSeen: null } as never })], T + 120_000);
-  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, cls: 'unheard' as const, lane: 'sweep' }]);
+  assert.deepEqual(out, [{ nodeId: 7, answered: false, misses: 1, cls: 'unheard' as const, lane: 'sweep', frame: 'ping' }]);
 });
 
 test('a probe is NOT judged before its grace period — no verdict on an in-flight round trip', () => {
@@ -1167,7 +1174,7 @@ test('unpendProbe withdraws exactly ONE entry — the failed probe, not the pend
   pendProbe(s, 9, T, 'sweep', 'self-proven');
   pendProbe(s, 9, T + 60_000, 'sweep', 'unheard');
   unpendProbe(s, 9, T + 60_000);
-  assert.deepEqual(s.awaitingAnswer.get(9), [{ at: T, cls: 'self-proven' as const, lane: 'sweep' }],
+  assert.deepEqual(s.awaitingAnswer.get(9), [{ at: T, cls: 'self-proven' as const, lane: 'sweep', frame: 'ping' as const }],
     'only the failed probe was withdrawn; its sibling still awaits judgment');
   unpendProbe(s, 9, T);
   assert.equal(s.awaitingAnswer.has(9), false, 'the emptied list is cleaned up');
@@ -1751,7 +1758,7 @@ test('a node that goes Dead on our own unanswered probe is retried without the d
   pendProbe(s, 7, T + 30_000, 'sweep', 'echo-only');             // our sweep goes out
   const died = mesh(20, [dead(7, heard)]);
   const settled = trackEpisodes(s, died, T + MIN);               // Dead on the next tick
-  assert.deepEqual(settled, [{ nodeId: 7, misses: 1, cls: 'echo-only', lane: 'sweep' }],
+  assert.deepEqual(settled, [{ nodeId: 7, misses: 1, cls: 'echo-only', lane: 'sweep', frame: 'ping' }],
     'the probe that knocked it Dead is booked as a MISS');
   assert.equal(s.awaitingAnswer.has(7), false, 'and is no longer pending judgment');
   assert.equal(s.missStreak.get(7), 1, 'and moves the consecutive-miss streak like any miss');
@@ -1847,28 +1854,32 @@ test('the sweep probe that knocked a node Dead is booked UNANSWERED, though the 
     'the sweep that killed it is a miss, reported exactly once');
 });
 
-test('a VERIFICATION probe that knocks a node Dead is a miss, but keeps the dwell and stays out of the reply rate (v0.64.4)', async () => {
-  // A burst keeps probing its node every tick. An immediate retry would hand it
-  // a live node to kill again, and kill–revive–kill is a critical dead-flap
-  // whose episode requests another burst (v0.64.4 review).
+test('a VERIFICATION probe that knocks a node Dead is a miss, is retried without the dwell, and stays out of the reply rate (v0.71.0)', async () => {
+  // v0.64.4 kept the dwell for a burst kill, to stop kill–revive–kill; on
+  // 2026-09-22 that dwell held a working outlet Dead for 101 minutes. The loop
+  // is bounded by the post-kill hold now (see the hold tests below).
   const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
   let clock = T;
   const reported: number[] = [];
   const pinged: number[] = [];
+  const lines: string[] = [];
   const old = { stats: { lastSeen: T - 120 * MIN } as never };
   let nodes = [node(1, { isController: true }), node(9, old)];
   let due: { id: number; first: boolean }[] = [];
   const h = startAutoPing({
     nodes: () => nodes, controller: () => null, ready: () => true,
     ping: async (n) => { pinged.push(n); }, probe: async () => {},
-    log: () => {}, onProbeResult: (id) => { reported.push(id); },
+    log: () => {}, log2: Object.assign((m: string) => { lines.push(m); }, { warn: (m: string) => { lines.push(m); } }),
+    onProbeResult: (id) => { reported.push(id); },
     verifyRequests: () => { const d = due; due = []; return d; },
     config: cfg({ staleMs: 0 }), tickMs: 1_000_000, now: () => clock,
   });
   clock = T + BOOT_WINDOW_MS + MIN; due = [{ id: 9, first: true }]; h.tick();
   clock += MIN; nodes = [node(1, { isController: true }), dead(9, old)]; h.tick();
   h.stop();
-  assert.deepEqual(pinged, [], 'a burst kill keeps the dwell');
+  assert.deepEqual(pinged, [9], 'a burst kill is retried on the tick the death is seen');
+  assert.ok(lines.some((l) => /node 9 went Dead with our verification probe to it unanswered — probing without the dwell \(attempt 1\/3\)/.test(l)),
+    `the retry names the lane that killed it: ${JSON.stringify(lines)}`);
   assert.deepEqual(reported, [], 'a verification probe is symptom-correlated and stays out of the comparable rate');
 });
 
@@ -1928,7 +1939,7 @@ test('traffic heard BEFORE a sweep kill does not make the node "talking" (v0.64.
   assert.deepEqual(d2.talkingWhileDead, [7], 'a voice newer than the death is still trusted over the flag');
 });
 
-test('a MANUAL ping pending at a death is booked a miss, but only a sweep kill skips the dwell (v0.64.4 review)', () => {
+test('a MANUAL ping pending at a death is booked a miss, but only a measurement-lane kill skips the dwell (v0.71.0)', () => {
   // v0.64.4 kept manual kills out for their loose send stamp. v0.64.5 dates a
   // manual ping from its launch, and they stay out anyway: no manual kill has
   // been observed, and `probeDeath` would discard the traffic heard before the
@@ -1944,16 +1955,29 @@ test('a MANUAL ping pending at a death is booked a miss, but only a sweep kill s
   assert.deepEqual(decideAutoPings({ now: T + MIN, state: s, nodes: died, controller: null, config: cfg(), booting: false }).ping, []);
 });
 
-test('the probe NEAREST the death decides the exemption — an older pending sweep lends none to a burst kill (v0.64.4 review)', () => {
+test('the probe NEAREST the death decides the exemption — an older pending sweep lends none to a MANUAL kill (v0.71.0)', () => {
   const s = createAutoPingState();
   const heard = { stats: { lastSeen: T - 120 * MIN } as never };
   tick(s, mesh(20, [node(7, heard)]), T);
   pendProbe(s, 7, T + 10_000, 'sweep', 'echo-only');          // an ordinary lost reply, still pending
-  pendProbe(s, 7, T + 70_000, 'verify');                       // the burst probe the node died on
+  pendProbe(s, 7, T + 70_000, 'manual');                       // the operator's ping the node died on
   const died = mesh(20, [dead(7, heard)]);
-  assert.deepEqual(trackEpisodes(s, died, T + 2 * MIN).map((x) => x.lane), ['sweep', 'verify'], 'both are misses');
-  assert.equal(s.probeDeath.has(7), false, 'but a burst kill keeps the dwell');
+  assert.deepEqual(trackEpisodes(s, died, T + 2 * MIN).map((x) => x.lane), ['sweep', 'manual'], 'both are misses');
+  assert.equal(s.probeDeath.has(7), false, 'but a manual kill keeps the dwell');
+  assert.equal(probeKillsWithin(s, 7, T + 2 * MIN), 0, 'and is not counted as our own probe kill');
   assert.deepEqual(decideAutoPings({ now: T + 2 * MIN, state: s, nodes: died, controller: null, config: cfg(), booting: false }).ping, []);
+});
+
+test('…and when the NEAREST probe is a verification probe, the lane it records is verify (v0.71.0)', () => {
+  const s = createAutoPingState();
+  const heard = { stats: { lastSeen: T - 120 * MIN } as never };
+  tick(s, mesh(20, [node(7, heard)]), T);
+  pendProbe(s, 7, T + 10_000, 'sweep', 'echo-only');
+  pendProbe(s, 7, T + 70_000, 'verify');
+  const died = mesh(20, [dead(7, heard)]);
+  assert.deepEqual(trackEpisodes(s, died, T + 2 * MIN).map((x) => x.lane), ['sweep', 'verify']);
+  assert.equal(s.probeDeath.get(7), 'verify', 'the newest decides, and names its lane');
+  assert.deepEqual(decideAutoPings({ now: T + 2 * MIN, state: s, nodes: died, controller: null, config: cfg(), booting: false }).ping, [7]);
 });
 
 test('an ANSWERED older probe stays pending while the unanswered newer one is settled (v0.64.4 review)', () => {
@@ -2679,14 +2703,14 @@ test('a second routed-read revival in 24 h raises a WARN and withholds the next 
     await L.until(() => L.lines.filter((l) => /answered our routed read/.test(l.text)).length === cycle, 10);
     L.status(NodeStatus.Alive);
     await L.step(2);
-    L.status(NodeStatus.Dead);                   // the next NoOp kills it again
+    L.status(NodeStatus.Dead);                   // it dies again, on nothing of ours
   }
-  assert.equal(L.warns.filter((w) => /revived by a routed read 2 times in 24 h — it answers Gets but not pings/.test(w)).length, 1,
+  assert.equal(L.warns.filter((w) => /revived by a routed read 2 times in 24 h after its ladder pings went unanswered — its stored routes keep failing/.test(w)).length, 1,
     'the loop is named, once');
   const readsAtCap = L.reads.length;
   await L.until(() => L.lines.some((l) => /giving up/.test(l.text)));
   assert.equal(L.reads.length, readsAtCap, 'past the cap no further read goes out');
-  assert.match(L.lines.find((l) => /giving up/.test(l.text))!.text, /revived it 2 times in the last 24 h and it keeps failing pings, so the read is withheld/);
+  assert.match(L.lines.find((l) => /giving up/.test(l.text))!.text, /revived it 2 times in the last 24 h after its pings went unanswered, so the read is withheld: its stored routes keep failing where a computed one got through/);
   L.h.stop();
 });
 
@@ -2698,4 +2722,669 @@ test('a SWEEP miss never earns a routed read — only a judged ladder ping does 
   assert.equal(L.node7()?.readOwed ?? false, false, 'no read is owed for a sweep miss');
   assert.equal(L.reads.length, 0);
   L.h.stop();
+});
+
+/* ── v0.71.0: the measurement lanes send a routed read; our own kills are contained ── */
+
+type RigCall = { verb: 'ping' | 'probe' | 'probeRead' | 'read' | 'sent' | 'withdrawn'; id: number; at: number; lane?: string; frame?: string };
+
+/** The real runner with every v0.71.0 hook recorded. The clock starts past the
+ *  boot window, so the measurement lanes are open from the first tick. */
+async function rig(over: {
+  nodes: NodeSnapshot[];
+  staleMs?: number;
+  canRead?: (id: number) => boolean;
+  probeRead?: boolean;
+  readResult?: (id: number) => unknown;
+  ladderReadResult?: (id: number) => unknown;
+  verify?: (now: number, skip?: (id: number) => boolean) => { id: number; first: boolean }[];
+  deaths?: () => { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[];
+}) {
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const calls: RigCall[] = [];
+  const lines: string[] = [];
+  const warns: string[] = [];
+  const results: unknown[][] = [];
+  const log2 = Object.assign((m: string) => { lines.push(m); },
+    { warn: (m: string) => { warns.push(m); lines.push(m); }, error: (m: string) => { lines.push(m); }, debug: () => {} });
+  const h = startAutoPing({
+    nodes: () => over.nodes, controller: () => null, ready: () => true,
+    ping: async (id) => { calls.push({ verb: 'ping', id, at: clock }); },
+    probe: async (id) => { calls.push({ verb: 'probe', id, at: clock }); },
+    read: async (id) => { calls.push({ verb: 'read', id, at: clock }); return over.ladderReadResult?.(id); },
+    ...(over.probeRead === false ? {} : {
+      probeRead: async (id: number) => { calls.push({ verb: 'probeRead', id, at: clock }); return over.readResult?.(id); },
+    }),
+    canRead: over.canRead ?? (() => true),
+    onMeasurementSent: (id, at, lane, frame) => { calls.push({ verb: 'sent', id, at, lane, frame }); },
+    onMeasurementWithdrawn: (id, at) => { calls.push({ verb: 'withdrawn', id, at }); },
+    verifyRequests: over.verify,
+    deaths: over.deaths,
+    log: () => {}, log2,
+    onProbeResult: (...a: unknown[]) => { results.push(a); },
+    config: cfg({ staleMs: over.staleMs ?? 0 }), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS;
+  const flush = () => new Promise((r) => setImmediate(r));
+  return {
+    h, calls, lines, warns, results,
+    at: () => clock,
+    set: (t: number) => { clock = t; },
+    async step(mins = 1) { for (let i = 0; i < mins; i++) { h.tick(); await flush(); clock += MIN; } },
+    snap: (id: number) => h.snapshot().nodes.find((n) => n.nodeId === id),
+    of: (verb: RigCall['verb'], id?: number) => calls.filter((c) => c.verb === verb && (id == null || c.id === id)),
+  };
+}
+const setStatus = (n: NodeSnapshot, st: NodeStatus) => { (n as unknown as { status: NodeStatus }).status = st; };
+const setSeen = (n: NodeSnapshot, v: number | null) => { (n.stats as unknown as { lastSeen: number | null }).lastSeen = v; };
+
+test('the SWEEP and VERIFY lanes send the routed read through probeRead() when the node has a value to read; the DEAD ladder still pings (v0.71.0)', async () => {
+  const nodes = [node(1, { isController: true }), dead(7), node(50, { stats: { lastSeen: T - 300 * MIN } as never }),
+    ...Array.from({ length: 18 }, (_v, i) => node(100 + i, { stats: { lastSeen: T + 30 * MIN } as never }))];
+  let due = false;
+  const R = await rig({ nodes, staleMs: 240 * MIN, verify: () => (due ? [{ id: 100, first: false }] : []) });
+  await R.step();                                   // observe the dead node; the sweep asks the stalest
+  R.set(R.at() + 10 * MIN); due = true; await R.step(); // the ladder is due, and a verification probe
+  R.h.stop();
+  assert.deepEqual(R.of('probeRead').map((c) => c.id).sort((a, b) => a - b), [50, 100],
+    `both measurement lanes read: ${JSON.stringify(R.calls)}`);
+  assert.deepEqual(R.of('probe'), [], 'no NoOp goes out from a measurement lane that can read');
+  assert.deepEqual(R.of('ping').map((c) => c.id), [7], 'the dead ladder keeps the learning ping');
+  assert.deepEqual(R.of('read'), [], 'and the measurement read is not the ladder read verb');
+});
+
+test('a node with no switch/light value is swept by the NoOp probe(), and each line names its frame (v0.71.0)', async () => {
+  const nodes = [node(1, { isController: true }), node(50, { stats: { lastSeen: T - 300 * MIN } as never }),
+    node(100, { stats: { lastSeen: T + 30 * MIN } as never })];
+  let due = false;
+  const R = await rig({ nodes, staleMs: 240 * MIN, canRead: (id) => id !== 50,
+    verify: () => (due ? [{ id: 100, first: true }] : []) });
+  await R.step();
+  due = true; await R.step();
+  R.h.stop();
+  assert.deepEqual(R.of('probe').map((c) => c.id), [50], 'the node with nothing to read gets the NoOp');
+  assert.deepEqual(R.of('probeRead').map((c) => c.id), [100]);
+  assert.ok(R.lines.some((l) => /^auto-ping: node 50 liveness sweep .* — NoOp ping \(no switch\/light value to read\)$/.test(l)),
+    `the sweep line says which frame and why: ${JSON.stringify(R.lines)}`);
+  assert.ok(R.lines.some((l) => /^auto-ping: node 100 verification probe \(episode evidence, burst start, \d+ owed\) — routed read$/.test(l)));
+});
+
+test('without probeRead the measurement lines carry no frame suffix, exactly v0.70.0 (v0.71.0)', async () => {
+  const nodes = [node(1, { isController: true }), node(50, { stats: { lastSeen: T - 300 * MIN } as never })];
+  const R = await rig({ nodes, staleMs: 240 * MIN, probeRead: false });
+  await R.step();
+  R.h.stop();
+  const line = R.lines.find((l) => /node 50 liveness sweep/.test(l));
+  assert.ok(line && !/ — (routed read|NoOp ping)/.test(line), `no suffix without a read verb: ${line}`);
+  assert.deepEqual(R.of('probe').map((c) => c.id), [50]);
+});
+
+test('onProbeResult carries the frame — read for a routed-read sweep, answered or missed; ping for a NoOp one (v0.71.0)', async () => {
+  const run = async (probeRead: boolean, answer: boolean) => {
+    const n50 = node(50, { stats: { lastSeen: T - 300 * MIN } as never });
+    const R = await rig({ nodes: [node(1, { isController: true }), n50], staleMs: 240 * MIN, probeRead });
+    await R.step();
+    if (answer) setSeen(n50, R.at() - MIN + 500);  // answered 0.5 s after it went out
+    await R.step(2);
+    R.h.stop();
+    missLines.push(...R.lines.filter((l) => /did NOT answer its probe/.test(l)));
+    return R.results.map((r) => [r[0], r[1], r[3]]);
+  };
+  const missLines: string[] = [];
+  assert.deepEqual(await run(true, true), [[50, true, 'read']]);
+  assert.deepEqual(await run(true, false), [[50, false, 'read']]);
+  assert.deepEqual(await run(false, true), [[50, true, 'ping']]);
+  assert.deepEqual(missLines.map((l) => / — [a-z]+ [a-zA-Z ]+$/.exec(l)?.[0]), [' — sweep routed read'],
+    'the one miss line names its lane and frame');
+});
+
+test('a sweep READ that knocks its node Dead is a sweep miss with frame read, retried without the dwell, never a read revival (v0.71.0)', () => {
+  const s = createAutoPingState();
+  const heard = { stats: { lastSeen: T - 120 * MIN } as never };
+  tick(s, mesh(20, [node(7, heard)]), T);
+  pendProbe(s, 7, T + 30_000, 'sweep', 'echo-only', 'read');
+  const died = mesh(20, [dead(7, heard)]);
+  assert.deepEqual(trackEpisodes(s, died, T + MIN), [{ nodeId: 7, misses: 1, cls: 'echo-only', lane: 'sweep', frame: 'read' }]);
+  assert.equal(s.probeDeath.get(7), 'sweep');
+  assert.equal(probeKillsWithin(s, 7, T + MIN), 1, 'counted as our own kill');
+  assert.equal(s.readOwed.has(7), false, 'it owes no ladder read — the ladder pings first');
+  const d = decideAutoPings({ now: T + MIN, state: s, nodes: died, controller: null, config: cfg(), booting: false, canRead: () => true });
+  assert.deepEqual([d.ping, d.read], [[7], []], 'the retry is the ladder ping, on the tick the death is seen');
+});
+
+test('an RF blackout drops an unanswered sweep read unjudged and owes no ladder read (v0.71.0)', () => {
+  const s = createAutoPingState();
+  pendProbe(s, 7, T, 'sweep', 'unheard', 'read');
+  assert.equal(dropBlackoutProbes(s, [node(7, { stats: { lastSeen: T - MIN } as never })], T + 5_000), 1);
+  assert.equal(s.awaitingAnswer.has(7), false, 'dropped, not judged');
+  assert.equal(s.readOwed.has(7), false, 'a sweep read is not the ladder\'s read, so nothing is re-owed');
+});
+
+test('a burst kill is not filed as "talking" on the burst\'s own earlier answers (v0.71.0)', () => {
+  // 2026-09-22 22:46: the burst's first probes were answered, the next one
+  // killed the outlet, and those answers — traffic from BEFORE the kill — filed
+  // it as talking, so the ladder waited out the dwell.
+  const s = createAutoPingState();
+  tick(s, mesh(20, [node(7, { stats: { lastSeen: T - 120 * MIN } as never })]), T);
+  pendProbe(s, 7, T + 60_000, 'verify');
+  pendProbe(s, 7, T + 120_000, 'verify');
+  const died = mesh(20, [dead(7, { stats: { lastSeen: T + 60_050 } as never })]);   // answered the first
+  trackEpisodes(s, died, T + 3 * MIN);
+  assert.equal(s.probeDeath.get(7), 'verify', 'the unanswered burst probe killed it');
+  const d = decideAutoPings({ now: T + 3 * MIN, state: s, nodes: died, controller: null, config: cfg(), booting: false });
+  assert.deepEqual(d.talkingWhileDead, [], 'its own earlier answer is older than the kill');
+  assert.deepEqual(d.ping, [7], 'so it is retried at once');
+});
+
+test('a node revived from a death on our own probe gets no sweep or verification probe for PROBE_KILL_HOLD_MS; the ladder is not held (v0.71.0)', () => {
+  const s = createAutoPingState();
+  const heard = { stats: { lastSeen: T - 120 * MIN } as never };
+  const only = (n: NodeSnapshot) => [node(1, { isController: true }), n];
+  tick(s, only(node(7, heard)), T);
+  pendProbe(s, 7, T + 10_000, 'sweep', 'echo-only', 'read');
+  trackEpisodes(s, only(dead(7, heard)), T + MIN);                  // killed by our read
+  const back = { stats: { lastSeen: T + MIN + 5_000 } as never };
+  const rec = T + 2 * MIN;
+  trackEpisodes(s, only(node(7, back)), rec);                        // revived by the retry
+  assert.equal(s.probeHoldFrom.get(7), rec, 'the hold is timed from the RECOVERY, not the kill');
+  const at = (t: number, verify: boolean) => decideAutoPings({ now: t, state: s, nodes: only(node(7, back)), controller: null,
+    config: cfg({ staleMs: 5 * MIN }), booting: false, verifyDue: () => (verify ? [{ id: 7, first: true }] : []) });
+  const held = at(rec + PROBE_KILL_HOLD_MS - MIN, true);
+  assert.deepEqual([held.stale, held.verify], [[], []], 'no sweep and no verification probe inside the hold');
+  assert.equal(inProbeHold(s, 7, rec + PROBE_KILL_HOLD_MS - 1), true);
+  assert.equal(inProbeHold(s, 7, rec + PROBE_KILL_HOLD_MS), false);
+  assert.deepEqual(at(rec + PROBE_KILL_HOLD_MS, true).verify, [7], 'the verification probe goes out when the hold lifts');
+  assert.deepEqual(at(rec + PROBE_KILL_HOLD_MS, false).stale, [7], 'and so does the sweep');
+  // An UNPROVOKED death inside the hold: nothing of ours was pending, so it
+  // serves the dwell — and the ladder then acts, hold or no hold.
+  const d2 = rec + MIN;
+  const quiet = { stats: { lastSeen: T - 120 * MIN } as never };
+  trackEpisodes(s, only(dead(7, quiet)), d2);
+  assert.equal(s.probeDeath.has(7), false, 'nothing of ours was pending');
+  const deadAt = (t: number) => decideAutoPings({ now: t, state: s, nodes: only(dead(7, quiet)), controller: null, config: cfg(), booting: false });
+  assert.deepEqual([deadAt(d2).ping, deadAt(d2).talkingWhileDead], [[], []], 'it serves the dwell (fixture: not "talking")');
+  assert.equal(inProbeHold(s, 7, d2 + 10 * MIN), true, 'fixture guard: the dwell ends INSIDE the hold');
+  assert.deepEqual(deadAt(d2 + 10 * MIN).ping, [7], 'and the ladder is never held');
+});
+
+test('kill, retry and hold keep our own probes under dead-flap\'s three crossings in any 10-minute window (v0.71.0)', async () => {
+  // The worst case: a verification burst owed on EVERY tick, a 5-minute sweep,
+  // and a node that dies on every measurement frame and revives on every ladder
+  // frame. Without the hold this is the kill–revive–kill loop v0.64.4 refused
+  // the immediate retry for.
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let skipped = 0;
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 5 * MIN,
+    verify: (_now, skip) => { if (skip?.(7)) { skipped++; return []; } return [{ id: 7, first: false }]; } });
+  const flips: number[] = [];
+  let seen = 0;
+  let kills = 0;
+  for (let i = 0; i < 180; i++) {
+    await R.step();
+    const sentAt = R.at() - MIN;
+    const fresh = R.calls.slice(seen);
+    seen = R.calls.length;
+    const wasDead = n7.status === NodeStatus.Dead;
+    if (fresh.some((c) => (c.verb === 'probeRead' || c.verb === 'probe') && c.id === 7)) setStatus(n7, NodeStatus.Dead);
+    if (fresh.some((c) => (c.verb === 'ping' || c.verb === 'read') && c.id === 7)) {
+      setStatus(n7, NodeStatus.Alive);
+      setSeen(n7, sentAt + 500);
+    }
+    const isDead = n7.status === NodeStatus.Dead;
+    if (isDead !== wasDead) { flips.push(R.at()); if (isDead) kills++; }
+  }
+  R.h.stop();
+  assert.ok(kills >= 3, `fixture guard: our probes did kill the node repeatedly (${kills})`);
+  assert.ok(skipped > 0, 'the runner asks the queue to leave a held node\'s burst owed');
+  for (const f of flips) {
+    const inWindow = flips.filter((x) => x >= f && x < f + 10 * MIN).length;
+    assert.ok(inWindow <= 2, `≤2 Dead crossings in any 10-minute window, got ${inWindow} from ${f}`);
+  }
+  assert.equal(R.warns.filter((w) => /node 7 went Dead on this add-on's own probes 2 times in 24 h/.test(w)).length, 1,
+    'the marginal route is named once');
+  assert.ok(R.lines.some((l) => /did NOT answer its probe \(1st consecutive miss — the node has since been marked Dead\) — (sweep|verification) routed read$/.test(l)),
+    'each miss line names its lane and frame');
+});
+
+test('two own-probe kills of one node in 24 h queue ONE warning; a third does not; an old kill does not count; a manual kill never counts (v0.71.0)', () => {
+  const s = createAutoPingState();
+  const heard = { stats: { lastSeen: T - 120 * MIN } as never };
+  const alive = mesh(20, [node(7, heard)]);
+  const died = mesh(20, [dead(7, heard)]);
+  const killAt = (t: number, lane: 'sweep' | 'verify' | 'manual') => {
+    trackEpisodes(s, alive, t - MIN);
+    pendProbe(s, 7, t - 30_000, lane);
+    trackEpisodes(s, died, t);
+  };
+  s.probeKills.set(7, [T - PROBE_KILL_WINDOW_MS - MIN]);             // a kill from yesterday
+  killAt(T, 'sweep');
+  assert.equal(probeKillsWithin(s, 7, T), 1, 'the day-old kill aged out');
+  assert.equal(s.probeKillWarn.has(7), false);
+  killAt(T + 60 * MIN, 'manual');
+  assert.equal(probeKillsWithin(s, 7, T + 60 * MIN), 1, 'a manual kill is not ours to count');
+  killAt(T + 120 * MIN, 'verify');
+  assert.equal(probeKillsWithin(s, 7, T + 120 * MIN), PROBE_KILL_WARN_AT);
+  assert.equal(s.probeKillWarn.has(7), true, 'the second one queues the warning');
+  s.probeKillWarn.clear();
+  killAt(T + 180 * MIN, 'sweep');
+  assert.equal(s.probeKillWarn.has(7), false, 'the third does not repeat it');
+});
+
+test('a departed node takes its probe hold, kill history, warning and read-fallback mark with it (v0.71.0)', () => {
+  const s = createAutoPingState();
+  s.probeHoldFrom.set(7, T); s.probeKills.set(7, [T]); s.probeKillWarn.add(7);
+  s.readLaunchFailedAt.set(7, T); s.readAfterOwnKill.add(7); s.probeDeath.set(7, 'sweep');
+  trackEpisodes(s, mesh(20), T + MIN);
+  assert.deepEqual([s.probeHoldFrom.has(7), s.probeKills.has(7), s.probeKillWarn.has(7), s.readLaunchFailedAt.has(7),
+    s.readAfterOwnKill.has(7), s.probeDeath.has(7)], [false, false, false, false, false, false]);
+});
+
+test('a routed read that could not be sent is withdrawn and refunded, the node falls back to the NoOp ping for READ_LAUNCH_FALLBACK_MS, and the sweep does not stall (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 400 * MIN } as never });
+  const n8 = node(8, { stats: { lastSeen: T - 300 * MIN } as never });
+  let refuse = true;
+  const R = await rig({ nodes: [node(1, { isController: true }), n7, n8], staleMs: 120 * MIN,
+    readResult: (id) => (id === 7 && refuse ? { ok: false, message: 'no entity' } : undefined) });
+  await R.step();                                                     // 7 is read — and refused
+  assert.deepEqual(R.of('probeRead').map((c) => c.id), [7]);
+  assert.ok(R.lines.some((l) => /node 7: a routed read could not be sent — its sweep and verification probes use the NoOp ping for the next 30m/.test(l)));
+  assert.deepEqual(R.of('withdrawn').map((c) => [c.id, c.at]), [[7, R.of('sent', 7)[0].at]], 'its measurement stamp is withdrawn, so no later frame inherits it');
+  await R.step();                                                     // refunded: 7 again, by NoOp
+  assert.deepEqual(R.of('probe').map((c) => c.id), [7], 'the refunded slot goes out as the fallback NoOp');
+  assert.ok(R.lines.some((l) => /node 7 liveness sweep .* — NoOp ping \(a routed read could not be sent in the last 30m\)$/.test(l)));
+  await R.step();                                                     // and the queue moves on
+  assert.deepEqual(R.of('probeRead').map((c) => c.id), [7, 8], 'the sweep did not stall on 7');
+  refuse = false;
+  R.set(R.at() + 120 * MIN);
+  await R.step(2);
+  R.h.stop();
+  assert.equal(R.of('probeRead', 7).length, 2, `past the fallback 7 is read again: ${JSON.stringify(R.calls)}`);
+  assert.ok(READ_LAUNCH_FALLBACK_MS < 120 * MIN, 'fixture guard: the cadence outlasts the fallback');
+});
+
+test('onMeasurementSent fires BEFORE the send for sweep and verification probes of either frame, never for the ladder, its read or a manual ping (v0.71.0)', async () => {
+  const nodes = [node(1, { isController: true }), dead(7), node(50, { stats: { lastSeen: T - 300 * MIN } as never }),
+    node(60, { stats: { lastSeen: T - 200 * MIN } as never })];
+  const R = await rig({ nodes, staleMs: 240 * MIN, canRead: (id) => id !== 60,
+    verify: (now) => (now >= T + 7 * MIN && now < T + 8 * MIN ? [{ id: 60, first: true }] : []) });
+  await R.step(3);
+  R.h.notePending(50, 'manual', R.at());
+  R.set(R.at() + 10 * MIN);
+  for (let i = 0; i < 6 && R.of('read', 7).length === 0; i++) await R.step();
+  R.h.stop();
+  assert.equal(R.of('read', 7).length, 1, 'fixture guard: the ladder read went out');
+  const idx = (verb: RigCall['verb'], id: number) => R.calls.findIndex((c) => c.verb === verb && c.id === id);
+  assert.ok(idx('sent', 50) >= 0 && idx('sent', 50) < idx('probeRead', 50), 'stamped before the read goes out');
+  assert.ok(idx('sent', 60) >= 0 && idx('sent', 60) < idx('probe', 60), 'and before a NoOp one');
+  assert.deepEqual(R.of('sent').map((c) => [c.id, c.lane, c.frame]), [[50, 'sweep', 'read'], [60, 'sweep', 'ping'], [60, 'verify', 'ping']]);
+  assert.equal(R.of('sent', 7).length, 0, 'neither the ladder ping nor its read is a measurement');
+  assert.ok(R.of('ping', 7).length > 0, 'fixture guard: the ladder did ping 7');
+});
+
+test('the twin-lane dedup still sends ONE measurement probe per node per tick with probeRead wired (v0.71.0)', async () => {
+  const R = await rig({ nodes: [node(1, { isController: true }), node(50, { stats: { lastSeen: T - 300 * MIN } as never })],
+    staleMs: 240 * MIN, verify: () => [{ id: 50, first: true }] });
+  await R.step();
+  R.h.stop();
+  assert.equal(R.of('probeRead', 50).length, 1, 'one frame, which answers both questions');
+  assert.deepEqual(R.of('sent').map((c) => c.lane), ['verify']);
+});
+
+test('the snapshot reports the probe hold and own-probe kills (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN });
+  await R.step();                                                     // swept by a read…
+  setStatus(n7, NodeStatus.Dead);                                     // …which killed it
+  await R.step();                                                     // seen Dead: retried
+  setStatus(n7, NodeStatus.Alive); setSeen(n7, R.at() - MIN + 300);
+  const rec = R.at();
+  await R.step(4);                                                    // seen Alive: the hold starts; the retry is judged
+  R.h.stop();
+  assert.equal(R.snap(7)?.pending ?? 0, 0, 'fixture guard: nothing is pending, so only the hold keeps the row');
+  assert.equal(R.snap(7)?.missStreak ?? 0, 0);
+  assert.equal(R.snap(7)?.probeKills24h, 1);
+  assert.equal(R.snap(7)?.probeHeldUntilMs, rec + PROBE_KILL_HOLD_MS);
+});
+
+test('a death that clears between two ticks is still booked as our probe\'s kill — counted and held — and the probe is judged answered (v0.71.0)', async () => {
+  // A Get can do what a NoOp cannot: the node takes it, the ACK is lost, the
+  // driver marks it Dead on the NoAck — and the node's own Report revives it
+  // before the next tick. Level-sampled, that death never happened.
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 5 * MIN,
+    deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step();
+  const sentAt = R.at() - MIN;
+  assert.deepEqual(R.of('probeRead').map((c) => c.id), [7]);
+  feed = [{ nodeId: 7, at: sentAt + 400, seen: T - 300 * MIN, clearedAt: sentAt + 700 }];   // Dead on the NoAck, unanswered…
+  setSeen(n7, sentAt + 700);                                          // …Alive on its Report
+  await R.step();
+  assert.ok(R.lines.some((l) => /node 7 went Dead 0s after our sweep routed read and was Alive again before the next tick \(revived 0\.3s later — a lost ACK, most likely: its Report revives it\) — no sweep or verification probe for 15m$/.test(l)),
+    JSON.stringify(R.lines));
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'counted');
+  const readsAfter = R.of('probeRead', 7).length;
+  await R.step(13);
+  assert.equal(R.of('probeRead', 7).length, readsAfter, 'and held: no measurement probe inside the hold');
+  await R.step(3);
+  R.h.stop();
+  assert.ok(R.of('probeRead', 7).length > readsAfter, 'until it lifts');
+  assert.deepEqual(R.results.map((r) => [r[0], r[1], r[3]]).slice(0, 1), [[7, true, 'read']],
+    'the probe is ANSWERED: its Report proves the Get arrived');
+  assert.equal(R.lines.filter((l) => /did NOT answer/.test(l)).length, 0, 'no miss is booked for it');
+});
+
+test('a between-tick death is not ours when the node\'s newest pending probe is manual, or when the tick itself saw it Dead (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 0,
+    deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step();
+  R.h.notePending(7, 'manual', R.at());
+  feed = [{ nodeId: 7, at: R.at() + 300 }];
+  setSeen(n7, R.at() + 600);
+  await R.step();
+  R.h.stop();
+  assert.equal(R.snap(7)?.probeKills24h ?? 0, 0, 'an operator\'s ping is not a measurement');
+  // Seen Dead at the tick as well as on the feed: trackEpisodes owns it, and
+  // it is counted ONCE.
+  const m7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed2: { nodeId: number; at: number; seen?: number | null }[] = [];
+  const R2 = await rig({ nodes: [node(1, { isController: true }), m7], staleMs: 240 * MIN,
+    deaths: () => { const f = feed2; feed2 = []; return f; } });
+  await R2.step();
+  feed2 = [{ nodeId: 7, at: R2.at() - MIN + 400 }];
+  setStatus(m7, NodeStatus.Dead);
+  await R2.step();
+  R2.h.stop();
+  assert.equal(R2.snap(7)?.probeKills24h, 1, 'one death, one kill');
+});
+
+test('a read revival after a death on our own measurement probe does not spend the read cap; the line says why (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN });
+  await R.step();                                                     // swept by a read…
+  setStatus(n7, NodeStatus.Dead);                                     // …which killed it
+  for (let i = 0; i < 12 && R.of('read', 7).length === 0; i++) await R.step();   // retry ping unanswered → ladder read
+  assert.equal(R.of('read', 7).length, 1, 'fixture guard: the ladder read went out');
+  const readAt = R.of('read', 7)[0].at;
+  setSeen(n7, readAt + 400);                                          // the read revived it
+  await R.step();
+  setStatus(n7, NodeStatus.Alive);
+  await R.step(3);
+  R.h.stop();
+  assert.ok(R.lines.some((l) => /answered our routed read after its ping went unanswered .* it went Dead on our own probe, so this revival does not count against the 2-per-24 h read cap/.test(l)),
+    JSON.stringify(R.lines.filter((l) => /routed read/.test(l))));
+  assert.equal(R.snap(7)?.readRevivals24h ?? 0, 0, 'the cap is untouched');
+});
+
+test('a verification probe that could not be sent gives back the PREVIOUS burst stamp, so the next gap is measured from a probe that left (v0.71.0)', async () => {
+  let n = 0;
+  const R = await rig({ nodes: [node(1, { isController: true }), node(100, { stats: { lastSeen: T + 60 * MIN } as never })],
+    probeRead: true, readResult: () => (n++ === 1 ? { ok: false, message: 'refused' } : undefined),
+    verify: () => [{ id: 100, first: false }] });
+  await R.step(3);
+  R.h.stop();
+  const gaps = R.lines.filter((l) => /node 100 verification probe/.test(l)).map((l) => /\+(\d+)s/.exec(l)?.[1] ?? 'start');
+  assert.deepEqual(gaps, ['start', '60', '120'], `the third gap is from the first probe, not the refused one: ${JSON.stringify(R.lines)}`);
+  assert.deepEqual(R.of('probe').map((c) => c.id), [100], 'and a refused verification read moves the node to the NoOp fallback');
+  assert.deepEqual(R.of('withdrawn').map((c) => c.id), [100], 'and withdraws its measurement stamp');
+  assert.equal(R.of('withdrawn')[0].at, R.of('sent', 100)[1].at, 'the stamp of the probe that never left');
+});
+
+test('a read whose launch failed in an own-kill episode lends no cap exemption to a later, unprovoked one (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let refuseLadderRead = true;
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN,
+    ladderReadResult: () => (refuseLadderRead ? { ok: false, message: 'refused' } : undefined) });
+  await R.step();                                                     // swept by a read…
+  setStatus(n7, NodeStatus.Dead);                                     // …which killed it
+  for (let i = 0; i < 12 && R.of('read', 7).length === 0; i++) await R.step();
+  assert.equal(R.of('read', 7).length, 1, 'fixture guard: the own-kill episode\'s ladder read was attempted');
+  await R.step();                                                     // its launch failed: never judged
+  setStatus(n7, NodeStatus.Alive); setSeen(n7, R.at());               // revived by something else
+  await R.step(20);                                                   // recovery; the hold runs out
+  refuseLadderRead = false;
+  setStatus(n7, NodeStatus.Dead);                                     // an UNPROVOKED death
+  for (let i = 0; i < 30 && R.of('read', 7).length === 1; i++) await R.step();
+  assert.equal(R.of('read', 7).length, 2, 'fixture guard: the unprovoked episode\'s read went out');
+  setSeen(n7, R.of('read', 7)[1].at + 400);                           // and revived it
+  await R.step(3);
+  R.h.stop();
+  assert.equal(R.snap(7)?.readRevivals24h, 1, 'an unprovoked revival spends the cap — the old episode\'s mark did not leak into it');
+});
+
+/* ── v0.71.0 review: a death between ticks is ours only if our probe went unanswered ── */
+
+/** One sweep probe to node 7 at the first tick, then a death fed between ticks. */
+async function blip(over: { canRead?: boolean; seen: (sentAt: number) => number | null; deathAfter: number; manualAfter?: number; revivedAfter?: number }) {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN,
+    canRead: () => over.canRead ?? true, deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step();
+  const sentAt = R.at() - MIN;
+  if (over.manualAfter != null) R.h.notePending(7, 'manual', sentAt + over.manualAfter);
+  const seen = over.seen(sentAt);
+  if (seen != null) setSeen(n7, seen);
+  feed = [{ nodeId: 7, at: sentAt + over.deathAfter, seen, clearedAt: sentAt + (over.revivedAfter ?? over.deathAfter + 300) }];
+  if (over.revivedAfter != null) setSeen(n7, sentAt + over.revivedAfter);   // what revived it
+  await R.step();
+  await R.step(2);
+  R.h.stop();
+  return { R, sentAt };
+}
+
+test('a between-tick death AFTER the node answered our probe is not ours — not counted, not held (v0.71.0)', async () => {
+  // A verification burst probes its node about once a tick; a flap of the
+  // node's own 40 s after it answered one is the node's, not our probe's.
+  const { R } = await blip({ seen: (at) => at + 200, deathAfter: 40_000 });
+  assert.equal(R.snap(7)?.probeKills24h ?? 0, 0);
+  assert.equal(R.snap(7)?.probeHeldUntilMs ?? null, null);
+  assert.ok(!R.lines.some((l) => /went Dead .* after our/.test(l)), JSON.stringify(R.lines));
+});
+
+test('a between-tick death past the answer grace, or before the probe went out, is not ours (v0.71.0)', async () => {
+  const late = await blip({ seen: () => T - 300 * MIN, deathAfter: 95_000 });
+  assert.equal(late.R.snap(7)?.probeKills24h ?? 0, 0, 'a death 95 s after an unjudged probe is not blamed on it');
+  const early = await blip({ seen: () => T - 300 * MIN, deathAfter: -5_000 });
+  assert.equal(early.R.snap(7)?.probeKills24h ?? 0, 0, 'a death before the probe went out cannot be its');
+});
+
+test('the NEWEST probe before a between-tick death decides — a manual ping sent after the sweep takes the blame (v0.71.0)', async () => {
+  const { R } = await blip({ seen: () => T - 300 * MIN, deathAfter: 20_000, manualAfter: 10_000 });
+  assert.equal(R.snap(7)?.probeKills24h ?? 0, 0, "the operator's ping was the nearer frame, and a manual kill is never ours");
+});
+
+test('a between-tick NoOp kill is a MISS — the traffic that revived the node is not the ping\'s answer (v0.71.0)', async () => {
+  const { R } = await blip({ canRead: false, seen: () => T - 300 * MIN, deathAfter: 400, revivedAfter: 30_000 });
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'counted as our kill');
+  assert.ok(R.snap(7)?.probeHeldUntilMs != null, 'and held');
+  assert.deepEqual(R.results.map((r) => [r[0], r[1], r[3]]), [[7, false, 'ping']], 'booked unanswered, once — never later credited as answered');
+  const quick = await blip({ canRead: false, seen: () => T - 300 * MIN, deathAfter: 400, revivedAfter: 700 });
+  assert.deepEqual(quick.R.results.map((r) => [r[0], r[1], r[3]]), [[7, false, 'ping']], 'even revived at once: a NoOp is never answered');
+  const miss = R.lines.find((l) => /did NOT answer its probe/.test(l)) ?? '';
+  assert.match(miss, /1st consecutive miss — it went Dead 0s after our sweep NoOp ping and was Alive again before the next tick; a NoOp gets no reply, so that was not an answer\) — no sweep or verification probe for 15m — sweep NoOp ping$/);
+});
+
+test('a burst whose first probe was answered and whose second killed the node counts ONE kill when the tick also saw it Dead (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 0,
+    verify: () => [{ id: 7, first: false }], deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step();                                                     // verify 1 goes out…
+  const first = R.at() - MIN;
+  setSeen(n7, first + 200);                                           // …and is answered
+  await R.step();                                                     // verify 2 goes out…
+  const second = R.at() - MIN;
+  setStatus(n7, NodeStatus.Dead);                                     // …and kills it
+  feed = [{ nodeId: 7, at: second + 400, seen: first + 200 }];        // the feed saw it too, and saw it clear
+  await R.step();
+  R.h.stop();
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'one death, one kill');
+  assert.equal(R.warns.filter((w) => /own probes 2 times/.test(w)).length, 0, 'and no repeat-kill warning from one death');
+});
+
+test('a sweep READ whose node the tick sees Dead reaches the reply rate as a missed READ (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN });
+  await R.step();
+  setStatus(n7, NodeStatus.Dead);
+  await R.step();
+  R.h.stop();
+  assert.deepEqual(R.results.map((r) => [r[0], r[1], r[3]]), [[7, false, 'read']], 'the read subset sees the kill');
+  assert.ok(R.lines.some((l) => /did NOT answer its probe \(1st consecutive miss — the node has since been marked Dead\) — sweep routed read$/.test(l)));
+});
+
+test('each miss line names the exact lane and frame, and a NoOp launch failure is not a read fallback (v0.71.0)', async () => {
+  // Verification lane, read frame, settled on the death.
+  const n9 = node(9, { stats: { lastSeen: T - 300 * MIN } as never });
+  let due = true;
+  const V = await rig({ nodes: [node(1, { isController: true }), n9], staleMs: 0, verify: () => (due ? [{ id: 9, first: true }] : []) });
+  await V.step(); due = false;
+  setStatus(n9, NodeStatus.Dead);
+  await V.step();
+  V.h.stop();
+  assert.ok(V.lines.some((l) => /node 9 did NOT answer its probe \(1st consecutive miss — the node has since been marked Dead\) — verification routed read$/.test(l)),
+    JSON.stringify(V.lines));
+  // Sweep lane, NoOp frame, judged at the grace.
+  const n8 = node(8, { stats: { lastSeen: T - 300 * MIN } as never });
+  const N = await rig({ nodes: [node(1, { isController: true }), n8], staleMs: 240 * MIN, canRead: () => false });
+  await N.step(3);
+  N.h.stop();
+  assert.ok(N.lines.some((l) => /node 8 did NOT answer its probe \(1st consecutive miss, lastSeen did not advance\) — sweep NoOp ping$/.test(l)),
+    JSON.stringify(N.lines));
+  // A NoOp that could not be sent is refunded, but it is not a failed READ.
+  const n6 = node(6, { stats: { lastSeen: T - 300 * MIN } as never });
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const h = startAutoPing({
+    nodes: () => [node(1, { isController: true }), n6], controller: () => null, ready: () => true,
+    ping: async () => {}, probe: async () => ({ ok: false, message: 'no ping button' }),
+    probeRead: async () => {}, canRead: () => false,
+    log: () => {}, log2: Object.assign((m: string) => { lines.push(m); }, { warn: (m: string) => { lines.push(m); } }),
+    config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS; h.tick(); await new Promise((r) => setImmediate(r));
+  h.stop();
+  assert.ok(lines.some((l) => /node 6 could not be probed/.test(l)), 'fixture guard: the NoOp launch failed');
+  assert.ok(!lines.some((l) => /a routed read could not be sent/.test(l)), 'and it is not reported as a read that could not be sent');
+});
+
+test('a ladder READ settled on a later death is labelled a routed read, not a NoOp (v0.71.0)', async () => {
+  const n7 = dead(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 0 });
+  for (let i = 0; i < 20 && R.of('read', 7).length === 0; i++) await R.step();
+  assert.equal(R.of('read', 7).length, 1, 'fixture guard: the ladder read went out');
+  setStatus(n7, NodeStatus.Alive);                                    // seen Alive before its answer lands…
+  await R.step();
+  setStatus(n7, NodeStatus.Dead);                                     // …and Dead again with the read unanswered
+  await R.step();
+  R.h.stop();
+  assert.ok(R.lines.some((l) => /node 7 did NOT answer its probe \(\d+(st|nd|rd|th) consecutive miss — the node has since been marked Dead\) — ladder routed read$/.test(l)),
+    JSON.stringify(R.lines.filter((l) => /did NOT answer/.test(l))));
+});
+
+test('a between-tick kill is still judged when the node is Dead AGAIN at the tick on a later death (v0.71.0)', async () => {
+  // The first death cleared (the feed hands it over); a second, unrelated one
+  // left the node Dead at the tick. trackEpisodes reads the lastSeen the revival
+  // moved and books nothing, so only the feed can book the first death.
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN, canRead: () => false,
+    deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step();
+  const sentAt = R.at() - MIN;
+  feed = [{ nodeId: 7, at: sentAt + 400, seen: T - 300 * MIN }];     // death 1, unanswered, then cleared
+  setSeen(n7, sentAt + 20_000);                                       // revived by its own report
+  setStatus(n7, NodeStatus.Dead);                                     // death 2, on something else
+  await R.step();
+  setStatus(n7, NodeStatus.Alive);
+  await R.step(3);
+  R.h.stop();
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'our kill is counted');
+  assert.deepEqual(R.results.map((r) => [r[0], r[1], r[3]]), [[7, false, 'ping']], 'the NoOp is a miss, never credited as answered');
+  assert.ok(R.lines.some((l) => /went Dead 0s after our sweep NoOp ping and came back, and is Dead again at this tick on something later/.test(l)),
+    JSON.stringify(R.lines.filter((l) => /went Dead/.test(l))));
+});
+
+test('a between-tick VERIFICATION NoOp kill stays out of the reply rate, and the miss streak carries into the next miss (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  let due = true;
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 0, canRead: () => false,
+    verify: () => (due ? [{ id: 7, first: true }] : []), deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step(); due = false;
+  const sentAt = R.at() - MIN;
+  feed = [{ nodeId: 7, at: sentAt + 400, seen: null }];                // no lastSeen on record: nothing answered it
+  setSeen(n7, sentAt + 20_000);
+  await R.step();
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'a death with no lastSeen on record is still blamed');
+  assert.deepEqual(R.results, [], 'a verification probe is symptom-correlated: never in the comparable rate');
+  // A later judged miss continues the streak the between-tick miss started.
+  R.set(R.at() + 16 * MIN);
+  due = true; await R.step(); due = false;
+  await R.step(3);
+  R.h.stop();
+  assert.ok(R.lines.some((l) => /node 7 did NOT answer its probe \(2nd consecutive miss, lastSeen did not advance\)/.test(l)),
+    JSON.stringify(R.lines.filter((l) => /did NOT answer/.test(l))));
+});
+
+test('a between-tick READ kill revived long after the death is a MISS — something else revived it, and the Get was never delivered (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN, deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step();
+  const sentAt = R.at() - MIN;
+  feed = [{ nodeId: 7, at: sentAt + 400, seen: T - 300 * MIN, clearedAt: sentAt + 25_000 }];
+  setSeen(n7, sentAt + 25_000);                                       // the outlet's own power report
+  await R.step(3);
+  R.h.stop();
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'still our kill');
+  assert.deepEqual(R.results.map((r) => [r[0], r[1], r[3]]), [[7, false, 'read']], 'booked a missed READ, never credited as answered');
+  assert.ok(R.lines.some((l) => /revived 25s later, too late to be the Get's own Report, so that was not an answer\) — no sweep or verification probe for 15m — sweep routed read$/.test(l)),
+    JSON.stringify(R.lines.filter((l) => /did NOT answer/.test(l))));
+});
+
+test('a between-tick death is not blamed when the node\'s statistics feed is not live, and one read is never booked twice (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN, deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step();
+  const sentAt = R.at() - MIN;
+  feed = [{ nodeId: 7, at: sentAt + 40_000, seen: null, clearedAt: sentAt + 40_300, feedLive: false }];
+  await R.step();
+  assert.equal(R.snap(7)?.probeKills24h ?? 0, 0, 'with no live statistics feed, an answered probe cannot be told from an unanswered one');
+  R.h.stop();
+  // Two cleared deaths inside one read's grace, `seen` frozen before it: ONE kill.
+  const m7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed2: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  const R2 = await rig({ nodes: [node(1, { isController: true }), m7], staleMs: 240 * MIN, deaths: () => { const f = feed2; feed2 = []; return f; } });
+  await R2.step();
+  const s2 = R2.at() - MIN;
+  feed2 = [
+    { nodeId: 7, at: s2 + 400, seen: T - 300 * MIN, clearedAt: s2 + 700 },
+    { nodeId: 7, at: s2 + 30_000, seen: T - 300 * MIN, clearedAt: s2 + 30_300 },
+  ];
+  await R2.step();
+  R2.h.stop();
+  assert.equal(R2.snap(7)?.probeKills24h, 1, 'one read, one kill');
+  assert.equal(R2.warns.filter((w) => /own probes 2 times/.test(w)).length, 0);
+});
+
+test('a read the feed already booked is not booked again when a later tick sees the node Dead with it unanswered (v0.71.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  let feed: { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[] = [];
+  const R = await rig({ nodes: [node(1, { isController: true }), n7], staleMs: 240 * MIN, deaths: () => { const f = feed; feed = []; return f; } });
+  await R.step();
+  const sentAt = R.at() - MIN;
+  feed = [{ nodeId: 7, at: sentAt + 400, seen: T - 300 * MIN, clearedAt: sentAt + 700 }];   // booked, left pending
+  await R.step();
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'fixture guard: the feed booked it');
+  setStatus(n7, NodeStatus.Dead);                                     // the roster, whose lastSeen lags, sees it Dead
+  await R.step();
+  R.h.stop();
+  assert.equal(R.snap(7)?.probeKills24h, 1, 'one read, one kill');
 });

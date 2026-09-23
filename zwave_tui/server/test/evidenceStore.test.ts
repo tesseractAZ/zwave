@@ -956,3 +956,53 @@ test('a snapshot written before rate runs were persisted re-folds them from the 
   d.load();
   assert.deepEqual(d.rateRun(6), before, 're-folded from the ring');
 });
+
+/* ── v0.71.0: the routed-read subset and the stored-route failovers ────── */
+
+test('a routed-read sweep counts in the lifetime AND the read counters; a NoOp sweep only in the lifetime ones (v0.71.0)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zwev-read-'));
+  try {
+    const s = createEvidenceStore({ path: join(dir, 'ev.json'), now: () => T });
+    s.recordProbe(7, true, 'echo-only', T, 'read');
+    s.recordProbe(7, false, 'echo-only', T, 'read');
+    s.recordProbe(7, true, 'echo-only', T, 'ping');
+    s.recordProbe(7, false, 'unheard', T);                       // no frame given: a NoOp, as before v0.71.0
+    const c = s.coverage(7)!;
+    assert.deepEqual([c.probesAsked, c.probesAnswered], [4, 2], 'the lifetime tally counts every frame');
+    assert.deepEqual([c.probesReadAsked, c.probesReadAnswered], [2, 1], 'the read subset counts reads only, and only answered reads as answered');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the read and reroute counters survive save/load, and a v0.70.0 file loads them at zero with its history intact (v0.71.0)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zwev-read-io-'));
+  const path = join(dir, 'ev.json');
+  try {
+    const s = createEvidenceStore({ path, now: () => T });
+    s.recordProbe(7, true, 'echo-only', T, 'read');
+    s.recordProbe(7, true, 'echo-only', T, 'read');
+    s.recordProbe(7, false, 'echo-only', T, 'read');
+    s.recordProbeReroute(7, T);
+    s.recordProbeReroute(7, T);
+    s.recordProbeReroute(9, T);                                   // a node the store has not seen yet
+    assert.equal(s.coverage(9)?.probeReroutes, 1, 'an unregistered node does not lose the count');
+    s.save();
+    const back = createEvidenceStore({ path, now: () => T });
+    back.load();
+    const c = back.coverage(7)!;
+    assert.deepEqual([c.probesReadAsked, c.probesReadAnswered, c.probeReroutes], [3, 2, 2], 'they persist');
+    // A v0.70.0 file: strip the new keys from a real save.
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as { meta: Record<string, Record<string, unknown>> };
+    for (const m of Object.values(raw.meta)) { delete m.ra; delete m.rk; delete m.rr; }
+    assert.ok(!('ra' in raw.meta['7']), 'precondition: the new keys are gone');
+    writeFileSync(path, JSON.stringify(raw), 'utf8');
+    const old = createEvidenceStore({ path, now: () => T });
+    old.load();
+    const oc = old.coverage(7)!;
+    assert.equal(oc.probesAsked, 3, 'its lifetime history survives');
+    assert.deepEqual([oc.probesReadAsked, oc.probesReadAnswered, oc.probeReroutes], [0, 0, 0], 'the split starts at zero, not NaN');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

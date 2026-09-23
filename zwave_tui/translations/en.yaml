@@ -70,23 +70,31 @@ configuration:
     name: Safety · Auto-ping after (minutes offline)
     description: >-
       How long a node must be continuously Dead before the first auto-ping.
-      Not applied when a node goes Dead while our own liveness-sweep probe to it
-      is unanswered: nothing heals that, so it is probed at once.
+      Not applied when a node goes Dead while our own sweep or verification
+      probe to it is unanswered: nothing heals that, so it is probed at once —
+      and once it revives it gets no sweep or verification probe for 15 minutes.
   auto_ping_max_attempts:
     name: Safety · Auto-ping attempts per outage
     description: >-
-      Attempts per dead episode, spaced 10/30/60 minutes apart (at the default 3, only the 10m and 30m waits are reached — about 50 minutes from death to the notice, about 40 after a sweep kill). After this the
+      Attempts per dead episode, spaced 10/30/60 minutes apart (at the default 3, only the 10m and 30m waits are reached — about 50 minutes from death to the notice, about 40 after a probe kill). After this the
       engine stops and leaves the node to you. A recovery resets the count.
       Each unanswered ping is followed by one routed read — a single Get on the
-      device's own switch/light value, which changes nothing — because a ping can
-      use only stored routes and a real command can find a new one.
+      device's own switch/light value, which changes nothing on the device —
+      because a ping can use only stored routes and a real command can find a
+      new one.
   auto_ping_stale_min:
     name: Safety · Liveness sweep interval (minutes)
     description: >-
-      Probe every MAINS node that is not already Dead once per this many
-      minutes (0 disables). Z-Wave marks a node Dead only when a send to it
-      FAILS — a device nobody addresses is never proven alive, so an unplugged
-      outlet can read "Alive" indefinitely. Every node is asked on the same
+      Ask every MAINS node that is not already Dead once per this many minutes
+      (0 disables), with one routed read — a single Get on the device's own
+      switch/light value, which changes nothing on the device and which the
+      controller may route; its Report can correct a stale Home Assistant state,
+      which may trigger automations — or a NoOp ping for a device with no such
+      value, or for 30 minutes after a read could not be sent. Z-Wave marks a
+      node Dead only when a send to it FAILS — a device nobody addresses is
+      never proven alive, so an unplugged outlet can read "Alive" indefinitely —
+      and a lone unanswered ping can mark a working one Dead, which is why the
+      sweep reads. Every node is asked on the same
       cadence, chatty or not, so its answered/asked ratio measures reachability
       rather than how talkative it is. One probe per tick, stalest first, under
       the same suppressors as auto-ping.

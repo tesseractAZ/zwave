@@ -441,6 +441,13 @@ export interface DataProvider {
     probesEchoOnly: number;
     probesAttribUnknown: number;
     probesUnheard: number;
+    /** Of the sweep probes, those sent as a routed read and answered (v0.71.0):
+     *  "answered" there means reached by ANY route, where a NoOp answers only
+     *  on a stored one. Optional so a provider predating them still type-checks. */
+    probesReadAsked?: number;
+    probesReadAnswered?: number;
+    /** Sweep routed reads that failed over from a stored route (v0.71.0). */
+    probeReroutes?: number;
     /** Store-level: when single-lane probe counting began (v0.63.1), or
      *  null/absent on a store predating the stamp. Optional so a provider that
      *  predates it still type-checks; absent means the caveat stays. */
@@ -757,7 +764,10 @@ export interface ActionRunner {
    *  autonomously, and its lines must not be logged as the operator's. */
   ping(nodeId: number, origin?: 'you' | 'engine'): Promise<ActionResult>;
   /**
-   * The same NoOp ping, but NEVER attributed to the outcome ledger (v0.38.1).
+   * The same NoOp ping, but NEVER attributed to the outcome ledger (v0.38.1) —
+   * since v0.71.0 the measurement lanes' FALLBACK frame, for a node with no
+   * switch/light value to read, or for 30 min after its read could not be sent
+   * (see `routedRead`'s 'probe' purpose).
    *
    * The audit finding this exists for: all three auto-ping lanes shared the
    * learning `ping`, so every liveness sweep and every verification burst
@@ -777,8 +787,12 @@ export interface ActionRunner {
    * default routing where a ping may use only the stored routes. Engine-only and
    * never learned. The result proves only that the request was queued (HA
    * returns before the Get is sent); the answer is judged from lastSeen.
+   *
+   * `purpose` (v0.71.0) changes only the log line: 'probe' is the liveness
+   * sweep's and the verification bursts' use — "probe node N (routed read)" —
+   * and 'revive' (the default) the dead ladder's follow-up.
    */
-  routedRead(nodeId: number): Promise<ActionResult>;
+  routedRead(nodeId: number, purpose?: 'revive' | 'probe'): Promise<ActionResult>;
   refreshValues(nodeId: number): Promise<ActionResult>;
   reInterview(nodeId: number): Promise<ActionResult>;
   healNode(nodeId: number): Promise<ActionResult>;

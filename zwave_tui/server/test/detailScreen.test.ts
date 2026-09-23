@@ -931,3 +931,60 @@ test('the revival-credit caveat is never cut mid-claim (v0.64.4)', () => {
     assert.ok(visLen(row!) <= cols, `${cols} cols: overflow`);
   }
 });
+
+/* ── v0.71.0: what the sweep sent, and the stored-route failovers it survived ─ */
+
+test('the Frame row tells a routed-read history from a NoOp one, and splits a mixed one with each rate toned (v0.71.0)', () => {
+  const frameRow = (p: Record<string, number>, raw = false): string => {
+    const d = withProbes({ probesAsked: 30, probesAnswered: 27, ...p } as never);
+    const lines = renderDetail(ctx(mkView(120, 60), d.data, d.nodes));
+    return (raw ? lines : lines.map(strip)).find((l) => /Frame/.test(strip(l))) ?? '';
+  };
+  assert.match(frameRow({ probesReadAsked: 0, probesReadAnswered: 0 }), /all NoOp pings: answered = reached on a stored route/);
+  assert.match(frameRow({ probesAsked: 30, probesAnswered: 30, probesReadAsked: 30, probesReadAnswered: 30 }), /all routed reads: answered = reached by any route/);
+  assert.match(frameRow({ probesReadAsked: 10, probesReadAnswered: 10 }), /read 10\/10 \(100%, any route\) · ping 17\/20 \(85%, stored routes\)/,
+    'the lifetime tally split by frame');
+  const raw = frameRow({ probesReadAsked: 10, probesReadAnswered: 10 }, true);
+  assert.ok(raw.includes('\x1b[92m') && raw.includes('\x1b[93m'), 'each rate carries its own tone');
+  assert.match(frameRow({}), /all NoOp pings/, 'a provider predating the counters reads as all NoOp');
+});
+
+test('the Frame and Rerouted rows are never cut mid-claim, 60 to 200 columns (v0.71.0)', () => {
+  const d = withProbes({ probesAsked: 1234, probesAnswered: 1200, probesReadAsked: 1000, probesReadAnswered: 999, probeReroutes: 3 } as never);
+  for (const cols of [60, 66, 73, 80, 87, 100, 120, 160, 200]) {
+    const lines = renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip);
+    const frame = lines.find((l) => /^\s*Frame/.test(l));
+    assert.ok(frame, `${cols} cols: the Frame row renders`);
+    assert.match(frame!, /read 999\/1000( \(100%(, any route)?\))? · ping 201\/234( \(86%(, stored routes)?\))?\s*$/, `${cols} cols: "${frame!.trim()}"`);
+    assert.ok(visLen(frame!) <= cols, `${cols} cols: overflow`);
+    const rr = lines.find((l) => /^\s*Rerouted/.test(l));
+    assert.ok(rr, `${cols} cols: the Rerouted row renders`);
+    assert.match(rr!, /3 (sweep reads failed over from a stored route to another|stored-route failovers on our sweep)\s*$/, `${cols} cols: "${rr!.trim()}"`);
+    assert.ok(visLen(rr!) <= cols, `${cols} cols: overflow`);
+  }
+  const none = evidenceLines(withProbes({ probesAsked: 5, probesAnswered: 5, probeReroutes: 0 } as never));
+  assert.ok(!none.some((l) => /Rerouted/.test(l)), 'no failovers, no row');
+});
+
+test('the all-NoOp and all-read Frame forms fit whole, 60 to 200 columns (v0.71.0)', () => {
+  // Every node loads ra=0 on upgrade day, so the all-NoOp form is what every
+  // DETAIL screen shows first.
+  const cases: Array<[Record<string, number>, RegExp]> = [
+    [{ probesAsked: 30, probesAnswered: 29, probesReadAsked: 0, probesReadAnswered: 0 },
+      /(all NoOp pings: answered = reached on a stored route|all NoOp pings \(stored routes only\))\s*$/],
+    [{ probesAsked: 30, probesAnswered: 30, probesReadAsked: 30, probesReadAnswered: 30 },
+      /(all routed reads: answered = reached by any route|all routed reads \(any route\))\s*$/],
+  ];
+  for (const [p, want] of cases) {
+    const d = withProbes(p as never);
+    const seen = new Set<string>();
+    for (const cols of [60, 66, 73, 80, 87, 100, 120, 160, 200]) {
+      const row = renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip).find((l) => /^\s*Frame/.test(l));
+      assert.ok(row, `${cols} cols: the Frame row renders`);
+      assert.match(row!, want, `${cols} cols: "${row!.trim()}"`);
+      assert.ok(visLen(row!) <= cols, `${cols} cols: overflow`);
+      seen.add(/answered = /.test(row!) ? 'long' : 'short');
+    }
+    assert.deepEqual([...seen].sort(), ['long', 'short'], 'fixture guard: both forms are exercised');
+  }
+});

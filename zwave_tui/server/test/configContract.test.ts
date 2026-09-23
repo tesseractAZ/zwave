@@ -453,3 +453,16 @@ test('index.ts hands auto-ping the two driver-WS readings (v0.65.0)', () => {
     'auto-ping must read the driver-restart stamp, or the burst is credited as self-proof',
   );
 });
+
+test('index.ts wires the measurement read, its stamp, the death feed, the verify skip and the probe frame (v0.71.0)', () => {
+  // Each of these is an OPTIONAL runner input: omitted, the runner silently
+  // behaves as v0.70.0 — NoOp sweeps, no reroute attribution, no between-tick
+  // kills, a hold that drains the ledger's bursts — with every gate green.
+  const index = read('server/src/index.ts');
+  assert.match(index, /probeRead: \(n\) => actions\.routedRead\(n, 'probe'\)/, 'the measurement lanes must read');
+  assert.match(index, /onMeasurementSent: \(n, at, lane, frame\) => zwaveData\.noteMeasurementProbe\(n, at, lane, frame\)/);
+  assert.match(index, /deaths: \(\) => zwaveData\.drainDeadEvents\(\)/);
+  assert.match(index, /onMeasurementWithdrawn: \(n, at\) => zwaveData\.clearMeasurementProbe\(n, at\)/);
+  assert.match(index, /verifyRequests: \(now, skip\) => zwaveData\.drainVerifyRequests\(now, skip\)/);
+  assert.match(index, /onProbeResult: \(nodeId, answered, cls, frame\) => zwaveData\.recordProbeResult\(nodeId, answered, cls, frame\)/);
+});

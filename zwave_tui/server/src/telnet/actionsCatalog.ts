@@ -89,7 +89,7 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
     scope: 'device',
     impact: 'safe',
     desc: 'Send a reachability ping request to the node.',
-    impactNote: "Harmless — no mesh disruption, no data change. NOTE: HA does not return the ping's result, so a success here means the request was SENT, not that the node answered — watch the node's Status / Last-seen right after to see if it replied.",
+    impactNote: "No data change, but a ping is ONE ACK-only attempt on the stored routes: if it goes unanswered the driver marks the node Dead — even a working one — until something reaches it. HA does not return the ping's result, so a success here means the request was SENT, not that the node answered — watch the node's Status / Last-seen right after to see if it replied.",
     needsNode: true,
   },
   {
