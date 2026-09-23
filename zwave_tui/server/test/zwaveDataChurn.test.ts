@@ -42,6 +42,8 @@ let failNetworkStatus: string | null = null;
 const NODE7 = { node_id: 7, status: 4, ready: true, is_routing: true, is_secure: false };
 let rosterNodes: Array<Record<string, unknown>> = [NODE7];
 const DEV_ID = 'dev-7';
+/** Override for the entity registry (v0.70.0). null = the default single switch. */
+let entityRegistry: Array<Record<string, unknown>> | null = null;
 
 function cannedResult(cmd: Record<string, unknown>): unknown {
   switch (cmd.type) {
@@ -50,7 +52,7 @@ function cannedResult(cmd: Record<string, unknown>): unknown {
     case 'config/device_registry/list':
       return [{ id: DEV_ID, identifiers: [['zwave_js', `${HOME}-7`]], name: 'Node Seven', manufacturer: 'T', model: 'M', area_id: null }];
     case 'config/entity_registry/list':
-      return [{ entity_id: 'switch.node_seven', device_id: DEV_ID, disabled_by: null, platform: 'zwave_js', original_name: 'Node Seven Switch' }];
+      return entityRegistry ?? [{ entity_id: 'switch.node_seven', device_id: DEV_ID, disabled_by: null, platform: 'zwave_js', original_name: 'Node Seven Switch' }];
     case 'get_states':
       return [{ entity_id: 'switch.node_seven', state: 'on', attributes: {} }];
     case 'zwave_js/network_status':
@@ -1876,5 +1878,33 @@ test('a node too quiet to rate is reported as UNMEASURED, not clear (v0.67.0)', 
     }
   } finally {
     zd.stop();
+  }
+});
+
+test('a routed read targets the node\'s own switch value, and nothing that merely LOOKS like one (v0.70.0)', async () => {
+  const ent = (entity_id: string, unique_id: string, over: Record<string, unknown> = {}) =>
+    ({ entity_id, unique_id, device_id: DEV_ID, disabled_by: null, platform: 'zwave_js', original_name: entity_id, ...over });
+  const cases: Array<[string, Array<Record<string, unknown>>, string | null]> = [
+    ['the switch currentValue', [ent('switch.node_seven', `${HOME}.7-37-0-currentValue`)], 'switch.node_seven'],
+    ['a multilevel light', [ent('light.node_seven', `${HOME}.7-38-0-currentValue`)], 'light.node_seven'],
+    ['the lowest endpoint wins', [ent('switch.node_seven_2', `${HOME}.7-37-2-currentValue`), ent('switch.node_seven_1', `${HOME}.7-37-1-currentValue`)], 'switch.node_seven_1'],
+    ['a config-parameter switch (CC 112) is not a value to read', [ent('switch.node_seven_led', `${HOME}.7-112-0-3`)], null],
+    ['node-level entities are not values', [ent('sensor.node_seven_node_status', `${HOME}.7.node_status`), ent('button.node_seven_ping', `${HOME}.7.ping`)], null],
+    ['a switch_as_x wrapper is a different platform', [ent('light.node_seven', `${HOME}.7-37-0-currentValue`, { platform: 'switch_as_x' })], null],
+    ['a value id naming ANOTHER node is refused', [ent('switch.node_seven', `${HOME}.9-37-0-currentValue`)], null],
+    ['a disabled entity is ignored', [ent('switch.node_seven', `${HOME}.7-37-0-currentValue`, { disabled_by: 'user' })], null],
+    ['no unique_id at all', [ent('switch.node_seven', '', { unique_id: undefined })], null],
+  ];
+  for (const [label, reg, want] of cases) {
+    entityRegistry = reg;
+    const ha = fakeHa();
+    const zd = await bootedZwaveData(ha, { refreshMs: 60 });
+    try {
+      await waitFor(() => zd.snapshot().length > 0);
+      assert.equal(zd.readEntityOf(7), want, label);
+    } finally {
+      zd.stop();
+      entityRegistry = null;
+    }
   }
 });

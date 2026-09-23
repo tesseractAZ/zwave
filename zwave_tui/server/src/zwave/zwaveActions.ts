@@ -34,6 +34,8 @@ export interface ActionRunnerOptions {
   deviceIdOf: (nodeId: number) => string | null;
   /** node id → its `button.*_ping` entity_id (null if none). */
   pingEntityOf: (nodeId: number) => string | null;
+  /** node id → the switch/light value entity a routed read targets (v0.70.0). */
+  readEntityOf?: (nodeId: number) => string | null;
   /**
    * Append an outcome line to the event ring.
    *
@@ -259,6 +261,24 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
         await o.client.send({ type: 'call_service', domain: 'button', service: 'press', service_data: { entity_id: ent } });
       }, /* learn */ false, /* origin */ 'engine'),
     refreshValues: (n) => run('refreshValues', n, `refresh values node ${n}`, () => deviceCmd('zwave_js/refresh_node_values', n)),
+    // ROUTED READ (v0.70.0) — one Get on the node's own switch/light value.
+    // NOT `refreshValues`: zwave_js/refresh_node_values runs the driver's
+    // refresh task, which returns before querying anything when the node is
+    // Dead (zwave-js Node.ts: "Sleeping and dead nodes cannot be queried"), and
+    // HA reports success anyway — on the one node this verb exists for, it
+    // would send nothing. `refresh_value` goes through Node.pollValue, which
+    // sends the Get regardless of status, with the driver's default transmit
+    // options (ACK|AutoRoute|Explore) where a ping is ACK-only. It changes no
+    // state. HA returns before the frame is on the air, so success here proves
+    // only that the request was queued: the answer is judged from lastSeen.
+    // Never learned: the ledger is first-action-wins, and the ladder's ping is
+    // always that first action.
+    routedRead: (n) =>
+      run('routedRead', n, `routed read node ${n}`, async () => {
+        const ent = o.readEntityOf?.(n) ?? null;
+        if (!ent) throw new Error(`node ${n} has no switch/light value to read`);
+        await o.client.send({ type: 'call_service', domain: 'zwave_js', service: 'refresh_value', service_data: { entity_id: ent, refresh_all_values: false } });
+      }, /* learn */ false, /* origin */ 'engine'),
     reInterview: (n) => run('reInterview', n, `re-interview node ${n}`, () => deviceCmd('zwave_js/refresh_node_info', n)),
     healNode: (n) => run('healNode', n, `rebuild routes node ${n}`, () => deviceCmd('zwave_js/rebuild_node_routes', n)),
     rebuildAll: () => run('rebuildAll', null, 'rebuild ALL routes', () => entryCmd('zwave_js/begin_rebuilding_routes')),

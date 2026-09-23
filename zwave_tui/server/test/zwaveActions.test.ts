@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createActionRunner, isNotFailedRefusal, zwaveErrorCode } from '../src/zwave/zwaveActions';
 import type { HaWsClient } from '../src/ha/haWsClient';
 
-interface MkOpts { reject?: boolean; noDevice?: boolean; noPing?: boolean; entry?: string | null }
+interface MkOpts { reject?: boolean; noDevice?: boolean; noPing?: boolean; noRead?: boolean; entry?: string | null }
 function mk(enabled: boolean, opts: MkOpts = {}) {
   const sent: any[] = [];
   const logs: Array<{ sev: string; nodeId: number | null; text: string; origin?: string }> = [];
@@ -18,6 +18,7 @@ function mk(enabled: boolean, opts: MkOpts = {}) {
     entryId: () => (opts.entry === undefined ? 'entry-1' : opts.entry),
     deviceIdOf: (n) => (opts.noDevice ? null : `dev-${n}`),
     pingEntityOf: (n) => (opts.noPing ? null : `button.node${n}_ping`),
+    readEntityOf: (n) => (opts.noRead ? null : `switch.node${n}`),
     log: (sev, nodeId, text, origin) => logs.push({ sev, nodeId, text, origin }),
     onOutcome: (kind, nodeId, ok) => outcomes.push({ kind, nodeId, ok }),
     onConfigWritten: (n) => configWritten.push(n),
@@ -450,4 +451,25 @@ test('the self-capture does NOT fire when no driver ever spoke (v0.44.0)', () =>
     assert.ok(!logs.some((l) => /unclassified ZW0360/.test(l)),
       `no driver spoke, so nothing to capture: ${JSON.stringify(logs)}`);
   });
+});
+
+test('a routed read is ONE refresh_value on the node\'s own value — never a Set, never refresh_node_values (v0.70.0)', async () => {
+  const { runner, sent, outcomes } = mk(true);
+  const r = await runner.routedRead(18);
+  assert.equal(r.ok, true);
+  assert.deepEqual(sent, [{ type: 'call_service', domain: 'zwave_js', service: 'refresh_value',
+    service_data: { entity_id: 'switch.node18', refresh_all_values: false } }],
+    'refresh_node_values sends NOTHING to a Dead node, and refresh_all_values would read far more than one value');
+  assert.equal(outcomes.length, 0, 'never learned: the ladder\'s ping is the episode\'s recorded action');
+});
+
+test('a routed read obeys the master gate and refuses a node with nothing to read (v0.70.0)', async () => {
+  const off = mk(false);
+  assert.equal((await off.runner.routedRead(18)).ok, false, 'write actions off');
+  assert.equal(off.sent.length, 0);
+  const none = mk(true, { noRead: true });
+  const r = await none.runner.routedRead(18);
+  assert.equal(r.ok, false, 'no readable value');
+  assert.match(r.message, /no switch\/light value to read/);
+  assert.equal(none.sent.length, 0, 'and nothing reaches the mesh');
 });

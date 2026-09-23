@@ -737,7 +737,8 @@ export type ActionKind =
   | 'stopRebuild'
   | 'removeFailed'
   | 'controlEntity'
-  | 'setConfigParam';
+  | 'setConfigParam'
+  | 'routedRead';
 
 /** A device-control verb (v0.23). Domain→service mapping lives in
  *  `zwave/entityControl.ts`; this union is the vocabulary. */
@@ -770,6 +771,14 @@ export interface ActionRunner {
    * keypress) uses the learning verb.
    */
   probe(nodeId: number): Promise<ActionResult>;
+  /**
+   * One ROUTED READ (v0.70.0): `zwave_js.refresh_value` on the node's own
+   * switch/light value — a single Get, read-only, sent with the driver's
+   * default routing where a ping may use only the stored routes. Engine-only and
+   * never learned. The result proves only that the request was queued (HA
+   * returns before the Get is sent); the answer is judged from lastSeen.
+   */
+  routedRead(nodeId: number): Promise<ActionResult>;
   refreshValues(nodeId: number): Promise<ActionResult>;
   reInterview(nodeId: number): Promise<ActionResult>;
   healNode(nodeId: number): Promise<ActionResult>;
