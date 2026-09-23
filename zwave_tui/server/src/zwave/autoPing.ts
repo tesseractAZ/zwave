@@ -221,6 +221,31 @@ export interface AutoPingState {
   launchGaveUpAnnounced: Set<number>;
   /** Nodes already announced as Dead-but-talking this outage (v0.42.0). */
   talkingAnnounced: Set<number>;
+  /**
+   * Nodes owed ONE routed read (v0.70.0): their latest dead-lane ping was judged
+   * unanswered. A ping reaches HA and zwave-js-server as an ACK-only NoOp
+   * (transmit options 0x01, one attempt), so it can use only the stored routes —
+   * LWR, NLWR, then direct. A Get goes out with the driver's default options
+   * (ACK|AutoRoute|Explore), so the controller may also compute a route. When
+   * every stored route is marginal, a ping cannot reach a node that any real
+   * command reaches at once: on 2026-09-22 the ladder spent three pings on an
+   * outlet and summoned a human, and a switch command then revived it in 340 ms
+   * through a repeater the stored routes did not use. Cleared on recovery and
+   * on departure.
+   */
+  readOwed: Set<number>;
+  /** nodeId → routed reads launched this episode, for the give-up line. */
+  reads: Map<number, number>;
+  /**
+   * nodeId → times a routed read REVIVED the node, epoch ms (v0.70.0). Kept
+   * across episodes on purpose and aged out after `READ_REVIVAL_WINDOW_MS`: a
+   * device that answers Gets but not pings is revived by the read and then
+   * killed again by the next NoOp, and because recovery resets the ladder that
+   * loop would never summon anyone. Past `READ_REVIVAL_CAP` the read is
+   * withheld, the ladder gives up as it did before this release, and the human
+   * is told why.
+   */
+  readRevivals: Map<number, number[]>;
 }
 
 /** Which lane issued a probe (v0.40.2). Only the fixed-cadence SWEEP feeds the
@@ -238,7 +263,7 @@ export interface AutoPingState {
  * deciding whether a ping was answered and never applied it to the one probe a
  * human actually asked for, so `p` reported "sent" and then said nothing.
  */
-export type ProbeLane = 'sweep' | 'dead' | 'verify' | 'manual';
+export type ProbeLane = 'sweep' | 'dead' | 'verify' | 'manual' | 'read';
 
 /**
  * What the sweep concluded about ONE probe's evidence (v0.49.0).
@@ -309,6 +334,7 @@ function settleProbe(
   t: number,
   launched: Promise<unknown>,
   onFailed?: () => void,
+  rejectWhy = 'no ping entity or transport error',
 ): void {
   const failed = (why: string): void => {
     unpendProbe(state, nodeId, t);
@@ -324,7 +350,7 @@ function settleProbe(
       // `undefined` (the plain-void runners the tests use) is not a failure.
       if ((res as { ok?: unknown } | null | undefined)?.ok === false) failed('write refused or transport error');
     },
-    () => failed('no ping entity or transport error'),
+    () => failed(rejectWhy),
   );
 }
 
@@ -343,8 +369,21 @@ export function unpendProbe(state: AutoPingState, nodeId: number, t: number): vo
  *  mesh hop and still well inside one tick of slack. */
 const ANSWER_GRACE_MS = 90_000;
 
+/** How long a routed-read revival counts against its node (v0.70.0). */
+export const READ_REVIVAL_WINDOW_MS = 24 * 60 * 60_000;
+/** Routed-read revivals per node per window before the read is withheld
+ *  (v0.70.0). Two tells "a stored route broke once" from "this device answers
+ *  Gets but not pings", and bounds the kill–revive loop the second case would
+ *  otherwise run forever. */
+export const READ_REVIVAL_CAP = 2;
+
+/** Routed-read revivals of this node inside the window ending at `now`. */
+export function readRevivalsWithin(state: AutoPingState, nodeId: number, now: number): number {
+  return (state.readRevivals.get(nodeId) ?? []).filter((at) => now - at < READ_REVIVAL_WINDOW_MS).length;
+}
+
 export function createAutoPingState(): AutoPingState {
-  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map(), launchFailures: new Map(), launchGaveUpAnnounced: new Set(), talkingAnnounced: new Set(), seenAlive: new Set(), probeDeath: new Set() };
+  return { attempts: new Map(), lastPingAt: new Map(), deadSince: new Map(), lastStaleAt: new Map(), awaitingAnswer: new Map(), lastProbeSeen: new Map(), gaveUpAnnounced: new Set(), missStreak: new Map(), lastVerifyAt: new Map(), launchFailures: new Map(), launchGaveUpAnnounced: new Set(), talkingAnnounced: new Set(), seenAlive: new Set(), probeDeath: new Set(), readOwed: new Set(), reads: new Map(), readRevivals: new Map() };
 }
 
 export interface AutoPingInput {
@@ -398,11 +437,17 @@ export interface AutoPingInput {
    * have no outage to end.
    */
   bootDeadLane?: boolean;
+  /** Whether a routed read can be sent to this node at all (v0.70.0): the
+   *  runner has a read verb and the node has a switch/light value to read.
+   *  Absent ⇒ no reads, exactly the v0.69.0 ladder. */
+  canRead?: (nodeId: number) => boolean;
 }
 
 export interface AutoPingDecision {
   /** Dead nodes to probe on this tick (remediation). */
   ping: number[];
+  /** Dead nodes to send ONE routed read on this tick (v0.70.0). */
+  read: number[];
   /**
    * At most ONE stale node to probe on this tick (liveness verification).
    *
@@ -521,7 +566,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   // the candidate set is empty BY CONSTRUCTION — not because there is nothing
   // to sweep. Counting the unknowns is what separates the two.
   const capabilityUnknown = nodes.filter((n) => !n.isController && n.isListening == null).length;
-  const base = { ping: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyOwed: 0, gaveUp: [] as number[], launchGaveUp: [] as number[], talkingWhileDead: [] as number[],
+  const base = { ping: [] as number[], read: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyOwed: 0, gaveUp: [] as number[], launchGaveUp: [] as number[], talkingWhileDead: [] as number[],
     deadListening: dead.length, capabilityUnknown,
     listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
@@ -561,6 +606,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   if (dead.length >= stormLimit) return { ...base, suppressed: gate('storm') };
 
   const ping: number[] = [];
+  const read: number[] = [];
   const launchGaveUp: number[] = [];
   const gaveUp: number[] = [];
   const talkingWhileDead: number[] = [];
@@ -607,6 +653,18 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
       if (!input.state.launchGaveUpAnnounced.has(n.nodeId)) launchGaveUp.push(n.nodeId);
       continue;
     }
+    // THE ROUTED READ (v0.70.0). Checked BEFORE the give-up hold, so the last
+    // rung's read goes out before any summons, and the hold below then waits for
+    // its judgment like any other pending probe. One frame per node per tick;
+    // the dwell, talking-while-dead and launch-failure checks above all apply.
+    // Withheld once the node has been revived this way `READ_REVIVAL_CAP` times
+    // in the window: it answers Gets but not pings, and reviving it again would
+    // only hand the next NoOp another kill.
+    if (input.state.readOwed.has(n.nodeId) && (input.canRead?.(n.nodeId) ?? false) &&
+        readRevivalsWithin(input.state, n.nodeId, now) < READ_REVIVAL_CAP) {
+      read.push(n.nodeId);
+      continue;
+    }
     // Do not announce the give-up while this node still has a probe awaiting
     // judgment (v0.41.2). The answer grace (90 s) exceeds the tick (60 s), so
     // deciding before judging announced "STILL DEAD … needs a human" up to one
@@ -644,7 +702,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   // Inside the boot window only the dead ladder was released (v0.64.4; see
   // `bootDeadLane`). Returned BEFORE the verification thunk is resolved, so a
   // gated tick still spends none of the ledger's burst budget (v0.36.2).
-  if (booting) return { ...base, ping, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'boot-window' };
+  if (booting) return { ...base, ping, read, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'boot-window' };
 
   /* ── liveness: a node nobody talks to is never proven alive ───────────
    *
@@ -719,7 +777,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const verifySet = new Set(verify);
   const staleDeduped = stale.filter((id) => !verifySet.has(id));
 
-  return { ...base, ping, stale: staleDeduped, verify, verifyFirst, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'none' };
+  return { ...base, ping, read, stale: staleDeduped, verify, verifyFirst, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'none' };
 }
 
 /**
@@ -793,6 +851,13 @@ export function dropBlackoutProbes(state: AutoPingState, nodes: NodeSnapshot[], 
       const answered = seen != null && seen >= p.at;
       const unjudgeable = !answered && p.at <= rfOffSince;
       if (unjudgeable) dropped += 1;
+      // A routed read the blackout swallowed was never really asked (v0.70.0).
+      // Owe it again so it goes out when the gate reopens, instead of letting
+      // the give-up hold release on a read that was never judged.
+      if (unjudgeable && p.lane === 'read') {
+        state.readOwed.add(nodeId);
+        state.reads.set(nodeId, Math.max(0, (state.reads.get(nodeId) ?? 1) - 1));
+      }
       return !unjudgeable;
     });
     if (keep.length > 0) state.awaitingAnswer.set(nodeId, keep);
@@ -908,6 +973,10 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
       state.talkingAnnounced.delete(n.nodeId);
       // …and the probe-death mark (v0.64.4): it described the episode that ended.
       state.probeDeath.delete(n.nodeId);
+      // …and the routed-read bookkeeping (v0.70.0). NOT `readRevivals`: that
+      // spans episodes by design, to bound a kill–revive loop.
+      state.readOwed.delete(n.nodeId);
+      state.reads.delete(n.nodeId);
     }
   }
   // A node that vanished from the roster (removed/excluded) must not leak its
@@ -934,6 +1003,11 @@ export function trackEpisodes(state: AutoPingState, nodes: NodeSnapshot[], now: 
   for (const id of [...state.seenAlive]) if (!seen.has(id)) state.seenAlive.delete(id);
   // …and the probe-death mark (v0.64.4), for the same reason.
   for (const id of [...state.probeDeath]) if (!seen.has(id)) state.probeDeath.delete(id);
+  // …and the routed-read state (v0.70.0), revivals included: a device
+  // re-included on the same id is a different device.
+  for (const id of [...state.readOwed]) if (!seen.has(id)) state.readOwed.delete(id);
+  for (const id of [...state.reads.keys()]) if (!seen.has(id)) state.reads.delete(id);
+  for (const id of [...state.readRevivals.keys()]) if (!seen.has(id)) state.readRevivals.delete(id);
   return settled;
 }
 
@@ -978,6 +1052,12 @@ export interface AutoPingRunnerOptions {
    *  control arm can never accrue. Only the dead-node remediation ladder keeps
    *  the learning verb, because there the ping genuinely IS the treatment. */
   probe?: (nodeId: number) => Promise<unknown>;
+  /** One routed read for a Dead node whose ladder ping went unanswered
+   *  (v0.70.0): a single Get on the node's own switch/light value. Non-learning,
+   *  read-only. Absent ⇒ no reads (the v0.69.0 ladder). */
+  read?: (nodeId: number) => Promise<unknown>;
+  /** Whether the node has a value a routed read can target (v0.70.0). */
+  canRead?: (nodeId: number) => boolean;
   /** Writes into the event ring so an autonomous action is never invisible. */
   log: (severity: 'info' | 'warn' | 'error', nodeId: number | null, text: string) => void;
   /**
@@ -1074,6 +1154,12 @@ export interface AutoPingNodeState {
   /** The driver flags this node Dead, but it was heard from inside the dwell
    *  (v0.42.0) — the flag is stale and the node is reachable. */
   talkingWhileDead: boolean;
+  /** Routed reads launched this episode (v0.70.0). */
+  reads: number;
+  /** An unanswered ladder ping is waiting on its one routed read (v0.70.0). */
+  readOwed: boolean;
+  /** Times a routed read revived this node in the last 24 h (v0.70.0). */
+  readRevivals24h: number;
 }
 
 export function startAutoPing(o: AutoPingRunnerOptions): {
@@ -1122,6 +1208,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       verifyDue: () => o.verifyRequests?.(t) ?? [],
       verifyOwedCount: () => o.verifyOwedCount?.() ?? 0,
       rfOffSince: o.rfOffSince?.() ?? null,
+      canRead: (id) => o.read != null && (o.canRead?.(id) ?? false),
     });
 
     // DECISION TRACE.
@@ -1141,11 +1228,11 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       `stale-due=${decision.staleDue}` +
       (decision.stalestMs != null ? ` stalest=${Math.round(decision.stalestMs / 60_000)}m` : '') +
       ` -> ${decision.suppressed === 'none'
-        ? `probing ${decision.ping.length + decision.stale.length}`
+        ? `probing ${decision.ping.length + decision.read.length + decision.stale.length}`
         : 'suppressed: ' + decision.suppressed +
           // v0.64.4: the dead ladder can act inside the boot window. Without this
           // the trace said "suppressed" beside a probe going out.
-          (decision.ping.length > 0 ? ` (dead ladder open, probing ${decision.ping.length})` : '')}`;
+          (decision.ping.length + decision.read.length > 0 ? ` (dead ladder open, probing ${decision.ping.length + decision.read.length})` : '')}`;
     o.log2?.debug?.(trace);
     // Dedup on the SHAPE of the decision, not its exact text (v0.37). The
     // sweep now asks every node, so `stale-due` and `stalest` churn on every
@@ -1156,7 +1243,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     // and whether anything is being probed at all; the exact queue depth is
     // detail, and rides the debug line every tick regardless.
     const traceKey = `${decision.listening}|${decision.deadListening}|${decision.suppressed}|` +
-      `${decision.ping.length + decision.stale.length > 0}`;
+      `${decision.ping.length + decision.read.length + decision.stale.length > 0}`;
     const changed = traceKey !== lastTrace;
     if (changed || t - lastTraceAt >= TRACE_HEARTBEAT_MS) {
       o.log('info', null, trace);
@@ -1371,6 +1458,25 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       });
     }
 
+    // ROUTED READS (v0.70.0) — one per unanswered ladder ping. Judged by the
+    // same evidence as every probe (lastSeen advancing past the moment it went
+    // out), because HA's refresh_value returns before the Get is on the air: the
+    // service result proves nothing. A launch that never left is un-counted and
+    // NOT owed again — re-owing it would recreate the v0.40.2 retry loop — and
+    // spends neither the attempt budget nor `launchFailures`.
+    for (const nodeId of decision.read) {
+      state.readOwed.delete(nodeId);
+      state.reads.set(nodeId, (state.reads.get(nodeId) ?? 0) + 1);
+      const m = `auto-ping: node ${nodeId} did not answer its ladder ping — sending one routed read ` +
+        `(a single Get with the driver's default routing, which may auto-route; a ping can use only the stored routes)`;
+      o.log('info', nodeId, m);
+      o.log2?.(m);
+      pendProbe(state, nodeId, t, 'read');
+      settleProbe(o, state, nodeId, t, o.read!(nodeId), () => {
+        state.reads.set(nodeId, Math.max(0, (state.reads.get(nodeId) ?? 1) - 1));
+      }, 'no switch/light value to read, or transport error');
+    }
+
     /* ── verification probes (v0.36) ─────────────────────────────────────
      * Requested by the outcome ledger at an episode's two scoring moments.
      *
@@ -1454,9 +1560,22 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // reachability test than any number of pings, and it is the step that
       // actually worked, so it leads.
       const tries = o.config.maxAttempts;
-      const m = `auto-ping: node ${nodeId} did not answer ${tries} ping${tries === 1 ? '' : 's'} — giving up. ` +
-        `That means it ignored ${tries} NOP frame${tries === 1 ? '' : 's'}, NOT that it is unreachable: ` +
-        `try OPERATING the device (a real command often lands when pings do not), then a manual ping, then check its power.`;
+      const reads = state.reads.get(nodeId) ?? 0;
+      const revived = readRevivalsWithin(state, nodeId, t);
+      const pl = (k: number, w: string): string => `${k} ${w}${k === 1 ? '' : 's'}`;
+      // v0.70.0: say which frames were ignored. With no read sent (the node has
+      // no switch/light value, or reads are off) the pre-v0.70.0 text stands.
+      const m = revived >= READ_REVIVAL_CAP
+        ? `auto-ping: node ${nodeId} did not answer ${pl(tries, 'ping')} — giving up. ` +
+          `A routed read has revived it ${revived} times in the last 24 h and it keeps failing pings, so the read is withheld: ` +
+          `it answers Gets but not the stored routes a ping uses. Consider rebuilding its routes, or moving it or a repeater.`
+        : reads > 0
+          ? `auto-ping: node ${nodeId} did not answer ${pl(tries, 'ping')} or ${pl(reads, 'routed read')} — giving up. ` +
+            `That means it ignored ${pl(tries, 'NOP frame')} and ${pl(reads, 'single-attempt Get')} that could auto-route, NOT that it is unreachable: ` +
+            `try OPERATING the device (a command gets up to 3 send attempts), then check its power, then consider rebuilding its routes.`
+          : `auto-ping: node ${nodeId} did not answer ${pl(tries, 'ping')} — giving up. ` +
+            `That means it ignored ${pl(tries, 'NOP frame')}, NOT that it is unreachable: ` +
+            `try OPERATING the device (a real command often lands when pings do not), then a manual ping, then check its power.`;
       o.log('error', nodeId, m);
       (o.log2?.error ?? o.log2)?.(m);
     }
@@ -1483,6 +1602,34 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       lastRfOffLogged = null;
     }
     for (const { nodeId, answered, misses, cls, lane } of judgeProbeAnswers(state, nodes, t)) {
+      // An unanswered LADDER ping earns one routed read (v0.70.0). Only the dead
+      // lane: sweep and verification probes target live nodes, and a miss there
+      // hands the node to the ladder, whose own ping comes first.
+      if (lane === 'dead' && !answered) state.readOwed.add(nodeId);
+      if (lane === 'read') {
+        if (answered) {
+          const revivals = [...(state.readRevivals.get(nodeId) ?? []).filter((at) => t - at < READ_REVIVAL_WINDOW_MS), t];
+          state.readRevivals.set(nodeId, revivals);
+          const m = `auto-ping: node ${nodeId} answered our routed read after its ping went unanswered — ` +
+            `its stored routes are suspect (the controller found another)`;
+          o.log('info', nodeId, m);
+          o.log2?.(m);
+          if (revivals.length === READ_REVIVAL_CAP) {
+            const w = `auto-ping: node ${nodeId} has now been revived by a routed read ${revivals.length} times in 24 h — ` +
+              `it answers Gets but not pings. Further routed reads are withheld for the rest of the window, so its next ` +
+              `death ends in a summons; consider rebuilding its routes.`;
+            o.log('warn', nodeId, w);
+            (o.log2?.warn ?? o.log2)?.(w);
+          }
+        } else {
+          const m = `auto-ping: node ${nodeId} did NOT answer our routed read (${ordinal(misses)} consecutive miss, lastSeen did not advance)`;
+          // Same first-miss-is-information rule as a ping miss (v0.36.5).
+          const streak = misses >= 2;
+          o.log(streak ? 'warn' : 'info', nodeId, m);
+          (streak ? (o.log2?.warn ?? o.log2) : o.log2)?.(m);
+        }
+        continue;
+      }
       // The expected case stays at debug — one line per probe on every healthy
       // node is several hundred a day saying "as designed", which is the noise
       // that trains an operator to stop reading. The UNANSWERED case below is
@@ -1512,7 +1659,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     const ids = new Set<number>([
       ...state.deadSince.keys(), ...state.attempts.keys(), ...state.missStreak.keys(),
       ...state.launchFailures.keys(), ...state.awaitingAnswer.keys(), ...state.gaveUpAnnounced,
-      ...state.launchGaveUpAnnounced, ...state.talkingAnnounced,
+      ...state.launchGaveUpAnnounced, ...state.talkingAnnounced, ...state.readOwed, ...state.reads.keys(),
     ]);
     const nodes: AutoPingNodeState[] = [...ids].sort((a, b) => a - b).map((nodeId) => {
       const attempts = state.attempts.get(nodeId) ?? 0;
@@ -1532,6 +1679,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
         gaveUp: state.gaveUpAnnounced.has(nodeId),
         launchGaveUp: state.launchGaveUpAnnounced.has(nodeId),
         talkingWhileDead: state.talkingAnnounced.has(nodeId),
+        reads: state.reads.get(nodeId) ?? 0,
+        readOwed: state.readOwed.has(nodeId),
+        readRevivals24h: lastTickMs == null ? 0 : readRevivalsWithin(state, nodeId, lastTickMs),
       };
     });
     return {

@@ -248,3 +248,10 @@ test('every blocked reason fits the chip budget — the renderer cannot fix a re
     }
   }
 });
+
+test('Refresh values is blocked on a Dead node — the driver would send nothing (v0.70.0)', () => {
+  const p = planFor(sym('return-path-degraded', { nodeId: 7 }), node(7, { status: NodeStatus.Dead }), ON);
+  const refresh = p.candidates.find((c) => c.action === 'refreshValues');
+  assert.ok(refresh, 'fixture guard: the card is still offered, so the reason is visible');
+  assert.match(String(refresh!.blocked), /node is Dead — zwave-js skips a value refresh on a Dead node/);
+});

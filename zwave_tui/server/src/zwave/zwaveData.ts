@@ -284,6 +284,8 @@ interface RawEntity {
   disabled_by?: string | null;
   name?: string | null;
   original_name?: string | null;
+  /** HA's `${home_id}.${value_id}` for a value-backed zwave_js entity (v0.70.0). */
+  unique_id?: string | null;
 }
 
 interface RawConfigEntry {
@@ -382,6 +384,8 @@ export interface ZwaveData {
   deviceIdOf(nodeId: number): string | null;
   /** node id → its ping button entity_id. */
   pingEntityOf(nodeId: number): string | null;
+  /** node id → the switch/light value entity a routed read targets (v0.70.0). */
+  readEntityOf(nodeId: number): string | null;
   /** Append an operator-action outcome to the event ring. */
   logAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void;
   logEngineAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void;
@@ -768,6 +772,8 @@ class ZwaveDataImpl implements ZwaveData {
   private batteryEntityToNode = new Map<string, number>();
   /** node id → its `button.*_ping` entity_id (for the ping action). */
   private pingEntityByNode = new Map<number, string>();
+  /** node → the one entity a routed read targets (v0.70.0); see `readEntityOf`. */
+  private readEntityByNode = new Map<number, string>();
   /** node id → its `update.*` firmware entity_ids (a node may have >1 target). */
   private updateEntitiesByNode = new Map<number, string[]>();
   /** `update.*` firmware entity_id → node id (for the get_states join). */
@@ -1855,6 +1861,10 @@ class ZwaveDataImpl implements ZwaveData {
   pingEntityOf(nodeId: number): string | null {
     return this.pingEntityByNode.get(nodeId) ?? null;
   }
+  /** node id → the switch/light entity a routed read targets, or null (v0.70.0). */
+  readEntityOf(nodeId: number): string | null {
+    return this.readEntityByNode.get(nodeId) ?? null;
+  }
   /** Route an action's log line by the CALLER's provenance (v0.41.0).
    *
    *  This lived as a ternary in index.ts, where no test could reach it — and a
@@ -2343,6 +2353,8 @@ class ZwaveDataImpl implements ZwaveData {
     // home_id network reset, mappings for a DIFFERENT network entirely.
     this.batteryEntityToNode.clear();
     this.pingEntityByNode.clear();
+    this.readEntityByNode.clear();
+    const readEndpoint = new Map<number, number>();
     let count = 0;
     for (const e of entities) {
       if (e.platform !== 'zwave_js') continue;
@@ -2359,6 +2371,22 @@ class ZwaveDataImpl implements ZwaveData {
         name: friendly ?? e.entity_id,
         domain,
       });
+      // The value a ROUTED READ targets (v0.70.0): the node's own Binary (37) or
+      // Multilevel (38) Switch `currentValue`, identified by the unique_id HA
+      // builds from the value id, so a match proves the entity's primary value
+      // IS that value. `refresh_value` on it is one Get and changes nothing.
+      // Config-parameter switches (CC 112), node-level entities (status, ping,
+      // firmware) and switch_as_x wrappers (a different platform, filtered above)
+      // never match. Lowest endpoint wins, for a stable choice.
+      {
+        const rv = /^\d+\.(\d+)-(37|38)-(\d+)-currentValue$/.exec(e.unique_id ?? '');
+        const nodeId = deviceIdToNodeId.get(e.device_id)!;
+        if (rv && Number(rv[1]) === nodeId && (domain === 'switch' || domain === 'light')) {
+          const ep = Number(rv[3]);
+          const prev = readEndpoint.get(nodeId);
+          if (prev == null || ep < prev) { readEndpoint.set(nodeId, ep); this.readEntityByNode.set(nodeId, e.entity_id); }
+        }
+      }
       count++;
       // Remember the battery-level sensor so we can read its % from get_states.
       if (e.entity_id.startsWith('sensor.') && /battery/i.test(e.entity_id)) {

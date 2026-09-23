@@ -11,6 +11,9 @@ import { test } from 'node:test';
 
 import {
   createAutoPingState,
+  readRevivalsWithin,
+  READ_REVIVAL_CAP,
+  READ_REVIVAL_WINDOW_MS,
   pendProbe,
   unpendProbe,
   noteStale,
@@ -53,7 +56,7 @@ function mesh(live: number, extra: NodeSnapshot[] = []): NodeSnapshot[] {
 /** Drive one tick: track episodes, then decide. */
 function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
   config?: AutoPingConfig; controller?: ControllerSnapshot | null; booting?: boolean; verifyDue?: number[];
-  rfOffSince?: number | null; bootDeadLane?: boolean;
+  rfOffSince?: number | null; bootDeadLane?: boolean; canRead?: (id: number) => boolean;
 } = {}) {
   trackEpisodes(state, nodes, now);
   return decideAutoPings({
@@ -68,6 +71,7 @@ function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
     // and the assertion below it is satisfied by the wrong branch.
     bootDeadLane: over.bootDeadLane,
     rfOffSince: over.rfOffSince ?? null,
+    canRead: over.canRead,
     verifyDue: over.verifyDue ? () => over.verifyDue!.map((id) => ({ id, first: true })) : undefined,
   });
 }
@@ -2432,4 +2436,266 @@ test('the runner reads the RF-off reading: it suppresses, and drops what was in 
   assert.equal(st?.pending ?? 0, 0, 'the unanswerable probe was dropped');
   assert.equal(st?.missStreak ?? 0, 0, 'and the blackout booked no miss against the node');
   h.stop();
+});
+
+/* ── v0.70.0: the routed read ─────────────────────────────────────────────
+ *
+ * An HA/zwave-js-server ping is an ACK-only NoOp (transmit options 0x01, one
+ * attempt), so it can use only the stored routes. A Get goes out with the
+ * driver's default options and may auto-route. On 2026-09-22 the ladder spent
+ * three pings on an outlet and summoned a human; a switch command then revived
+ * it in 340 ms through a repeater the stored routes did not use. */
+
+const yes = () => true;
+
+test('an unanswered ladder ping earns ONE routed read, instead of a ping, on the next tick (v0.70.0)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  let clock = T;
+  tick(s, nodes, clock, { canRead: yes });
+  clock += 11 * MIN;
+  assert.deepEqual(tick(s, nodes, clock, { canRead: yes }).ping, [7], 'fixture guard: rung 1 is a ping');
+  noteAttempt(s, 7, clock);
+  s.readOwed.add(7);                              // the judgment loop does this on a judged miss
+  clock += 2 * MIN;
+  const d = tick(s, nodes, clock, { canRead: yes });
+  assert.deepEqual(d.read, [7], 'the owed read goes out');
+  assert.deepEqual(d.ping, [], 'and no ping in the same tick — one frame per node per tick');
+});
+
+test('with no readable value the ladder is exactly the v0.69.0 ladder (v0.70.0)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  let clock = T;
+  tick(s, nodes, clock);
+  s.readOwed.add(7);
+  clock += 11 * MIN;
+  const d = tick(s, nodes, clock, { canRead: () => false });
+  assert.deepEqual(d.read, [], 'nothing to read, so no read');
+  assert.deepEqual(d.ping, [7], 'and the ping goes out as it always did');
+  assert.deepEqual(tick(s, nodes, clock).read, [], 'an input without canRead never reads');
+});
+
+test('the final rung reads BEFORE the give-up, and the give-up waits for the read (v0.70.0)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  let clock = T;
+  tick(s, nodes, clock, { canRead: yes });
+  s.attempts.set(7, 3);                           // budget spent
+  s.readOwed.add(7);                              // …and the last ping was judged unanswered
+  clock += 61 * MIN;
+  const d = tick(s, nodes, clock, { canRead: yes });
+  assert.deepEqual(d.read, [7], 'the last rung still gets its read');
+  assert.deepEqual(d.gaveUp, [], 'nobody is summoned while a read is owed');
+  s.readOwed.delete(7);
+  pendProbe(s, 7, clock, 'read');                 // the runner pends the read it sent
+  assert.deepEqual(tick(s, nodes, clock + MIN, { canRead: yes }).gaveUp, [], 'nor while it awaits judgment');
+  s.awaitingAnswer.delete(7);                     // judged, unanswered
+  assert.deepEqual(tick(s, nodes, clock + 3 * MIN, { canRead: yes }).gaveUp, [7], 'then the summons, as before');
+});
+
+test('two routed-read revivals in 24 h withhold the read, so a kill–revive loop ends in a summons (v0.70.0)', () => {
+  // A device that answers Gets but not pings is revived by the read and killed
+  // again by the next NoOp; recovery resets the ladder, so without a bound the
+  // loop never reaches a human.
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  let clock = T;
+  tick(s, nodes, clock, { canRead: yes });
+  clock += 11 * MIN;
+  s.readOwed.add(7);
+  s.readRevivals.set(7, [clock - 5 * 60 * MIN, clock - 60 * MIN]);
+  assert.equal(readRevivalsWithin(s, 7, clock), READ_REVIVAL_CAP, 'fixture guard: at the cap');
+  const d = tick(s, nodes, clock, { canRead: yes });
+  assert.deepEqual(d.read, [], 'the read is withheld at the cap');
+  assert.deepEqual(d.ping, [7], 'and the ladder carries on with pings, toward the summons');
+  // …but the window ages out.
+  s.readRevivals.set(7, [clock - READ_REVIVAL_WINDOW_MS - MIN, clock - 60 * MIN]);
+  assert.equal(readRevivalsWithin(s, 7, clock), 1, 'a revival older than the window no longer counts');
+  assert.deepEqual(tick(s, nodes, clock, { canRead: yes }).read, [7], 'below the cap the read is back');
+});
+
+test('every gate that holds the ladder holds the read too (v0.70.0)', () => {
+  const owed = (): AutoPingState => {
+    const s = createAutoPingState();
+    tick(s, mesh(20, [dead(7)]), T, { canRead: yes });
+    s.readOwed.add(7);
+    return s;
+  };
+  const at = T + 11 * MIN;
+  const nodes = mesh(20, [dead(7)]);
+  assert.deepEqual(tick(owed(), nodes, at, { canRead: yes }).read, [7], 'fixture guard: ungated, it reads');
+  assert.deepEqual(tick(owed(), nodes, at, { canRead: yes, config: cfg({ enabled: false }) }).read, [], 'disabled');
+  assert.deepEqual(tick(owed(), nodes, at, { canRead: yes, config: cfg({ writeActions: false }) }).read, [], 'write actions off');
+  assert.deepEqual(tick(owed(), nodes, at, { canRead: yes, rfOffSince: at - 1000 }).read, [], 'controller RF off');
+  assert.deepEqual(tick(owed(), nodes, at, { canRead: yes, controller: { isRebuildingRoutes: true } as never }).read, [], 'rebuilding routes');
+  assert.deepEqual(tick(owed(), nodes, at, { canRead: yes, booting: true }).read, [], 'boot window, roster not ready');
+  assert.deepEqual(tick(owed(), nodes, at, { canRead: yes, booting: true, bootDeadLane: true }).read, [7],
+    'boot window with the dead lane released reads exactly as the ladder pings');
+  const storm = mesh(8, [dead(7), dead(8), dead(9), dead(10)]);
+  const ss = createAutoPingState(); tick(ss, storm, T, { canRead: yes }); ss.readOwed.add(7);
+  assert.deepEqual(tick(ss, storm, at, { canRead: yes }).read, [], 'storm');
+});
+
+test('battery and FLiRS nodes never get a routed read (v0.70.0)', () => {
+  for (const over of [{ isListening: false }, { isListening: false, isFrequentListening: true } as never]) {
+    const s = createAutoPingState();
+    const nodes = mesh(20, [dead(7, over)]);
+    tick(s, nodes, T, { canRead: yes });
+    s.readOwed.add(7);
+    assert.deepEqual(tick(s, nodes, T + 11 * MIN, { canRead: yes }).read, [], `not a ping candidate: ${JSON.stringify(over)}`);
+  }
+});
+
+test('a routed read swallowed by the RF blackout is owed again; a ping is not (v0.70.0)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7), dead(8)]);
+  pendProbe(s, 7, T, 'read');
+  s.reads.set(7, 1);
+  pendProbe(s, 8, T, 'dead');
+  assert.equal(dropBlackoutProbes(s, nodes, T + 5_000), 2, 'fixture guard: both were in flight');
+  assert.ok(s.readOwed.has(7), 'the read was never really asked, so it is owed again');
+  assert.equal(s.reads.get(7), 0, 'and not counted as sent');
+  assert.equal(s.readOwed.has(8), false, 'a dropped ping earns no read — only a JUDGED miss does');
+});
+
+test('recovery clears the owed read but keeps the revival history; departure clears both (v0.70.0)', () => {
+  const s = createAutoPingState();
+  s.readOwed.add(7); s.reads.set(7, 2); s.readRevivals.set(7, [T]);
+  trackEpisodes(s, mesh(20, [node(7)]), T + MIN);
+  assert.equal(s.readOwed.has(7), false, 'recovered: nothing is owed');
+  assert.equal(s.reads.has(7), false, 'and the per-episode count resets');
+  assert.deepEqual(s.readRevivals.get(7), [T], 'but revivals span episodes — that is what bounds the loop');
+  trackEpisodes(s, mesh(20), T + 2 * MIN);
+  assert.equal(s.readRevivals.has(7), false, 'a node that left the roster takes its history with it');
+});
+
+/* ── v0.70.0: the routed read, through the real runner ─────────────────── */
+
+async function ladder(over: { read?: boolean; readResult?: unknown; nodes?: NodeSnapshot[]; staleMs?: number } = {}) {
+  const { startAutoPing } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const n7 = over.nodes ? over.nodes.find((n) => n.nodeId === 7)! : dead(7);
+  const nodes = over.nodes ?? mesh(20, [n7]);
+  const pings: number[] = [];
+  const reads: { id: number; at: number }[] = [];
+  const lines: { at: number; text: string }[] = [];
+  const warns: string[] = [];
+  const results: unknown[] = [];
+  const push = (m: string) => lines.push({ at: clock, text: m });
+  const log2 = Object.assign(push, { warn: (m: string) => { warns.push(m); push(m); }, error: push, debug: () => {} });
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async (id: number) => { pings.push(id); }, probe: async () => {},
+    ...(over.read === false ? {} : {
+      read: async (id: number) => { reads.push({ id, at: clock }); return over.readResult; },
+      canRead: () => true,
+    }),
+    log: () => {}, log2,
+    config: cfg({ staleMs: over.staleMs ?? 0, afterMs: 10 * MIN, maxAttempts: 3 }), tickMs: 1_000_000, now: () => clock,
+    onProbeResult: (...a: unknown[]) => { results.push(a); },
+  });
+  const flush = () => new Promise((r) => setImmediate(r));
+  return {
+    h, n7, pings, reads, lines, warns, results,
+    at: () => clock,
+    seen: (v: number | null) => { (n7.stats as unknown as { lastSeen: number | null }).lastSeen = v; },
+    status: (st: NodeStatus) => { (n7 as unknown as { status: NodeStatus }).status = st; },
+    async step(mins = 1) { for (let i = 0; i < mins; i++) { h.tick(); await flush(); clock += MIN; } },
+    async until(pred: () => boolean, max = 400) { for (let i = 0; i < max && !pred(); i++) await this.step(); },
+    node7: () => h.snapshot().nodes.find((n) => n.nodeId === 7),
+  };
+}
+
+test('the runner sends the read only AFTER the ping is judged, once per rung, and never as a ping (v0.70.0)', async () => {
+  const L = await ladder();
+  await L.until(() => L.pings.length === 1);
+  const pingAt = L.at() - MIN;
+  await L.until(() => L.reads.length === 1);
+  assert.ok(L.reads[0].at - pingAt >= 90_000, `the read waits for the ping's answer grace (${(L.reads[0].at - pingAt) / 1000}s)`);
+  assert.equal(L.pings.length, 1, 'the tick that reads does not also ping');
+  assert.ok(L.lines.some((l) => /sending one routed read/.test(l.text)), 'the read is said out loud');
+  await L.step(6);
+  assert.equal(L.reads.length, 1, 'one read per rung — not one per tick while the backoff runs');
+  L.h.stop();
+});
+
+test('a read the node answers revives it and says so; recovery then clears the rung (v0.70.0)', async () => {
+  const L = await ladder();
+  await L.until(() => L.reads.length === 1);
+  L.seen(L.reads[0].at + 1_000);                 // the Get was ACKed
+  await L.until(() => L.lines.some((l) => /answered our routed read/.test(l.text)), 10);
+  assert.ok(L.lines.some((l) => /answered our routed read after its ping went unanswered/.test(l.text)), 'the revival is attributed in the log');
+  assert.equal(L.node7()?.readRevivals24h, 1, 'and counted');
+  L.status(NodeStatus.Alive);
+  await L.step();
+  assert.equal(L.node7()?.readOwed ?? false, false, 'nothing is owed once it is Alive');
+  assert.equal(L.node7()?.reads ?? 0, 0, 'and the per-episode count reset');
+  assert.equal(L.results.length, 0, 'a read never reaches the persisted reply rate');
+  L.h.stop();
+});
+
+test('a node that ignores pings AND reads is summoned after the last read is judged, and the line says so (v0.70.0)', async () => {
+  const L = await ladder();
+  await L.until(() => L.lines.some((l) => /giving up/.test(l.text)));
+  const gaveUp = L.lines.find((l) => /giving up/.test(l.text))!;
+  assert.equal(L.pings.length, 3, 'three pings, as before');
+  assert.equal(L.reads.length, 3, 'one read per rung');
+  assert.ok(gaveUp.at - L.reads[2].at >= 90_000, 'nobody is summoned before the last read could be answered');
+  assert.match(gaveUp.text, /did not answer 3 pings or 3 routed reads — giving up/);
+  assert.match(gaveUp.text, /3 NOP frames and 3 single-attempt Gets that could auto-route/);
+  L.h.stop();
+});
+
+test('without a read verb the ladder and its give-up text are exactly v0.69.0 (v0.70.0)', async () => {
+  const L = await ladder({ read: false });
+  await L.until(() => L.lines.some((l) => /giving up/.test(l.text)));
+  const gaveUp = L.lines.find((l) => /giving up/.test(l.text))!;
+  assert.equal(L.reads.length, 0);
+  assert.match(gaveUp.text, /did not answer 3 pings — giving up\. That means it ignored 3 NOP frames, NOT that it is unreachable: try OPERATING the device \(a real command often lands when pings do not\), then a manual ping, then check its power\./);
+  L.h.stop();
+});
+
+test('a read that never leaves is un-counted and NOT retried, and spends no ladder budget (v0.70.0)', async () => {
+  const L = await ladder({ readResult: { ok: false, message: 'no entity' } });
+  await L.until(() => L.reads.length === 1);
+  await L.step();
+  assert.equal(L.node7()?.reads, 0, 'a read that never left is not counted as sent');
+  assert.equal(L.node7()?.attempts, 1, 'the ping budget is untouched');
+  assert.equal(L.node7()?.launchFailures, 0, 'and it is not a failure to probe');
+  assert.ok(L.warns.some((w) => /no switch\/light value to read, or transport error/.test(w)) ||
+    L.lines.some((l) => /could not be probed/.test(l.text)), 'the failed launch is reported, with a reason that fits a read');
+  await L.step(8);
+  assert.equal(L.reads.length, 1, 'and it is not re-sent every tick — the next one needs the next ping to miss');
+  L.h.stop();
+});
+
+test('a second routed-read revival in 24 h raises a WARN and withholds the next read (v0.70.0)', async () => {
+  const L = await ladder();
+  for (let cycle = 1; cycle <= 2; cycle++) {
+    const before = L.reads.length;
+    await L.until(() => L.reads.length === before + 1);
+    L.seen(L.at());
+    await L.until(() => L.lines.filter((l) => /answered our routed read/.test(l.text)).length === cycle, 10);
+    L.status(NodeStatus.Alive);
+    await L.step(2);
+    L.status(NodeStatus.Dead);                   // the next NoOp kills it again
+  }
+  assert.equal(L.warns.filter((w) => /revived by a routed read 2 times in 24 h — it answers Gets but not pings/.test(w)).length, 1,
+    'the loop is named, once');
+  const readsAtCap = L.reads.length;
+  await L.until(() => L.lines.some((l) => /giving up/.test(l.text)));
+  assert.equal(L.reads.length, readsAtCap, 'past the cap no further read goes out');
+  assert.match(L.lines.find((l) => /giving up/.test(l.text))!.text, /revived it 2 times in the last 24 h and it keeps failing pings, so the read is withheld/);
+  L.h.stop();
+});
+
+test('a SWEEP miss never earns a routed read — only a judged ladder ping does (v0.70.0)', async () => {
+  const n7 = node(7, { stats: { lastSeen: T - 300 * MIN } as never });
+  const L = await ladder({ nodes: [node(1, { isController: true }), n7], staleMs: 60 * MIN });
+  await L.until(() => L.lines.some((l) => /node 7 did NOT answer its probe/.test(l.text)), 20);
+  assert.ok(L.lines.some((l) => /node 7 did NOT answer its probe/.test(l.text)), 'fixture guard: the sweep probe was judged a miss');
+  assert.equal(L.node7()?.readOwed ?? false, false, 'no read is owed for a sweep miss');
+  assert.equal(L.reads.length, 0);
+  L.h.stop();
 });

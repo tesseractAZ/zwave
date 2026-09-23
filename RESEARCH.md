@@ -844,6 +844,13 @@ actions; never queue repeated per-node actions on battery nodes; exclude
 FLiRS/sleeping from active link tests; sleeping-node after-windows key off next
 wake.
 
+### 5.6 A ping cannot take a route a command can *(source, zwave-js 15.29.0 / zwave-js-server 3.10.2 / HA Core 2026.9)*
+
+- **Pings are ACK-only.** `NoOperationCCAPI.send()` sets `transmitOptions: TransmitOptions.ACK` and `maxSendAttempts: 1`; `Node.ping(tryReallyHard)` switches to `TransmitOptions.DEFAULT` only when passed `true`, and zwave-js-server's `node.ping` handler calls it with no argument. HA's ping button goes through that handler, so every ping from HA — and from this add-on — is `0x01`, one attempt, over LWR, then NLWR, then direct. A NoAck marks the node Dead (`changeNodeStatusOnTimeout` defaults to true).
+- **Commands are not.** Every other CC command defaults to `TransmitOptions.DEFAULT` = ACK|AutoRoute|Explore (`0x25`), up to three send attempts. `Node.pollValue` (HA `zwave_js.refresh_value`) keeps the default options with one attempt. Nothing on the send path holds a frame for a Dead node, and an OK TX report marks a listening node Alive.
+- **`refresh_node_values` does nothing to a Dead node.** The driver's refresh task returns before querying any CC when the node is Dead, and HA still reports success.
+- **Observed** (reference mesh, 2026-09-22): three `0x01` pings to a Dead outlet NoAcked; one `0x25` Set reached it via Auto Route through a repeater in 340 ms; its next ping then succeeded over that route. No explorer frame appears in 37 h of driver log — AutoRoute, not Explore, did the work.
+
 ---
 
 ## 6. Live symptom — worked diagnosis (patio-light switches)

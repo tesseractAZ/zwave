@@ -23,6 +23,7 @@
  */
 
 import type { NodeSnapshot, ActionKind, Efficacy } from '../types';
+import { NodeStatus } from '../types';
 import type { Symptom, SymptomKind } from './symptoms';
 
 /** Evidence-grade of a recommendation — surfaced so the UI can distinguish a
@@ -145,7 +146,11 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
       } else {
         candidates.push(repeaterCandidate());
         // A benign re-poll can confirm the current values without touching routes.
-        candidates.push({ action: 'refreshValues', title: 'Refresh values (re-poll, non-mutating)', rationale: 'Re-reads the node’s current values without changing any route. Confirms the live state; it does not fix a marginal link.', basis: 'source', cost: 'safe', blocked: gateExecutable(node, ctx) });
+        // Blocked on a Dead node (v0.70.0): zwave_js/refresh_node_values runs the
+        // driver's refresh task, which returns before querying anything when the
+        // node is Dead, and HA reports success anyway — an action that says it
+        // ran and sent nothing.
+        candidates.push({ action: 'refreshValues', title: 'Refresh values (re-poll, non-mutating)', rationale: 'Re-reads the node’s current values without changing any route. Confirms the live state; it does not fix a marginal link.', basis: 'source', cost: 'safe', blocked: node?.status === NodeStatus.Dead ? 'node is Dead — zwave-js skips a value refresh on a Dead node, so this would send nothing' : gateExecutable(node, ctx) });
         // Rebuild is the anti-pattern here — offered only to say NOT to.
         candidates.push({ action: 'healNode', title: 'Rebuild routes — NOT recommended here', rationale: 'Rebuilding routes does not fix a physically marginal link and can regress a working route; it also deletes any manually-set priority routes. Only use it after devices were physically moved/added/removed.', basis: 'source', cost: 'disruptive', blocked: 'no topology change — won’t help' });
       }

@@ -92,6 +92,7 @@ async function main(): Promise<void> {
     entryId: () => zwaveData.getEntryId(),
     deviceIdOf: (n) => zwaveData.deviceIdOf(n),
     pingEntityOf: (n) => zwaveData.pingEntityOf(n),
+    readEntityOf: (n) => zwaveData.readEntityOf(n),
     // Provenance follows the CALLER (v0.41.0): one runner serves both the
     // operator's typed CONFIRM and auto-ping's autonomous ladder, so a fixed
     // source here made the Log screen attribute engine probes to the human —
@@ -128,6 +129,9 @@ async function main(): Promise<void> {
       // v0.38.1: measurement lanes (sweep + verification) must not stamp the
       // ledger — see ActionRunner.probe.
       probe: (n) => actions.probe(n),
+      // v0.70.0: one routed read after an unanswered ladder ping.
+      read: (n) => actions.routedRead(n),
+      canRead: (n) => zwaveData.readEntityOf(n) != null,
       // v0.36: the outcome ledger's verification probes ride the same runner,
       // so they inherit every gate auto-ping already applies rather than
       // opening a second, less-guarded path to the mesh.
@@ -164,7 +168,9 @@ async function main(): Promise<void> {
       `auto-ping ENABLED — a MAINS node Dead for ${Math.round(config.autoPing.afterMs / 60_000)}m is probed, ` +
         `or at once if it went Dead with our sweep probe to it unanswered ` +
         `(max ${config.autoPing.maxAttempts}/outage, waits 10/30/60m between attempts — at the default 3 that is 10m dwell + 10m + 30m, so ~50m to "needs a human", ~40m after a sweep kill; ` +
-        `suppressed on storm and rebuild, and for 5m after start — the dead ladder only until the roster is ready)` +
+        `suppressed on storm and rebuild, and for 5m after start — the dead ladder only until the roster is ready); ` +
+        `an unanswered ladder ping is followed by one routed read (zwave_js.refresh_value on the node's own switch/light value — a Get, read-only), ` +
+        `which adds ~4m before "needs a human"` +
         (config.autoPing.staleMs > 0
           ? `; liveness probe after ${Math.round(config.autoPing.staleMs / 60_000)}m of silence`
           : '; liveness probe off'),
