@@ -21,6 +21,7 @@
 
 import type { IdentityChoice } from '../zwave/homeTag';
 import type { DataProvider, NodeSnapshot, ScreenCtx, ViewState, ActionRunner, ActionKind, ConfigParam, EntityVerb } from '../types';
+import { NodeStatus } from '../types';
 import { applyKey, clampSelection, filteredEvents, syncLogCursor, syncRemedyCursor, visibleNodes } from './input';
 import type { InputEvent } from './input';
 import { renderScreen } from './screens/index';
@@ -1003,7 +1004,12 @@ export class TuiSession {
     try {
       switch (action.kind) {
         case 'ping': res = await a.ping(action.nodeId!); break;
-        case 'refreshValues': res = await a.refreshValues(action.nodeId!); break;
+        // A Dead node gets nothing from a value refresh (v0.70.0): the driver's
+        // refresh task returns before querying, and HA still reports success.
+        // Say so instead of reporting a refresh that never went on the air.
+        case 'refreshValues': res = this.data.nodes().find((n) => n.nodeId === action.nodeId)?.status === NodeStatus.Dead
+          ? { ok: false, message: `node ${action.nodeId} is Dead — zwave-js skips a value refresh on a Dead node, so it would send nothing; ping it, or operate the device` }
+          : await a.refreshValues(action.nodeId!); break;
         case 'reInterview': res = await a.reInterview(action.nodeId!); break;
         case 'healNode': res = await a.healNode(action.nodeId!); break;
         case 'rebuildAll': res = await a.rebuildAll(); break;

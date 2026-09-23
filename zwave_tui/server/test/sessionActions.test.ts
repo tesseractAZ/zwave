@@ -763,3 +763,30 @@ test('a THROWN action error is capped and scrubbed like every other (v0.51.0)', 
   assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(notice),
     'control bytes must be scrubbed before they reach a frame');
 });
+
+test('Refresh values on a Dead node says it would send nothing, and does not report success (v0.70.0)', async () => {
+  // zwave_js/refresh_node_values runs the driver's refresh task, which returns
+  // before querying anything when the node is Dead — and HA reports success.
+  const deadNode: NodeSnapshot = { ...node, status: NodeStatus.Dead, statusLabel: 'dead' };
+  const d: DataProvider = { ...mkData(), nodes: () => [deadNode], nodeById: () => deadNode };
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner, d);
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Refresh values'), 'fixture guard: the menu offers Refresh values');
+  s.feed([enter]); s.draw();
+  if (/CONFIRM/.test(strip(last()))) typeConfirm(s);
+  await flush(); await flush(); s.draw();
+  assert.ok(!calls.includes('refresh:5'), `nothing is sent to a Dead node: ${JSON.stringify(calls)}`);
+  assert.match(strip(last()), /is Dead — zwave-js skips a value refresh/, 'and the operator is told why');
+});
+
+test('Refresh values on a live node still runs (v0.70.0 regression pin)', async () => {
+  const { runner, calls } = mkActions();
+  const { s, last } = mkSession(runner);
+  s.feed([key('a')]); s.draw();
+  assert.ok(seek(s, last, 'Refresh values'));
+  s.feed([enter]); s.draw();
+  if (/CONFIRM/.test(strip(last()))) typeConfirm(s);
+  await flush(); await flush();
+  assert.ok(calls.includes('refresh:5'), `a live node is refreshed: ${JSON.stringify(calls)}`);
+});
