@@ -1623,8 +1623,10 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
           }
         } else {
           const m = `auto-ping: node ${nodeId} did NOT answer our routed read (${ordinal(misses)} consecutive miss, lastSeen did not advance)`;
-          o.log(misses >= 2 ? 'warn' : 'info', nodeId, m);
-          (misses >= 2 ? (o.log2?.warn ?? o.log2) : o.log2)?.(m);
+          // Same first-miss-is-information rule as a ping miss (v0.36.5).
+          const streak = misses >= 2;
+          o.log(streak ? 'warn' : 'info', nodeId, m);
+          (streak ? (o.log2?.warn ?? o.log2) : o.log2)?.(m);
         }
         continue;
       }

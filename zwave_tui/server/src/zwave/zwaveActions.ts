@@ -278,7 +278,7 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
         const ent = o.readEntityOf?.(n) ?? null;
         if (!ent) throw new Error(`node ${n} has no switch/light value to read`);
         await o.client.send({ type: 'call_service', domain: 'zwave_js', service: 'refresh_value', service_data: { entity_id: ent, refresh_all_values: false } });
-      }, /* learn */ false, /* origin */ 'engine'),
+      }, /* learn: never, see above */ false, /* origin */ 'engine'),
     reInterview: (n) => run('reInterview', n, `re-interview node ${n}`, () => deviceCmd('zwave_js/refresh_node_info', n)),
     healNode: (n) => run('healNode', n, `rebuild routes node ${n}`, () => deviceCmd('zwave_js/rebuild_node_routes', n)),
     rebuildAll: () => run('rebuildAll', null, 'rebuild ALL routes', () => entryCmd('zwave_js/begin_rebuilding_routes')),
