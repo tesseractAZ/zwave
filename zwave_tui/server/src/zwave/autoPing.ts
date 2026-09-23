@@ -20,8 +20,9 @@
  * node Dead. On the reference mesh 100 of 106 mains Dead episodes in 67 days
  * began 0.11–3.49 s after one of this module's own unanswered pings — 63 on a
  * sweep probe, 35 on a verification probe. A read adds a controller-computed
- * route to the attempts and was never seen to go unanswered in 170 frames of
- * the 39 h driver log (95 % upper bound ≈1.8 %); it CAN still go unanswered,
+ * route to the attempts; no frame sent with its transmit options (0x25) went
+ * unanswered in the 39 h driver log — 170 of them: 115 Sets, 35 Gets and 20
+ * Nonce Gets (95 % upper bound ≈1.8 %) — but it CAN still go unanswered,
  * and then it marks the node Dead exactly as a ping does, so the kill
  * containment below (`probeDeath`, `probeHoldFrom`) stays. Unlike a ping, a
  * read can make the controller keep a new working route — zwaveData
@@ -163,8 +164,8 @@ export interface AutoPingState {
    * a device that ignores NOPs (v0.42.0) the exemption
    * would trade its Dead-but-talking notice for an immediate retry of the very
    * frame it ignores. The operator is at the keyboard, and pressing `p` again
-   * is the retry. Both lanes still have the miss booked when the death is seen
-   * (`settleProbeDeath`); both keep the dwell.
+   * is the retry. A manual ping's miss is still booked when the death is seen
+   * (`settleProbeDeath`), and it keeps the dwell, as does the ladder's.
    *
    * `deadSince` still records the observed death, so every age an operator
    * sees stays true; the dwell gate and the traffic check read this set.
@@ -1200,11 +1201,13 @@ export interface AutoPingRunnerOptions {
    *  data layer can tell a route change our frame caused from one it merely
    *  revealed. Never for the ladder, its read, or a manual ping. */
   onMeasurementSent?: (nodeId: number, at: number, lane: 'sweep' | 'verify', frame: ProbeFrame) => void;
-  /** Drain the Dead transitions the event feed saw since the last call, epoch
-   *  ms (v0.71.0). A death that clears between two ticks is invisible to the
-   *  level-sampled roster, and a Get can make one; see the runner. Optional:
-   *  absent, only tick-visible deaths are attributed, as before. */
-  deaths?: () => { nodeId: number; at: number }[];
+  /** Drain the Dead transitions the event feed has seen CLEAR since the last
+   *  call (v0.71.0): when the node went Dead (`at`, epoch ms) and the node's
+   *  `lastSeen` as of that moment (`seen`, from the same feed, so it cannot be
+   *  a later frame's). A death that clears between two ticks is invisible to
+   *  the level-sampled roster; see the runner. Optional: absent, only
+   *  tick-visible deaths are attributed, as before. */
+  deaths?: () => { nodeId: number; at: number; seen?: number | null }[];
   /** One routed read for a Dead node whose ladder ping went unanswered
    *  (v0.70.0): a single Get on the node's own switch/light value. Non-learning,
    *  read-only. Absent ⇒ no reads (the v0.69.0 ladder). */
@@ -1391,30 +1394,56 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     }
     // DEATHS BETWEEN TICKS (v0.71.0). trackEpisodes LEVEL-samples status once a
     // tick, so a node that goes Dead and comes back inside one tick never reaches
-    // it. A lost NoOp cannot do that — nothing answers it — but a Get can: the
-    // node takes the frame, its ACK is lost, the driver marks it Dead on the
-    // NoAck, and the node's own Report then marks it Alive again. The event feed
-    // counts both crossings into dead-flap and the confound guard, so the
-    // containment must count them too, or a burst could make such pairs without
-    // the hold ever arming. The probe itself stays pending and is judged as
-    // usual: the Report proves the Get arrived, so it is ANSWERED.
+    // it. Two things revive a node that fast. Any frame FROM a Dead node marks it
+    // Alive, so a node that reports on its own clears a NoOp kill by itself. And
+    // a Get can clear its own: the node takes the frame, its ACK is lost, the
+    // driver marks it Dead on the NoAck, and the node's Report then marks it
+    // Alive again. The event feed counts both crossings into dead-flap and the
+    // confound guard, so the containment must count them too, or a burst could
+    // make such pairs without the hold ever arming. The feed hands over only
+    // deaths it has seen CLEAR, so a Dead node the roster has not caught up with
+    // is left to trackEpisodes rather than booked here and again there.
     for (const d of o.deaths?.() ?? []) {
       if (state.deadSince.has(d.nodeId)) continue; // Dead at this tick: trackEpisodes owns it
-      const before = (state.awaitingAnswer.get(d.nodeId) ?? []).filter((p) => p.at <= d.at && d.at - p.at <= ANSWER_GRACE_MS);
+      // settleProbeDeath's own test, applied at the death: a probe the node had
+      // answered before it died did not kill it, and one sent after it cannot.
+      const pending = state.awaitingAnswer.get(d.nodeId) ?? [];
+      const before = pending.filter((p) => p.at <= d.at && d.at - p.at <= ANSWER_GRACE_MS && (d.seen == null || d.seen < p.at));
       const newest = before[before.length - 1];
       if (newest == null || (newest.lane !== 'sweep' && newest.lane !== 'verify')) continue;
       recordProbeKill(state, d.nodeId, d.at);
       state.probeHoldFrom.set(d.nodeId, t);
-      const m = `auto-ping: node ${d.nodeId} went Dead on our ${LANE_WORD[newest.lane]} ${frameWord(newest.frame ?? 'ping')} ` +
-        `and was Alive again before the next tick (a lost ACK; its own reply revives it) — ` +
-        `no sweep or verification probe for ${Math.round(PROBE_KILL_HOLD_MS / 60_000)}m`;
-      o.log('info', d.nodeId, m);
-      o.log2?.(m);
+      const frame = newest.frame ?? 'ping';
+      const after = `${Math.max(0, Math.round((d.at - newest.at) / 1000))}s after our ${LANE_WORD[newest.lane]} ${frameWord(frame)}`;
+      const hold = `no sweep or verification probe for ${Math.round(PROBE_KILL_HOLD_MS / 60_000)}m`;
+      if (frame === 'read') {
+        // The read stays pending and is judged as usual: its Report is what
+        // revived the node, and a Report proves the Get arrived — ANSWERED.
+        const m = `auto-ping: node ${d.nodeId} went Dead ${after} and was Alive again before the next tick ` +
+          `(a lost ACK, most likely: its Report revives it) — ${hold}`;
+        o.log('info', d.nodeId, m);
+        o.log2?.(m);
+        continue;
+      }
+      // A NoOp gets no reply, so whatever revived the node was its own traffic,
+      // not an answer. Settle the ping as a miss now, as settleProbeDeath does,
+      // or the judgment would read that traffic as the answer (the v0.64.4
+      // credit leak, reopened).
+      const rest = pending.filter((p) => p !== newest);
+      if (rest.length > 0) state.awaitingAnswer.set(d.nodeId, rest);
+      else state.awaitingAnswer.delete(d.nodeId);
+      const misses = (state.missStreak.get(d.nodeId) ?? 0) + 1;
+      state.missStreak.set(d.nodeId, misses);
+      if (newest.lane === 'sweep') o.onProbeResult?.(d.nodeId, false, newest.cls, frame);
+      const m = `auto-ping: node ${d.nodeId} did NOT answer its probe (${ordinal(misses)} consecutive miss — ` +
+        `it went Dead ${after} and was Alive again before the next tick, on traffic of its own) — ${hold}` + probeWord(newest.lane, frame);
+      o.log(misses >= 2 ? 'warn' : 'info', d.nodeId, m);
+      (misses >= 2 ? (o.log2?.warn ?? o.log2) : o.log2)?.(m);
     }
     // ONE warning when a node's own-probe kills reach the threshold (v0.71.0).
     for (const id of state.probeKillWarn) {
       const w = `auto-ping: node ${id} went Dead on this add-on's own probes ${PROBE_KILL_WARN_AT} times in 24 h ` +
-        `(each retried at once, then left alone for ${Math.round(PROBE_KILL_HOLD_MS / 60_000)}m) — ` +
+        `(each followed by ${Math.round(PROBE_KILL_HOLD_MS / 60_000)}m with no sweep or verification probe) — ` +
         `its routes are marginal; consider rebuilding its routes, or moving it or a repeater`;
       o.log('warn', id, w);
       (o.log2?.warn ?? o.log2)?.(w);
@@ -1709,7 +1738,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
         `(a single Get with the driver's default routing, which may auto-route; a ping can use only the stored routes)`;
       o.log('info', nodeId, m);
       o.log2?.(m);
-      pendProbe(state, nodeId, t, 'read');
+      pendProbe(state, nodeId, t, 'read', 'unheard', 'read');
       settleProbe(o, state, nodeId, t, o.read!(nodeId), () => {
         state.reads.set(nodeId, Math.max(0, (state.reads.get(nodeId) ?? 1) - 1));
       }, 'no switch/light value to read, or transport error');

@@ -766,7 +766,8 @@ export interface ActionRunner {
   /**
    * The same NoOp ping, but NEVER attributed to the outcome ledger (v0.38.1) —
    * since v0.71.0 the measurement lanes' FALLBACK frame, for a node with no
-   * switch/light value to read (see `routedRead`'s 'probe' purpose).
+   * switch/light value to read, or for 30 min after its read could not be sent
+   * (see `routedRead`'s 'probe' purpose).
    *
    * The audit finding this exists for: all three auto-ping lanes shared the
    * learning `ping`, so every liveness sweep and every verification burst

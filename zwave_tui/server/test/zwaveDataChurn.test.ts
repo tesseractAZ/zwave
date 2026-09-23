@@ -1991,7 +1991,7 @@ test('a VERIFICATION read that fails over is ours, but only the sweep feeds the 
   } finally { R.stop(); }
 });
 
-test('our read\'s failover confounds the node\'s open rate, RTT, signal and return-path episodes — not dead-flap, route-churn, quiet-node or s2-desync — and is consumed by one engine pass (v0.71.0)', async () => {
+test('our read\'s failover confounds the node\'s open rate, RTT, signal, return-path and route-churn episodes — not dead-flap, quiet-node or s2-desync — and is consumed by one engine pass (v0.71.0)', async () => {
   const R = await rerouteZd('zwtui-reroute-confound-');
   try {
     const real = R.priv.snapshot();
@@ -2012,8 +2012,8 @@ test('our read\'s failover confounds the node\'s open rate, RTT, signal and retu
     R.priv.updateEpisodes(syms, t0 + 60_000);
     assert.deepEqual([...open].sort(), [...kinds].sort(), 'fixture guard: every kind has an open episode');
     const hit = [...new Set(marked.filter(([n]) => n === 7).map(([, k]) => k))].sort();
-    assert.deepEqual(hit, ['chronic-return-path', 'rate-fallback', 'return-path-degraded', 'rtt-degraded', 'weak-signal'],
-      'exactly the kinds a new route can clear by itself');
+    assert.deepEqual(hit, ['chronic-return-path', 'rate-fallback', 'return-path-degraded', 'route-churn', 'rtt-degraded', 'weak-signal'],
+      'the kinds a new route can clear by itself, and route-churn, whose accumulator our failover is kept out of');
     R.priv.lastOkAt = Date.now();
     R.priv.sampleEvidence();
     assert.equal(R.priv.measurementReroutes.size, 0, 'consumed by the engine pass, not latched');
@@ -2036,16 +2036,25 @@ test('each Alive→Dead transition reaches the runner once — from the status f
   try {
     R.zd.drainDeadEvents();
     const feed = (event: string) => { for (const h of R.ha.handlers.get('zwave_js/subscribe_node_status') ?? []) h({ event: { event } } as never); };
-    feed('alive'); feed('dead'); feed('alive'); feed('alive');
+    R.route(R.direct);                                                 // a counted TX: the node now has a lastSeen
+    const seenBefore = (R.priv as unknown as { statsByNode: Map<number, { lastSeen: number | null }> }).statsByNode.get(7)?.lastSeen ?? null;
+    assert.ok(seenBefore != null, 'fixture guard: a real lastSeen to carry');
+    feed('alive'); feed('dead');
+    assert.deepEqual(R.zd.drainDeadEvents(), [], 'a death not yet seen to clear stays with the roster — the runner must not book it twice');
+    feed('alive'); feed('alive');
     const first = R.zd.drainDeadEvents();
-    assert.deepEqual(first.map((d) => d.nodeId), [7], 'one death, one entry — a revival is not a death');
+    assert.deepEqual(first.map((d) => d.nodeId), [7], 'one death, one entry, once it cleared — a revival is not a death');
     assert.ok(Math.abs(first[0].at - Date.now()) < 5_000, 'stamped when it was seen');
+    assert.equal(first[0].seen, seenBefore, "it carries the node's lastSeen as of the death");
     assert.deepEqual(R.zd.drainDeadEvents(), [], 'drained, not latched');
     // The roster-diff fallback, for a node whose status subscription failed.
     R.priv.statusSubbed.delete(7);
     rosterNodes = [{ ...NODE7, status: 3 }];
     await waitFor(() => R.zd.snapshot().find((n) => n.nodeId === 7)?.status === NodeStatus.Dead, 4000);
-    assert.deepEqual(R.zd.drainDeadEvents().map((d) => d.nodeId), [7], 'the fallback feeds it too');
+    assert.deepEqual(R.zd.drainDeadEvents(), [], 'still Dead: not handed over');
+    rosterNodes = [NODE7];
+    await waitFor(() => R.zd.snapshot().find((n) => n.nodeId === 7)?.status === NodeStatus.Alive, 4000);
+    assert.deepEqual(R.zd.drainDeadEvents().map((d) => d.nodeId), [7], 'the fallback feeds it too, once it cleared');
   } finally {
     rosterNodes = [NODE7];
     R.stop();
@@ -2062,5 +2071,63 @@ test('drainVerifyRequests leaves a SKIPPED node\'s burst owed, and hands it out 
     const got: number[] = [];
     for (let i = 10; i < 20; i++) got.push(...R.zd.drainVerifyRequests(t0 + i * 80_000).map((e) => e.id));
     assert.equal(got.length, 5, `the whole burst goes out after the hold: ${JSON.stringify(got)}`);
+  } finally { R.stop(); }
+});
+
+test('only the statistics event carrying OUR read\'s TX report can be ours — a later frame\'s failover inside the grace is route churn (v0.71.0)', async () => {
+  // zwave-js rewrites lwr from every frame's TX report: the ladder's retry, an
+  // operator's ping or an automation's command 30 s after our read would all
+  // look like our read's failover to a 90 s window alone.
+  const R = await rerouteZd('zwtui-reroute-ours-');
+  try {
+    const churn0 = R.priv.routeChangeAccum.get(7) ?? 0;
+    R.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    R.route(R.direct);                                                 // our read's own report: delivered, no change
+    R.route(R.failedOver);                                             // someone else's frame fails over
+    assert.equal(R.priv.measurementReroutes.has(7), false, 'the stamp was consumed by our own frame');
+    assert.equal(R.priv.routeChangeAccum.get(7) ?? 0, churn0 + 1, 'the later failover is ordinary route churn');
+    assert.equal(R.zd.evidenceCoverage(7)?.probeReroutes ?? 0, 0);
+  } finally { R.stop(); }
+});
+
+test('a node marked Dead drops its measurement stamp — the next frame to reach it is not our probe\'s report (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-dead-');
+  try {
+    R.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    for (const h of R.ha.handlers.get('zwave_js/subscribe_node_status') ?? []) { h({ event: { event: 'alive' } } as never); h({ event: { event: 'dead' } } as never); }
+    R.route(R.failedOver);                                             // the ladder's frame, after the death
+    assert.equal(R.priv.measurementReroutes.has(7), false, 'an unacknowledged read was not delivered, by any route');
+  } finally { R.stop(); }
+});
+
+test('the route event in the Log ring says when the failover was our read\'s (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-ring-');
+  try {
+    R.zd.noteMeasurementProbe(7, Date.now(), 'verify', 'read');
+    R.route(R.failedOver);
+    const ev = R.zd.events().filter((e) => e.kind === 'route' && e.nodeId === 7).map((e) => e.text);
+    assert.ok(ev.some((x) => /^route → .* \(our verification routed read failed over \d+s after it went out\)$/.test(x)), JSON.stringify(ev));
+  } finally { R.stop(); }
+});
+
+test('the death queue is bounded when nothing drains it — auto-ping off means no reader (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-deaths-cap-');
+  try {
+    const feed = (event: string) => { for (const h of R.ha.handlers.get('zwave_js/subscribe_node_status') ?? []) h({ event: { event } } as never); };
+    feed('alive');
+    for (let i = 0; i < 260; i++) { feed('dead'); feed('alive'); }
+    const q = (R.zd as unknown as { deadEvents: unknown[] }).deadEvents;
+    assert.equal(q.length, 200, 'held at the cap, oldest dropped');
+    assert.equal(R.zd.drainDeadEvents().length, 200);
+  } finally { R.stop(); }
+});
+
+test('a statistics event that moves no TX counter does not consume the stamp — the node\'s own report is not our read\'s TX report (v0.71.0)', async () => {
+  const R = await rerouteZd('zwtui-reroute-rx-');
+  try {
+    R.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    pushStats(R.ha, statsEvent({ commands_tx: 11, commands_rx: 11, rssi: -55, lwr: R.direct }));   // no TX movement (an RSSI refresh)
+    R.route(R.failedOver);                                             // then our read's own TX report
+    assert.equal(R.priv.measurementReroutes.has(7), true, 'our read\'s failover is still ours');
   } finally { R.stop(); }
 });

@@ -965,3 +965,26 @@ test('the Frame and Rerouted rows are never cut mid-claim, 60 to 200 columns (v0
   const none = evidenceLines(withProbes({ probesAsked: 5, probesAnswered: 5, probeReroutes: 0 } as never));
   assert.ok(!none.some((l) => /Rerouted/.test(l)), 'no failovers, no row');
 });
+
+test('the all-NoOp and all-read Frame forms fit whole, 60 to 200 columns (v0.71.0)', () => {
+  // Every node loads ra=0 on upgrade day, so the all-NoOp form is what every
+  // DETAIL screen shows first.
+  const cases: Array<[Record<string, number>, RegExp]> = [
+    [{ probesAsked: 30, probesAnswered: 29, probesReadAsked: 0, probesReadAnswered: 0 },
+      /(all NoOp pings: answered = reached on a stored route|all NoOp pings \(stored routes only\))\s*$/],
+    [{ probesAsked: 30, probesAnswered: 30, probesReadAsked: 30, probesReadAnswered: 30 },
+      /(all routed reads: answered = reached by any route|all routed reads \(any route\))\s*$/],
+  ];
+  for (const [p, want] of cases) {
+    const d = withProbes(p as never);
+    const seen = new Set<string>();
+    for (const cols of [60, 66, 73, 80, 87, 100, 120, 160, 200]) {
+      const row = renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip).find((l) => /^\s*Frame/.test(l));
+      assert.ok(row, `${cols} cols: the Frame row renders`);
+      assert.match(row!, want, `${cols} cols: "${row!.trim()}"`);
+      assert.ok(visLen(row!) <= cols, `${cols} cols: overflow`);
+      seen.add(/answered = /.test(row!) ? 'long' : 'short');
+    }
+    assert.deepEqual([...seen].sort(), ['long', 'short'], 'fixture guard: both forms are exercised');
+  }
+});

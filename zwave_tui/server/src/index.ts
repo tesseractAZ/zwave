@@ -181,7 +181,7 @@ async function main(): Promise<void> {
         `which adds ~4m before "needs a human"` +
         (config.autoPing.staleMs > 0
           ? `; liveness sweep of every mains node every ${Math.round(config.autoPing.staleMs / 60_000)}m by one routed read ` +
-            `(the same Get; a NoOp ping only for a node with no switch/light value), and verification bursts send the same frame`
+            `(the same Get; a NoOp ping for a node with no switch/light value, or for 30m after its read could not be sent), and verification bursts send the same frame`
           : '; liveness sweep off'),
     );
   } else if (config.autoPing.enabled) {

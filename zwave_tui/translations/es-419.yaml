@@ -84,16 +84,19 @@ configuration:
       deja el nodo a usted. Una recuperación reinicia la cuenta.
       Cada ping sin respuesta va seguido de una lectura con enrutamiento: un solo
       Get sobre el valor de interruptor/luz del propio dispositivo, que no cambia
-      nada, porque un ping solo puede usar las rutas guardadas y un comando real
-      puede encontrar una nueva.
+      nada en el dispositivo, porque un ping solo puede usar las rutas guardadas
+      y un comando real puede encontrar una nueva.
   auto_ping_stale_min:
     name: Seguridad · Intervalo del sondeo de vida (minutos)
     description: >-
       Consulta cada nodo alimentado por red que no esté ya caído una vez cada
       tantos minutos como indica este valor (0 lo desactiva), con una lectura
       con enrutamiento — un solo Get sobre el valor de interruptor/luz del
-      propio dispositivo, que no cambia nada y que el controlador puede
-      enrutar — o con un ping NoOp si el dispositivo no tiene ese valor. Z-Wave
+      propio dispositivo, que no cambia nada en el dispositivo y que el
+      controlador puede enrutar; su respuesta puede corregir un estado obsoleto
+      de Home Assistant, lo que puede disparar automatizaciones — o con un ping
+      NoOp si el dispositivo no tiene ese valor, o durante 30 minutos después de
+      que una lectura no pudo enviarse. Z-Wave
       marca un nodo como caído (Dead) solo cuando un envío hacia él FALLA, de
       modo que un dispositivo al que nadie le habla nunca se comprueba: un
       tomacorriente desenchufado puede figurar como Alive indefinidamente; y un

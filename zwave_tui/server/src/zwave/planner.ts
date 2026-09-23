@@ -211,7 +211,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
 
     case 'quiet-node': {
       headline = 'Node is quiet — confirm reachability before assuming a fault';
-      candidates.push({ action: 'ping', title: 'Ping (consented reachability check)', rationale: 'The node hasn’t communicated in a while, but no traffic was attempted — silence is not proof of failure. A single consented ping prompts it to respond; watch its status/last-seen for the result (the ping itself returns none). A ping is one ACK-only attempt on the stored routes, so on a marginal link it can itself mark the node Dead; the liveness sweep already asks every mains node on a cadence, by a routed read where the node has a switch/light value.', basis: 'source', cost: 'caution', blocked: gateExecutable(node, ctx, { probes: true }) });
+      candidates.push({ action: 'ping', title: 'Ping (consented reachability check)', rationale: 'The node hasn’t communicated in a while, but no traffic was attempted — silence is not proof of failure. A single consented ping prompts it to respond; watch its status/last-seen for the result (the ping itself returns none). A ping is one ACK-only attempt on the stored routes, so on a marginal link it can itself mark the node Dead; with auto-ping’s liveness sweep on, every mains node is already asked on a cadence, by a routed read where the node has a switch/light value.', basis: 'source', cost: 'caution', blocked: gateExecutable(node, ctx, { probes: true }) });
       // Always-available guidance so a quiet node never renders as a single
       // blocked ping with no next step (esp. write-actions off): silence is often
       // benign, and the physical checks below need no software action.

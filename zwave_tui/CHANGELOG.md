@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.71.0
+
+### Fixed — the add-on's own probes were marking working devices Dead
+
+A ping from Home Assistant is an ACK-only NoOp — transmit options `0x01`, one
+attempt — that can use only the controller's stored routes, and when one goes
+unanswered the driver marks the node Dead. The liveness sweep asks every mains
+node that question every two hours, and verification bursts ask it again of
+nodes under investigation. Over 67 days of recorder history on the reference
+mesh, 100 of the 106 times a mains node went from Alive to Dead began 0.11–3.49 s
+after one of this add-on's own ping presses: 63 on a sweep probe, 35 on a
+verification probe and 2 not attributable to one lane. About 0.4 % of those
+pings went unanswered (0.18 % since 0.64.4), so a working device read "dead"
+roughly once a day — for about a minute after a sweep probe, and for as long as
+101 minutes after a verification probe. The 0.70.0 notes counted 81 of 85 such
+episodes as ending on the add-on's pings; the same episodes began on them, and
+that count missed two nodes whose entities carry a `_2` suffix.
+
+The liveness sweep and the verification bursts now send one **routed read**
+instead: `zwave_js.refresh_value` on the node's own switch or light value, with
+`refresh_all_values` off — at source a single Get with the driver's default
+options (`0x25`: ACK, AutoRoute, Explore), one attempt, at NodeQuery priority,
+changing nothing on the device. It adds a route the controller computes to the
+attempts a ping makes; in 39 hours of driver log none of 170 such frames went
+unanswered (95 % upper bound about 1.8 %). It is judged as before, by the node's
+`lastSeen` moving past the moment it went out. A node with no switch or light
+value keeps the NoOp, as does a node whose read could not be sent in the last
+30 minutes, so a refused call cannot stall the sweep; every probe line names the
+frame it sent. The dead-node ladder and the manual `p` still ping.
+
+A read can still go unanswered and mark a node Dead. A verification probe's kill
+is now retried at once, as a sweep kill has been since 0.64.4, and is no longer
+filed as "talking" on the burst's own earlier answers. Once a node revives from a
+death on the add-on's own probe it gets no sweep or verification probe for
+15 minutes — its verification burst is left owed, not spent — so the add-on's
+probing cannot produce the three Alive↔Dead crossings a `dead-flap` needs inside
+one window. A death that clears between two ticks — a node's own traffic can
+revive it, and so can a Get's Report when only its acknowledgement was lost — is
+seen from the status feed and handled the same way, but only when the probe
+before it had gone unanswered; a NoOp probe in that case is booked a miss. Two such deaths of one node inside 24 hours raise one
+warning that names it, and ENGINE shows the count and the hold. A routed-read
+revival after such a death no longer spends the ladder's two-a-day read cap.
+
+What the sweep measures changes with the frame: an answered read means the
+controller reached the node by some route in one send, where an answered ping
+meant a stored route. The persisted reply rate keeps its lifetime counts, now
+also counts the routed-read subset, and NODE DETAIL shows the split on a new
+**Frame** row. A sweep read whose stored route failed on the way and was
+delivered by another is counted on a new **Rerouted** row — the stored-route
+failure a NoOp sweep used to turn into a Dead episode. Such a failover is logged
+as caused by that read, left out of `route-churn`'s count, and confounds the
+node's open rate-fallback, rtt-degraded, weak-signal and return-path episodes,
+since a new route can clear those by itself, and its open route-churn episode,
+whose after-window those reads fill. Only the statistics event that carries the
+read's own transmit report can be attributed to it, so a route change merely
+first seen on a probe (after a route rebuild, for example), or made by another
+frame inside the same minute, is not. The cost is about 500
+Get-and-Report exchanges a day in place of the same number of NoOps: roughly
+30 s more controller transmit time a day, S2 encapsulation on secure nodes, and
+about 7 % more Z-Wave JS driver log.
+
+### Fixed — a refused verification probe restored its own time stamp
+
+The refund for a verification probe that could not be sent put back the stamp of
+the probe being refunded rather than the one before it, so the next burst gap
+was measured from a probe that never left.
+
+### Changed — the ping's own description no longer calls it harmless
+
+The action catalog's Ping note and the quiet-node card now say that a ping is one
+ACK-only attempt on the stored routes that can mark a working node Dead; the card
+no longer claims pings never run automatically. The startup banner, the
+`auto_ping_stale_min` and `auto_ping_after_min` descriptions (English and
+Spanish) and the `staleMs` documentation now describe a fixed per-node cadence
+and the frame each lane sends.
+
+@@V071_FIGURES@@
+
 ## 0.70.0
 
 ### Fixed — the ladder pinged a working device and asked a human to fix it
