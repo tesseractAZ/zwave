@@ -1026,7 +1026,7 @@ via n7 @ 9.6k, F+R flags, RSSI improving) and #3 South Patio Light (77, "DROP
 8. **Probing is invasive.** NOP ping via `invoke_cc_api` can mark a flaky node
    **dead** — consented + rate-limited, never a background poller; no active link
    tests on battery/FLiRS; `backup_nvm` before any disruptive action. *(§3.4, §5.5, §3.8)*
-   *(v0.71.0: the background sweep that broke this rule for 34 releases now reads
+   *(v0.71.0: the background sweep that broke this rule from v0.37 on now reads
    instead of pinging — §5.6.)*
 9. **Closed, tiered allowlist** (read / benign-active / disruptive / destructive)
    in the engine core — the same channel that rebuilds can factory-reset. *(§3.8)*

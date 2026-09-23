@@ -81,7 +81,7 @@ no longer claims pings never run automatically. The startup banner, the
 Spanish) and the `staleMs` documentation now describe a fixed per-node cadence
 and the frame each lane sends.
 
-@@V071_FIGURES@@
+65 new tests pin these — each lane sends the read or the NoOp only where it must and names its frame, a probe kill is retried at once and followed by the hold, the hold leaves bursts owed, a between-tick death is blamed only on an unanswered probe and never credited, the warning fires once, the fallback lifts, a refused read attributes nothing, a route change is attributed only on the read's own report across the statistics throttle, and the new counters survive a restart — and 141 more mutants (one retired, fourteen re-pointed) show each guard is load-bearing. Full run: 867 killed, 0 survived, 12 equivalent.
 
 ## 0.70.0
 

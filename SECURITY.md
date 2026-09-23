@@ -42,13 +42,19 @@ seriously.
   do anything. With both on, a **mains-powered** node still Dead after the dwell
   is probed with no keypress, as is every non-Dead mains-powered node once per
   `auto_ping_stale_min` (the liveness sweep) and a node an open outcome episode
-  needs a verification reading from. A
-  ping transmits, so this is a genuine automatic path and is named here as one.
-  It is bounded: `auto_ping_max_attempts` per outage on a widening backoff, and
+  needs a verification reading from. Two frames can go out this way: Home
+  Assistant's ping (the dead-node ladder), and one `zwave_js.refresh_value`
+  routed read — a single Get on the node's own switch/light value — which
+  follows an unanswered ladder ping (v0.70.0) and is what the liveness sweep and
+  the verification probes send (v0.71.0). Both transmit, so this is a genuine
+  automatic path and is named here as one. Neither changes a device's state or
+  configuration, though a read's Report can correct a stale Home Assistant state.
+  It is bounded: `auto_ping_max_attempts` per outage on a widening backoff, a
+  15-minute hold after a node is revived from a death on its own probe, and
   suppressed during storms, route rebuilds, restarts and while the controller
-  reports its radio off (the nightly NVM backup). Nothing else — refresh,
-  re-interview, rebuild-routes, remove-failed, device control, config writes —
-  has any automatic path whatsoever.
+  reports its radio off (the nightly NVM backup). Nothing else — a full value
+  refresh, re-interview, rebuild-routes, remove-failed, device control, config
+  writes — has any automatic path whatsoever.
 - **One decision is answerable without write actions.** `write_actions_enabled`
   gates mesh mutations. The mesh-identity decision below mutates nothing on the
   mesh — it answers a question about the add-on's own `/data` — so it is
