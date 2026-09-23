@@ -1887,7 +1887,9 @@ test('a routed read targets the node\'s own switch value, and nothing that merel
   const cases: Array<[string, Array<Record<string, unknown>>, string | null]> = [
     ['the switch currentValue', [ent('switch.node_seven', `${HOME}.7-37-0-currentValue`)], 'switch.node_seven'],
     ['a multilevel light', [ent('light.node_seven', `${HOME}.7-38-0-currentValue`)], 'light.node_seven'],
-    ['the lowest endpoint wins', [ent('switch.node_seven_2', `${HOME}.7-37-2-currentValue`), ent('switch.node_seven_1', `${HOME}.7-37-1-currentValue`)], 'switch.node_seven_1'],
+    // Both orders: "lowest wins" must not be "first wins" or "last wins" in disguise.
+    ['the lowest endpoint wins (listed last)', [ent('switch.node_seven_2', `${HOME}.7-37-2-currentValue`), ent('switch.node_seven_1', `${HOME}.7-37-1-currentValue`)], 'switch.node_seven_1'],
+    ['the lowest endpoint wins (listed first)', [ent('switch.node_seven_1', `${HOME}.7-37-1-currentValue`), ent('switch.node_seven_2', `${HOME}.7-37-2-currentValue`)], 'switch.node_seven_1'],
     ['a config-parameter switch (CC 112) is not a value to read', [ent('switch.node_seven_led', `${HOME}.7-112-0-3`)], null],
     ['node-level entities are not values', [ent('sensor.node_seven_node_status', `${HOME}.7.node_status`), ent('button.node_seven_ping', `${HOME}.7.ping`)], null],
     ['a switch_as_x wrapper is a different platform', [ent('light.node_seven', `${HOME}.7-37-0-currentValue`, { platform: 'switch_as_x' })], null],
