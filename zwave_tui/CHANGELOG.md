@@ -39,7 +39,8 @@ probing cannot produce the three Alive↔Dead crossings a `dead-flap` needs insi
 one window. A death that clears between two ticks — a node's own traffic can
 revive it, and so can a Get's Report when only its acknowledgement was lost — is
 seen from the status feed and handled the same way, but only when the probe
-before it had gone unanswered; a NoOp probe in that case is booked a miss. Two such deaths of one node inside 24 hours raise one
+before it had gone unanswered; that probe is then booked a miss unless it was a
+read whose node came back within five seconds, which is its own Report. Two such deaths of one node inside 24 hours raise one
 warning that names it, and ENGINE shows the count and the hold. A routed-read
 revival after such a death no longer spends the ladder's two-a-day read cap.
 
@@ -57,8 +58,10 @@ whose after-window those reads fill. Only the read's own transmit report — the
 first one for the node after the read was queued, whose route zwave-js's
 statistics throttle usually delivers about 250 ms after its counters — can be
 attributed to it, so a route change merely first seen on a probe (after a route
-rebuild, for example), or made by another frame inside the same minute, is not;
-a read whose launch was refused attributes nothing. The cost is about 500
+rebuild, for example), or made by a later frame, is not; a read whose launch was
+refused attributes nothing. A frame to the node that reports before the read can
+still be taken for it, and a read to a node that first needs a nonce exchange
+(S0, or S2 re-establishing its SPAN) attributes nothing. The cost is about 500
 Get-and-Report exchanges a day in place of the same number of NoOps: roughly
 30 s more controller transmit time a day, S2 encapsulation on secure nodes, and
 about 7 % more Z-Wave JS driver log.

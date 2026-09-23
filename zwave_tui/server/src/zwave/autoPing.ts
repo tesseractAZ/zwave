@@ -198,7 +198,7 @@ export interface AutoPingState {
    * lanes (dead-remediation, verification) carry `self: false`: the flag
    * means "spoke on its own since the last sweep", which only a sweep asks.
    */
-  awaitingAnswer: Map<number, { at: number; cls: ProbeClass; lane: ProbeLane; frame?: ProbeFrame }[]>;
+  awaitingAnswer: Map<number, { at: number; cls: ProbeClass; lane: ProbeLane; frame?: ProbeFrame; killBooked?: true }[]>;
   /** nodeId → the `lastSeen` value most recently ATTRIBUTED to one of our own
    *  probe answers (v0.40). The sweep's self-proven flag compares against it:
    *  a lastSeen that has not advanced past our probe's answer is the app
@@ -453,6 +453,12 @@ export const PROBE_KILL_WARN_AT = 2;
 /** How long a node whose measurement read could not be SENT is probed with the
  *  NoOp ping instead (v0.71.0). See `readLaunchFailedAt`. */
 export const READ_LAUNCH_FALLBACK_MS = 30 * 60_000;
+/** How soon after a between-tick death a revival can still be a routed read's
+ *  OWN Report (v0.71.0): the Report follows the Get within its report timeout
+ *  (the frame's RTT plus 1 s), so a revival later than this came from something
+ *  else — the node's own traffic, another sender's frame — and the read, which
+ *  its NoAck says was never delivered, is a miss. */
+export const READ_REPORT_REVIVAL_MS = 5_000;
 /** Why a routed read's launch was withdrawn, for the "could not be probed" line. */
 const READ_REJECT_WHY = 'no switch/light value to read, or transport error';
 
@@ -1037,7 +1043,9 @@ function settleProbeDeath(state: AutoPingState, nodeId: number, lastHeard: numbe
   const newest = killed[killed.length - 1];
   if (newest.lane === 'sweep' || newest.lane === 'verify') {
     state.probeDeath.set(nodeId, newest.lane);
-    recordProbeKill(state, nodeId, now);
+    // A read the deaths feed already booked as a kill (and left pending as
+    // answered) is not a second kill (v0.71.0).
+    if (!newest.killBooked) recordProbeKill(state, nodeId, now);
   }
   return killed.map(({ cls, lane, frame }) => {
     const misses = (state.missStreak.get(nodeId) ?? 0) + 1;
@@ -1210,7 +1218,7 @@ export interface AutoPingRunnerOptions {
    *  a later frame's). A death that clears between two ticks is invisible to
    *  the level-sampled roster; see the runner. Optional: absent, only
    *  tick-visible deaths are attributed, as before. */
-  deaths?: () => { nodeId: number; at: number; seen?: number | null }[];
+  deaths?: () => { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[];
   /** One routed read for a Dead node whose ladder ping went unanswered
    *  (v0.70.0): a single Get on the node's own switch/light value. Non-learning,
    *  read-only. Absent ⇒ no reads (the v0.69.0 ladder). */
@@ -1412,10 +1420,15 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     // judged here, which trackEpisodes, reading the lastSeen that revival moved,
     // cannot do.
     for (const d of o.deaths?.() ?? []) {
+      // With the node's statistics feed not delivering, `seen` cannot say
+      // whether our probe was answered, so the death is not blamed on it.
+      if (d.feedLive === false) continue;
       // settleProbeDeath's own test, applied at the death: a probe the node had
       // answered before it died did not kill it, and one sent after it cannot.
+      // A probe already booked as a kill is not booked again.
       const pending = state.awaitingAnswer.get(d.nodeId) ?? [];
-      const before = pending.filter((p) => p.at <= d.at && d.at - p.at <= ANSWER_GRACE_MS && (d.seen == null || d.seen < p.at));
+      const before = pending.filter((p) => p.at <= d.at && d.at - p.at <= ANSWER_GRACE_MS &&
+        (d.seen == null || d.seen < p.at) && !p.killBooked);
       const newest = before[before.length - 1];
       if (newest == null || (newest.lane !== 'sweep' && newest.lane !== 'verify')) continue;
       recordProbeKill(state, d.nodeId, d.at);
@@ -1424,27 +1437,34 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       const back = state.deadSince.has(d.nodeId) ? 'came back, and is Dead again at this tick on something later' : 'was Alive again before the next tick';
       const after = `${Math.max(0, Math.round((d.at - newest.at) / 1000))}s after our ${LANE_WORD[newest.lane]} ${frameWord(frame)}`;
       const hold = `no sweep or verification probe for ${Math.round(PROBE_KILL_HOLD_MS / 60_000)}m`;
-      if (frame === 'read') {
-        // The read stays pending and is judged as usual: its Report is what
-        // revived the node, and a Report proves the Get arrived — ANSWERED.
+      const revivedIn = d.clearedAt == null ? null : d.clearedAt - d.at;
+      if (frame === 'read' && revivedIn != null && revivedIn <= READ_REPORT_REVIVAL_MS) {
+        // Revived within the Get's own report timeout: that was its Report (the
+        // ACK was lost, not the frame), and a Report proves the Get arrived. The
+        // read stays pending and is judged ANSWERED as usual.
+        newest.killBooked = true;
         const m = `auto-ping: node ${d.nodeId} went Dead ${after} and ${back} ` +
-          `(a lost ACK, most likely: its Report revives it) — ${hold}`;
+          `(revived ${(revivedIn / 1000).toFixed(1)}s later — a lost ACK, most likely: its Report revives it) — ${hold}`;
         o.log('info', d.nodeId, m);
         o.log2?.(m);
         continue;
       }
-      // A NoOp gets no reply, so whatever revived the node — its own report, or
-      // another sender's acknowledged frame — was not an answer. Settle the ping
-      // as a miss now, as settleProbeDeath does, or the judgment would read that
-      // traffic as the answer (the v0.64.4 credit leak, reopened).
+      // Otherwise whatever revived the node — its own report, another sender's
+      // acknowledged frame — was not an answer: a NoOp gets no reply, and a Get
+      // whose Report did not follow at once was not delivered (its NoAck said
+      // so). Settle the probe as a miss now, as settleProbeDeath does, or the
+      // judgment would read that traffic as the answer (the v0.64.4 credit leak).
       const rest = pending.filter((p) => p !== newest);
       if (rest.length > 0) state.awaitingAnswer.set(d.nodeId, rest);
       else state.awaitingAnswer.delete(d.nodeId);
       const misses = (state.missStreak.get(d.nodeId) ?? 0) + 1;
       state.missStreak.set(d.nodeId, misses);
       if (newest.lane === 'sweep') o.onProbeResult?.(d.nodeId, false, newest.cls, frame);
+      const why = frame === 'read'
+        ? `revived ${revivedIn == null ? 'at an unknown time' : `${Math.round(revivedIn / 1000)}s later`}, too late to be the Get's own Report, so that was not an answer`
+        : 'a NoOp gets no reply, so that was not an answer';
       const m = `auto-ping: node ${d.nodeId} did NOT answer its probe (${ordinal(misses)} consecutive miss — ` +
-        `it went Dead ${after} and ${back}; a NoOp gets no reply, so that was not an answer) — ${hold}` + probeWord(newest.lane, frame);
+        `it went Dead ${after} and ${back}; ${why}) — ${hold}` + probeWord(newest.lane, frame);
       o.log(misses >= 2 ? 'warn' : 'info', d.nodeId, m);
       (misses >= 2 ? (o.log2?.warn ?? o.log2) : o.log2)?.(m);
     }

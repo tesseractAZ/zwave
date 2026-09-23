@@ -490,7 +490,7 @@ export interface ZwaveData {
   clearMeasurementProbe(nodeId: number, at: number): void;
   /** Drain the Alive→Dead transitions the feed has since seen clear, with the
    *  node's lastSeen at the death (v0.71.0). */
-  drainDeadEvents(): { nodeId: number; at: number; seen: number | null }[];
+  drainDeadEvents(): { nodeId: number; at: number; seen: number | null; feedLive: boolean; clearedAt: number | null }[];
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** The learned RTT yardstick for this node's CURRENT time-of-day band (v0.48.0). */
   rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
@@ -717,7 +717,7 @@ class ZwaveDataImpl implements ZwaveData {
   /** nodeId → our measurement frame's TX report once its counters have arrived
    *  (`txAt`), held open for the trailing statistics emit that carries its route,
    *  until the counters move again or `until` passes (v0.71.0). */
-  private readonly ourTxReport = new Map<number, { txAt: number; lane: 'sweep' | 'verify'; frame: ProbeFrameLite; sinceMs: number; until: number }>();
+  private readonly ourTxReport = new Map<number, { at: number; txAt: number; lane: 'sweep' | 'verify'; frame: ProbeFrameLite; sinceMs: number; until: number }>();
   /** Nodes whose route our own routed read changed since the last engine pass
    *  (v0.71.0) — consumed by the confound guard in updateEpisodes. */
   private readonly measurementReroutes = new Set<number>();
@@ -726,7 +726,7 @@ class ZwaveDataImpl implements ZwaveData {
    *  without one. `seen` is the node's lastSeen at the death (this feed's own
    *  stamp, so a later frame cannot move it); `cleared` is set when the same
    *  source sees the node leave Dead. See `drainDeadEvents`. */
-  private deadEvents: { nodeId: number; at: number; seen: number | null; cleared: boolean }[] = [];
+  private deadEvents: { nodeId: number; at: number; seen: number | null; feedLive: boolean; cleared: boolean; clearedAt: number | null }[] = [];
   /** S2 SPAN-resync log events per node since the last evidence sample (v0.26).
    *  Fed by the driver-ws log listener; drains beside flapAccum. Nonce desync
    *  appears ONLY in driver logs — no statistics counter moves — so without
@@ -2896,10 +2896,15 @@ class ZwaveDataImpl implements ZwaveData {
    *  death is queued, a revival clears the node's queued deaths. */
   private noteDeadCrossing(nodeId: number, died: boolean): void {
     if (!died) {
-      for (const e of this.deadEvents) if (e.nodeId === nodeId) e.cleared = true;
+      const now = Date.now();
+      for (const e of this.deadEvents) if (e.nodeId === nodeId && !e.cleared) { e.cleared = true; e.clearedAt = now; }
       return;
     }
-    this.deadEvents.push({ nodeId, at: Date.now(), seen: this.statsByNode.get(nodeId)?.lastSeen ?? null, cleared: false });
+    // `seen` comes from the statistics feed, the same connection as this status
+    // feed, so it is the node's lastSeen AT the death; a node whose statistics
+    // feed is not live has no such reading, and says so (`feedLive`).
+    this.deadEvents.push({ nodeId, at: Date.now(), seen: this.statsByNode.get(nodeId)?.lastSeen ?? null,
+      feedLive: this.statsSubbedNodes.has(nodeId), cleared: false, clearedAt: null });
     if (this.deadEvents.length > DEAD_EVENTS_MAX) this.deadEvents.splice(0, this.deadEvents.length - DEAD_EVENTS_MAX);
     // A frame that was not acknowledged was not delivered: whatever reaches this
     // node next is not our measurement probe's TX report.
@@ -2916,10 +2921,10 @@ class ZwaveDataImpl implements ZwaveData {
    * over only CLEARED deaths is what keeps the runner from booking a death the
    * lagging roster has not shown yet, which the next tick would book again.
    */
-  drainDeadEvents(): { nodeId: number; at: number; seen: number | null }[] {
+  drainDeadEvents(): { nodeId: number; at: number; seen: number | null; feedLive: boolean; clearedAt: number | null }[] {
     const out = this.deadEvents.filter((e) => e.cleared);
     this.deadEvents = this.deadEvents.filter((e) => !e.cleared);
-    return out.map(({ nodeId, at, seen }) => ({ nodeId, at, seen }));
+    return out.map(({ nodeId, at, seen, feedLive, clearedAt }) => ({ nodeId, at, seen, feedLive, clearedAt }));
   }
 
   /** The runner is about to send a sweep or verification probe (v0.71.0). */
@@ -2932,6 +2937,9 @@ class ZwaveDataImpl implements ZwaveData {
    *  is withdrawn, or the next frame to reach the node would inherit it. */
   clearMeasurementProbe(nodeId: number, at: number): void {
     if (this.measurementSent.get(nodeId)?.at === at) this.measurementSent.delete(nodeId);
+    // …and if another frame's counters already arrived and were taken for ours,
+    // that held report goes too: a read that never left owns no TX report.
+    if (this.ourTxReport.get(nodeId)?.at === at) this.ourTxReport.delete(nodeId);
   }
 
   /**
@@ -3391,8 +3399,10 @@ class ZwaveDataImpl implements ZwaveData {
       } else if (sent != null && sent.tx0 != null && txNow > sent.tx0) {
         this.measurementSent.delete(nodeId);
         const sinceMs = Date.now() - sent.at;
-        if (sinceMs >= 0 && sinceMs <= ANSWER_GRACE_MS) {
-          this.ourTxReport.set(nodeId, { txAt: txNow, lane: sent.lane, frame: sent.frame, sinceMs, until: Date.now() + OUR_TX_TRAIL_MS });
+        // Exactly ONE TX report since the stamp, or the route this event
+        // carries is a later frame's (the throttle coalesced several).
+        if (txNow === sent.tx0 + 1 && sinceMs >= 0 && sinceMs <= ANSWER_GRACE_MS) {
+          this.ourTxReport.set(nodeId, { at: sent.at, txAt: txNow, lane: sent.lane, frame: sent.frame, sinceMs, until: Date.now() + OUR_TX_TRAIL_MS });
         } else this.ourTxReport.delete(nodeId);
       } else {
         const held = this.ourTxReport.get(nodeId);
