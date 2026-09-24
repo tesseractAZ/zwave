@@ -34,7 +34,7 @@ import {
   truncate,
   visLen,
 } from '../ansi';
-import { masthead, titleRule, fieldStrip, field, commandBar, linkState, type Keycap } from '../chrome';
+import { masthead, mastheadOpts, titleRule, fieldStrip, field, commandBar, type Keycap } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
 import { noiseColor, rssiColor, marginColor, rttColor, timeoutPctColor, WEAK_MARGIN_DB, rssiReading } from '../bands';
 import { meter, signalBars, litBars, sparkline, vblock, fmtElapsed, spinner } from '../gauges';
@@ -174,7 +174,7 @@ export function renderOverview(ctx: ScreenCtx): string[] {
 
   const out: string[] = [];
   // Chrome: masthead · titled rule · telemetry strip · column header.
-  out.push(masthead(view, { link: linkState(data), homeId: data.controller()?.homeId ?? null, now: Date.now(), apSuppressed: data.autoPingState?.()?.suppressed ?? null }));
+  out.push(masthead(view, mastheadOpts(data)));
   out.push(titleRule(view, 'OVERVIEW', rightStatus(ctx)));
   out.push(telemetryStrip(ctx));
   out.push(truncate(headerRow(view, cols), W));

@@ -421,9 +421,15 @@ test("index.ts carries the runner's launch stamp to the manual probe (v0.64.5)",
   const index = read('server/src/index.ts');
   assert.match(
     index,
-    /onOutcome: \(kind, nodeId, ok, refusal, origin, sentAt\) => zwaveData\.recordActionOutcome\(kind, nodeId, ok, refusal, origin, sentAt\)/,
-    'onOutcome must forward the launch stamp to the data layer',
+    /onOutcome: \(kind, nodeId, ok, refusal, origin, sentAt, aliveAtLaunch\) =>\s+zwaveData\.recordActionOutcome\(kind, nodeId, ok, refusal, origin, sentAt, aliveAtLaunch\)/,
+    'onOutcome must forward the launch stamp — and, since v0.72.0, the launch status — to the data layer',
   );
+  // v0.72.0: the launch status and listening flag are read from the roster.
+  assert.match(index, /statusOf: \(n\) => provider\.nodeById\(n\)\?\.status \?\? null/);
+  assert.match(index, /listeningOf: \(n\) => zwaveData\.listensForCommands\(n\)/, 'FLiRS counts as listening for a queued write');
+  assert.match(index, /onLaunch: \(kind, nodeId, origin, at, alive\) => zwaveData\.noteActionLaunched\(kind, nodeId, origin, at, alive\)/);
+  assert.match(index, /onSettled: \(kind, nodeId, origin, at, settledAt, effect\) => zwaveData\.noteActionSettled\(kind, nodeId, origin, at, settledAt, effect\)/);
+  assert.match(index, /operatorBusy: \(\) => actions\.operatorActionInFlight\(\) != null/, 'auto-ping stands down for a one-node rebuild');
   assert.match(
     index,
     /setProbeNotePending\(\(n, sentAt\) => autoPing\?\.notePending\(n, 'manual', sentAt\)\)/,
@@ -465,4 +471,23 @@ test('index.ts wires the measurement read, its stamp, the death feed, the verify
   assert.match(index, /onMeasurementWithdrawn: \(n, at\) => zwaveData\.clearMeasurementProbe\(n, at\)/);
   assert.match(index, /verifyRequests: \(now, skip\) => zwaveData\.drainVerifyRequests\(now, skip\)/);
   assert.match(index, /onProbeResult: \(nodeId, answered, cls, frame\) => zwaveData\.recordProbeResult\(nodeId, answered, cls, frame\)/);
+});
+
+test('the pause file path is exported and read, and index.ts wires the pause into auto-ping (v0.72.0)', () => {
+  const run = read('rootfs/etc/services.d/zwave-tui/run');
+  assert.match(run, /^export AUTONOMY_PATH=\/data\/autonomy\.json$/m);
+  assert.match(read('server/src/config.ts'), /autonomyPath: process\.env\.AUTONOMY_PATH \|\| null/);
+  const idx = read('server/src/index.ts');
+  assert.match(idx, /autonomyPath: config\.autonomyPath/);
+  assert.match(idx, /paused: \(\) => zwaveData\.autonomyPause\(\) != null/, 'auto-ping must read the pause');
+  const dp = read('server/src/telnet/dataProvider.ts');
+  for (const m of ['autonomyPause', 'pauseAutonomy', 'resumeAutonomy', 'autonomyPauseOverdue']) {
+    assert.equal((dp.match(new RegExp(`\\b${m}: `, 'g')) ?? []).length, 2, `${m} is forwarded by BOTH bridges`);
+  }
+});
+
+test('the HA publisher is told the master gate and the boot time (v0.72.0)', () => {
+  const idx = read('server/src/index.ts');
+  assert.match(idx, /writeActions: config\.writeActions,\n\s+startedAt: bootedAt,/, 'startHaStates gets both');
+  assert.match(idx, /\+ 5 sensors every/);
 });

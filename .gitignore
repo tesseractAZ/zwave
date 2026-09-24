@@ -1,5 +1,8 @@
 # dependencies
 node_modules/
+# …and a node_modules SYMLINK (a worktree sharing another checkout's install):
+# the trailing-slash pattern above matches only a directory.
+node_modules
 
 # build artifacts
 dist/

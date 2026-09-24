@@ -488,3 +488,235 @@ test('a MEASUREMENT read is the same ONE refresh_value, logged as "probe node N 
   await ladder.runner.routedRead(18);
   assert.ok(ladder.logs.some((l) => /routed read node 18/.test(l.text)), 'the default purpose keeps the v0.70.0 line');
 });
+
+/* ── v0.72.0: results read from the reply, long verbs, actor, launch status ── */
+
+import { HEAL_TIMEOUT_MS, REMOVE_FAILED_TIMEOUT_MS, READY_TIMEOUT_MS, configResult } from '../src/zwave/zwaveActions';
+import { NodeStatus } from '../src/types';
+
+function rig(reply: (cmd: any) => unknown, over: { status?: NodeStatus | null; listening?: boolean | null } = {}) {
+  const sent: Array<{ cmd: any; timeout: unknown }> = [];
+  const logs: Array<{ sev: string; text: string; origin?: string }> = [];
+  const outcomes: Array<{ kind: string; ok: boolean; refusal?: string; origin?: string; sentAt?: number; alive?: boolean }> = [];
+  const removed: number[] = [];
+  let status: NodeStatus | null = over.status === undefined ? NodeStatus.Alive : over.status;
+  let clock = 1_000;
+  let inFlightSeen: unknown = 'unread';
+  const client = {
+    send: async (cmd: any, timeout?: unknown) => {
+      sent.push({ cmd, timeout });
+      inFlightSeen = runner.operatorActionInFlight();
+      status = NodeStatus.Alive; // the action "revives" it: the launch status must already be read
+      clock += 5_000;
+      const r = reply(cmd);
+      if (r instanceof Error) throw r;
+      return r;
+    },
+  } as unknown as HaWsClient;
+  const runner = createActionRunner({
+    client, entryId: () => 'entry-1', deviceIdOf: (n) => `dev-${n}`, pingEntityOf: (n) => `button.node${n}_ping`,
+    log: (sev, _n, text, origin) => logs.push({ sev, text, origin }),
+    onOutcome: (kind, _n, ok, refusal, origin, sentAt, alive) => outcomes.push({ kind, ok, refusal, origin, sentAt, alive }),
+    onNodeRemoved: (n) => removed.push(n),
+    statusOf: () => status, listeningOf: () => (over.listening === undefined ? true : over.listening),
+    now: () => clock, enabled: true,
+  });
+  return { runner, sent, logs, outcomes, removed, inFlight: () => inFlightSeen };
+}
+
+test('a heal that returns FALSE did not happen, and is never booked as success (v0.72.0)', async () => {
+  const R = rig(() => false);
+  const r = await R.runner.healNode(5);
+  assert.equal(r.ok, false);
+  assert.match(r.message, /did not complete — the driver returned false/);
+  assert.ok(R.logs.some((l) => l.sev === 'error' && /returned false/.test(l.text)));
+  assert.deepEqual(R.outcomes.map((o) => [o.ok, o.refusal]), [[false, 'transport']], 'indicts nothing, credits nothing');
+  const t = rig(() => true);
+  const ok = await t.runner.healNode(5);
+  assert.equal(ok.ok, true);
+  assert.match(ok.message, /driver reports success; a failed return-route assignment is not reported/);
+});
+
+test('rebuild-all and stop-rebuild read their boolean too (v0.72.0)', async () => {
+  const a = await rig(() => false).runner.rebuildAll();
+  assert.equal(a.ok, false);
+  assert.match(a.message, /not started — a route rebuild is already running/);
+  const b = await rig(() => false).runner.stopRebuild();
+  assert.equal(b.ok, false);
+  assert.match(b.message, /nothing to stop — no route rebuild was running/);
+  assert.equal((await rig(() => true).runner.rebuildAll()).ok, true);
+});
+
+test('a config write HA reports QUEUED is not confirmed on a mains device, and waits for wake-up on a sleeping one (v0.72.0)', async () => {
+  const p = param();
+  const mains = await rig(() => ({ status: 'queued' }), { listening: true }).runner.setConfigParam(5, p, 1);
+  assert.equal(mains.ok, false);
+  assert.match(mains.message, /not confirmed — the device was or went offline while Home Assistant waited; the value may not be set; re-read it/);
+  const unknown = await rig(() => ({ status: 'queued' }), { listening: null }).runner.setConfigParam(5, p, 1);
+  assert.equal(unknown.ok, false, 'an unknown device type is not assumed asleep');
+  const sleepy = await rig(() => ({ status: 'queued' }), { listening: false }).runner.setConfigParam(5, p, 1);
+  assert.equal(sleepy.ok, true);
+  assert.match(sleepy.message, /queued — the device applies it at its next wake-up/);
+  assert.equal((await rig(() => ({ status: 'accepted' })).runner.setConfigParam(5, p, 1)).message.endsWith(': ok'), true);
+  assert.match((await rig(() => null).runner.setConfigParam(5, p, 1)).message, /Home Assistant returned no status/);
+  assert.deepEqual(configResult({ status: 'accepted' }, true), { ok: true });
+});
+
+test('heal and remove-failed wait long for the reply but only 10 s for the socket; nothing else changes (v0.72.0)', async () => {
+  const R = rig(() => true);
+  await R.runner.healNode(5);
+  await R.runner.removeFailed(5);
+  await R.runner.reInterview(5);
+  await R.runner.refreshValues(5);
+  await R.runner.rebuildAll();
+  const by = (t: string) => R.sent.find((s) => s.cmd.type === t)!.timeout;
+  assert.deepEqual(by('zwave_js/rebuild_node_routes'), { readyMs: READY_TIMEOUT_MS, replyMs: HEAL_TIMEOUT_MS });
+  assert.deepEqual(by('zwave_js/remove_failed_node'), { readyMs: READY_TIMEOUT_MS, replyMs: REMOVE_FAILED_TIMEOUT_MS });
+  assert.equal(HEAL_TIMEOUT_MS, 1_200_000);
+  assert.equal(REMOVE_FAILED_TIMEOUT_MS, 180_000);
+  for (const t of ['zwave_js/refresh_node_info', 'zwave_js/refresh_node_values', 'zwave_js/begin_rebuilding_routes']) {
+    assert.equal(by(t), undefined, `${t} keeps the default`);
+  }
+});
+
+test('a heal Home Assistant stopped waiting for is UNKNOWN — not failed, not learned (v0.72.0)', async () => {
+  for (const err of ['HA WS timeout (id 9, zwave_js/rebuild_node_routes)', 'HA WS connection closed']) {
+    const R = rig(() => new Error(err));
+    const r = await R.runner.healNode(5);
+    assert.equal(r.ok, false);
+    assert.equal(r.unknown, true);
+    assert.match(r.message, /outcome unknown — .*; the driver may still be working/);
+    assert.ok(R.logs.some((l) => l.sev === 'warn' && /outcome unknown/.test(l.text)), 'warn, not a red failure');
+    assert.deepEqual(R.outcomes, [], 'never learned');
+  }
+  const x = rig(() => new Error('HA WS timeout (id 3, zwave_js/remove_failed_node)'));
+  const r = await x.runner.removeFailed(5);
+  assert.equal(r.unknown, true);
+  assert.deepEqual(x.removed, [], 'an unknown removal never forgets the node');
+  const other = rig(() => new Error('HA WS timeout (id 4, zwave_js/refresh_node_info)'));
+  assert.notEqual((await other.runner.reInterview(5)).unknown, true, 'only the two long verbs read a timeout as unknown');
+});
+
+test('every learned verb carries its origin, and the launch status is read BEFORE the await (v0.72.0)', async () => {
+  const R = rig(() => true, { status: NodeStatus.Dead });
+  await R.runner.healNode(5, 'engine');
+  assert.deepEqual([R.outcomes[0].origin, R.outcomes[0].alive, R.outcomes[0].sentAt], ['engine', false, 1_000],
+    'Dead at launch, though the node answered by the time the call returned');
+  const S = rig(() => true);
+  await S.runner.refreshValues(5, 'engine');
+  await S.runner.reInterview(5, 'engine');
+  await S.runner.removeFailed(5, 'engine');
+  await S.runner.rebuildAll('engine');
+  await S.runner.stopRebuild('engine');
+  await S.runner.healNode(5);
+  assert.deepEqual(S.outcomes.map((o) => o.origin), ['engine', 'engine', 'engine', 'engine', 'engine', 'you']);
+  assert.ok(S.outcomes.slice(0, 3).every((o) => o.alive === true));
+});
+
+test('a one-node rebuild or removal is IN FLIGHT while it runs, and cleared after — even when it throws (v0.72.0)', async () => {
+  const R = rig(() => true);
+  await R.runner.healNode(5);
+  assert.deepEqual(R.inFlight(), { kind: 'healNode', nodeId: 5, since: 1_000 });
+  assert.equal(R.runner.operatorActionInFlight(), null);
+  const T = rig(() => new Error('boom'));
+  await T.runner.removeFailed(6);
+  assert.equal((T.inFlight() as { kind: string }).kind, 'removeFailed');
+  assert.equal(T.runner.operatorActionInFlight(), null, 'cleared in a finally');
+  const P = rig(() => null);
+  await P.runner.ping(5);
+  assert.equal(P.inFlight(), null, 'a ping is not one');
+});
+
+/* ── v0.72.0 review: every rebuild is tracked on its own; launch and settle ── */
+
+function deferredRig() {
+  const pending: Array<{ cmd: any; resolve: (v: unknown) => void; reject: (e: Error) => void }> = [];
+  const hooks: string[] = [];
+  let clock = 1_000;
+  const client = {
+    send: (cmd: any) => new Promise((resolve, reject) => { pending.push({ cmd, resolve, reject }); }),
+  } as unknown as HaWsClient;
+  const runner = createActionRunner({
+    client, entryId: () => 'entry-1', deviceIdOf: (n) => `dev-${n}`, pingEntityOf: (n) => `button.node${n}_ping`,
+    log: () => {}, statusOf: () => NodeStatus.Alive, now: () => clock, enabled: true,
+    onLaunch: (kind, n, origin, at, alive) => hooks.push(`launch ${kind} ${n} ${origin} ${at} ${alive}`),
+    onSettled: (kind, n, origin, at, settledAt) => hooks.push(`settled ${kind} ${n} ${at} ${settledAt}`),
+  });
+  return { runner, pending, hooks, tick: (ms: number) => { clock += ms; }, now: () => clock };
+}
+
+test('two rebuilds at once: the first to finish does not end the stand-down for the other (v0.72.0 review)', async () => {
+  const R = deferredRig();
+  const h5 = R.runner.healNode(5);
+  R.tick(1_000);
+  const h7 = R.runner.healNode(7);
+  assert.equal(R.runner.operatorActionInFlight()?.nodeId, 5, 'the oldest running is reported');
+  R.pending[0].resolve(true);
+  await h5;
+  assert.equal(R.runner.operatorActionInFlight()?.nodeId, 7, 'heal 7 still holds auto-ping off');
+  R.pending[1].resolve(true);
+  await h7;
+  assert.equal(R.runner.operatorActionInFlight(), null);
+});
+
+test('an UNKNOWN heal keeps the stand-down until its own reply bound has passed (v0.72.0 review)', async () => {
+  const R = deferredRig();
+  const h = R.runner.healNode(5);
+  R.tick(60_000);
+  R.pending[0].reject(new Error('HA WS connection closed'));
+  const r = await h;
+  assert.equal(r.unknown, true);
+  assert.equal(R.runner.operatorActionInFlight()?.nodeId, 5, 'the driver may still be rebuilding');
+  R.tick(HEAL_TIMEOUT_MS - 60_000 - 1);
+  assert.equal(R.runner.operatorActionInFlight()?.nodeId, 5);
+  R.tick(1);
+  assert.equal(R.runner.operatorActionInFlight(), null, 'released at launch + HEAL_TIMEOUT_MS');
+  assert.deepEqual(R.hooks, ['launch healNode 5 you 1000 true', `settled healNode 5 1000 ${1_000 + HEAL_TIMEOUT_MS}`],
+    'the ledger is told the launch before the await, and an unknown settles at its reply bound');
+});
+
+test('launch comes before the await for every learned verb and never for device control; Unknown status is not alive (v0.72.0 review)', async () => {
+  const R = deferredRig();
+  const p = R.runner.ping(5);
+  assert.equal(R.hooks.length, 1, 'fired before the reply');
+  R.pending[0].resolve(null);
+  await p;
+  const c = R.runner.controlEntity(5, 'light.x', 'on');
+  R.pending[1].resolve(null);
+  await c;
+  assert.equal(R.hooks.filter((x) => x.startsWith('launch')).length, 1, 'device control is not a remediation');
+  const U = rig(() => true, { status: NodeStatus.Unknown });
+  await U.runner.healNode(5);
+  assert.equal(U.outcomes[0].alive, false, 'Unknown is not evidence of life');
+});
+
+test('each settle says what the action may have done: ok, none (never sent / refused) or maybe (second review)', async () => {
+  const eff = async (reply: (cmd: any) => unknown, verb: (r: ReturnType<typeof createActionRunner>) => Promise<unknown>, over: { noDevice?: boolean } = {}) => {
+    const effects: string[] = [];
+    const client = { send: async (cmd: any) => { const r = reply(cmd); if (r instanceof Error) throw r; return r; } } as unknown as HaWsClient;
+    const runner = createActionRunner({
+      client, entryId: () => 'e', deviceIdOf: (n) => (over.noDevice ? null : `dev-${n}`), pingEntityOf: () => 'button.p', log: () => {},
+      statusOf: () => NodeStatus.Alive, enabled: true, onSettled: (_k, _n, _o, _a, _s, e) => effects.push(e),
+    });
+    await verb(runner);
+    return effects[0];
+  };
+  assert.equal(await eff(() => true, (r) => r.healNode(5)), 'ok');
+  assert.equal(await eff(() => false, (r) => r.healNode(5)), 'maybe', 'returned false: its routes may be partly changed');
+  assert.equal(await eff(() => new Error('HA WS connection closed'), (r) => r.healNode(5)), 'maybe', 'unknown');
+  assert.equal(await eff(() => new Error('HA WS timeout (id 3, zwave_js/refresh_node_info)'), (r) => r.reInterview(5)), 'maybe', 'sent, then timed out');
+  assert.equal(await eff(() => null, (r) => r.healNode(5), { noDevice: true }), 'none', 'never sent');
+  assert.equal(await eff(() => new Error('HA WS not ready (auth timeout)'), (r) => r.healNode(5)), 'none');
+  assert.equal(await eff(() => new Error('Z-Wave error 361 - removal aborted (ZW0361)'), (r) => r.removeFailed(5)), 'none', 'a refusal changed nothing');
+});
+
+test('the HA client\'s own pre-send failures are "none", not "maybe" (third review)', async () => {
+  for (const [err, want] of [['HA WS not open', 'none'], ['HA WS client not configured (SUPERVISOR_TOKEN absent)', 'none'], ['HA WS client stopped', 'maybe']] as const) {
+    const effects: string[] = [];
+    const client = { send: async () => { throw new Error(err); } } as unknown as HaWsClient;
+    const runner = createActionRunner({ client, entryId: () => 'e', deviceIdOf: (n) => `dev-${n}`, pingEntityOf: () => 'b', log: () => {},
+      statusOf: () => NodeStatus.Alive, enabled: true, onSettled: (_k, _n, _o, _a, _s, e) => effects.push(e) });
+    await runner.healNode(5);
+    assert.equal(effects[0], want, err);
+  }
+});

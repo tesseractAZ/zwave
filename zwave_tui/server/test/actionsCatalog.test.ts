@@ -8,6 +8,8 @@ import {
   clampMenuIndex,
   describeAction,
   CONFIRM_WORD,
+  isIdentityKind,
+  isLocalDecisionKind,
   type ActionImpact,
 } from '../src/telnet/actionsCatalog';
 import { MENU_LABEL_W, renderTypeConfirm } from '../src/telnet/screens/actionsMenu';
@@ -37,7 +39,7 @@ test('impact classification: ping safe, rebuildAll + removeFailed destructive', 
 });
 
 test('buildMenu with a node + idle: device actions enabled, no mesh-wide rows', () => {
-  const items = buildMenu({ scope: 'device', hasNode: true, rebuilding: false, identityPending: false, identityResumable: false });
+  const items = buildMenu({ scope: 'device', hasNode: true, rebuilding: false, identityPending: false, identityResumable: false, autonomyPausedByTui: false });
   assert.ok(items.length > 0, 'device menu is empty');
   assert.ok(items.every((i) => !i.disabled), 'device actions enabled with a node');
   // The mesh-wide rows moved to the network menu; see the two scope tests below.
@@ -47,11 +49,11 @@ test('buildMenu with a node + idle: device actions enabled, no mesh-wide rows', 
 });
 
 test('the NETWORK menu honours the rebuild/stop mutual exclusion', () => {
-  const idle = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false }).map((i) => i.desc.kind);
+  const idle = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false, autonomyPausedByTui: false }).map((i) => i.desc.kind);
   assert.ok(idle.includes('rebuildAll'), 'rebuildAll offered while idle');
   assert.ok(!idle.includes('stopRebuild'), 'stopRebuild hidden while idle');
 
-  const busy = buildMenu({ scope: 'network', hasNode: false, rebuilding: true, identityPending: false, identityResumable: false }).map((i) => i.desc.kind);
+  const busy = buildMenu({ scope: 'network', hasNode: false, rebuilding: true, identityPending: false, identityResumable: false, autonomyPausedByTui: false }).map((i) => i.desc.kind);
   assert.ok(busy.includes('stopRebuild'), 'stopRebuild shown while rebuilding');
   assert.ok(!busy.includes('rebuildAll'), 'rebuildAll hidden while rebuilding');
 });
@@ -61,7 +63,7 @@ test('the DEVICE menu contains NO mesh-wide action, at any context', () => {
   // never offer an action whose blast radius is all 39 nodes.
   for (const hasNode of [true, false]) {
     for (const rebuilding of [true, false]) {
-      const items = buildMenu({ scope: 'device', hasNode, rebuilding, identityPending: false, identityResumable: false });
+      const items = buildMenu({ scope: 'device', hasNode, rebuilding, identityPending: false, identityResumable: false, autonomyPausedByTui: false });
       assert.ok(items.length > 0, `device menu is empty (hasNode=${hasNode})`);
       assert.ok(items.every((i) => i.desc.scope === 'device'),
         `a system-scoped row leaked into the device menu: ${items.filter((i) => i.desc.scope !== 'device').map((i) => i.desc.kind).join(',')}`);
@@ -74,7 +76,7 @@ test('the DEVICE menu contains NO mesh-wide action, at any context', () => {
 test('the NETWORK menu contains NO device action, at any context', () => {
   for (const hasNode of [true, false]) {
     for (const rebuilding of [true, false]) {
-      const items = buildMenu({ scope: 'network', hasNode, rebuilding, identityPending: false, identityResumable: false });
+      const items = buildMenu({ scope: 'network', hasNode, rebuilding, identityPending: false, identityResumable: false, autonomyPausedByTui: false });
       assert.ok(items.length > 0, 'network menu is empty');
       assert.ok(items.every((i) => i.desc.scope === 'system'),
         `a device row leaked into the network menu: ${items.filter((i) => i.desc.scope !== 'system').map((i) => i.desc.kind).join(',')}`);
@@ -88,42 +90,44 @@ test('the NETWORK menu contains NO device action, at any context', () => {
 
 test('every catalog action appears in exactly one of the two menus', () => {
   // No action may be stranded (unreachable) or duplicated (two blast radii).
-  const ctx = { hasNode: true, rebuilding: false, identityPending: false, identityResumable: false } as const;
+  const ctx = { hasNode: true, rebuilding: false, identityPending: false, identityResumable: false, autonomyPausedByTui: false } as const;
   const device = buildMenu({ scope: 'device', ...ctx }).map((i) => i.desc.kind);
   const network = buildMenu({ scope: 'network', ...ctx }).map((i) => i.desc.kind);
-  const busy = buildMenu({ scope: 'network', hasNode: true, rebuilding: true, identityPending: false, identityResumable: false }).map((i) => i.desc.kind);
+  const busy = buildMenu({ scope: 'network', hasNode: true, rebuilding: true, identityPending: false, identityResumable: false, autonomyPausedByTui: false }).map((i) => i.desc.kind);
   // Each GATE needs its own variant here, or a gated row reads as "stranded".
   // The identity rows are offered only while a decision is actually pending.
-  const pending = buildMenu({ scope: 'network', hasNode: true, rebuilding: false, identityPending: true, identityResumable: true }).map((i) => i.desc.kind);
-  const reachable = new Set([...device, ...network, ...busy, ...pending]);
+  const pending = buildMenu({ scope: 'network', hasNode: true, rebuilding: false, identityPending: true, identityResumable: true, autonomyPausedByTui: false }).map((i) => i.desc.kind);
+  // Resume is offered only while the TUI holds a pause (v0.72.0).
+  const paused = buildMenu({ scope: 'network', hasNode: true, rebuilding: false, identityPending: false, identityResumable: false, autonomyPausedByTui: true }).map((i) => i.desc.kind);
+  const reachable = new Set([...device, ...network, ...busy, ...pending, ...paused]);
   for (const d of ACTION_CATALOG) {
     assert.ok(reachable.has(d.kind), `${d.kind} is not reachable from any menu`);
   }
   for (const k of device) {
-    assert.ok(!network.includes(k) && !busy.includes(k) && !pending.includes(k), `${k} appears in both menus`);
+    assert.ok(!network.includes(k) && !busy.includes(k) && !pending.includes(k) && !paused.includes(k), `${k} appears in both menus`);
   }
 });
 
 test('the identity rows are offered ONLY while a decision is pending', () => {
   // Gating is the whole safety story: an always-present "start fresh" invites
   // archiving a healthy mesh's learning for no reason.
-  const idle = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false })
+  const idle = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false, autonomyPausedByTui: false })
     .map((i) => i.desc.kind);
   assert.ok(!idle.includes('identityKeep') && !idle.includes('identityFresh'), 'hidden when nothing is pending');
 
-  const pending = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: true })
+  const pending = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: true, autonomyPausedByTui: false })
     .map((i) => i.desc.kind);
   assert.ok(pending.includes('identityKeep'), 'Keep offered while pending');
   assert.ok(pending.includes('identityFresh'), 'Start-fresh offered while pending');
 
   // And they are MESH-wide, never device rows — they act on no node.
-  const device = buildMenu({ scope: 'device', hasNode: true, rebuilding: false, identityPending: true, identityResumable: true })
+  const device = buildMenu({ scope: 'device', hasNode: true, rebuilding: false, identityPending: true, identityResumable: true, autonomyPausedByTui: false })
     .map((i) => i.desc.kind);
   assert.ok(!device.includes('identityKeep') && !device.includes('identityFresh'), 'not device-scoped');
 });
 
 test('buildMenu with no node: device actions present but DISABLED with a reason', () => {
-  const items = buildMenu({ scope: 'device', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false });
+  const items = buildMenu({ scope: 'device', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false, autonomyPausedByTui: false });
   assert.ok(items.length > 0);
   assert.ok(items.every((i) => i.disabled && i.reason), 'device actions disabled + reasoned without a node');
 });
@@ -271,4 +275,15 @@ test('the Ping node note says an unanswered ping marks the node Dead — never "
   assert.doesNotMatch(ping.impactNote, /harmless/i);
   assert.match(ping.impactNote, /ONE ACK-only attempt on the stored routes: if it goes unanswered the driver marks the node Dead — even a working one/);
   assert.match(ping.impactNote, /request was SENT, not that the node answered/, 'and it keeps the result caveat');
+});
+
+test('the local-decision predicate covers the identity AND autonomy kinds, and no mesh action (v0.72.0)', () => {
+  // It replaced isIdentityKind at the read-only exemption and the menu footer;
+  // a kind answerable at one site and "locked" at the other is the v0.64.1 defect.
+  const local = ACTION_CATALOG.map((d) => d.kind).filter(isLocalDecisionKind).sort();
+  assert.deepEqual(local, ['autonomyPause', 'autonomyResume', 'identityFresh', 'identityKeep', 'identityResume']);
+  for (const d of ACTION_CATALOG) if (isIdentityKind(d.kind)) assert.ok(isLocalDecisionKind(d.kind), d.kind);
+  assert.equal(describeAction('autonomyPause')?.impact, 'safe');
+  assert.equal(describeAction('autonomyResume')?.impact, 'caution');
+  assert.match(describeAction('autonomyResume')!.impactNote, /start sending again at the next tick/);
 });

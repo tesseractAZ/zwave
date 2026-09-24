@@ -1042,7 +1042,7 @@ test('a skipped (confirmation-window) action CONFOUNDS the episode — no contro
   assert.equal(o.confounded('rtt-degraded'), 1, 'counted as confounded');
   assert.equal(o.baseRate('rtt-degraded'), null, 'and the control arm gained nothing');
   const line = logged.find((l) => /episode 57:rtt-degraded/.test(l));
-  assert.match(line!, /\(confounded — the node died, was remediated, or was re-routed by our own probe mid-episode; credited to neither arm\)/,
+  assert.match(line!, /\(confounded — the node died, was remediated, was re-routed by our own probe, or the checks were paused mid-episode; credited to neither arm\)/,
     `the closure names the confound: ${line}`);
 });
 
@@ -1452,4 +1452,298 @@ test('a starved quiet-node closure is UNDERSAMPLED whatever its live span — si
   o.resolve(21, 'quiet-node', 60_000 + 10 * 60_000, W(50, 0, 50), { absentSinceMs: 60_000 });
   assert.equal(o.unverifiableUndersampled('quiet-node'), 1, 'six silent hours: it had the time, never the readings');
   assert.equal(o.unverifiableTransient('quiet-node'), 0, 'not a blink');
+});
+
+/* ── v0.72.0: who acted, when an arm last learned, what died after ───────── */
+
+import { KILLED_AFTER_MS, ROUTE_EFFECT_KINDS } from '../src/zwave/outcomes';
+
+/** Close one rtt-degraded episode on `node` after `act` by `origin`, improved. */
+function closeAfter(o: ReturnType<typeof store>, node: number, act: 'ping' | 'healNode', origin: 'you' | 'engine' | undefined, t: number, after = WT(30)) {
+  o.open(node, 'rtt-degraded', t, WT(400));
+  o.recordAction(node, act, false, t + 100, undefined, undefined, origin ? { origin, aliveAtAction: true } : undefined);
+  return o.resolve(node, 'rtt-degraded', t + 1000, after);
+}
+
+test('the action is booked to its ACTOR — you, engine, and an unstated origin as you (v0.72.0)', () => {
+  const o = store();
+  const ep = closeAfter(o, 7, 'ping', 'engine', 1_000);
+  assert.equal(ep?.action?.origin, 'engine', 'the origin is stored on the episode');
+  closeAfter(o, 8, 'ping', 'you', 10_000);
+  closeAfter(o, 9, 'ping', undefined, 20_000);
+  const arms = o.actorArms('rtt-degraded').map((x) => `${x.action}|${x.origin}:${x.n}:${x.nodes}`);
+  assert.deepEqual(arms, ['ping|engine:1:1', 'ping|you:2:2']);
+  assert.equal(o.pooledArm('rtt-degraded', 'ping')?.n, 3, 'the pooled arm keeps learning every origin, as v0.71.0 did');
+});
+
+test('the pooled arm bumps exactly as v0.71.0 did — a rollback reads the same numbers (v0.72.0)', () => {
+  const o = createOutcomeStore({ minEpisodes: 4, decay: 0.03 });
+  closeAfter(o, 7, 'ping', 'engine', 1_000);                   // improved
+  closeAfter(o, 7, 'ping', 'you', 10_000, WT(400));            // no-change
+  closeAfter(o, 7, 'ping', 'you', 20_000, WT(900));            // worse
+  const k = 0.97;
+  const pooled = (o.toJSON() as { action: [string, { n: number; ok: number; bad: number }][] }).action.find(([key]) => key === 'rtt-degraded|ping')![1];
+  // The v0.71.0 recurrence, by hand: n' = n·k + 1; ok' = ok·k + [improved]; bad' = bad·k + [worse].
+  assert.equal(pooled.n, (1 * k + 1) * k + 1);
+  assert.equal(pooled.ok, 1 * k * k);
+  assert.equal(pooled.bad, 1);
+});
+
+test('a claim is read from the OPERATOR arm only — the ladder never earns one (v0.72.0)', () => {
+  const o = store();
+  for (let i = 0; i < 6; i++) { o.open(100 + i, 'rtt-degraded', i * 10_000, WT(400)); o.resolve(100 + i, 'rtt-degraded', i * 10_000 + 1000, WT(400)); } // control: 0/6
+  for (let i = 0; i < 8; i++) closeAfter(o, 200 + i, 'ping', 'engine', 100_000 + i * 10_000);        // ladder: 8/8 improved
+  const e = o.efficacyFor('rtt-degraded', 'ping');
+  assert.equal(e.n, 0, 'the ladder arm is not the operator arm');
+  assert.equal(e.expectedEfficacy, null, 'no claim');
+  for (let i = 0; i < 8; i++) closeAfter(o, 300 + i, 'ping', 'you', 300_000 + i * 10_000);
+  assert.ok(o.efficacyFor('rtt-degraded', 'ping').expectedEfficacy != null, 'the operator arm earns it');
+});
+
+test('every tally records when it last learned (v0.72.0)', () => {
+  const o = store();
+  o.open(5, 'rtt-degraded', 1_000, WT(400));
+  o.resolve(5, 'rtt-degraded', 5_000, WT(30));
+  closeAfter(o, 7, 'ping', 'you', 10_000);
+  const j = o.toJSON() as { control: [string, { lastAt?: number }][]; action: [string, { lastAt?: number }][]; actorArms: [string, { lastAt?: number }][] };
+  assert.equal(j.control[0][1].lastAt, 5_000);
+  assert.equal(j.action[0][1].lastAt, 11_000);
+  assert.equal(j.actorArms[0][1].lastAt, 11_000);
+  assert.equal(o.pooledArm('rtt-degraded', 'ping')?.lastAt, 11_000);
+});
+
+test('a death ≤15 min after an action the node was ALIVE for is counted once, at once, and survives the episode (v0.72.0)', () => {
+  const o = store();
+  const t = 1_000_000;
+  const arm = () => o.actorArms('rtt-degraded').find((x) => x.origin === 'you')?.killedAfter ?? 0;
+  o.open(7, 'rtt-degraded', t, WT(400));
+  o.recordAction(7, 'healNode', false, t + 1, undefined, undefined, { origin: 'you', aliveAtAction: true });
+  o.noteDeadAfterAction(7, 'rtt-degraded', t + 1 + KILLED_AFTER_MS);
+  assert.equal(arm(), 1, 'at exactly 15:00 it counts');
+  o.noteDeadAfterAction(7, 'rtt-degraded', t + 1 + KILLED_AFTER_MS);
+  assert.equal(arm(), 1, 'once per episode');
+  o.abandon(7, 'rtt-degraded');
+  assert.equal(arm(), 1, 'an abandoned episode keeps the count');
+  o.open(8, 'rtt-degraded', t, WT(400));
+  o.recordAction(8, 'healNode', false, t + 1, undefined, undefined, { origin: 'you', aliveAtAction: true });
+  o.noteDeadAfterAction(8, 'rtt-degraded', t + 1 + KILLED_AFTER_MS + 60_000);
+  assert.equal(arm(), 1, 'at 15:01 it does not');
+  o.open(9, 'rtt-degraded', t, WT(400));
+  o.recordAction(9, 'ping', false, t + 1, undefined, undefined, { origin: 'engine', aliveAtAction: false });
+  o.noteDeadAfterAction(9, 'rtt-degraded', t + 60_000);
+  assert.equal(o.actorArms('rtt-degraded').find((x) => x.origin === 'engine')?.killedAfter ?? 0, 0,
+    'a ping to a node already Dead — the ladder — never counts');
+  o.open(10, 'dead-flap', t, WF(4));
+  o.recordAction(10, 'ping', false, t + 1, undefined, undefined, { origin: 'you', aliveAtAction: true });
+  o.noteDeadAfterAction(10, 'dead-flap', t + 60_000);
+  assert.equal(o.actorArms('dead-flap').length, 0, 'never for dead-flap, whose definition is the death');
+});
+
+test('an episode that opened AFTER the action was sent is confounded, not credited (v0.72.0)', () => {
+  const o = store();
+  o.open(7, 'route-churn', 2_000, W(50, 0));
+  o.recordAction(7, 'healNode', false, 1_000, undefined, undefined, { origin: 'you', aliveAtAction: true });
+  // Asserted on the OPEN episode: a route-churn closure on thin windows is
+  // unverifiable anyway, so the arm alone could not tell the rule was applied.
+  assert.deepEqual(o.openEpisodeDetails().map((e) => [e.actionKind, e.confounded]), [[null, true]],
+    'the heal is not credited for its own side effect');
+  o.resolve(7, 'route-churn', 9_000, W(50, 0, 50, { routeKnown: 3 }));
+  assert.equal(o.actorArms('route-churn').length, 0);
+});
+
+test('a route-kind symptom opening ≤15 min after an action is counted as possible harm (v0.72.0)', () => {
+  const o = store();
+  assert.ok(ROUTE_EFFECT_KINDS.has('route-churn') && !ROUTE_EFFECT_KINDS.has('quiet-node'));
+  o.recordAction(7, 'healNode', false, 1_000, undefined, undefined, { origin: 'you', aliveAtAction: true });
+  o.open(7, 'route-churn', 1_000 + KILLED_AFTER_MS, W(50, 0));
+  o.open(7, 'quiet-node', 2_000, W(50, 0));
+  o.open(7, 'rtt-degraded', 1_000 + KILLED_AFTER_MS + 1, WT(400));
+  assert.equal(o.routeSymptomsAfter('healNode', 'you'), 1, 'route-churn at 15:00 counts; quiet-node and a late one do not');
+  assert.equal(o.routeSymptomsAfter('healNode', 'engine'), 0);
+});
+
+test('live span is bucketed at 10, 30 and 60 minutes, scored apart from unscored (v0.72.0)', () => {
+  const o = store();
+  const day = 20_000 * 86_400_000;
+  const M = 60_000;
+  const close = (id: number, liveMin: number, after: WindowMetrics | null, confound = false) => {
+    o.open(id, 'rtt-degraded', day + 1_000, WT(400), { dwellStartMs: day });
+    if (confound) o.markConfounded(id, 'rtt-degraded');
+    o.resolve(id, 'rtt-degraded', day + liveMin * M + 10 * M, after, { absentSinceMs: day + liveMin * M });
+  };
+  close(1, 9.99, WT(30));
+  close(2, 10, WT(30));
+  close(3, 30, WT(400));
+  close(4, 60, WT(900));
+  close(5, 45, null);            // unverifiable → unscored
+  close(6, 45, WT(30), true);    // confounded → unscored
+  const ls = o.liveSpan('rtt-degraded', day + 86_400_000)!;
+  assert.deepEqual(ls.scored, [1, 1, 1, 1]);
+  assert.deepEqual(ls.unscored, [0, 0, 2, 0]);
+  assert.equal(o.liveSpan('rtt-degraded', day + 40 * 86_400_000)?.scored.reduce((a, b) => a + b, 0), 0, 'a 30-day window');
+});
+
+test('the confounded tag prints on an ATTRIBUTED closure too, with who acted and how long it was live (v0.72.0)', () => {
+  const logged: string[] = [];
+  const o = createOutcomeStore({ minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });
+  o.open(7, 'rtt-degraded', 1_000, WT(400), { dwellStartMs: 0 });
+  o.recordAction(7, 'healNode', false, 1_500, undefined, undefined, { origin: 'you', aliveAtAction: true });
+  o.markConfounded(7, 'rtt-degraded');
+  o.noteDeadAfterAction(7, 'rtt-degraded', 60_000);
+  o.resolve(7, 'rtt-degraded', 20 * 60_000, WT(30), { absentSinceMs: 12 * 60_000 });
+  const line = logged.find((l) => /episode 7:rtt-degraded/.test(l))!;
+  assert.match(line, /improved after healNode \(you\) live=12m/);
+  assert.match(line, /credited to neither arm/);
+  assert.match(line, /node went Dead ≤15m after the action/);
+});
+
+test('a v0.71.0 ledger loads, the new tallies round-trip, the file stays v:1, and reset clears them (v0.72.0)', () => {
+  const v071 = { v: 1, control: [['rtt-degraded', { n: 5, ok: 2, bad: 1 }]], action: [['rtt-degraded|ping', { n: 17.8, ok: 3, bad: 2 }]] };
+  const o = store();
+  o.loadJSON(v071);
+  assert.equal(o.pooledArm('rtt-degraded', 'ping')?.n, 17.8);
+  assert.equal(o.pooledArm('rtt-degraded', 'ping')?.lastAt, null, 'learned before v0.72.0: no date');
+  assert.deepEqual(o.actorArms('rtt-degraded'), [], 'and no actor split');
+  closeAfter(o, 7, 'healNode', 'you', 1_000);
+  o.open(8, 'rtt-degraded', 1_000, WT(400));
+  o.recordAction(8, 'healNode', false, 1_001, undefined, undefined, { origin: 'you', aliveAtAction: true });
+  o.noteDeadAfterAction(8, 'rtt-degraded', 60_000);
+  const j = o.toJSON() as { v: number };
+  assert.equal(j.v, 1);
+  const p = store();
+  p.loadJSON(JSON.parse(JSON.stringify(j)));
+  assert.deepEqual(p.actorArms('rtt-degraded'), o.actorArms('rtt-degraded'));
+  assert.deepEqual(p.liveSpan('rtt-degraded', 2_000), o.liveSpan('rtt-degraded', 2_000));
+  p.reset();
+  assert.deepEqual(p.actorArms('rtt-degraded'), [], 'a reset (identity: start fresh) clears the actor arms');
+  assert.equal(p.liveSpan('rtt-degraded'), null);
+  assert.equal(p.routeSymptomsAfter('healNode', 'you'), 0);
+});
+
+/* ── v0.72.0 review: harm windows from the LAUNCH, against the latest action ── */
+
+test('a death is charged to the node\'s LATEST action, while it runs and for 15 min after it settles (v0.72.0 review)', () => {
+  const o = store();
+  const arm = (act: string) => o.actorArms('rtt-degraded').find((x) => x.action === act && x.origin === 'you')?.killedAfter ?? 0;
+  o.open(7, 'rtt-degraded', 1_000, WT(400));
+  o.noteLaunch(7, 'ping', 60_000, { origin: 'you', alive: true });
+  o.recordAction(7, 'ping', false, 60_000, undefined, undefined, { origin: 'you', aliveAtAction: true });
+  o.noteSettled(7, 60_000, 61_000);
+  o.noteLaunch(7, 'healNode', 600_000, { origin: 'you', alive: true });
+  // 25 minutes into a heal that has not settled: still inside its window.
+  o.noteDeadAfterAction(7, 'rtt-degraded', 600_000 + 25 * 60_000);
+  assert.equal(arm('healNode'), 1, 'charged to the heal, not the earlier ping');
+  assert.equal(arm('ping'), 0);
+  o.open(8, 'rtt-degraded', 1_000, WT(400));
+  o.noteLaunch(8, 'healNode', 10_000, { origin: 'you', alive: true });
+  o.noteSettled(8, 10_000, 30 * 60_000);
+  o.noteDeadAfterAction(8, 'rtt-degraded', 30 * 60_000 + KILLED_AFTER_MS);
+  assert.equal(arm('healNode'), 2, '15:00 after the settle counts');
+  o.open(9, 'rtt-degraded', 1_000, WT(400));
+  o.noteLaunch(9, 'healNode', 10_000, { origin: 'you', alive: true });
+  o.noteSettled(9, 10_000, 30 * 60_000);
+  o.noteDeadAfterAction(9, 'rtt-degraded', 30 * 60_000 + KILLED_AFTER_MS + 1);
+  assert.equal(arm('healNode'), 2, 'later does not');
+});
+
+test('route symptoms count from the launch, from the BREACH start, and only for a node alive at launch (v0.72.0 review)', () => {
+  const o = store();
+  o.noteLaunch(7, 'healNode', 100_000, { origin: 'you', alive: true });
+  o.open(7, 'route-churn', 100_000 + 60_000, W(50, 0), { dwellStartMs: 100_000 + 30_000 });  // during the heal
+  assert.equal(o.routeSymptomsAfter('healNode', 'you'), 1, 'counted while the heal still runs');
+  o.open(7, 'rate-fallback', 100_000 + 60_000, W(50, 0), { dwellStartMs: 100_000 - 4 * 60_000 }); // breach began before it
+  assert.equal(o.routeSymptomsAfter('healNode', 'you'), 1, 'a breach older than the action is not its side effect');
+  o.noteLaunch(8, 'ping', 100_000, { origin: 'engine', alive: false });
+  o.open(8, 'route-churn', 100_000 + 60_000, W(50, 0));
+  assert.equal(o.routeSymptomsAfter('ping', 'engine'), 0, 'reviving a Dead node is not harm');
+  // A breach that began before the launch and matured during a long heal is attributed, not confounded.
+  const p = store();
+  p.open(5, 'rtt-degraded', 200_000, WT(400), { dwellStartMs: 90_000 });
+  p.recordAction(5, 'healNode', false, 100_000, undefined, undefined, { origin: 'you', aliveAtAction: true });
+  assert.equal(p.openEpisodeDetails()[0].actionKind, 'healNode');
+  assert.equal(p.openEpisodeDetails()[0].confounded, false);
+});
+
+test('the pre-actor share is a decayed snapshot, not pooled minus actors (v0.72.0 review)', () => {
+  const o = createOutcomeStore({ minEpisodes: 4, decay: 0.03 });
+  o.loadJSON({ v: 1, action: [['rtt-degraded|ping', { n: 4, ok: 1, bad: 0 }]] });
+  assert.equal(o.pooledArm('rtt-degraded', 'ping')?.legacyN, 4, 'snapshot from a pre-v0.72.0 file');
+  for (let i = 0; i < 20; i++) closeAfter(o, 100 + i, 'ping', i % 2 ? 'you' : 'engine', 1_000_000 + i * 10_000);
+  const p = o.pooledArm('rtt-degraded', 'ping')!;
+  assert.ok(Math.abs(p.legacyN - 4 * 0.97 ** 20) < 1e-9, `decayed with the pooled arm: ${p.legacyN}`);
+  assert.equal(p.nodes, 20, 'the pooled arm keeps its node provenance');
+  const q = store();
+  q.loadJSON(JSON.parse(JSON.stringify(o.toJSON())));
+  assert.ok(Math.abs((q.pooledArm('rtt-degraded', 'ping')?.legacyN ?? 0) - p.legacyN) < 1e-9, 'round-trips');
+  const fresh = store();
+  fresh.loadJSON({ v: 1, action: [['rtt-degraded|ping', { n: 4, ok: 1, bad: 0 }]], actorArms: [] });
+  assert.equal(fresh.pooledArm('rtt-degraded', 'ping')?.legacyN, 0, 'a v0.72.0 file carries its own legacy share, never re-snapshots');
+});
+
+test('one malformed optional entry does not wipe the ledger (v0.72.0 review)', () => {
+  const o = store();
+  o.loadJSON({ v: 1, control: [['rtt-degraded', { n: 5, ok: 2, bad: 0 }]], action: [['rtt-degraded|ping', { n: 3, ok: 1, bad: 0 }]],
+    actorArms: [null, ['rtt-degraded|ping|you', null], ['rtt-degraded|ping|you', { n: 1, ok: 1, bad: 0 }]],
+    liveSpan: [['rtt-degraded', { since: 1, days: [null, [1, [1, 0, 0, 0], [0, 0, 0, 0]]] }], 'junk'], killedAfter: 'x', legacyArms: [7] });
+  assert.equal(o.controlArm('rtt-degraded')?.n, 5, 'the control arm survives');
+  assert.equal(o.pooledArm('rtt-degraded', 'ping')?.n, 3, 'the pooled arm survives');
+  assert.equal(o.actorArms('rtt-degraded')[0]?.n, 1, 'the good actor entry loads');
+  assert.deepEqual(o.liveSpan('rtt-degraded', 86_400_000)?.scored, [1, 0, 0, 0]);
+});
+
+/* ── v0.72.0 second review ─────────────────────────────────────────────── */
+
+test('a quick action during a long heal does not replace the heal\'s window, nor does a later ladder ping (second review)', () => {
+  const o = store();
+  const heal = () => o.actorArms('rtt-degraded').find((x) => x.action === 'healNode')?.killedAfter ?? 0;
+  o.open(7, 'rtt-degraded', 1_000, WT(400));
+  o.noteLaunch(7, 'healNode', 10_000, { origin: 'you', alive: true });
+  o.noteLaunch(7, 'ping', 20_000, { origin: 'you', alive: true });
+  o.noteSettled(7, 20_000, 21_000);                       // the ping answers at once
+  o.noteLaunch(7, 'ping', 22 * 60_000, { origin: 'engine', alive: false }); // a ladder ping to the now-Dead node
+  o.noteDeadAfterAction(7, 'rtt-degraded', 25 * 60_000);  // still inside the heal, which has not settled
+  assert.equal(heal(), 1, 'the heal still owns the death');
+  o.open(8, 'route-churn', 1_000, W(50, 0));
+  o.noteLaunch(9, 'healNode', 10_000, { origin: 'you', alive: true });
+  o.noteLaunch(9, 'ping', 11_000, { origin: 'engine', alive: false });
+  o.open(9, 'route-churn', 12_000, W(50, 0), { dwellStartMs: 12_000 });
+  assert.equal(o.routeSymptomsAfter('healNode', 'you'), 1, 'a Dead-node ping does not erase the heal\'s route-harm window');
+});
+
+test('the pre-actor row keeps the node count of its snapshot, not the pooled arm\'s growing one (second review)', () => {
+  const o = createOutcomeStore({ minEpisodes: 4, decay: 0.03 });
+  o.loadJSON({ v: 1, action: [['rtt-degraded|ping', { n: 4, ok: 1, bad: 0 }]], armNodes: [['rtt-degraded|ping', [1, 2, 3]]] });
+  for (let i = 0; i < 5; i++) closeAfter(o, 100 + i, 'ping', 'you', 1_000_000 + i * 10_000);
+  const p = o.pooledArm('rtt-degraded', 'ping')!;
+  assert.equal(p.legacyNodes, 3);
+  assert.equal(p.nodes, 8, 'the pooled arm itself keeps growing');
+  const q = store();
+  q.loadJSON(JSON.parse(JSON.stringify(o.toJSON())));
+  assert.equal(q.pooledArm('rtt-degraded', 'ping')?.legacyNodes, 3, 'round-trips');
+});
+
+test('a malformed entry in ANY field drops only itself (second review)', () => {
+  const o = store();
+  o.loadJSON({ v: 1, control: [['rtt-degraded', { n: 5, ok: 2, bad: 0 }], null], action: 'x', unver: [null, ['rtt-degraded', 2]],
+    fp: [[1, 2]], armNodes: [['k', 'notarray']], actorArms: [['rtt-degraded|ping|you', { n: 1, ok: 1, bad: 0 }]], splitRule: 'live-span', unverTransient: [null] });
+  assert.equal(o.controlArm('rtt-degraded')?.n, 5);
+  assert.equal(o.unverifiable('rtt-degraded'), 2);
+  assert.equal(o.actorArms('rtt-degraded')[0]?.n, 1, 'the v0.72.0 fields survive a bad older field');
+});
+
+test('a death during a running heal is the heal\'s even when a quick ping ran and settled inside it (third review)', () => {
+  const o = store();
+  o.open(7, 'rtt-degraded', 1_000, WT(400));
+  o.noteLaunch(7, 'healNode', 10_000, { origin: 'you', alive: true });
+  o.noteLaunch(7, 'ping', 60_000, { origin: 'you', alive: true });
+  o.noteSettled(7, 60_000, 62_000);
+  o.noteDeadAfterAction(7, 'rtt-degraded', 5 * 60_000);         // the heal still runs; the ping's window still covers it
+  const by = (act: string) => o.actorArms('rtt-degraded').find((x) => x.action === act)?.killedAfter ?? 0;
+  assert.equal(by('healNode'), 1);
+  assert.equal(by('ping'), 0);
+  o.open(8, 'rtt-degraded', 1_000, WT(400));
+  o.noteLaunch(8, 'healNode', 10_000, { origin: 'you', alive: true });
+  o.dropLaunch(8, 10_000);                                      // it never left the add-on
+  o.noteDeadAfterAction(8, 'rtt-degraded', 60_000);
+  assert.equal(by('healNode'), 1, 'a launch that never left opens no harm window');
 });

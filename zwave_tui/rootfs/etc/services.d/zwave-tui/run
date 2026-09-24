@@ -101,6 +101,10 @@ export BASELINES_PATH=/data/baselines.json
 # M5 outcome ledger (learned action efficacy vs the no-action control arm).
 # Atomic JSON on /data; flush is fixed in code (5 min + on shutdown). No user knob.
 export OUTCOMES_PATH=/data/outcomes.json
+# The owner's pause on every autonomous write (v0.72.0): set from the TUI (Z on
+# ENGINE) and kept across restarts. Absent means never paused; unreadable or
+# malformed reads as PAUSED.
+export AUTONOMY_PATH=/data/autonomy.json
 
 # SUPERVISOR_TOKEN is injected automatically by the HA Supervisor (unlocked by
 # homeassistant_api: true) — the Node process inherits it. Do NOT export it.

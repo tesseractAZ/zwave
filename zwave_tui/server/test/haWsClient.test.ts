@@ -242,3 +242,27 @@ test('stop() while the socket is still CONNECTING does not crash the process', a
     await new Promise<void>((r) => srv.close(() => r()));
   }
 });
+
+test('send() bounds the wait for the SOCKET apart from the wait for the REPLY (v0.72.0)', async () => {
+  // A 20-minute route rebuild must not also wait 20 minutes for a socket: a
+  // command confirmed during an outage would fire unattended when it returned.
+  const dead = createHaWsClient({ url: 'ws://127.0.0.1:9', token: 't', log: () => {} });
+  try {
+    dead.start();
+    const t0 = Date.now();
+    await assert.rejects(dead.send({ type: 'x' }, { readyMs: 80, replyMs: 60_000 }), /not ready/);
+    assert.ok(Date.now() - t0 < 2_000, `gave up on the socket at readyMs, not replyMs (${Date.now() - t0} ms)`);
+  } finally { dead.stop(); }
+  const m = await mockHa();
+  const c = client(m.url);
+  try {
+    c.start();
+    await waitFor(() => c.ready());
+    const t0 = Date.now();
+    await assert.rejects(c.send({ type: 'never-answered' }, { readyMs: 10_000, replyMs: 80 }), /HA WS timeout/);
+    assert.ok(Date.now() - t0 < 2_000, 'the reply bound is its own');
+  } finally {
+    c.stop();
+    await m.close();
+  }
+});

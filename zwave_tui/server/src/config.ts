@@ -109,6 +109,9 @@ export const config = {
   /** Persistent OUTCOMES ledger (M5 — learned action efficacy vs the no-action
    *  arm). Exported as OUTCOMES_PATH=/data/outcomes.json; absent → in-memory. */
   outcomesPath: process.env.OUTCOMES_PATH || null,
+  /** The owner's pause on every autonomous write (v0.72.0). Exported as
+   *  AUTONOMY_PATH=/data/autonomy.json; absent → a TUI pause lasts until restart. */
+  autonomyPath: process.env.AUTONOMY_PATH || null,
   /** Build stamp promoted from the Docker ARG (reported by /api/version). */
   version: process.env.BUILD_VERSION ?? '0.1.0',
 

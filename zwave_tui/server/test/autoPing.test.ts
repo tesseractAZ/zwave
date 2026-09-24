@@ -63,7 +63,7 @@ function mesh(live: number, extra: NodeSnapshot[] = []): NodeSnapshot[] {
 /** Drive one tick: track episodes, then decide. */
 function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
   config?: AutoPingConfig; controller?: ControllerSnapshot | null; booting?: boolean; verifyDue?: number[];
-  rfOffSince?: number | null; bootDeadLane?: boolean; canRead?: (id: number) => boolean;
+  rfOffSince?: number | null; bootDeadLane?: boolean; canRead?: (id: number) => boolean; paused?: boolean; operatorBusy?: boolean;
 } = {}) {
   trackEpisodes(state, nodes, now);
   return decideAutoPings({
@@ -78,6 +78,8 @@ function tick(state: AutoPingState, nodes: NodeSnapshot[], now: number, over: {
     // and the assertion below it is satisfied by the wrong branch.
     bootDeadLane: over.bootDeadLane,
     rfOffSince: over.rfOffSince ?? null,
+    paused: over.paused,
+    operatorBusy: over.operatorBusy,
     canRead: over.canRead,
     verifyDue: over.verifyDue ? () => over.verifyDue!.map((id) => ({ id, first: true })) : undefined,
   });
@@ -3387,4 +3389,131 @@ test('a read the feed already booked is not booked again when a later tick sees 
   await R.step();
   R.h.stop();
   assert.equal(R.snap(7)?.probeKills24h, 1, 'one read, one kill');
+});
+
+/* ── v0.72.0: the owner's pause ───────────────────────────────────────────
+ * One switch for every autonomous write. It sends nothing on any lane, and it
+ * ranks BELOW the suppressions that raise the degraded alarm.
+ */
+
+test('a pause stops every lane — the dead ladder, the sweep and verification (v0.72.0)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  tick(s, nodes, T);
+  const live = tick(s, nodes, T + 30 * MIN, { config: staleCfg(), verifyDue: [105] });
+  assert.deepEqual(live.ping, [7], 'precondition: the ladder would probe node 7 right now');
+  assert.ok(live.stale.length > 0 && live.verify.length > 0, 'precondition: the sweep and verification lanes have work');
+  const d = tick(s, nodes, T + 30 * MIN, { config: staleCfg(), verifyDue: [105], paused: true });
+  assert.equal(d.suppressed, 'paused');
+  assert.deepEqual([d.ping, d.read, d.stale, d.verify], [[], [], [], []], 'nothing is sent');
+  // Inside the boot window, where the ladder alone is released, too.
+  const b = tick(createAutoPingState(), nodes, T, { booting: true, bootDeadLane: true, paused: true });
+  assert.equal(b.suppressed, 'paused');
+  assert.deepEqual(b.ping, []);
+});
+
+test('a pause follows write-actions-off, rebuild, RF-off, no-capability-data and storm (v0.72.0)', () => {
+  const nodes = mesh(20, [dead(7)]);
+  const at = (over: Parameters<typeof tick>[3], ns = nodes) => tick(createAutoPingState(), ns, T, { paused: true, ...over }).suppressed;
+  assert.equal(at({ config: cfg({ writeActions: false }) }), 'write-actions-off');
+  assert.equal(at({ controller: { isRebuildingRoutes: true } as never }), 'rebuilding-routes');
+  assert.equal(at({ rfOffSince: T - 1000 }), 'controller-rf-off');
+  const blind = [node(1, { isController: true }), node(9, { isListening: null })];
+  assert.equal(at({}, blind), 'no-capability-data', 'a pause must not hide the add-on going blind');
+  const storm = mesh(8, [dead(20), dead(21), dead(22), dead(23)]);
+  assert.equal(at({}, storm), 'storm', 'nor a storm');
+  assert.equal(at({}), 'paused');
+});
+
+test('the runner reads the pause: nothing new is sent, and a probe already out is still judged (v0.72.0)', async () => {
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  let paused = false;
+  const probed: number[] = [];
+  const logs: string[] = [];
+  const n7 = node(7, { stats: { lastSeen: T } as never });
+  const nodes = [node(1, { isController: true }), n7];
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, probe: async (n) => { probed.push(n); }, log: (_s, _n, m) => { logs.push(m); },
+    config: cfg({ staleMs: 60 * MIN }), tickMs: 1_000_000, now: () => clock,
+    paused: () => paused,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN;
+  h.tick();
+  assert.deepEqual(probed, [7], 'precondition: the sweep probes it');
+  paused = true;
+  setSeen(n7, clock + 2_000); // its answer lands during the pause
+  clock += 2 * MIN; // past ANSWER_GRACE_MS, so the probe is mature
+  h.tick();
+  assert.equal(h.snapshot().suppressed, 'paused');
+  assert.deepEqual(probed, [7], 'nothing new is sent');
+  const st = h.snapshot().nodes.find((n) => n.nodeId === 7);
+  assert.equal(st?.pending ?? 0, 0, 'the probe already out was judged');
+  assert.equal(st?.missStreak ?? 0, 0, 'and judged answered');
+  clock += 2 * 3_600_000;
+  h.tick();
+  assert.deepEqual(probed, [7], 'hours later, still nothing');
+  paused = false;
+  clock += MIN;
+  h.tick();
+  assert.deepEqual(probed, [7, 7], 'resumed: the sweep sends again at the next tick');
+  h.stop();
+});
+
+test('auto-ping stands down while the operator waits on a one-node rebuild or removal (v0.72.0)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  tick(s, nodes, T);
+  const live = tick(s, nodes, T + 30 * MIN, { config: staleCfg(), verifyDue: [105] });
+  assert.deepEqual(live.ping, [7], 'precondition');
+  const d = tick(s, nodes, T + 30 * MIN, { config: staleCfg(), verifyDue: [105], operatorBusy: true });
+  assert.equal(d.suppressed, 'operator-action');
+  assert.deepEqual([d.ping, d.read, d.stale, d.verify], [[], [], [], []]);
+  const b = tick(createAutoPingState(), nodes, T, { booting: true, bootDeadLane: true, operatorBusy: true });
+  assert.equal(b.suppressed, 'boot-window', 'reported as the boot window while the mesh settles, like a rebuild');
+  assert.deepEqual(b.ping, []);
+});
+
+test('operator-action ranks below storm and no-capability-data, and above the pause (v0.72.0 review)', () => {
+  const at = (over: Parameters<typeof tick>[3], ns: NodeSnapshot[]) => tick(createAutoPingState(), ns, T, { operatorBusy: true, ...over }).suppressed;
+  const storm = mesh(8, [dead(20), dead(21), dead(22), dead(23)]);
+  assert.equal(at({}, storm), 'storm', 'a chain of heals must not hide a storm');
+  const blind = [node(1, { isController: true }), node(9, { isListening: null })];
+  assert.equal(at({}, blind), 'no-capability-data');
+  assert.equal(at({ paused: true }, mesh(20)), 'operator-action');
+});
+
+test('while paused, a node that already spent its budget is still announced as given up — escalation sends nothing (v0.72.0 review)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(7)]);
+  tick(s, nodes, T);
+  s.attempts.set(7, 3);                 // the ladder's whole budget, already spent
+  const d = tick(s, nodes, T + 3 * 3_600_000, { paused: true });
+  assert.equal(d.suppressed, 'paused');
+  assert.deepEqual(d.ping, [], 'still nothing sent');
+  assert.deepEqual(d.gaveUp, [7], 'but the summons is not held for the length of the pause');
+});
+
+test('paused, a node whose budget is spent and whose last step is an owed read still gives up (second review)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(49)]);
+  tick(s, nodes, T);
+  s.attempts.set(49, 3);
+  s.readOwed.add(49);
+  const live = tick(s, nodes, T + 3 * 3_600_000, { canRead: () => true });
+  assert.deepEqual(live.read, [49], 'precondition: unpaused, the read goes first');
+  const d = tick(s, nodes, T + 3 * 3_600_000, { canRead: () => true, paused: true });
+  assert.deepEqual([d.read, d.gaveUp], [[], [49]], 'paused, the read cannot go, so the summons is not held');
+});
+
+test('paused, a spent node is not given up while a probe to it still awaits its answer (third review)', () => {
+  const s = createAutoPingState();
+  const nodes = mesh(20, [dead(49)]);
+  tick(s, nodes, T);
+  s.attempts.set(49, 3);
+  s.readOwed.add(49);
+  s.awaitingAnswer.set(49, [{ at: T + 3 * 3_600_000 - 10_000, cls: 'echo-only', lane: 'manual' } as never]);
+  const d = tick(s, nodes, T + 3 * 3_600_000, { canRead: () => true, paused: true });
+  assert.deepEqual(d.gaveUp, [], 'its answer grace runs first');
 });

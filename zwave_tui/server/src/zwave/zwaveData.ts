@@ -70,9 +70,11 @@ import { refusalScope } from './planner';
 import { detectSymptoms, symptomaticNodes, armingNodes, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
-import type { ActionRefusal, ActionOrigin } from './zwaveActions';
+import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
 import type { DriverWsState } from './driverWsClient';
-import type { OpenEpisodeView } from './outcomes';
+import { KILLED_AFTER_MS, type OpenEpisodeView, type ActorArmView, type LiveSpanView } from './outcomes';
+import { createAutonomyPause, PAUSE_ENTITY, type AutonomyPause, type PauseState } from './autonomyPause';
+import type { LogSink } from '../logger';
 
 /** An open episode plus the confirmation-window flag only this layer knows. */
 export interface OpenEpisodeSummary extends OpenEpisodeView {
@@ -368,7 +370,9 @@ export interface ZwaveDataOptions {
   baselinesPath?: string | null;
   /** Persistent OUTCOMES ledger (M5). Empty/null ⇒ in-memory (re-learns on restart). */
   outcomesPath?: string | null;
-  log?: (msg: string) => void;
+  /** The owner's pause file (v0.72.0). Empty/null ⇒ a TUI pause lasts until restart. */
+  autonomyPath?: string | null;
+  log?: LogSink;
 }
 
 export interface ZwaveData {
@@ -430,11 +434,35 @@ export interface ZwaveData {
   engineStatus(): EngineStatus;
   /** The mesh-identity decision waiting on the operator, or null (v0.64.0). */
   pendingIdentity(): IdentityDecision | null;
+  /** The owner's pause on every autonomous write, or null when running (v0.72.0). */
+  autonomyPause(): PauseState | null;
+  /** Pause from the TUI. Idempotent; sends nothing. */
+  pauseAutonomy(by: 'tui'): PauseState;
+  /** Lift the TUI pause; says whether Home Assistant's toggle still holds one. */
+  resumeAutonomy(): { resumed: boolean; stillPausedBy: 'ha' | null };
+  /** True once a pause has outlived PAUSE_ESCALATE_MS (v0.72.0). */
+  autonomyPauseOverdue(now: number): boolean;
   /** Answer it: `keep` re-adopts the old learning, `fresh` archives it. */
   resolveIdentityDecision(choice: IdentityChoice): boolean;
   /** M5: fold an operator action's outcome into the learning ledger. `sentAt`
    *  is when the runner launched the action (v0.64.5). */
-  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin, sentAt?: number): void;
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin, sentAt?: number, aliveAtLaunch?: boolean): void;
+  /** A learned action was launched / has settled (v0.72.0 review) — the ledger
+   *  dates its harm windows from the launch, and an episode on that node is
+   *  held open while the action runs. */
+  noteActionLaunched(kind: ActionKind, nodeId: number | null, origin: ActionOrigin, at: number, aliveAtLaunch: boolean): void;
+  noteActionSettled(kind: ActionKind, nodeId: number | null, origin: ActionOrigin, at: number, settledAt: number, effect?: ActionEffect): void;
+  /** The node's command class of listening: mains or FLiRS (true), a sleeper
+   *  (false), or unknown (null) — from the driver-WS flag dump (v0.72.0 review). */
+  listensForCommands(nodeId: number): boolean | null;
+  /** Every actor's arm for a kind (v0.72.0). */
+  actorArms(kind: SymptomKind): ActorArmView[];
+  /** The pooled, all-origin arm (v0.72.0). */
+  pooledArm(kind: SymptomKind, action: ActionKind): { n: number; lastAt: number | null; nodes: number; legacyN: number; legacyNodes: number } | null;
+  /** How long closed episodes of a kind were live (v0.72.0). */
+  liveSpan(kind: SymptomKind): LiveSpanView | null;
+  /** Route-kind episodes opened soon after this actor's action (v0.72.0). */
+  routeSymptomsAfter(action: ActionKind, origin: 'you' | 'engine'): number;
   /** Register the probe-pending hook the auto-ping runner owns (v0.47.0), so a
    *  MANUAL ping is judged by the same machinery as an engine one. It receives
    *  the runner's launch stamp (v0.64.5). */
@@ -656,7 +684,7 @@ class ZwaveDataImpl implements ZwaveData {
   private readonly refreshMs: number;
   private readonly evictAfterMs: number;
   private readonly routePollMs: number;
-  private readonly log: (msg: string) => void;
+  private readonly log: LogSink;
 
   private entryId: string | null;
   private registriesLoaded = false;
@@ -804,7 +832,23 @@ class ZwaveDataImpl implements ZwaveData {
   /** Episode keys whose after-window burst has already been requested (v0.36.3),
    *  so the timed request fires once per confirmation window rather than every
    *  tick from the moment it comes due. */
-  private readonly confirmBurstSent = new Set<string>();
+  private readonly confirmBurstSent = new Map<string, number>();
+  /** Per node: was its LAST Alive→Dead crossing on one of our own measurement
+   *  probes (v0.72.0)? A probe still unanswered inside ANSWER_GRACE_MS when the
+   *  node died. Such a death is not charged to an operator's action. */
+  private readonly lastDeathOwnProbe = new Map<number, boolean>();
+  /** Per node: learned actions, launch → settle time (Infinity while in
+   *  flight), kept an hour past the settle so a later reply can tell it
+   *  overlapped them. An episode on the node is held open until they settle. */
+  private readonly opsOnNode = new Map<number, Map<number, number>>();
+  /** A mesh-wide route rebuild: Infinity while the controller reports one, the
+   *  time it ended after, null once that is an hour old (v0.72.0 review). */
+  private meshRebuildUntil: number | null = null;
+  /** Per node: until when an action whose effect is unknown may still be
+   *  acting (third review) — episodes open on the node then are confounded. */
+  private readonly maybeUntil = new Map<number, number>();
+  /** The owner's pause on every autonomous write (v0.72.0) — see autonomyPause.ts. */
+  private readonly autonomy: AutonomyPause;
   private outcomesFlushTimer: ReturnType<typeof setInterval> | null = null;
   private baselineFlushTimer: ReturnType<typeof setInterval> | null = null;
   /** M6 interference view, memoized on the sample cadence (heavy coarse fold). */
@@ -908,6 +952,20 @@ class ZwaveDataImpl implements ZwaveData {
     this.evictAfterMs = opts.evictAfterMs ?? 5 * 60_000;
     this.routePollMs = opts.routePollMs ?? Number(process.env.ROUTE_POLL_INTERVAL_MS ?? 10_000);
     this.log = opts.log ?? (() => {});
+    // Transitions go to BOTH sinks at WARN: the add-on log and the Log screen.
+    const pauseLog: LogSink = Object.assign((m: string) => this.log(m), {
+      warn: (m: string) => { (this.log.warn ?? this.log)(m); this.pushEvent('engine', 'warn', 'system', null, m); },
+      error: (m: string) => { (this.log.error ?? this.log)(m); this.pushEvent('engine', 'error', 'system', null, m); },
+    });
+    this.autonomy = createAutonomyPause({
+      path: (opts.autonomyPath ?? process.env.AUTONOMY_PATH) || null,
+      log: pauseLog,
+      // Nothing is owed from a paused period: a burst requested before the
+      // pause would otherwise drain the moment it lifts, against episodes whose
+      // windows it no longer fits.
+      onChange: (st) => { if (st) this.verifyOwed.clear(); },
+    });
+    this.autonomy.load();
     const seed = opts.entryId ?? process.env.ZWAVE_ENTRY_ID ?? '';
     this.entrySeeded = seed !== '';
     this.entryId = this.entrySeeded ? seed : null;
@@ -1039,6 +1097,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.registriesLoaded = false;
       this.statsSubscribed = false;
       this.connEpoch += 1;
+      this.autonomy.newConnection();
       void this.subscribeStatistics();
     });
     void this.tick();
@@ -1321,7 +1380,14 @@ class ZwaveDataImpl implements ZwaveData {
     const oc = this.outcomes;
     if (!oc) return;
     const CONFIRM_MS = 10 * 60_000;
-    const { toOpen, toResolve } = planEpisodeLifecycle(symptoms, oc.openEpisodes(), this.pendingResolve, now, CONFIRM_MS);
+    // A mesh-wide route rebuild (v0.72.0 second review): every node's routes
+    // are being rewritten, so no episode may close as spontaneous meanwhile.
+    const meshRebuilding = this.lastController?.isRebuildingRoutes === true;
+    if (meshRebuilding) this.meshRebuildUntil = Infinity;
+    else if (this.meshRebuildUntil === Infinity) this.meshRebuildUntil = now;
+    else if (this.meshRebuildUntil != null && now - this.meshRebuildUntil > OPS_KEEP_MS) this.meshRebuildUntil = null;
+    const { toOpen, toResolve } = planEpisodeLifecycle(symptoms, oc.openEpisodes(), this.pendingResolve, now, CONFIRM_MS,
+      (nodeId) => this.holdRelease(nodeId, now));
     // Capture the degraded before-window at onset and the settled after-window
     // at resolution (well past the transition, thanks to the confirm window).
     //
@@ -1371,7 +1437,19 @@ class ZwaveDataImpl implements ZwaveData {
     // audited case (the remediation ping's revival booked as spontaneous).
     {
       const snap = this.snapshot();
+      // Only while the pause is what stops auto-ping (v0.72.0 review): with
+      // auto-ping off it changes nothing these episodes would have received.
+      const paused = this.autonomy.state() != null && this.autoPingState()?.suppressed === 'paused';
       for (const ep of oc.openEpisodes()) {
+        // An episode open during a pause got none of the probe reads the rest
+        // of the baseline receives (v0.72.0): not a clean control observation.
+        // Nor one open while the whole mesh is being re-routed.
+        if (paused || meshRebuilding) oc.markConfounded(ep.nodeId, ep.kind);
+        const mu = ep.nodeId == null ? undefined : this.maybeUntil.get(ep.nodeId);
+        if (mu != null) {
+          if (now <= mu) oc.markConfounded(ep.nodeId, ep.kind);
+          else if (ep.nodeId != null && now - mu > OPS_KEEP_MS) this.maybeUntil.delete(ep.nodeId);
+        }
         if (ep.nodeId == null) continue;
         // NEVER dead-flap (v0.40 review, critical): Dead status is that
         // symptom's own DEFINITION — its node is Dead by construction while
@@ -1385,7 +1463,13 @@ class ZwaveDataImpl implements ZwaveData {
         // level sample cannot see (v0.40.2). A death is a death whether or not
         // it happened to straddle a sample boundary.
         const flapped = (this.flapsThisTick.get(ep.nodeId) ?? 0) > 0;
-        if (flapped || (nd && nd.status === NodeStatus.Dead)) oc.markConfounded(ep.nodeId, ep.kind);
+        if (flapped || (nd && nd.status === NodeStatus.Dead)) {
+          oc.markConfounded(ep.nodeId, ep.kind);
+          // …and a death soon after an action the node was alive for is
+          // charged to that action (v0.72.0) — unless the death was on one of
+          // this add-on's own measurement probes, which is ours, not theirs.
+          if (!this.lastDeathOwnProbe.get(ep.nodeId)) oc.noteDeadAfterAction(ep.nodeId, ep.kind, now);
+        }
         // …or our own measurement read re-routed the node (v0.71.0) — see onNodeStats.
         if (this.measurementReroutes.has(ep.nodeId) && MEASUREMENT_REROUTE_KINDS.has(ep.kind)) oc.markConfounded(ep.nodeId, ep.kind);
       }
@@ -1426,7 +1510,9 @@ class ZwaveDataImpl implements ZwaveData {
         // nobody sees. Deliberately NOT 'error': the errorsOnly filter is for
         // things that FAILED, and a closure verdict is a measurement.
         this.pushEvent('engine', ep.verdict === 'worse' ? 'warn' : 'info', 'symptom', ep.nodeId,
-          `${ep.kind} closed ${ep.verdict}${ep.action ? ` after ${ep.action.kind}` : ' (no action)'}`);
+          `${ep.kind} closed ${ep.verdict}${ep.action ? ` after ${ep.action.kind} (${ep.action.origin ?? 'you'})` : ' (no action)'}` +
+          (ep.confounded && ep.verdict !== 'unverifiable' && ep.verdict !== 'refused-misdiagnosis' ? ' (confounded)' : '') +
+          (ep.killedAfter ? ` (went Dead ≤${KILLED_AFTER_MS / 60_000}m after it)` : ''));
       }
     }
     // The AFTER-window burst, timed to land inside the window it fills (v0.36.3).
@@ -1439,17 +1525,25 @@ class ZwaveDataImpl implements ZwaveData {
     // CONFIRM_MS - WINDOW_MS, which is the moment the after-window starts.
     const WINDOW_MS = 5 * 60_000;
     for (const [key, since] of this.pendingResolve) {
-      if (this.confirmBurstSent.has(key)) continue;
-      if (!confirmBurstDue(since, now, CONFIRM_MS, WINDOW_MS)) continue;
       const id = Number(key.split(':')[0]);
-      if (Number.isFinite(id)) {
-        this.requestVerification(id);
-        this.confirmBurstSent.add(key);
-      }
+      // Timed from the hold's release (v0.72.0 review): a burst sent while an
+      // action still ran would land outside the settled after-window, so it is
+      // forgotten and sent again once the action settles.
+      const held = this.holdRelease(Number.isFinite(id) ? id : null, now);
+      if (held === Infinity) continue;
+      // An action that SETTLED after the burst went out makes that burst stale
+      // (third review) — even one quick enough to run between two ticks.
+      const sentAt = this.confirmBurstSent.get(key);
+      if (sentAt != null && held != null && held > sentAt) this.confirmBurstSent.delete(key);
+      if (this.confirmBurstSent.has(key)) continue;
+      if (!confirmBurstDue(held == null ? since : Math.max(since, held), now, CONFIRM_MS, WINDOW_MS)) continue;
+      // Marked sent only when it was ACCEPTED (v0.72.0): a burst refused by
+      // the pause is still owed if the window is open when it lifts.
+      if (Number.isFinite(id) && this.requestVerification(id)) this.confirmBurstSent.set(key, now);
     }
     // Forget keys that left the confirmation window, so a symptom that returns
     // and clears again gets a fresh burst rather than being remembered forever.
-    for (const key of [...this.confirmBurstSent]) {
+    for (const key of [...this.confirmBurstSent.keys()]) {
       if (!this.pendingResolve.has(key)) this.confirmBurstSent.delete(key);
     }
   }
@@ -1501,7 +1595,7 @@ class ZwaveDataImpl implements ZwaveData {
     this.probeNotePending = fn;
   }
 
-  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin, sentAt?: number): void {
+  recordActionOutcome(actionKind: ActionKind, nodeId: number | null, ok: boolean, refusal?: ActionRefusal, origin?: ActionOrigin, sentAt?: number, aliveAtLaunch?: boolean): void {
     // A MANUAL ping is now JUDGED (v0.47.0). The engine has owned the exact
     // primitive for deciding whether a ping was answered since v0.36 and never
     // applied it to the one probe a human actually asked for — `p` reported
@@ -1524,7 +1618,14 @@ class ZwaveDataImpl implements ZwaveData {
     if (!this.outcomes || nodeId == null) return;
     // Do not credit an action against an episode whose symptom already went
     // absent (it's in the confirmation window recovering on its own).
-    const skip = (key: string): boolean => this.pendingResolve.has(key);
+    // Dated from the LAUNCH (v0.72.0 review): a symptom that cleared while a
+    // twenty-minute heal ran may be the heal's doing; only one already absent
+    // when the action was sent is recovering on its own.
+    const launchedAt = sentAt ?? Date.now();
+    const skip = (key: string): boolean => {
+      const absentSince = this.pendingResolve.get(key);
+      return absentSince != null && absentSince <= launchedAt;
+    };
     // A DRIVER REFUSAL is now distinguishable, and is recorded (v0.43.1).
     //
     // This branch used to be a blanket `if (!ok) return;`, justified by the
@@ -1545,10 +1646,98 @@ class ZwaveDataImpl implements ZwaveData {
       if (refusal !== 'refused') return; // could not run ⇒ indicts nothing
       const scope = refusalScope(actionKind);
       if (scope.size === 0) return; // no detector asked for it ⇒ indicts nothing
-      this.outcomes.recordAction(nodeId, actionKind, /* refused */ true, Date.now(), skip, scope);
+      this.outcomes.recordAction(nodeId, actionKind, /* refused */ true, sentAt ?? Date.now(), skip, scope, { origin });
       return;
     }
-    this.outcomes.recordAction(nodeId, actionKind, false, Date.now(), skip);
+    // OVERLAPPING ACTIONS ARE NEITHER ARM (v0.72.0 second review). After Esc
+    // nothing stops a second action on the node, and first-action-wins would
+    // then credit whichever REPLIED first — a quick ping taking a long heal's
+    // credit. If another learned action on the node ran at any point while
+    // this one did, the node's open episodes are confounded instead.
+    const replyAt = Date.now();
+    const others = [...(this.opsOnNode.get(nodeId) ?? new Map<number, number>())]
+      .some(([at, until]) => at !== launchedAt && at <= replyAt && until >= launchedAt);
+    if (others) {
+      for (const ep of this.outcomes.openEpisodes()) if (ep.nodeId === nodeId) this.outcomes.markConfounded(ep.nodeId, ep.kind);
+      return;
+    }
+    // Dated from the LAUNCH (v0.72.0): an episode whose BREACH began after the
+    // action was sent is then visibly younger than it, and the ledger keeps it
+    // out of the arm. Stamped at resolution, a heal's own side effects were credited to it.
+    this.outcomes.recordAction(nodeId, actionKind, false, sentAt ?? Date.now(), skip, undefined,
+      { origin, aliveAtAction: aliveAtLaunch });
+  }
+
+  noteActionLaunched(kind: ActionKind, nodeId: number | null, origin: ActionOrigin, at: number, aliveAtLaunch: boolean): void {
+    if (nodeId == null) return;
+    const m = this.opsOnNode.get(nodeId) ?? new Map<number, number>();
+    m.set(at, Infinity);
+    this.opsOnNode.set(nodeId, m);
+    this.outcomes?.noteLaunch(nodeId, kind, at, { origin, alive: aliveAtLaunch });
+  }
+
+  noteActionSettled(_kind: ActionKind, nodeId: number | null, _origin: ActionOrigin, at: number, settledAt: number, effect: ActionEffect = 'ok'): void {
+    if (nodeId == null) return;
+    // It never left the add-on (third review): no hold, no harm window, and
+    // nothing for a later reply to have overlapped.
+    if (effect === 'none') {
+      this.opsOnNode.get(nodeId)?.delete(at);
+      this.outcomes?.dropLaunch(nodeId, at);
+      return;
+    }
+    this.opsOnNode.get(nodeId)?.set(at, settledAt);
+    this.outcomes?.noteSettled(nodeId, at, settledAt);
+    // It reached the driver and did not report success (v0.72.0 second
+    // review) — a heal that returned false, one whose outcome is unknown, a
+    // call that failed after it was sent. Whatever it did is unmeasured, so
+    // no episode on the node may close as a spontaneous recovery — including
+    // one that opens later while an unknown heal may still be running
+    // (settledAt is then its reply bound; third review).
+    if (effect === 'maybe') {
+      this.maybeUntil.set(nodeId, Math.max(this.maybeUntil.get(nodeId) ?? 0, settledAt));
+      if (this.outcomes) for (const ep of this.outcomes.openEpisodes()) if (ep.nodeId === nodeId) this.outcomes.markConfounded(ep.nodeId, ep.kind);
+    }
+  }
+
+  /** When actions on this node — or a mesh-wide rebuild — last settled
+   *  (Infinity while one runs), or null: the episode hold's release time. */
+  private holdRelease(nodeId: number | null, now: number): number | null {
+    let r: number | null = null;
+    const add = (t: number): void => { r = r == null ? t : Math.max(r, t); };
+    if (this.meshRebuildUntil != null) add(this.meshRebuildUntil);
+    if (nodeId != null) {
+      const m = this.opsOnNode.get(nodeId);
+      if (m) {
+        for (const [at, until] of m) if (until < now - OPS_KEEP_MS) m.delete(at);
+        if (m.size === 0) this.opsOnNode.delete(nodeId);
+        for (const until of m.values()) add(until);
+      }
+    }
+    return r;
+  }
+
+  listensForCommands(nodeId: number): boolean | null {
+    const f = this.driverListening.get(nodeId);
+    if (!f) return null;
+    if (f.isListening === true || f.isFrequentListening === true) return true;
+    if (f.isListening === false && f.isFrequentListening === false) return false;
+    return null;
+  }
+
+  actorArms(kind: SymptomKind): ActorArmView[] {
+    return this.outcomes ? this.outcomes.actorArms(kind) : [];
+  }
+
+  pooledArm(kind: SymptomKind, action: ActionKind): { n: number; lastAt: number | null; nodes: number; legacyN: number; legacyNodes: number } | null {
+    return this.outcomes ? this.outcomes.pooledArm(kind, action) : null;
+  }
+
+  liveSpan(kind: SymptomKind): LiveSpanView | null {
+    return this.outcomes ? this.outcomes.liveSpan(kind) : null;
+  }
+
+  routeSymptomsAfter(action: ActionKind, origin: 'you' | 'engine'): number {
+    return this.outcomes ? this.outcomes.routeSymptomsAfter(action, origin) : 0;
   }
 
   /** Learned efficacy of an action against a symptom kind (M5) — for the planner. */
@@ -1650,6 +1839,22 @@ class ZwaveDataImpl implements ZwaveData {
     this.autoPingSnapshotFn = fn;
   }
 
+  autonomyPause(): PauseState | null {
+    return this.autonomy.state();
+  }
+
+  pauseAutonomy(_by: 'tui'): PauseState {
+    return this.autonomy.pauseTui();
+  }
+
+  resumeAutonomy(): { resumed: boolean; stillPausedBy: 'ha' | null } {
+    return this.autonomy.resumeTui();
+  }
+
+  autonomyPauseOverdue(now: number): boolean {
+    return this.autonomy.overdue(now);
+  }
+
   private autoPingSnapshotFn: (() => AutoPingSnapshot) | null = null;
 
   /**
@@ -1659,13 +1864,16 @@ class ZwaveDataImpl implements ZwaveData {
    * count back up rather than queueing a second burst, so a symptom that
    * flaps cannot multiply the traffic it causes.
    */
-  private requestVerification(nodeId: number | null): void {
-    if (nodeId == null || !this.outcomes) return;
+  private requestVerification(nodeId: number | null): boolean {
+    if (nodeId == null || !this.outcomes) return false;
+    // Paused (v0.72.0): nothing is owed from a paused period.
+    if (this.autonomy.state() != null) return false;
     const cur = this.verifyOwed.get(nodeId);
     this.verifyOwed.set(nodeId, {
       left: Math.max(cur?.left ?? 0, VERIFY_BURST),
       nextAt: cur?.nextAt ?? 0,
     });
+    return true;
   }
 
   /**
@@ -2906,6 +3114,8 @@ class ZwaveDataImpl implements ZwaveData {
     this.deadEvents.push({ nodeId, at: Date.now(), seen: this.statsByNode.get(nodeId)?.lastSeen ?? null,
       feedLive: this.statsSubbedNodes.has(nodeId), cleared: false, clearedAt: null });
     if (this.deadEvents.length > DEAD_EVENTS_MAX) this.deadEvents.splice(0, this.deadEvents.length - DEAD_EVENTS_MAX);
+    const sent = this.measurementSent.get(nodeId);
+    this.lastDeathOwnProbe.set(nodeId, sent != null && Date.now() - sent.at <= ANSWER_GRACE_MS);
     // A frame that was not acknowledged was not delivered: whatever reaches this
     // node next is not our measurement probe's TX report.
     this.measurementSent.delete(nodeId);
@@ -2999,6 +3209,13 @@ class ZwaveDataImpl implements ZwaveData {
   /** Map an HA `state_changed` event → a `value` activity-log entry (tracked
    *  zwave entities only). Ignores no-op churn and throttles numeric telemetry. */
   private onStateChanged(ev: unknown): void {
+    // (0) The owner's pause toggle (v0.72.0) — read, never logged as a value.
+    const d = (ev as { data?: { entity_id?: unknown; new_state?: { state?: unknown; last_changed?: unknown } | null } } | null)?.data;
+    if (d?.entity_id === PAUSE_ENTITY) {
+      const st = typeof d.new_state?.state === 'string' ? d.new_state.state : null;
+      this.autonomy.noteHa(st, stampOf(d.new_state?.last_changed), { source: 'event' });
+      return;
+    }
     // (1) Keep the LIVE-state cache fresh for tracked entities — done FIRST and
     // unconditionally, so attribute-only changes (a dimmer level moving while
     // state stays "on") and throttled/no-op sensor updates still refresh Detail.
@@ -3056,11 +3273,17 @@ class ZwaveDataImpl implements ZwaveData {
    * this feature exists for were exactly the ones a healthy connection froze.
    */
   private async fetchEntityStates(): Promise<void> {
-    // entityIndex ⊇ (battery ∪ update ∪ every other tracked mesh entity); an
-    // empty index means the registry hasn't loaded yet — nothing to seed.
-    if (this.entityIndex.size === 0) return;
     try {
       const states = await this.client.send<RawEntityState[]>({ type: 'get_states' });
+      // The owner's pause toggle (v0.72.0), from the same read — BEFORE the
+      // registry check, so it is read even before the registry loads. Absent
+      // from a full read is NOT a deletion (HA lists input_boolean late at
+      // startup): a toggle last seen pausing stays paused (`source: 'full'`).
+      const toggle = states.find((s) => s.entity_id === PAUSE_ENTITY) ?? null;
+      this.autonomy.noteHa(toggle?.state ?? null, stampOf(toggle?.last_changed), { source: 'full' });
+      // entityIndex ⊇ (battery ∪ update ∪ every other tracked mesh entity); an
+      // empty index means the registry hasn't loaded yet — nothing to seed.
+      if (this.entityIndex.size === 0) return;
       for (const s of states) {
         const bNode = this.batteryEntityToNode.get(s.entity_id);
         if (bNode != null) {
@@ -3751,6 +3974,17 @@ export interface RawEntityState {
   entity_id: string;
   state: string;
   attributes?: Record<string, unknown>;
+  last_changed?: string;
+}
+
+/** How long a settled action is remembered, to tell a later reply it
+ *  overlapped (v0.72.0 review): longer than the longest reply bound. */
+const OPS_KEEP_MS = 60 * 60_000;
+
+/** An HA `last_changed` as epoch ms, or now when absent or unparseable. */
+function stampOf(v: unknown): number {
+  const t = typeof v === 'string' ? Date.parse(v) : NaN;
+  return Number.isFinite(t) ? t : Date.now();
 }
 
 /**

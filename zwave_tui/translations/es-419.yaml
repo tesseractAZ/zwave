@@ -48,8 +48,10 @@ configuration:
       fallido, control de dispositivos (encender/apagar, abrir/cerrar,
       bloquear/desbloquear) y escritura de configuración. Desactivado, el
       complemento es un monitor de solo lectura. Es seguro dejarlo activado:
-      cada comando, salvo el atajo de ping de una sola tecla (p), debe armarse
-      escribiendo la palabra CONFIRM antes de ejecutarse.
+      cada comando que llega a la malla, salvo el atajo de ping de una sola
+      tecla (p), debe armarse escribiendo la palabra CONFIRM antes de
+      ejecutarse. Las recomendaciones del motor nunca se ejecutan solas; solo
+      el ping automático, más abajo, actúa sin que se presione una tecla.
   # ── Autorreparación (auto-ping) ─────────────────────────────────────────────
   auto_ping_enabled:
     name: Seguridad · Hacer ping automático a un nodo caído
@@ -65,7 +67,11 @@ configuration:
       respaldo nocturno de NVM) y cuando una cuarta parte de la malla está caída
       a la vez (eso
       es un problema del controlador, no de un dispositivo). Cada intento queda
-      registrado, así que la pantalla REMEDY muestra si realmente funciona.
+      registrado. Si pone fin a una caída no se califica (una caída termina
+      cuando el dispositivo vuelve, así que no hay con qué compararlo), y lo que
+      aprenden sus pings se muestra en ENGINE en su propia fila y nunca se
+      presenta como una solución. Presione Z en la pantalla ENGINE para
+      pausarlo todo a la vez.
   auto_ping_after_min:
     name: Seguridad · Ping automático después de (minutos caído)
     description: >-

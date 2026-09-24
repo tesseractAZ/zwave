@@ -12,6 +12,8 @@ function mockData(over: Partial<DataProvider> = {}): DataProvider {
   const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
   return {
     pendingIdentity: () => null, resolveIdentityDecision: () => false,
+    autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
     nodes: () => [], nodeById: () => undefined, controller: () => ctrl, events: () => [],
     scoreFor: () => ({ score: 0, grade: 'F', state: 'unknown', flags: [] }),
     noiseFloor: () => -92, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }),
@@ -254,4 +256,32 @@ test('a live ROSTER is not a live FEED — the masthead says which (v0.61.0)', (
   const dead = masthead(view(140), { link: 'online', homeId: 1, now: 1_000_000, statsStaleMs: 45 * 60_000 });
   assert.match(strip(dead), /NO STATS 45m/,
     `a dead feed must be named even while the roster polls: ${strip(dead)}`);
+});
+
+test('a PAUSE chip carries its age, and survives a narrow masthead whole (v0.72.0)', () => {
+  const now = 1_700_000_000_000;
+  const base = { link: 'online' as const, homeId: 3586281591, now, apSuppressed: 'paused' };
+  assert.match(strip(masthead(view(120), { ...base, pausedSince: now - 45 * 60_000 })), /⚠ AUTO-PING PAUSED 45m/);
+  assert.match(strip(masthead(view(120), { ...base, pausedSince: now - 7 * 3_600_000 })), /⚠ AUTO-PING PAUSED 7h/);
+  assert.match(strip(masthead(view(120), { ...base, pausedSince: now - 72 * 3_600_000 })), /⚠ AUTO-PING PAUSED 3d/);
+  for (const cols of [40, 56, 80]) {
+    const out = strip(masthead(view(cols), { ...base, pausedSince: now - 7 * 3_600_000 }));
+    assert.ok(out.length <= cols, `${cols}: overflow — "${out}"`);
+    assert.match(out, /⚠ AUTO-PING PAUSED 7h/, `${cols}: whole — "${out}"`);
+  }
+  assert.doesNotMatch(strip(masthead(view(120), { ...base, apSuppressed: 'storm', pausedSince: now })), /STORM \d/,
+    'only a pause carries an age');
+});
+
+test('the PAUSED chip appears from the pause itself, before auto-ping has run a pass (v0.72.0 review)', () => {
+  const now = 1_700_000_000_000;
+  const base = { link: 'online' as const, homeId: 1, now };
+  assert.match(strip(masthead(view(120), { ...base, apSuppressed: 'none', pausedSince: now - 60_000 })), /⚠ AUTO-PING PAUSED 1m/);
+  assert.match(strip(masthead(view(120), { ...base, apSuppressed: 'storm', pausedSince: now })), /⚠ AUTO-PING STORM/, 'an alarm still names itself');
+  assert.doesNotMatch(strip(masthead(view(120), { ...base, apSuppressed: null, pausedSince: now })), /PAUSED/, 'auto-ping off: nothing is paused');
+});
+
+test('after a resume, a lagging `paused` pass shows no chip (second review)', () => {
+  const now = 1_700_000_000_000;
+  assert.doesNotMatch(strip(masthead(view(120), { link: 'online', homeId: 1, now, apSuppressed: 'paused', pausedSince: null })), /AUTO-PING/);
 });

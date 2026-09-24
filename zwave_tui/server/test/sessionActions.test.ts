@@ -17,6 +17,8 @@ function mkData(controller: ControllerSnapshot | null = null): DataProvider {
   return {
     pendingIdentity: () => null,
     resolveIdentityDecision: () => false,
+    autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
     nodes: () => [node], nodeById: () => node, controller: () => controller, events: () => [], scoreFor: () => score,
     noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0,
     ready: () => true, lastError: () => null, symptoms: () => [], engineStatus: () => ({ enabled: false, ready: 0, total: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0, band: 0, bands: 6 }), efficacyFor: () => null, interference: () => ({ noise: { channels: [null,null,null,null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
@@ -34,7 +36,8 @@ function mkActions(enabled = true) {
   const runner: ActionRunner = {
     enabled,
     ping: ok('ping'), probe: ok('probe'), routedRead: ok('routedRead'), refreshValues: ok('refresh'), reInterview: ok('reInterview'),
-    healNode: ok('heal'), rebuildAll: ok('rebuildAll'), stopRebuild: ok('stopRebuild'), removeFailed: ok('remove'),
+    healNode: ok('heal'), rebuildAll: async () => ok('rebuildAll')(), stopRebuild: async () => ok('stopRebuild')(), removeFailed: ok('remove'),
+    operatorActionInFlight: () => null,
     controlEntity: async (n, eid, verb) => { calls.push(`control:${n}:${eid}:${verb}`); return { ok: true, message: 'ok' }; },
     setConfigParam: async (n, param, value) => { calls.push(`setParam:${n}:${param.property}:${value}`); return { ok: true, message: 'ok' }; },
   };
@@ -789,4 +792,212 @@ test('Refresh values on a live node still runs (v0.70.0 regression pin)', async 
   if (/CONFIRM/.test(strip(last()))) typeConfirm(s);
   await flush(); await flush();
   assert.ok(calls.includes('refresh:5'), `a live node is refreshed: ${JSON.stringify(calls)}`);
+});
+
+/* ── v0.72.0: the owner's pause ──────────────────────────────────────────── */
+
+function pauseData() {
+  let tui: number | null = null;
+  let ha = false;
+  const st = () => (tui == null && !ha ? null
+    : { by: [...(tui != null ? ['tui' as const] : []), ...(ha ? ['ha' as const] : [])], since: tui ?? Date.now(), reason: '' });
+  const d: DataProvider = {
+    ...mkData(),
+    autonomyPause: st,
+    pauseAutonomy: () => { if (tui == null) tui = Date.now(); return st()!; },
+    resumeAutonomy: () => { const resumed = tui != null; tui = null; return { resumed, stillPausedBy: ha ? 'ha' : null }; },
+  };
+  return { d, setHa: (v: boolean) => { ha = v; }, paused: () => st() };
+}
+
+test('[Z] on ENGINE pauses at once — no CONFIRM, and with write actions OFF (v0.72.0)', () => {
+  const P = pauseData();
+  const { runner, calls } = mkActions(false);
+  const { s, last } = mkSession(runner, P.d);
+  s.feed([key('9')]);
+  s.feed([key('Z')]); s.draw();
+  assert.deepEqual(P.paused()?.by, ['tui']);
+  const f = strip(last());
+  assert.match(f, /Automatic writes paused/);
+  assert.doesNotMatch(f, /type CONFIRM to arm/i, 'pausing asks nothing');
+  assert.deepEqual(calls, [], 'and sends nothing');
+  s.feed([key('x')]); // dismiss the notice
+  s.feed([key('Z')]); s.draw();
+  assert.match(strip(last()), /already paused since \d\d:\d\d/);
+});
+
+test('[Z] does nothing on any other screen (v0.72.0)', () => {
+  for (const scr of ['1', '2', '3', '4', '5', '6', '7', '8']) {
+    const P = pauseData();
+    const { runner } = mkActions();
+    const { s } = mkSession(runner, P.d);
+    s.feed([key(scr)]);
+    s.feed([key('Z')]);
+    assert.equal(P.paused(), null, `screen ${scr}: Z must not pause`);
+  }
+});
+
+test('Pause and Resume are exclusive menu rows, each behind the typed CONFIRM, and answerable read-only (v0.72.0)', async () => {
+  const P = pauseData();
+  const { runner } = mkActions(false);
+  const { s, last } = mkSession(runner, P.d);
+  s.feed([key('3')]);
+  s.feed([key('a')]); s.draw();
+  let f = strip(last());
+  assert.match(f, /Pause automatic writes/);
+  assert.doesNotMatch(f, /Resume automatic writes/, 'only the row that would change something');
+  s.feed([key('j')]);
+  s.feed([enter]); s.draw();
+  assert.match(strip(last()), /type CONFIRM to arm/i, 'the menu row takes the typed CONFIRM');
+  assert.equal(P.paused(), null, 'nothing yet');
+  typeConfirm(s);
+  await flush();
+  assert.deepEqual(P.paused()?.by, ['tui'], 'read-only did not lock it');
+  s.feed([key('x')]);
+  s.feed([key('a')]); s.draw();
+  f = strip(last());
+  assert.match(f, /Resume automatic writes/);
+  assert.doesNotMatch(f, /Pause automatic writes/);
+  assert.match(f, /⏎ locked/, 'precondition: the cursor starts on a locked mesh row');
+  s.feed([key('j')]); s.draw();
+  assert.doesNotMatch(strip(last()), /⏎ locked/, 'the footer does not call an answerable row locked');
+  s.feed([enter]);
+  typeConfirm(s);
+  await flush();
+  assert.equal(P.paused(), null, 'resumed');
+});
+
+test('a resume that leaves Home Assistant\'s pause on says so (v0.72.0)', async () => {
+  const P = pauseData();
+  P.setHa(true);
+  P.d.pauseAutonomy('tui');
+  const { runner } = mkActions();
+  const { s, last } = mkSession(runner, P.d);
+  s.feed([key('3')]);
+  s.feed([key('a')]);
+  s.feed([key('j')]);
+  s.feed([enter]);
+  typeConfirm(s);
+  await flush();
+  s.draw();
+  const f = strip(last());
+  assert.match(f, /Resumed from the TUI — still paused by Home Assistant/);
+  assert.match(f, /input_boolean\.zwave_tui_pause_autonomy is on/);
+  assert.deepEqual(P.paused()?.by, ['ha']);
+});
+
+test('Esc leaves a long action running; its late result does not replace a newer card; other keys stay swallowed (v0.72.0)', async () => {
+  let release: (v: { ok: boolean; message: string }) => void = () => {};
+  const { runner, calls } = mkActions();
+  runner.healNode = () => new Promise((r) => { release = r; });
+  const { s, last } = mkSession(runner);
+  s.feed([key('h')]);
+  typeConfirm(s);
+  s.draw();
+  let f = strip(last());
+  assert.match(f, /WORKING/);
+  assert.match(f, /Esc: leave it running/);
+  s.feed([key('3')]); s.draw();
+  assert.match(strip(last()), /WORKING/, 'a screen key is still swallowed');
+  s.feed([esc]); s.draw();
+  f = strip(last());
+  assert.match(f, /running in the background/);
+  assert.match(f, /its result will be in the Log \(e\)/);
+  s.feed([key('x')]);           // dismiss
+  s.feed([key('p')]);           // a newer action's card
+  await flush();
+  s.draw();
+  const newer = strip(last());
+  release({ ok: false, message: 'late heal result' });
+  await flush();
+  s.draw();
+  assert.doesNotMatch(strip(last()), /late heal result/, 'the detached result stayed in the Log');
+  assert.equal(strip(last()), newer);
+  assert.ok(calls.includes('ping:5'));
+});
+
+test('[Z] pauses even over the WORKING card and a result card — the panic key never asks twice (v0.72.0 review)', async () => {
+  const P = pauseData();
+  let release: (v: { ok: boolean; message: string }) => void = () => {};
+  const { runner, calls } = mkActions();
+  runner.rebuildAll = () => { calls.push('rebuildAll'); return new Promise((r) => { release = r; }); };
+  const { s, last } = mkSession(runner, P.d);
+  s.feed([key('9')]);
+  s.feed([key('R')]);
+  typeConfirm(s);
+  s.draw();
+  assert.match(strip(last()), /WORKING/, 'fixture guard: the WORKING card is really up');
+  assert.deepEqual(calls, ['rebuildAll']);
+  s.feed([key('Z')]);
+  s.draw();
+  assert.deepEqual(P.paused()?.by, ['tui'], 'paused while the rebuild still runs');
+  assert.match(strip(last()), /WORKING/);
+  assert.match(strip(last()), /automatic writes paused since \d\d:\d\d/, 'acknowledged on the WORKING card (second review)');
+  release({ ok: true, message: 'rebuild ALL routes: ok' });
+  await flush();
+  s.draw();
+  assert.match(strip(last()), /automatic writes paused since/, 'and carried onto the result card, not lost under it');
+  const Q = pauseData();
+  const q = mkSession(mkActions().runner, Q.d);
+  q.s.feed([key('9')]);
+  q.s.feed([key('p')]);            // a result card is now up
+  await flush();
+  q.s.feed([key('Z')]);
+  assert.deepEqual(Q.paused()?.by, ['tui'], 'the first Z pauses; it does not merely dismiss the card');
+});
+
+test('the result card carries the reply\'s note, and an unknown outcome is not a red failure (v0.72.0 review)', async () => {
+  const { runner } = mkActions();
+  runner.healNode = async () => ({ ok: true, message: 'rebuild routes node 5: ok — driver reports success; a failed return-route assignment is not reported' });
+  const { s, last } = mkSession(runner);
+  s.feed([key('h')]);
+  typeConfirm(s);
+  await flush();
+  s.draw();
+  assert.match(strip(last()), /a failed return-route assignment is not reported/);
+  const u = mkActions();
+  u.runner.healNode = async () => ({ ok: false, unknown: true, message: 'rebuild routes node 5: outcome unknown — the connection to Home Assistant closed while waiting; the driver may still be working' });
+  const U = mkSession(u.runner);
+  U.s.feed([key('h')]);
+  typeConfirm(U.s);
+  await flush();
+  U.s.draw();
+  const raw = U.last();
+  assert.match(strip(raw), /◷ +rebuild routes node 5: outcome unknown/);
+  assert.doesNotMatch(strip(raw), /✗ +rebuild routes node 5/);
+  assert.ok(raw.includes('\x1b[93m◷'), 'yellow, not red');
+});
+
+test('a pause held only by a MISSING toggle can be resumed from the menu, and says the toggle was forgotten (third review)', async () => {
+  let missing = true;
+  const d: DataProvider = {
+    ...mkData(),
+    autonomyPause: () => (missing ? { by: ['ha'], since: Date.now() - 60_000, reason: 'missing', haMissing: true } : null),
+    resumeAutonomy: () => { const r = missing; missing = false; return { resumed: r, stillPausedBy: null }; },
+  };
+  const { runner } = mkActions();
+  const { s, last } = mkSession(runner, d);
+  s.feed([key('3')]);
+  s.feed([key('a')]); s.draw();
+  assert.match(strip(last()), /Resume automatic writes/, 'offered, though the TUI did not pause');
+  s.feed([key('j')]);
+  s.feed([enter]);
+  typeConfirm(s);
+  await flush();
+  s.draw();
+  assert.match(strip(last()), /the missing Home Assistant toggle was forgotten/);
+});
+
+test('the pause acknowledgement is drawn from the pause\'s current state, shows on the CONFIRM box, and never outlives a resume (third review)', async () => {
+  const P = pauseData();
+  const { runner } = mkActions();
+  const { s, last } = mkSession(runner, P.d);
+  s.feed([key('9')]);
+  s.feed([key('R')]);               // CONFIRM box up
+  s.feed([key('Z')]); s.draw();
+  assert.match(strip(last()), /type CONFIRM to arm/i);
+  assert.match(strip(last()), /automatic writes paused since \d\d:\d\d/, 'acknowledged on the CONFIRM box');
+  P.d.resumeAutonomy();             // resumed elsewhere before the box closes
+  s.feed([esc]); s.draw();
+  assert.doesNotMatch(strip(last()), /automatic writes paused since/, 'a stale ack is never shown');
 });

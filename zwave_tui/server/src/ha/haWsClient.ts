@@ -69,6 +69,12 @@ export type HaEventHandler = (msg: HaMessage) => void;
 
 export type Logger = (msg: string) => void;
 
+/** Separate bounds for the socket and the reply (v0.72.0). */
+export interface SendTimeouts {
+  readyMs: number;
+  replyMs: number;
+}
+
 export interface HaWsClientOptions {
   /** Override the WS URL. Defaults to env `HA_WS_URL` then the supervisor/dev URL. */
   url?: string;
@@ -89,7 +95,11 @@ export interface HaWsClient {
   /** Begin connecting (idempotent; no-op when unconfigured). */
   start(): void;
   /** Request/response. Resolves on the first matching `{type:'result', id}`. */
-  send<T = unknown>(cmd: Record<string, unknown>, timeoutMs?: number): Promise<T>;
+  /** A number bounds both the wait for the socket and the wait for the reply.
+   *  `{ readyMs, replyMs }` bounds them apart (v0.72.0): a 20-minute route
+   *  rebuild must not also wait 20 minutes for a socket, or a command confirmed
+   *  during an outage would fire unattended when the connection returns. */
+  send<T = unknown>(cmd: Record<string, unknown>, timeoutMs?: number | SendTimeouts): Promise<T>;
   /** Subscribe helper: registers an event handler then sends the subscribe command. */
   subscribe(cmd: Record<string, unknown>, onEvent: HaEventHandler, timeoutMs?: number): Promise<HaSubscription>;
   /** Called after every successful (re)authentication — the re-subscribe hook. */
@@ -218,8 +228,10 @@ class HaWebSocketClient implements HaWsClient {
     this.connect();
   }
 
-  send<T = unknown>(cmd: Record<string, unknown>, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
-    return this.waitReady(timeoutMs).then(() => this.dispatch<T>(this.nextId++, cmd, timeoutMs));
+  send<T = unknown>(cmd: Record<string, unknown>, timeoutMs: number | SendTimeouts = DEFAULT_TIMEOUT_MS): Promise<T> {
+    const readyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.readyMs;
+    const replyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.replyMs;
+    return this.waitReady(readyMs).then(() => this.dispatch<T>(this.nextId++, cmd, replyMs));
   }
 
   async subscribe(

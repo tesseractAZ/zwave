@@ -28,7 +28,8 @@ import { renderScreen } from './screens/index';
 import { renderLogin } from './screens/login';
 import { centeredNotice } from './screens/overview';
 import { sortedSymptoms, symptomKey } from './screens/remedy';
-import { buildMenu, isIdentityKind, buildEntityRows, buildConfigRows, clampMenuIndex, describeAction, CONFIRM_WORD, type MenuActionKind } from './actionsCatalog';
+import { buildMenu, isIdentityKind, isAutonomyKind, isLocalDecisionKind, buildEntityRows, buildConfigRows, clampMenuIndex, describeAction, CONFIRM_WORD, type MenuActionKind } from './actionsCatalog';
+import { PAUSE_ENTITY } from '../zwave/autonomyPause';
 import type { MenuScope } from './actionsCatalog';
 import type { MenuItem, ActionImpact } from './actionsCatalog';
 import { renderActionsMenu, renderTypeConfirm, renderParamEdit } from './screens/actionsMenu';
@@ -97,6 +98,8 @@ interface PendingAction {
   value?: number;
   /** v0.64.0 identity decision — set for the two identity kinds only. */
   identityChoice?: IdentityChoice;
+  /** v0.72.0 autonomy pause — set for the two autonomy kinds only. */
+  autonomyChoice?: 'pause' | 'resume';
 }
 
 /** The transient config value-picker state (between menu-select and CONFIRM). */
@@ -166,6 +169,20 @@ export class TuiSession {
   private confirmFromMenu = false;
   /** True while an action's WS call is in flight. */
   private actionInFlight = false;
+  /** Each launched action's number, and the ones the operator left running
+   *  (v0.72.0): a detached action's late result must not replace a newer card. */
+  private actionSeq = 0;
+  private readonly detached = new Set<number>();
+  /** A pause taken while an action ran or a CONFIRM box was up (second
+   *  review): shown on the WORKING card and carried onto the next card, not
+   *  lost under the action's result. */
+  private pauseAckPending = false;
+  /** Rendered from the pause's CURRENT state (third review), so a stale ack
+   *  can never say "paused" after a resume. */
+  private pauseAckText(): string | null {
+    const p = this.pauseAckPending ? this.data.autonomyPause() : null;
+    return p ? `⏸  automatic writes paused since ${clock(p.since)}` : null;
+  }
   /** Transient outcome card ("✓/✗ …"), dismissed by the next keypress. */
   private actionNotice: string | null = null;
   /** Optional second line under a notice (kept short so the box still fits). */
@@ -426,8 +443,34 @@ export class TuiSession {
         continue;
       }
 
-      // An action is in flight — swallow keys until it resolves.
-      if (this.actionInFlight) continue;
+      // [Z] on ENGINE pauses every autonomous write at once (v0.72.0). No
+      // CONFIRM and no write-actions gate: it removes writes and sends nothing,
+      // and the one key an operator reaches for in a hurry must not ask twice —
+      // so it is taken ahead of the WORKING card and the result card (v0.72.0
+      // review), which would otherwise swallow or spend the first press.
+      // Resuming is the guarded direction (Controller 3 → A, typed CONFIRM).
+      if (ev.type === 'char' && ev.ch === 'Z' && this.view.screen === 'engine') {
+        this.pauseFromKey();
+        dirty = true;
+        continue;
+      }
+
+      // An action is in flight — swallow keys until it resolves. Esc leaves it
+      // running (v0.72.0): a route rebuild can take twenty minutes, and the
+      // command cannot be recalled, so holding the terminal hostage buys nothing.
+      if (this.actionInFlight) {
+        if (ev.type === 'escape') {
+          this.detached.add(this.actionSeq);
+          this.actionInFlight = false;
+          this.actionNotice = `◷  ${this.actionRunningLabel} — running in the background`;
+          // A pause taken over the WORKING card rides along (third review).
+          this.actionNoticeDetail = ['its result will be in the Log (e)', this.pauseAckText()].filter(Boolean).join(' · ');
+          this.pauseAckPending = false;
+          this.lastFrameHash = '';
+          dirty = true;
+        }
+        continue;
+      }
 
       // The config value-picker (v0.23) owns keys until a value is chosen/cancelled.
       if (this.paramEdit != null) {
@@ -680,6 +723,9 @@ export class TuiSession {
       rebuilding: this.data.controller()?.isRebuildingRoutes ?? false,
       identityPending: this.data.pendingIdentity() != null,
       identityResumable: this.data.pendingIdentity()?.resumable ?? false,
+      // Resume is offered for a TUI pause, and for a MISSING HA toggle, which
+      // has no switch left to turn off (third review).
+      autonomyPausedByTui: (this.data.autonomyPause()?.by.includes('tui') || this.data.autonomyPause()?.haMissing === true) ?? false,
     });
     // v0.23: append device-control + config-edit rows for the target node. These
     // are frozen at open time (same snapshot discipline as the catalog rows).
@@ -728,13 +774,16 @@ export class TuiSession {
   private selectMenuItem(item: MenuItem | undefined): void {
     if (!item) return;
     const ip = item.payload;
-    const isIdentity = ip.type === 'catalog' && isIdentityKind(ip.kind);
+    const isLocal = ip.type === 'catalog' && isLocalDecisionKind(ip.kind);
     // `write_actions_enabled` governs MESH mutations. An identity decision
     // mutates nothing on the mesh — it answers a question about the add-on's
     // OWN persisted state. Gating it here would leave a read-only install that
     // swapped a stick permanently held: no learned state, `degraded` latched
     // on forever, and no reachable way to answer.
-    if (!isIdentity && !this.actions?.enabled) {
+    // The autonomy pause is the same kind of decision (v0.72.0): it changes
+    // what THIS add-on sends on its own, and pausing or resuming it must work
+    // on the install whose master gate is off.
+    if (!isLocal && !this.actions?.enabled) {
       // Read-only: the menu already shows a READ-ONLY badge; make the block
       // explicit so a keypress isn't silently ignored.
       this.closeMenu();
@@ -745,7 +794,13 @@ export class TuiSession {
     if (item.disabled) return; // the reason is shown inline on the row
     const node = this.menuTarget ?? undefined; // frozen at open time
     const p = item.payload;
-    if (p.type === 'catalog' && isIdentityKind(p.kind)) {
+    if (p.type === 'catalog' && isAutonomyKind(p.kind)) {
+      // Runner-free like the identity answer; still the typed CONFIRM — the
+      // menu rule for every row (actionsCatalog.ts).
+      this.closeMenu();
+      this.confirmFromMenu = true;
+      this.beginAutonomyDecision(p.kind === 'autonomyPause' ? 'pause' : 'resume');
+    } else if (p.type === 'catalog' && isIdentityKind(p.kind)) {
       // Not a mesh action: this resolves the add-on's own held state, so it
       // does not go through ActionRunner and is never scored by the ledger.
       // It still takes the typed CONFIRM — it is the one decision that decides
@@ -759,7 +814,7 @@ export class TuiSession {
       // The two identity kinds are excluded by the branch above, but TS cannot
       // see that through a conjunction — so re-narrow here rather than cast.
       // A cast would silence the compiler on exactly the union it exists to check.
-      if (!isIdentityKind(p.kind)) {
+      if (!isLocalDecisionKind(p.kind)) {
         this.beginAction(p.kind, false, node); // menu always requires the typed CONFIRM
       }
     } else if (p.type === 'entity' && node) {
@@ -812,6 +867,67 @@ export class TuiSession {
     this.confirmBuffer = '';
   }
 
+  /** Arm the typed CONFIRM for pausing or resuming automatic writes (v0.72.0). */
+  private beginAutonomyDecision(choice: 'pause' | 'resume'): void {
+    const kind = choice === 'pause' ? 'autonomyPause' : 'autonomyResume';
+    const d = describeAction(kind);
+    this.pendingAction = {
+      kind,
+      nodeId: null,
+      label: d?.label ?? 'Automatic writes',
+      target: 'this add-on (nothing is sent to the mesh)',
+      impact: d?.impact ?? 'caution',
+      desc: d?.desc ?? '',
+      impactNote: d?.impactNote ?? '',
+      autonomyChoice: choice,
+    };
+    this.confirmBuffer = '';
+  }
+
+  /** [Z] on ENGINE: pause at once, or say since when it already is. */
+  private pauseFromKey(): void {
+    const before = this.data.autonomyPause();
+    if (this.actionInFlight || this.pendingAction != null) {
+      if (!before?.by.includes('tui')) {
+        this.data.pauseAutonomy('tui');
+        this.log('⏸  Automatic writes paused (while an action was on screen)');
+      }
+      this.pauseAckPending = true;
+      this.lastFrameHash = '';
+      return;
+    }
+    if (before?.by.includes('tui')) {
+      this.actionNotice = `⏸  Automatic writes already paused since ${clock(before.since)}`;
+      this.actionNoticeDetail = 'Resume: Controller 3 → A → Resume automatic writes';
+    } else {
+      this.executeAutonomyDecision('pause');
+      return;
+    }
+    this.lastFrameHash = '';
+  }
+
+  /** Apply a pause decision. Synchronous and runner-free: it flips a persisted
+   *  latch in this process, with no mesh traffic. */
+  private executeAutonomyDecision(choice: 'pause' | 'resume'): void {
+    if (choice === 'pause') {
+      this.data.pauseAutonomy('tui');
+      this.actionNotice = '⏸  Automatic writes paused — nothing autonomous is sent until you resume';
+      this.actionNoticeDetail = 'Resume: Controller 3 → A → Resume automatic writes';
+    } else {
+      const wasMissing = this.data.autonomyPause()?.haMissing === true;
+      const r = this.data.resumeAutonomy();
+      this.actionNotice = r.stillPausedBy === 'ha'
+        ? (r.resumed ? '✓  Resumed from the TUI — still paused by Home Assistant' : '✗  Not paused from the TUI — Home Assistant holds the pause')
+        : (r.resumed ? '✓  Automatic writes resumed — auto-ping sends again at its next tick' : '✓  Already running — nothing to resume');
+      this.actionNoticeDetail = r.stillPausedBy === 'ha' ? (this.data.autonomyPause()?.reason || `${PAUSE_ENTITY} is on`)
+        : r.resumed && wasMissing ? 'the missing Home Assistant toggle was forgotten' : null;
+    }
+    this.pauseAckPending = false;
+    this.log(`${this.actionNotice}${this.actionNoticeDetail ? ` (${this.actionNoticeDetail})` : ''}`);
+    this.lastFrameHash = '';
+    this.draw();
+  }
+
   /**
    * Apply the answer. Synchronous and runner-free — it moves files and flips
    * latches inside this process, so there is nothing to await and no mesh
@@ -830,6 +946,10 @@ export class TuiSession {
     this.actionNoticeDetail = ok && choice !== 'keep'
       ? 'Archived beside the originals in /data as <name>.home-<id>.json.'
       : null;
+    // A pause taken while this CONFIRM box was up rides along (third review).
+    const ack = this.pauseAckText();
+    this.pauseAckPending = false;
+    if (ack) this.actionNoticeDetail = [this.actionNoticeDetail, ack].filter(Boolean).join(' · ');
     this.lastFrameHash = '';
     this.draw();
   }
@@ -986,6 +1106,9 @@ export class TuiSession {
   private cancelConfirm(): void {
     this.pendingAction = null;
     this.confirmBuffer = '';
+    const ack = this.pauseAckText();
+    this.pauseAckPending = false;
+    if (ack) { this.actionNotice = ack; this.actionNoticeDetail = null; }
     if (this.confirmFromMenu) {
       this.confirmFromMenu = false;
       this.openMenu(this.menuScope);
@@ -994,13 +1117,15 @@ export class TuiSession {
 
   private async executeAction(action: PendingAction): Promise<void> {
     if (action.identityChoice) { this.executeIdentityDecision(action.identityChoice); return; }
+    if (action.autonomyChoice) { this.executeAutonomyDecision(action.autonomyChoice); return; }
     if (!this.actions) return;
+    const seq = ++this.actionSeq;
     this.actionInFlight = true;
     this.actionRunningLabel = action.label;
     this.lastFrameHash = '';
     this.draw();
     const a = this.actions;
-    let res: { ok: boolean; message: string };
+    let res: { ok: boolean; message: string; unknown?: boolean };
     try {
       switch (action.kind) {
         case 'ping': res = await a.ping(action.nodeId!); break;
@@ -1026,9 +1151,17 @@ export class TuiSession {
       // budget below assumes did not hold here.
       res = { ok: false, message: sanitizeEventText(e instanceof Error ? e.message : String(e)) };
     }
+    // Left running (v0.72.0): the runner's ring lines carry the result, and
+    // whatever is on screen now belongs to something newer.
+    if (this.detached.delete(seq)) return;
     this.actionInFlight = false;
-    this.actionNotice = res.ok ? `✓  ${action.label}` : `✗  ${res.message}`;
-    this.actionNoticeDetail = null;
+    // What the reply said (v0.72.0 review): a success can carry a note — a
+    // heal's unreported return-route step, a config write queued for a
+    // sleeper's wake-up — and an UNKNOWN outcome is not a failure.
+    const note = res.ok ? res.message.split(' — ').slice(1).join(' — ') : '';
+    this.actionNotice = res.ok ? `✓  ${action.label}` : res.unknown ? `◷  ${res.message}` : `✗  ${res.message}`;
+    this.actionNoticeDetail = [note, this.pauseAckText()].filter(Boolean).join(' · ') || null;
+    this.pauseAckPending = false;
     this.lastFrameHash = '';
     this.draw();
   }
@@ -1080,13 +1213,16 @@ export class TuiSession {
         desc: a.desc,
         impactNote: a.impactNote,
         buffer: this.confirmBuffer,
+        notice: this.pauseAckText() ?? undefined,
       });
     }
     if (this.actionInFlight) {
-      return centeredNotice(this.view, 'WORKING', [c.yellow(this.actionRunningLabel || 'running…'), '', c.grey('sending command to the mesh…')]);
+      return centeredNotice(this.view, 'WORKING', [c.yellow(this.actionRunningLabel || 'running…'), '', c.grey('sending command to the mesh…'), c.grey('Esc: leave it running'),
+        ...(this.pauseAckText() ? ['', c.yellow(this.pauseAckText()!)] : [])]);
     }
     if (this.actionNotice != null) {
       const ok = this.actionNotice.startsWith('✓');
+      const pending = this.actionNotice.startsWith('◷') || this.actionNotice.startsWith('⏸');
       // WRAPPED, not tail-clipped (v0.51.0). `centeredNotice` handed one long
       // line to `center`, which falls through to a blind `truncate` at ~71
       // visible chars — so the three semantically OPPOSITE ZW0360 outcomes
@@ -1100,7 +1236,7 @@ export class TuiSession {
       const fit = (s: string): string[] =>
         wrapWords(s, w).flatMap((l) => (visLen(l) <= w ? [l] : (l.match(new RegExp(`.{1,${w}}`, 'g')) ?? [l])));
       return centeredNotice(this.view, 'RESULT', [
-        ...fit(this.actionNotice).map((l) => (ok ? c.green : c.red)(l)),
+        ...fit(this.actionNotice).map((l) => (ok ? c.green : pending ? c.yellow : c.red)(l)),
         ...(this.actionNoticeDetail ? ['', ...fit(this.actionNoticeDetail).map((l) => c.grey(l))] : []),
         '',
         c.grey('press any key to continue'),
@@ -1206,4 +1342,10 @@ export class TuiSession {
       }
     }
   }
+}
+
+/** Epoch ms → local HH:MM. */
+function clock(t: number): string {
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }

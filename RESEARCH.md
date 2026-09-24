@@ -421,7 +421,10 @@ node, first-non-functional node]` — **it names the exact failing hop** — plu
 `controller.rebuildNodeRoutes(nodeId)`: throws for the controller's own node and
 for **LR nodes**; pings dead-looking nodes first (`tryReallyHard`) and returns
 false if unresponsive; forces `keepAwake` on battery nodes for the whole run;
-then runs **4 steps, each retried up to 5×**:
+then runs **4 steps** — steps 1, 3 and 4 retried up to 5×; step 2
+(`AssignSUCReturnRoute`) is one unretried, non-fatal call (`Controller.ts`
+5215-5218), so a `true` result can hide its failure; step 4 failures are logged
+and skipped *(corrected v0.72.0; earlier text said every step retries 5×)*:
 1. `discoverNodeNeighbors` → `RequestNodeNeighborUpdate` (the **node re-scans its
    RF neighbors**); can trigger `AssignSUCReturnRoute`, so the cached SUC return
    route is invalidated.

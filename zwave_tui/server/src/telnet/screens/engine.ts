@@ -30,6 +30,8 @@
  * exactly-`view.rows` contract and discloses anything it cannot fit.
  */
 
+import { ADMISSION_SUMMARY } from '../../zwave/admission';
+import { PAUSE_ENTITY } from '../../zwave/autonomyPause';
 import { c, truncate, visLen } from '../ansi';
 import { provenance, weight, unscoreableReason } from '../ledgerText';
 import { frame } from '../chrome';
@@ -112,6 +114,18 @@ function fitBits(prefix: string, bits: string[], width: number): string {
   return out;
 }
 
+/** Epoch ms → local MM-DD. */
+function mmdd(t: number): string {
+  const d = new Date(t);
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** Epoch ms → local HH:MM. */
+function hhmm(t: number): string {
+  const d = new Date(t);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 /** ms → a compact age. Never fabricates precision it does not have. */
 function age(ms: number | null): string {
   if (ms == null) return '—';
@@ -133,8 +147,41 @@ export function renderEngine(ctx: ScreenCtx): string[] {
   const wide = view.cols >= 100;
 
   /* ── AUTO-PING ─────────────────────────────────────────────────────────── */
-  push(c.label('AUTO-PING') + c.grey('  — the engine\'s one autonomous write'));
+  // The admission rule's verdict rides the header (v0.72.0): automatic
+  // remediation is decided, not pending, and the operator should not have to
+  // read DESIGN.md to learn that nothing else runs on its own.
+  push(c.label('AUTO-PING') + c.grey(pick(view.cols - 'AUTO-PING'.length, [
+    `  — the engine's one autonomous write · automatic remediation: ${ADMISSION_SUMMARY}`,
+    "  — the engine's one autonomous write · auto-remediation: none admitted",
+    "  — the engine's one autonomous write",
+  ])));
   const ap = data.autoPingState() ?? null;
+  // The pause is read DIRECTLY (v0.72.0 review), not from the last pass's
+  // suppression: that lags by a tick after Z, and hides the pause behind any
+  // higher-ranked suppressor or an auto-ping that is off.
+  const pause = data.autonomyPause();
+  // The exits, long and short (second review): at 80 columns the full entity
+  // id did not fit and was clipped mid-name. A missing toggle has no exit in
+  // Home Assistant: recreate it off, or resume here, which forgets it.
+  const pauseHow = (p: NonNullable<typeof pause>, short = false): string => {
+    // Controller 3 → A resumes a TUI pause AND forgets a missing toggle, so
+    // with either it is named once (third review).
+    const viaMenu = p.by.includes('tui') || p.haMissing === true;
+    const tui = viaMenu
+      ? (p.haMissing ? (short ? 'Controller 3 → A (HA toggle gone)' : 'Controller 3 → A (it also forgets the missing HA toggle, or recreate that toggle off)') : 'Controller 3 → A')
+      : null;
+    const ha = p.by.includes('ha') && !p.haMissing ? (short ? 'the HA toggle off' : `turn off ${PAUSE_ENTITY}`) : null;
+    return [tui, ha].filter((x): x is string => x != null).join(short ? ' + ' : ', then ');
+  };
+  const pauseLines = (p: NonNullable<typeof pause>, lead: string): string[] => [
+    `${lead} (${pauseWho(p)}) · resume: ${pauseHow(p)}`,
+    `${lead} (${pauseWho(p)}) · resume: ${pauseHow(p, true)}`,
+    `${lead} · resume: ${pauseHow(p, true)}`,
+    `paused · resume: ${pauseHow(p, true)}`,
+    // Always fits 38 columns (a 40-column terminal).
+    `paused · resume: ${p.by.includes('ha') && !p.haMissing ? (p.by.includes('tui') ? '3 → A + HA toggle' : 'HA toggle off') : 'Controller 3 → A'}`,
+  ];
+  const pauseWho = (p: NonNullable<typeof pause>): string => `by ${p.by.join(' + ')} since ${hhmm(p.since)}, ${age(now - p.since)}`;
   if (!ap) {
     // TWO DIFFERENT FACTS, AND THE SCREEN HAS BOTH (v0.59.0). "auto-ping is
     // disabled, or write actions are off" made the operator go and check which,
@@ -144,15 +191,38 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     push('  ' + c.grey(ctx.actionsEnabled === false
       ? '◷ off — WRITE ACTIONS are off (the master gate). Auto-ping cannot act, and neither can you.'
       : '◷ off — auto-ping is disabled. Write actions are on, so manual actions still work.'));
+    if (pause != null) push('  ' + c.grey(pick(view.cols - 2, [
+      `automatic writes paused (${pauseWho(pause)}) — nothing to stop while auto-ping is off · resume: ${pauseHow(pause)}`,
+      ...pauseLines(pause, 'paused, nothing to stop'),
+    ])));
   } else if (ap.lastTickMs == null) {
     push('  ' + c.grey('◷ started, but has not completed a decision pass yet.'));
+    // A persisted pause is in force from the first pass (second review).
+    if (pause != null) push('  ' + c.yellow(pick(view.cols - 2, pauseLines(pause, 'automatic writes paused'))));
   } else {
-    const sup = ap.suppressed === 'none'
-      ? c.green('running')
-      : c.yellow(`suppressed: ${ap.suppressed}`);
+    // The owner's pause names who and since when (v0.72.0): it has no expiry,
+    // so its age is the fact that matters.
+    const showsPause = pause != null && (ap.suppressed === 'paused' || ap.suppressed === 'none');
+    const sup = showsPause
+      ? c.yellow(`suppressed: paused (${pauseWho(pause!)})`)
+      : ap.suppressed === 'none'
+        ? c.green('running')
+        : ap.suppressed === 'paused'
+          ? c.yellow('resuming — auto-ping sends again at its next pass')
+          : c.yellow(`suppressed: ${ap.suppressed}`);
     push('  ' + sup + c.grey(`  · last pass ${age(now - ap.lastTickMs)} ago`) +
       c.grey(`  · dwell ${Math.round(ap.config.afterMs / 60_000)}m, max ${ap.config.maxAttempts}/outage`) +
       (ap.config.staleMs > 0 ? c.grey(`, sweep ${Math.round(ap.config.staleMs / 60_000)}m`) : c.grey(', sweep off')));
+    if (pause != null) {
+      const how = pauseHow(pause);
+      push('  ' + c.grey(pick(view.cols - 2, showsPause ? [
+        `nothing autonomous is sent — sweep, verification and dead-node ladder · resume: ${how}`,
+        `nothing autonomous is sent · resume: ${how}`,
+        `nothing autonomous is sent · resume: ${pauseHow(pause, true)}`,
+        `resume: ${pauseHow(pause, true)}`,
+        ...pauseLines(pause, 'paused').slice(-1),
+      ] : pauseLines(pause, 'also paused'))));
+    }
     // `—` where the pass never computed a queue: a suppressed tick returns
     // before the sweep and verify queues are read, and printing 0 there would
     // assert an empty backlog the engine never looked at.
@@ -305,8 +375,21 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     const arms = ARM_ACTIONS
       .map((a) => ({ a, e: data.efficacyFor(kind, a) }))
       .filter((x) => x.e != null && x.e.n > 0);
-    const nothing = (arm == null || arm.n === 0) && arms.length === 0 &&
-      unver + transient + under + unprobe + conf + fp === 0;
+    // PER ACTOR (v0.72.0). `efficacyFor` reads the operator's arm; the ladder's
+    // is shown on its own row and never claimed, and whatever the pooled arm
+    // learned before actors were recorded is shown as exactly that.
+    const actors = data.actorArms(kind);
+    const ladder = actors.filter((x) => x.origin === 'engine' && x.n > 0);
+    const yourDeaths = new Map(actors.filter((x) => x.origin === 'you' && x.killedAfter > 0).map((x) => [x.action, x.killedAfter]));
+    // The pre-actor share is its own decayed snapshot (v0.72.0 review) — not
+    // `pooled − Σ actors`, which cannot be subtracted under decay.
+    const legacy = ARM_ACTIONS.map((a) => {
+      const p = data.pooledArm(kind, a);
+      return p != null && p.legacyN >= 0.5 ? { a, n: p.legacyN, nodes: p.legacyNodes } : null;
+    }).filter((x): x is { a: ActionKind; n: number; nodes: number } => x != null);
+    const live = data.liveSpan(kind);
+    const nothing = (arm == null || arm.n === 0) && arms.length === 0 && ladder.length === 0 && legacy.length === 0 &&
+      yourDeaths.size === 0 && unver + transient + under + unprobe + conf + fp === 0;
     if (nothing) continue;
     anyLearned = true;
     const parts: string[] = [];
@@ -389,12 +472,28 @@ export function renderEngine(ctx: ScreenCtx): string[] {
       // legend says bare numbers are cumulative node counts.
       if (e!.harmed >= 0.5) bit(c.yellow(`${a}: ${weight(e!.harmed)} worse`), 0);
     }
+    // A death soon after the operator's action (v0.72.0) is harm evidence, and
+    // ranks with a measured regression.
+    for (const [a, k] of yourDeaths) bit(c.yellow(`${a}: Dead ≤15m after ×${k}`), 0);
     push('  ' + c.white(kind));
     // Stable sort by priority: regressions survive a narrow terminal, bounds
     // are shed first. `map`+`sort` on indices keeps the within-priority order.
     const laid = parts.map((t, i) => ({ t, p: pri[i], i }))
       .sort((x, y) => x.p - y.p || x.i - y.i).map((b) => b.t);
     push(fitBits('    ', laid, view.cols));
+    for (const x of ladder) {
+      push(fitBits('    ', [
+        c.grey(`ladder ${x.action} ${weight(x.n)}${provenance(x.nodes)}`),
+        c.grey('shown, never claimed'),
+        c.grey(x.lastAt == null ? 'never scored' : `last scored ${age(now - x.lastAt)} ago`),
+        ...(x.killedAfter > 0 ? [c.yellow(`Dead ≤15m after ×${x.killedAfter}`)] : []),
+      ], view.cols));
+    }
+    for (const x of legacy) {
+      push(fitBits('    ', [
+        c.grey(`(learned before v0.72.0, all origins: ${x.a} ${weight(x.n)}${provenance(x.nodes)} — not claimed)`),
+      ], view.cols));
+    }
     const tallies: string[] = [];
     if (unver > 0) tallies.push(`${unver} unscoreable (thin evidence)`);
     if (transient > 0) tallies.push(`${transient} transient blink${transient === 1 ? '' : 's'}`);
@@ -402,6 +501,15 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     if (unprobe > 0) tallies.push(`${unprobe} unprobeable`);
     if (conf > 0) tallies.push(`${conf} confounded`);
     if (fp > 0) tallies.push(`${fp} refused as misdiagnosis`);
+    // HOW MANY EPISODES LIVE LONG ENOUGH TO ACT ON (v0.72.0), and how many of
+    // those could be scored — over the last 30 days. Only these could ever be
+    // evidence for an automatic action.
+    if (live) {
+      const a = live.scored[1] + live.scored[2] + live.scored[3];
+      const b = a + live.unscored[1] + live.unscored[2] + live.unscored[3];
+      const since = now - live.since < 30 * 86_400_000 ? `since ${mmdd(live.since)}` : 'in 30 d';
+      if (b > 0) tallies.push(`live ≥10m: ${a}/${b} scored ${since}`);
+    }
     // fitBits, NOT a raw join (v0.51.0). `push` blind-truncates, so at 80 cols
     // this row read "...· 2 undersampled (node r" and three tallies — including
     // `refused as misdiagnosis`, the ledger's own count of times it decided a
@@ -410,6 +518,15 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     // `push` stays: at cols 1-5 fitBits emits prefix + `+N` wider than the
     // frame, and only truncate enforces renderContract's `visLen <= cols`.
     if (tallies.length) push(fitBits('    ' + c.grey('○ '), tallies.map((t) => c.grey(t)), view.cols));
+  }
+  // POSSIBLE HARM, per action (v0.72.0): a route-kind symptom that opened soon
+  // after an action on the same node. Not per kind — the new symptom is rarely
+  // the kind the action was aimed at.
+  const routeAfter = ARM_ACTIONS.flatMap((a) => (['you', 'engine'] as const).map((o) => ({ a, o, k: data.routeSymptomsAfter(a, o) })))
+    .filter((x) => x.k > 0);
+  if (routeAfter.length > 0) {
+    anyLearned = true;
+    push(fitBits('  ' + c.yellow('route symptoms opened ≤15m after: '), routeAfter.map((x) => c.yellow(`${x.a} (${x.o}) ×${x.k}`)), view.cols));
   }
   // UNGATED: no counter can ever bring these rows into existence, because the
   // kind opens no episode. They are the difference between "not yet" and "never".
@@ -435,6 +552,8 @@ export function renderEngine(ctx: ScreenCtx): string[] {
   return frame(view, data, {
     title: 'ENGINE',
     body,
-    keys: [['1-9', 'SCREENS'], ['Q', 'BACK']],
+    // [Z] pauses every autonomous write at once (v0.72.0) — no CONFIRM,
+    // because it removes writes and sends nothing.
+    keys: [['Z', 'PAUSE', 1], ['1-9', 'SCREENS'], ['Q', 'BACK']],
   });
 }

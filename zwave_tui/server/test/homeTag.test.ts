@@ -357,7 +357,7 @@ test('the decision is reachable from the network menu and resolves through CONFI
   // Navigate deterministically: ask the catalog where the row is rather than
   // hunting for it, so a menu-order change fails loudly instead of silently
   // arming some other action.
-  const rows = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: true });
+  const rows = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: true, autonomyPausedByTui: false });
   const idx = rows.findIndex((r) => r.desc.kind === 'identityKeep');
   assert.ok(idx >= 0, 'identityKeep is in the network menu');
   for (let i = 0; i < idx; i++) s.feed([{ type: 'arrow', dir: 'down' }]);
@@ -377,7 +377,7 @@ test('read-only: the footer says SELECT on an identity row, LOCKED on a mesh act
   // A footer that reads "locked" over a row the operator can actually press is
   // the same defect class as a screen claiming all-clear while a detector is
   // starved — the label describing a rule the code below it does not apply.
-  const rows = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: true });
+  const rows = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: true, autonomyPausedByTui: false });
   const idIdx = rows.findIndex((r) => r.desc.kind === 'identityKeep');
   const meshIdx = rows.findIndex((r) => r.desc.kind === 'rebuildAll');
   assert.ok(idIdx >= 0 && meshIdx >= 0);
@@ -405,7 +405,7 @@ test('read-only: EVERY identity row says select — not just the first two', () 
   // the whole set and fails if a future kind is added to the catalog but not to
   // the predicate.
   const rows = buildMenu({ scope: 'network', hasNode: false, rebuilding: false,
-                           identityPending: true, identityResumable: true });
+                           identityPending: true, identityResumable: true, autonomyPausedByTui: false });
   const strip = (x: string) => x.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
   const view = { cols: 110, rows: 34 } as ViewState;
 
@@ -589,11 +589,11 @@ test('resume PARKS what is live before restoring — nothing is traded away', ()
 });
 
 test('RESUME is offered only when this controller actually has an archive', () => {
-  const withArchive = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: true })
+  const withArchive = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: true, autonomyPausedByTui: false })
     .map((i) => i.desc.kind);
   assert.ok(withArchive.includes('identityResume'), 'offered when resumable');
 
-  const without = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: false })
+  const without = buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: true, identityResumable: false, autonomyPausedByTui: false })
     .map((i) => i.desc.kind);
   assert.ok(!without.includes('identityResume'), 'a row that could only fail is not shown');
   assert.ok(without.includes('identityFresh') && without.includes('identityKeep'), 'the other two still are');

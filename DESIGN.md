@@ -63,7 +63,7 @@ Design tenets (inherited from the ecoflow-panel engine, battle-tested there):
         │            planner.ts (M4)  ←── outcomes.ts (M5, advisory)
         │            symptom → ranked plan    episodes (action AND no-action)
         │                    │                          ▲
-        │            executor.ts (DEFERRED — not built)  │
+        │            executor.ts (DECIDED v0.72.0: none)  │
         │            gates, cooldowns  ·  human type-CONFIRM populates ┘
         │                    │  (advisory-only: operator runs actions)
         │                    ▼
@@ -394,12 +394,103 @@ only after §3.6's controls are met.
 The planner is **pure and always-on** — it powers the advisory REMEDY screen
 even when execution is fully disabled.
 
-### 3.5 `executor.ts` (DEFERRED — not built; owner chose advisory-only)
+### 3.5 `executor.ts` (DECIDED (v0.72.0): risk-first admission; automatic set empty)
+
+> **Decision (v0.72.0, 2026-09).** The executor tier is decided rather than
+> deferred. A verb may run with no operator present only if it passes five
+> properties **as this add-on is wired**:
+>
+> | | Property |
+> |---|---|
+> | P1 | no effect on a device, or on Home Assistant state that automations trigger on |
+> | P2 | an in-band result: the add-on can tell, from the call, what happened |
+> | P3 | a fixed frame count, at no more than Normal priority, with no queue-blocking controller command |
+> | P4 | nothing persistent to undo |
+> | P5 | an effect the outcome ledger can measure apart from what the control arm already receives |
+>
+> **No verb passes, so the automatic set is empty** — pinned by the type
+> checker (`AutoVerb = never` in `server/src/zwave/admission.ts`), not by a
+> comment. The table, verb by verb, with the source line that fails each:
+>
+> | Verb | Fails | Why (source) |
+> |---|---|---|
+> | `ping` | P2, P3, P5 | HA's ping button drops whether the node responded (`ha/button.py`); Ping priority outranks Normal (`NoOperationCC.ts`, `MessagePriority.ts`); as a remedy its effect cannot be scored, and it began 100 of 106 mains Dead episodes on the reference mesh |
+> | `routedRead` | P1, P2, P5 | a Report correcting a stale HA state is a state change (`ha/entity.py`); `refresh_value` only dispatches the poll; both arms already receive it (verification bursts) |
+> | `refreshValues` | P1, P2, P5 | the same state correction; sent with `wait_for_result=False`; on 35 of 38 nodes it is the routed read's single Get |
+> | `reInterview` | P1, P4 | clears stored values; writes lifeline associations and configuration (`Node.ts`) |
+> | `healNode` | P1, P2, P3, P4 | deletes every return route, priority routes included; a true result can hide a failed, unretried SUC-return-route assignment; neighbour discovery blocks the send queue ~2 min per attempt, up to five (`Controller.ts`) |
+> | `rebuildAll` | P1, P3, P4 | the same, for every listening node in turn |
+> | `stopRebuild` | P4 | can abort a node between route deletion and assignment |
+> | `removeFailed` | P4 | permanent; the device must be reset and re-included by hand |
+> | `controlEntity` | P1 | switches, dims, locks or opens a real device |
+> | `setConfigParam` | P1, P4 | changes device behaviour, persisted in the device |
+>
+> `ping` and `routedRead` **predate the rule and fail it**. They keep running
+> only as auto-ping — the dead-node ladder, the sweep and the verification
+> bursts — under auto-ping's gates and the owner's pause (DOCS §11.12), and the
+> table says so (`alreadyAutonomousAs`) rather than pretending they pass.
+>
+> **Evidence qualifies efficacy, never safety.** `NEVER_AUTO` —
+> `healNode`, `rebuildAll`, `stopRebuild`, `removeFailed`, `reInterview`,
+> `controlEntity`, `setConfigParam` — is a fixed set no option, ledger reading or
+> efficacy claim reaches: a repair that deletes routes, wipes an interview,
+> removes a device, switches a load or rewrites a setting does not become safe
+> because it measured well.
+>
+> **The safety model, stated completely.** What runs with no one present is
+> auto-ping's three lanes, and nothing else. Those frames never command a
+> device, but (a) an answer that corrects a wrong Home Assistant state is a
+> state change that state-triggered automations react to; (b) a routed read
+> that fails over leaves the controller on the route that worked; (c) a
+> listening device that misses a frame is marked Dead, and the driver rejects
+> every command queued to it at that moment. One switch pauses all three lanes;
+> while paused, a mains device that fails when nothing talks to it is not
+> noticed: `quiet-node` fires only after max(6 h, 3 sweep intervals) of silence
+> plus its dwell, and then for every idle mains node. A pause older than 24 h
+> raises the degraded alarm while auto-ping is running for it to stop. Everything else runs only behind the typed `CONFIRM`.
+>
+> **Any future admission must, all of:** delete that verb's failure rows in
+> review; pass the pre-registered randomized trial below; be handed to an
+> executor only as a **narrowed handle** holding the admitted verbs — never the
+> `ActionRunner` (for the refresh trial:
+> `{ refreshValues: (n) => actions.refreshValues(n, 'engine') }`); sit behind
+> its own default-off option, independent of `write_actions_enabled`; and be
+> re-consented to by the owner.
+>
+> **The pre-registered protocol** — the only path by which any verb may later
+> be admitted:
+>
+> - episode-level randomization at p = 0.5 at the decision tick, persisted
+>   before any send;
+> - the before-window frozen at decision time in both arms;
+> - experiment tallies undecayed, and kept apart from the operator and ladder
+>   arms;
+> - a death within 30 min counted as harm in both arms, never filed as
+>   confounded;
+> - one verdict, at 30 + 30 scoreable closures: pass only if
+>   `wilsonLower(treated) ≥ held rate + 0.05` **and** treated deaths ≤ held
+>   deaths + 1;
+> - a 120-day deadline, after which the pair retires as *not measurable here*;
+> - the first direct kill (Dead ≤ 5 min after an automatic send) excludes the
+>   node for 7 days; a second within 7 days latches everything off until the
+>   owner acts;
+> - limits: ≤ 1 per node per 24 h, ≤ 2 per hour, ≤ 6 per day, 09:00–20:00, one
+>   in flight, never within 10 min of an operator action, and only while
+>   auto-ping runs unsuppressed and unpaused;
+> - a permanent ≥ ⅓ holdout after a pass.
+>
+> **Revisit condition.** A verb is worth trialling only when ENGINE's live-span
+> bit for the candidate kind shows ≥ 30 scored closures live ≥ 10 min within
+> 30 days (DOCS §9.3 — counted from the dwell start, the clock an executor's
+> eligibility would use), **and** the candidate verb differs from what the
+> verification lane already sends to both arms.
 
 > **Since written (v0.30, 2026-08):** one narrow autonomous write ships OUTSIDE
 > this design — **auto-ping** (`autoPing.ts`, DOCS.md §11.12): opt-in, off by
 > default, and it never reads the planner's recommendations. It is not this
-> executor; everything below about the executor tiers remains accurate.
+> executor. *(Superseded in part by the v0.72.0 decision above: the tier list
+> below is the design of record, but no verb — `refresh_values` included —
+> passes the admission rule, so `auto_safe` admits nothing.)*
 >
 > **Amendment (v0.71.0, 2026-09).** Two statements in this document no longer
 > describe the shipped build. The liveness sweep has been a background prober of
@@ -420,7 +511,8 @@ even when execution is fully disabled.
 > `advise` mode there is **no new execution path**: the planner surfaces
 > recommendations and the human runs the executable ones through the *existing*
 > type-CONFIRM Actions Menu (v0.9); the outcome ledger's "action arm" is
-> populated by exactly those operator actions. `executor.ts` — the gate-stack
+> populated by those operator actions and by the dead-node ladder's pings
+> (booked per actor since v0.72.0, with claims from the operator's arm only). `executor.ts` — the gate-stack
 > below — and the `auto_remediation` config knob only earn their existence when
 > an **auto** tier drives actions itself. **The owner explicitly chose to keep
 > the engine advisory-only, so this module and `auto_remediation` are NOT built**
@@ -428,12 +520,14 @@ even when execution is fully disabled.
 > must be surfaced and agreed first. The gate-stack below is the design of record
 > for that future tier.
 
-The (future) module that would call `ActionRunner` autonomously, behind stacked gates:
+The (future) module that would call `ActionRunner` autonomously, behind stacked gates — kept as the design of record; the v0.72.0 decision above narrows it to a handle holding admitted verbs only, and adds the pre-registered trial:
 
 1. `write_actions_enabled` (existing master gate).
 2. `auto_remediation: list(off|advise|auto_safe)` — default `off`. `advise` =
    plans surface in TUI + log; human executes via type-CONFIRM. **`auto_safe`
-   = refresh-class reads only** (`refresh_values`). *(DR blocker resolved:)*
+   = refresh-class reads only** (`refresh_values`) — *superseded v0.72.0: the
+   admission table fails `refresh_values` on P1, P2 and P5, so the automatic
+   set is empty.* *(DR blocker resolved:)*
    **`remove_failed_node` is destructive and NEVER auto-tier** — it is
    advise-only behind type-CONFIRM, requires §3.3's coverage-proven ghost
    evidence, and `isFailedNode` is **not queryable via HA WS**: the removal
@@ -478,9 +572,10 @@ after-window without fresh evidence (wedge, no traffic) yields
 > only after the symptom has stayed gone through a 10-min
 > confirmation window (a blink of improvement is not a recovery, and the dwell
 > lets the after-window settle past the transition). The "action arm" is
-> populated by operator type-CONFIRM actions via the ActionRunner's `onOutcome`
-> hook (attributed to every open episode on the acted node); NO engine-initiated
-> execution this milestone. `expectedEfficacy` feeds the planner (§3.4) and the
+> populated through the ActionRunner's `onOutcome` hook (attributed to every
+> open episode on the acted node) — by operator type-CONFIRM actions and, since
+> v0.30, by the dead-node ladder's pings; since v0.72.0 each is booked to its
+> actor, and claims come from the operator's arm alone (DOCS §9.3). `expectedEfficacy` feeds the planner (§3.4) and the
 > Remedy screen renders "✓ helped X% (n≈W · N nodes) vs Y% self-heal" or "≈ not
 > distinguishable from self-healing" — never a claim while `n < min`. As of
 > v0.43.1 the withheld case also names the Wilson lower bound and the bar it
@@ -545,7 +640,10 @@ without:
   — not merely until minimum-attempts — and renders with its n and a
   "not distinguishable from self-healing" state.
 - Exponential (per-episode) decay; the action arm is keyed by
-  `(symptom.kind, action, time-of-day band)`.
+  `(symptom.kind, action, time-of-day band)`. *(Superseded: the arms are not
+  banded — a band-summed action rate against an un-banded base rate is a
+  Simpson's-paradox confound; DOCS §9.8. Since v0.72.0 they are keyed by actor
+  as well.)*
 
 ### 3.7 TUI surfaces (M4 advisory + M6 interference)
 
@@ -587,14 +685,14 @@ without:
 ## 4. Config surface (additions, all safe-defaulted for strangers' meshes)
 
 ```yaml
-# auto_remediation: DEFERRED — the executor tier (§3.5) is NOT built (owner chose
-#   advisory-only). This knob lands only if/when auto-execution is ever built.
+# auto_remediation: not built — see the §3.5 decision (v0.72.0): no verb is
+#   admitted. It lands only with a verb that passes the pre-registered trial.
 engine_enabled: true          # PROPOSED, NEVER IMPLEMENTED — the detectors and
 #                             # advisory compute are unconditionally on; there is
 #                             # no such add-on option. Listed here as design
 #                             # intent only.
 driver_ws_url: "ws://core-zwave-js:3000"  # read-only telemetry; empty = disabled (v0.13)
-# advanced — DEFERRED with the executor (§3.5); not add-on options:
+# advanced — not built, see the §3.5 decision; not add-on options:
 engine_cooldown_hours: 24     # int(1,168) per-node same-action cooldown
 engine_max_actions_per_hour: 2  # int(1,10) global engine-initiated cap
 ```
@@ -606,11 +704,11 @@ options only for knobs a stranger genuinely needs.
 
 | | ships | proves |
 | --- | --- | --- |
-| ~~executor~~ | `executor.ts` gate-stack + `auto_remediation` (off/advise/auto_safe) — **DEFERRED, not built** (owner chose advisory-only); design of record kept in §3.5 for a future opt-in | — |
+| ~~executor~~ | `executor.ts` gate-stack + `auto_remediation` (off/advise/auto_safe) — **DECIDED v0.72.0: no verb admitted** (§3.5 admission rule, `admission.ts`); the pre-registered trial is the only path to admitting one | — |
 | M2 (v0.12) | reworked evidence substrate: fine+coarse tiers, event-driven flaps/route accumulators, freshness, homeId binding, coverage metadata, controller ring, columnar persistence w/ size test | evidence is trustworthy across restarts/resets/wedges — every DR substrate finding closed |
 | M3 (v0.14) | baselines (per-series statistics) + detectors + REMEDY advisory | symptoms are right — detectors arm only after their bands graduate (days × active windows) |
 | M4 (v0.15) | planner (pure, always-on) + advisory REMEDY surface — severity-sorted, cost/basis-tagged candidates, honest overflow; `advise` runs via the existing type-CONFIRM Actions Menu (no new execution path) | recommendations grounded + auditable, with `basis` labels; rebuild never offered as a runnable candidate |
-| M5 (v0.16) | episode ledger (`outcomes.ts`) + learned efficacy on the Remedy screen — **advisory-only**: the action arm is populated by operator type-CONFIRM actions; the spontaneous-recovery control arm accrues from untouched recoveries | the loop learns honestly against a no-action control arm; an action is credited only when it beats self-healing by a real margin with comparable traffic |
+| M5 (v0.16) | episode ledger (`outcomes.ts`) + learned efficacy on the Remedy screen — **advisory-only**: the action arm is populated by operator type-CONFIRM actions and (since v0.30) the dead-node ladder's pings, booked per actor since v0.72.0 with claims from the operator arm only; the spontaneous-recovery control arm accrues from untouched recoveries | the loop learns honestly against a no-action control arm; an action is credited only when it beats self-healing by a real margin with comparable traffic |
 | M6 (v0.17) | interference-watch screen (key `8`/`f`): measured noise floor + trend, controller serial-link health, diurnal raw-timeout-rate heatmap, correlated-degradation state | correlated/diurnal interference visible; measured (driver-WS noise floor), not inferred; heatmap raw not baseline-relative |
 | M7 (v0.18) | complete `DOCS.md` system & engine reference (12 chapters) + `SECURITY.md` + a printable `.docx`/`.pdf` manual built in CI (`scripts/build-docs-docx.py`). The no-dB-numbers guard already ships as a planner test (`no candidate fabricates a numeric dB claim`); defaults are safe-defaulted for strangers' meshes (read-only, driver-WS empty=disabled) | the whole system is documented from source; the offline manual stays current; safe for other users' meshes |
 | v0.13 | read-only driver-WS evidence client (§2.1) | noise floor + last_seen + capability flags feed the reserved schema before baselines learn |

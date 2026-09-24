@@ -52,12 +52,17 @@
  * window returning MORE rows means the longer one is lying. Inside retention the
  * 3-day window returns 534 rows where the 7-day returns 153.)
  *
- * Whether a ping actually clears those long outages is still unproven, so this
- * instruments itself: every attempt is recorded through the M5 outcome ledger
- * against the node's open episode, and `efficacyFor('dead-flap', 'ping')` turns
- * "usually wakes them up" into a measured recovery rate on the REMEDY screen. If
- * the rate comes back poor, the honest answer is to switch this off — and the
- * data will say so.
+ * Whether a ping actually clears those long outages is still unproven. Every
+ * attempt is recorded through the M5 outcome ledger against the node's open
+ * episode — since v0.72.0 in its own actor arm (`…|ping|engine`), shown on
+ * ENGINE and never claimed: the ladder acts after a dwell, on nodes it chose for
+ * being Dead, so what it learns is selection, not efficacy (DOCS §9.3, §9.7a).
+ *
+ * THE OWNER'S PAUSE (v0.72.0) is one more suppressor, `paused`, and it stops
+ * every lane, the ladder included (autonomyPause.ts). It ranks below `storm` and
+ * `no-capability-data`, which also send nothing and raise the degraded alarm,
+ * so a pause can never hide them. `operator-action` stands every lane down while
+ * the operator waits on a one-node route rebuild or removal.
  *
  * The decision is a PURE function (`decideAutoPings`) taking a snapshot and
  * returning what to do plus why — so every gate below is directly testable, and
@@ -80,6 +85,20 @@ export type AutoPingSuppression =
    *  driver to mark a node Dead, which this engine would then report and
    *  remediate. Probing into a switched-off radio measures the radio. */
   | 'controller-rf-off'
+  /** The operator is waiting on a single-device route rebuild or removal
+   *  (v0.72.0). The driver deletes and reassigns that node's routes while it
+   *  runs; a probe sent meanwhile measures the rebuild, and a death on it would
+   *  be charged to the operator's action. Ranks below `storm` and
+   *  `no-capability-data`, which raise the degraded alarm; held after an
+   *  outcome-unknown until its reply bound. */
+  | 'operator-action'
+  /** The owner paused every autonomous write (v0.72.0) — from the TUI (`Z` on
+   *  ENGINE) or Home Assistant (`input_boolean.zwave_tui_pause_autonomy`). No
+   *  lane sends, the dead-node ladder included; probes already out are still
+   *  judged. Ranked BELOW storm and no-capability-data, which also send
+   *  nothing, so a pause never hides the two suppressions that raise
+   *  `binary_sensor.zwave_tui_degraded`. See autonomyPause.ts. */
+  | 'paused'
   | 'none';
 
 export interface AutoPingConfig {
@@ -516,6 +535,10 @@ export interface AutoPingInput {
   /** When the controller reported its receiver OFF and has not reported it back
    *  on (v0.65.0), or null. See `controllerRfEvent` in driverWsClient. */
   rfOffSince?: number | null;
+  /** The owner's pause is on (v0.72.0). */
+  paused?: boolean;
+  /** A single-device rebuild or removal is running (v0.72.0). */
+  operatorBusy?: boolean;
   /**
    * Nodes the outcome ledger has asked to probe for episode verification
    * (v0.36). Subject to EVERY gate below — a verification probe is a write like
@@ -722,6 +745,10 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
 
   const stormLimit = Math.max(STORM_MIN_NODES, Math.ceil(listeningNodes.length * STORM_FRACTION));
   if (dead.length >= stormLimit) return { ...base, suppressed: gate('storm') };
+  // A one-node rebuild or removal the operator started (v0.72.0). Below storm
+  // and no-capability-data (v0.72.0 review), which raise the degraded alarm:
+  // a chain of long heals must not hide them.
+  if (input.operatorBusy) return { ...base, suppressed: gate('operator-action') };
 
   const ping: number[] = [];
   const read: number[] = [];
@@ -821,6 +848,21 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   // Inside the boot window only the dead ladder was released (v0.64.4; see
   // `bootDeadLane`). Returned BEFORE the verification thunk is resolved, so a
   // gated tick still spends none of the ledger's burst budget (v0.36.2).
+  // The owner's pause (v0.72.0): every lane, the ladder included — nothing is
+  // sent. It is decided AFTER the dead-node pass (v0.72.0 review) so that
+  // escalation, which sends nothing, still happens: a node that had already
+  // spent its budget is still announced as given up, and still summons a
+  // person, rather than being held for the length of the pause. Not gated on
+  // the boot window — it raises nothing, and it is what the owner asked for.
+  if (input.paused) {
+    // …including a node whose budget is spent but whose last step is an owed
+    // routed read (second review): paused, that read cannot go, so waiting for
+    // it would hold the summons for the length of the pause.
+    const spent = read.filter((id) => (input.state.attempts.get(id) ?? 0) >= config.maxAttempts && !input.state.gaveUpAnnounced.has(id) &&
+      // …and not while a probe to it still awaits its answer (v0.41.2's rule).
+      (input.state.awaitingAnswer.get(id)?.length ?? 0) === 0);
+    return { ...base, gaveUp: [...gaveUp, ...spent], launchGaveUp, talkingWhileDead, suppressed: 'paused' };
+  }
   if (booting) return { ...base, ping, read, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'boot-window' };
 
   /* ── liveness: a node nobody talks to is never proven alive ───────────
@@ -1262,6 +1304,10 @@ export interface AutoPingRunnerOptions {
    *  or null. Suppresses every lane, and makes the probes already in flight
    *  unjudgeable rather than missed. */
   rfOffSince?: () => number | null;
+  /** The owner's pause (v0.72.0): true stops every lane. */
+  paused?: () => boolean;
+  /** A single-device rebuild or removal is running (v0.72.0). */
+  operatorBusy?: () => boolean;
   /** When the driver-WS link last completed a handshake (v0.65.0), or null.
    *  A driver restart pings the whole mesh itself, which advances every node's
    *  lastSeen — evidence this add-on cannot attribute to anything it sent. */
@@ -1491,6 +1537,8 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       verifyDue: () => o.verifyRequests?.(t, (id) => inProbeHold(state, id, t)) ?? [],
       verifyOwedCount: () => o.verifyOwedCount?.() ?? 0,
       rfOffSince: o.rfOffSince?.() ?? null,
+      paused: o.paused?.() ?? false,
+      operatorBusy: o.operatorBusy?.() ?? false,
       canRead: (id) => o.read != null && (o.canRead?.(id) ?? false),
     });
 

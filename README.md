@@ -204,9 +204,31 @@ can never offer you an action that touches all 39 nodes.
 Every row is badged **SAFE / CAUTION / DESTRUCTIVE** (unlocking a lock or opening a
 garage is DESTRUCTIVE), and selecting any of them opens a modal that requires you
 to type the literal word **`CONFIRM`** before it runs (only a bare `p` ping stays
-immediate). Every outcome is logged. The *engine* never executes its
-recommendations; device control and config writes are **operator** actions, and
-are never fed to the learning ledger.
+immediate — and `Z` on ENGINE, which pauses automatic writes and sends nothing).
+Every outcome is logged, and since v0.72.0 it reports what the driver actually
+said: a route rebuild that returns `false` is a failure, a config write that is
+only `queued` on a mains device is *not confirmed*, and a rebuild Home Assistant
+stopped waiting for is *outcome unknown*, not failed. The *engine* never executes
+its recommendations; device control and config writes are **operator** actions,
+and are never fed to the learning ledger.
+
+**Automatic remediation was evaluated, and nothing qualifies (v0.72.0).** Every
+verb was checked against a five-property rule — no effect a Home Assistant
+automation reacts to, an in-band result, a bounded frame count, nothing to undo,
+and an effect the ledger can measure — and none passes, so the automatic set is
+empty (DESIGN §3.5). Rebuild, re-interview, remove-failed, device control and
+config writes can never run automatically. What needs a person is published as
+`sensor.zwave_tui_recommendation` — at once when auto-ping has given up on a
+device, and otherwise once a problem has lasted an hour — so your own
+notification automation can tell you.
+
+**One pause for everything automatic (v0.72.0).** `Z` on the ENGINE screen, or an
+`input_boolean.zwave_tui_pause_autonomy` helper you create in Home Assistant,
+stops auto-ping's sweep, verification and dead-node ladder at once; it survives
+restarts, fails closed, and once it is older than 24 hours raises the degraded
+alarm (while auto-ping is running for it to stop). A pause
+set from the TUI is resumed behind the typed `CONFIRM` (Controller 3 → `A`); one
+set by the toggle lifts when you turn the toggle off.
 
 **Auto-ping — the one autonomous mesh write (v0.30, opt-in).** With
 `auto_ping_enabled` on (and only under the master `write_actions_enabled` gate),
@@ -283,10 +305,11 @@ re-asserted every 30 seconds:
 | entity | state | notable attributes |
 | --- | --- | --- |
 | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total` |
+| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `paused_by`, `paused_since`, `auto_remediation` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
 | `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind or before the roster has loaded) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |
+| `sensor.zwave_tui_recommendation` | `summons` / `action` / `physical` / `none` | `node_id`, `node_name`, `symptom`, `since`, `headline`, `recommendation`, `action`, `automatic` (always `false`), … |
 
 The engine sensor's states are listed in the order the code checks them:
 `awaiting-identity-decision` (a mesh identity decision is pending; it outranks
@@ -304,8 +327,9 @@ them would make an existing uptime check flap on a single symptom.
 **`degraded` is deliberately not "any symptom exists."** A warning-level symptom
 on one node is the resting state of a real mesh, and an alert that is always on
 is not an alert. It fires on a summons (the remediation ladder has spent its
-budget and is asking for a person), a critical symptom, or the engine being
-structurally unable to do its job.
+budget and is asking for a person), a critical symptom, the engine being
+structurally unable to do its job, or a pause on automatic writes older than 24
+hours while auto-ping is running for it to stop.
 
 **There is no built-in notifier, on purpose.** The add-on could call
 `notify.mobile_app_*` directly — it has the permission — but that hardcodes a
