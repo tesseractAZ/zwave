@@ -18,7 +18,7 @@
 import { clipWords, c, lr, padEnd, truncate, visLen } from '../ansi';
 import type { ViewState } from '../../types';
 import type { ActionImpact, MenuGroup, MenuItem, MenuScope } from '../actionsCatalog';
-import { isIdentityKind, CONFIRM_WORD } from '../actionsCatalog';
+import { isLocalDecisionKind, CONFIRM_WORD } from '../actionsCatalog';
 import { centeredNotice } from './overview';
 
 /* ── impact styling ────────────────────────────────────────────────────── */
@@ -124,7 +124,7 @@ export function renderActionsMenu(view: ViewState, opts: ActionsMenuOpts): strin
   // it does not apply.
   const cursorRow = items[index];
   const cursorActionable = !locked
-    || (cursorRow?.payload.type === 'catalog' && isIdentityKind(cursorRow.payload.kind));
+    || (cursorRow?.payload.type === 'catalog' && isLocalDecisionKind(cursorRow.payload.kind));
   const left = [key('↑↓', 'move'), key('⏎', cursorActionable ? 'select' : 'locked'), key('Esc', 'close')].join(c.grey(' · '));
   const more = entries.length > bodyCap ? c.cyan(`${start > 0 ? '▲' : ' '}${start + bodyCap < entries.length ? '▼' : ' '} `) : '';
   const right = locked && !cursorActionable
@@ -244,6 +244,9 @@ export interface TypeConfirmOpts {
   impactNote: string;
   /** What the operator has typed so far toward CONFIRM. */
   buffer: string;
+  /** A line to show above the prompt — the pause acknowledgement when Z was
+   *  pressed with this box up (v0.72.0 third review). */
+  notice?: string;
 }
 
 export function renderTypeConfirm(view: ViewState, o: TypeConfirmOpts): string[] {
@@ -278,6 +281,7 @@ export function renderTypeConfirm(view: ViewState, o: TypeConfirmOpts): string[]
     '',
     ...wrapDesc.map((l) => c.grey(l)),
     ...wrapNote.map((l) => impactColor(o.impact)(l)),
+    ...(o.notice ? ['', c.yellow(o.notice)] : []),
     '',
     prompt,
     c.grey('Esc = cancel'),

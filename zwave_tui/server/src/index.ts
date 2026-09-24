@@ -40,6 +40,9 @@ import type { LogEvent } from './types';
 const log = createLogger(config.logLevel);
 
 async function main(): Promise<void> {
+  /** When this run began (v0.72.0): symptom dwell state is in memory, so the
+   *  recommendation's persistence clock starts here, and says so. */
+  const bootedAt = Date.now();
   log(`Z-Wave TUI v${config.version} starting — HA ${config.haWsUrl}`);
 
   // 1) HA Core WebSocket (SUPERVISOR_TOKEN auth; no-ops if unconfigured in dev).
@@ -63,6 +66,7 @@ async function main(): Promise<void> {
     driverWsUrl: config.driverWsUrl,
     baselinesPath: config.baselinesPath,
     outcomesPath: config.outcomesPath,
+    autonomyPath: config.autonomyPath,
     log,
   });
   zwaveData.start();
@@ -100,7 +104,20 @@ async function main(): Promise<void> {
     log: (sev, nodeId, text, origin) => zwaveData.logByOrigin(sev, nodeId, text, origin),
     // M5: feed operator-action outcomes into the learning ledger.
     // v0.64.5: with the launch stamp, so a manual ping is judged from its send.
-    onOutcome: (kind, nodeId, ok, refusal, origin, sentAt) => zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin, sentAt),
+    onOutcome: (kind, nodeId, ok, refusal, origin, sentAt, aliveAtLaunch) =>
+      zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin, sentAt, aliveAtLaunch),
+    // v0.72.0: read at LAUNCH — a death after an action counts only against a
+    // node that was alive for it, and a `queued` config write means opposite
+    // things on a mains and a sleeping device.
+    statusOf: (n) => provider.nodeById(n)?.status ?? null,
+    // Listening for commands — mains OR FLiRS (v0.72.0 review): a FLiRS lock's
+    // `isListening` is false, but a queued write to one was not "waiting for
+    // its next wake-up".
+    listeningOf: (n) => zwaveData.listensForCommands(n),
+    // v0.72.0 review: the ledger dates its harm windows from the LAUNCH, and
+    // holds an episode open while an action on its node runs.
+    onLaunch: (kind, nodeId, origin, at, alive) => zwaveData.noteActionLaunched(kind, nodeId, origin, at, alive),
+    onSettled: (kind, nodeId, origin, at, settledAt, effect) => zwaveData.noteActionSettled(kind, nodeId, origin, at, settledAt, effect),
     // v0.23: after a config write, drop the stale cache so DETAIL re-fetches.
     onConfigWritten: (nodeId) => zwaveData.invalidateConfigParams(nodeId),
     onNodeRemoved: (nodeId) => zwaveData.forgetNodeBaselines(nodeId),
@@ -111,6 +128,15 @@ async function main(): Promise<void> {
       ? 'write actions ENABLED (each requires a typed CONFIRM) — ping/refresh/re-interview/heal/rebuild/remove'
       : 'write actions disabled (read-only) — set write_actions_enabled to unlock',
   );
+  // v0.72.0: the executor tier is decided — see src/zwave/admission.ts.
+  log('automatic remediation: none admitted — no verb passes the admission rule (DESIGN §3.5); ' +
+    'rebuild, re-interview, remove-failed, device control and config writes can never run automatically');
+  {
+    const p = zwaveData.autonomyPause();
+    log(p == null
+      ? 'automatic writes: running — pause with Z on ENGINE, or input_boolean.zwave_tui_pause_autonomy in Home Assistant'
+      : `automatic writes: PAUSED by ${p.by.join(' + ')} since ${new Date(p.since).toISOString()} (${p.reason})`);
+  }
 
   // 4c) Auto-ping — the ONE thing this engine does without a human pressing a
   //     key. Off unless BOTH its own switch and write_actions_enabled are on;
@@ -150,6 +176,10 @@ async function main(): Promise<void> {
       // itself whenever it restarts. Neither is this add-on's probe, and both
       // are indistinguishable from mesh behaviour without these two readings.
       rfOffSince: () => zwaveData.controllerRfOffSince(),
+      // v0.72.0: the owner's pause — every lane, the dead-node ladder included.
+      paused: () => zwaveData.autonomyPause() != null,
+      // v0.72.0: a single-device rebuild or removal the operator is waiting on.
+      operatorBusy: () => actions.operatorActionInFlight() != null,
       driverReconnectedAt: () => zwaveData.driverReconnectedAt(),
       onProbeResult: (nodeId, answered, cls, frame) => zwaveData.recordProbeResult(nodeId, answered, cls, frame),
       // v0.41: the ENGINE's own writes, not the operator's — the Log screen
@@ -264,7 +294,7 @@ async function main(): Promise<void> {
     // alone: a degraded mesh is not a broken add-on, and conflating them would
     // make an existing uptime check flap on a single crit symptom.
     const healthy = client.ready() && provider.ready() && !provider.lastError();
-    const conclusions = buildStates(provider);
+    const conclusions = buildStates(provider, Date.now(), { writeActions: config.writeActions, startedAt: bootedAt });
     const byEntity = new Map(conclusions.map((s) => [s.entity, s]));
     const degraded = byEntity.get(ENTITY_DEGRADED);
     reply.code(healthy ? 200 : 503).send({
@@ -324,9 +354,12 @@ async function main(): Promise<void> {
     data: provider,
     token: config.supervisorToken,
     log,
+    // v0.72.0: the recommendation names a verb only when the operator could run it.
+    writeActions: config.writeActions,
+    startedAt: bootedAt,
   });
   log(config.supervisorToken
-    ? `HA states: publishing ${ENTITY_DEGRADED} + 4 sensors every ${HA_STATE_PUBLISH_MS / 1000}s`
+    ? `HA states: publishing ${ENTITY_DEGRADED} + 5 sensors every ${HA_STATE_PUBLISH_MS / 1000}s`
     : 'HA states: no SUPERVISOR_TOKEN — engine conclusions stay local (bare dev)');
 
   // 8) Graceful shutdown — stop the transports, timers, and sockets in order.

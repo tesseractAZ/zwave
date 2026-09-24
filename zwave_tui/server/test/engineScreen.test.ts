@@ -50,6 +50,8 @@ function data(over: Partial<DataProvider> = {}): DataProvider {
     // so omitting them COMPILES and fails at runtime — which is precisely the
     // hole that made these members optional worth closing.
     openEpisodes: () => [], controlArm: () => null, autoPingState: () => null,
+    actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
+    autonomyPause: () => null,
     ...over,
   } as DataProvider;
 }
@@ -532,4 +534,121 @@ test('ENGINE shows a node held after an own-probe kill, and its own-probe kills 
   assert.doesNotMatch(once, /probes held/, 'a lifted hold is not shown');
   const quiet = plain(renderEngine(ctx(120, 30, { autoPingState: () => ap({}) })));
   assert.doesNotMatch(quiet, /#49/, 'a node with nothing to show is not a tracked row');
+});
+
+test('the ENGINE header says automatic remediation is not admitted, in words that fit (v0.72.0)', () => {
+  for (const [cols, want] of [[160, /automatic remediation: none admitted \(DESIGN §3\.5\)/], [80, /auto-remediation: none admitted/]] as const) {
+    const raw = renderEngine(ctx(cols, 24));
+    const head = plain(raw).split('\n').find((l) => l.startsWith('AUTO-PING')) ?? '';
+    assert.match(head, want, `${cols} cols: "${head}"`);
+    for (const l of raw) assert.ok(visLen(l) <= cols, `${cols} cols: ${visLen(l)} > ${cols}`);
+  }
+});
+
+test('a paused ENGINE names who paused, since when, and how to resume — and fits (v0.72.0)', () => {
+  const since = NOW - 2 * 3_600_000;
+  // At 80 columns the HA exit takes its short form (second review): the full
+  // entity id was clipped mid-name there.
+  const hows: Record<string, Record<number, RegExp>> = {
+    tui: { 80: /resume: Controller 3 → A/, 120: /resume: Controller 3 → A/ },
+    ha: { 80: /resume: the HA toggle off/, 120: /resume: turn off input_boolean\.zwave_tui_pause_autonomy/ },
+  };
+  for (const [by] of [[['tui']], [['ha']]] as const) {
+    for (const cols of [80, 120]) {
+      const how = hows[by[0]][cols];
+      const raw = renderEngine(ctx(cols, 24, {
+        autoPingState: () => AP({ suppressed: 'paused' }),
+        autonomyPause: () => ({ by: [...by], since, reason: 'x' }),
+      }));
+      const joined = plain(raw);
+      assert.match(joined, new RegExp(`suppressed: paused \\(by ${by[0]} since \\d\\d:\\d\\d, 2\\.0h\\)`), `${cols}: ${joined}`);
+      assert.match(joined, how, `${cols} cols`);
+      for (const l of raw) assert.ok(visLen(l) <= cols, `${cols} cols: ${visLen(l)} > ${cols}`);
+    }
+  }
+  const running = plain(renderEngine(ctx(120, 24)));
+  assert.doesNotMatch(running, /resume:/, 'no resume hint while running');
+  assert.match(running, /\[Z\] PAUSE|Z PAUSE/, 'the command bar offers the pause');
+});
+
+test('LEARNED shows the ladder arm apart, the pooled legacy arm as unclaimed, deaths after an action, and live span — and fits 80 columns (v0.72.0)', () => {
+  const day = 86_400_000;
+  const over: Partial<DataProvider> = {
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6, ok: 3, bad: 0, nodes: 4, minN: 4 } : null),
+    efficacyFor: (k, a) => (k === 'rtt-degraded' && a === 'healNode'
+      ? { expectedEfficacy: null, n: 1, baseRate: 0.5, nodes: 1, ready: false, lowerBound: null, bar: null, minN: 4, baseN: 6, baseNodes: 4, harmed: 0, baseHarmed: 0 }
+      : null),
+    actorArms: (k) => (k === 'rtt-degraded' ? [
+      { action: 'ping', origin: 'engine', n: 3.2, ok: 1, bad: 0, nodes: 2, lastAt: NOW - 3 * day, killedAfter: 0 },
+      { action: 'healNode', origin: 'you', n: 1, ok: 0, bad: 0, nodes: 1, lastAt: NOW - day, killedAfter: 2 },
+    ] : []),
+    pooledArm: (k, a) => (k === 'rtt-degraded' && a === 'ping' ? { n: 17.8, lastAt: null, nodes: 9, legacyN: 14.6, legacyNodes: 5 } : null),
+    liveSpan: (k) => (k === 'rtt-degraded' ? { since: NOW - 5 * day, scored: [4, 2, 1, 0], unscored: [9, 3, 1, 1] } : null),
+    routeSymptomsAfter: (a, o) => (a === 'healNode' && o === 'you' ? 1 : 0),
+  };
+  for (const [cols, rows] of [[80, 60], [140, 60]] as const) {
+    const raw = renderEngine(ctx(cols, rows, over));
+    for (const l of raw) assert.ok(visLen(l) <= cols, `${cols} cols: ${visLen(l)} > ${cols}: ${l}`);
+    const j = plain(raw);
+    assert.match(j, /ladder ping n≈3\.2/, `${cols}: the ladder arm has its own row`);
+    assert.match(j, /shown, never claimed/, `${cols}`);
+    assert.match(j, /\(learned before v0\.72\.0, all origins: ping n≈14\.6, 5 nodes — not claimed\)/, `${cols}: the decayed pre-actor share, with the nodes that had taught it at the snapshot (not the pooled arm's growing 9)`);
+    assert.match(j, /healNode: Dead ≤15m after ×2/, `${cols}: a death after the operator's heal is harm evidence`);
+    assert.match(j, /live ≥10m: 3\/8 scored since \d\d-\d\d/, `${cols}`);
+    assert.match(j, /route symptoms opened ≤15m after: healNode \(you\) ×1/, `${cols}`);
+    if (cols >= 140) assert.match(j, /last scored 72\.0h ago/, 'when the ladder arm last learned');
+  }
+});
+
+test('ENGINE shows the pause from its own state: before the next pass, beneath a higher suppression, and with auto-ping off (v0.72.0 review)', () => {
+  const since = NOW - 3_600_000;
+  const pause = () => ({ by: ['tui' as const], since, reason: 'x' });
+  const lag = plain(renderEngine(ctx(120, 30, { autoPingState: () => AP({ suppressed: 'none' }), autonomyPause: pause })));
+  assert.match(lag, /suppressed: paused \(by tui since \d\d:\d\d, 60m\)/, 'right after Z, before auto-ping has run a pass');
+  const storm = plain(renderEngine(ctx(120, 30, { autoPingState: () => AP({ suppressed: 'storm' }), autonomyPause: pause })));
+  assert.match(storm, /suppressed: storm/);
+  assert.match(storm, /also paused \(by tui since \d\d:\d\d, 60m\) · resume: Controller 3 → A/);
+  const off = plain(renderEngine(ctx(120, 30, { autoPingState: () => null, autonomyPause: pause })));
+  assert.match(off, /automatic writes paused \(by tui since \d\d:\d\d, 60m\) — nothing to stop while auto-ping is off/);
+  const resuming = plain(renderEngine(ctx(120, 30, { autoPingState: () => AP({ suppressed: 'paused' }) })));
+  assert.match(resuming, /resuming — auto-ping sends again at its next pass/);
+});
+
+test('the pause shows before auto-ping\'s first pass, and every pause line fits 80 columns with both sources (second review)', () => {
+  const since = NOW - 3_600_000;
+  const both = () => ({ by: ['tui' as const, 'ha' as const], since, reason: 'x' });
+  const first = plain(renderEngine(ctx(80, 30, { autoPingState: () => AP({ lastTickMs: null }), autonomyPause: both })));
+  assert.match(first, /automatic writes paused/);
+  for (const [label, over] of [
+    ['also-paused', { autoPingState: () => AP({ suppressed: 'storm' }), autonomyPause: both }],
+    ['off', { autoPingState: () => null, autonomyPause: both }],
+    ['paused', { autoPingState: () => AP({ suppressed: 'paused' }), autonomyPause: both }],
+    ['missing', { autoPingState: () => AP({ suppressed: 'paused' }), autonomyPause: () => ({ ...both(), haMissing: true }) }],
+  ] as const) {
+    const raw = renderEngine(ctx(80, 30, over as never));
+    for (const l of raw) assert.ok(visLen(l) <= 80, `${label}: ${visLen(l)} > 80`);
+    const hint = plain(raw).split('\n').find((l) => /resume:/.test(l)) ?? '';
+    assert.match(hint, /resume: (Controller 3 → A|the HA toggle off|3 → A \+ HA toggle|HA toggle off)/, `${label}: "${hint}"`);
+    assert.doesNotMatch(hint, /input_boolean\.zwave_tui_pause_au(?!tonomy)/, `${label}: the entity id is never clipped`);
+    if (label === 'missing') assert.doesNotMatch(hint, /HA toggle off/, 'a missing toggle has no switch to name');
+  }
+});
+
+test('every pause line fits a 40-column terminal whole (third review)', () => {
+  const since = NOW - 3_600_000;
+  for (const by of [['tui'], ['ha'], ['tui', 'ha']] as const) {
+    for (const over of [{ autoPingState: () => AP({ suppressed: 'paused' }) }, { autoPingState: () => AP({ suppressed: 'storm' }) }, { autoPingState: () => null }]) {
+      const raw = renderEngine(ctx(40, 30, { ...over, autonomyPause: () => ({ by: [...by], since, reason: 'x' }) } as never));
+      const hint = plain(raw).split('\n').find((l) => /resume:/.test(l)) ?? '';
+      assert.match(hint, /resume: (Controller 3 → A|HA toggle off|3 → A \+ HA toggle|the HA toggle off)\s*$/, `${by}: "${hint}"`);
+    }
+  }
+});
+
+test('at 80 columns a missing HA toggle is still named on ENGINE (fourth review)', () => {
+  const raw = renderEngine(ctx(80, 30, { autoPingState: () => AP({ suppressed: 'paused' }),
+    autonomyPause: () => ({ by: ['ha' as const], since: NOW - 60_000, reason: 'x', haMissing: true }) }));
+  const hint = plain(raw).split('\n').find((l) => /resume:/.test(l)) ?? '';
+  assert.match(hint, /Controller 3 → A \(HA toggle gone\)/, hint);
+  for (const l of raw) assert.ok(visLen(l) <= 80);
 });

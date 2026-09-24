@@ -382,9 +382,10 @@ by the owner's decision** (DESIGN §1, tenet 1; RESEARCH §0). `zwaveData` runs 
 detectors each evidence tick (`runEngine`), exposes ranked `symptoms()`, engine
 readiness, learned `efficacyFor()`, and the M6 `interference()` view up through the
 provider to the Remedy and Interference screens — and none of it executes its
-own recommendations. The designed-but-not-built `executor.ts` /
+own recommendations. The `executor.ts` /
 `auto_remediation` / `auto_safe` tiers appear in the DESIGN §2 diagram marked
-*DEFERRED — not built*. One autonomous write DOES ship outside that pipeline:
+*DECIDED v0.72.0: none* — evaluated, and not built, because no verb passes the
+admission rule (DESIGN §3.5). One autonomous write DOES ship outside that pipeline:
 **auto-ping** (§11.12, v0.30) — opt-in, off by default, ping and routed read only — which reads
 the same provider snapshots but never touches the planner or its
 recommendations.
@@ -721,7 +722,7 @@ type InputEvent =
 
 The telnet parser (`server.ts`, `parseInput`) strips IAC framing, decodes NAWS window-size sub-negotiations into `resize` events, and recognizes a **bare** CSI/SS3 `A/B/C/D` as an arrow (longer sequences — modified arrows, bracketed paste, mouse — are swallowed). The xterm parser (`wsConsole.ts`, `parseXtermData`) mirrors the non-IAC half. Feeding both into `TuiSession.feed()` keeps navigation transport-agnostic.
 
-**Dispatch order.** `TuiSession.feed()` (`session.ts`) gates keys through session-owned modes before the generic map ever sees them: `ctrlc` (universal disconnect) → `denied` → login gate → `/`-filter capture → action-in-flight (swallowed) → **config value-picker (v0.23)** → pending type-CONFIRM → dismiss action notice → Actions Menu → `a`/`A` open menu → mutating shortcut keys (only when `actions.enabled`) → finally `applyKey(view, ev, data, log)` in `input.ts`. The value-picker + type-CONFIRM sit *ahead* of the menu-open, so `a` can never re-open the menu while a confirm or a value entry is in flight. Inside `applyKey`, the **Log and Detail screens get first refusal** via `applyLogKey` / `applyDetailKey` (each owns its own cursor/scroll and keys), returning `null` to fall through to the generic handler for anything it doesn't claim.
+**Dispatch order.** `TuiSession.feed()` (`session.ts`) gates keys through session-owned modes before the generic map ever sees them: `ctrlc` (universal disconnect) → `denied` → login gate → `/`-filter capture → `Z` on ENGINE (pause every autonomous write, v0.72.0) → action-in-flight (all keys swallowed but `Esc`, which detaches the action) → **config value-picker (v0.23)** → pending type-CONFIRM → dismiss action notice → Actions Menu → `a`/`A` open menu → mutating shortcut keys (only when `actions.enabled`) → finally `applyKey(view, ev, data, log)` in `input.ts`. The value-picker + type-CONFIRM sit *ahead* of the menu-open, so `a` can never re-open the menu while a confirm or a value entry is in flight. Inside `applyKey`, the **Log and Detail screens get first refusal** via `applyLogKey` / `applyDetailKey` (each owns its own cursor/scroll and keys), returning `null` to fall through to the generic handler for anything it doesn't claim.
 
 **The generic key map** (`applyKey`):
 
@@ -2872,7 +2873,7 @@ The ledger keeps two decayed tallies per symptom kind, plus a false-positive cou
 | `control: Map<SymptomKind, Tally>` | `kind` | Spontaneous-recovery arm — episodes that resolved with **no** action |
 | `fp: Map<SymptomKind, number>` | `kind` | `refused-misdiagnosis` count (detector false positives) — **read by REMEDY from v0.35** via `OutcomeStore.falsePositives(kind)` → `zwaveData.falsePositives` → `DataProvider.falsePositives`; before that it was tallied and shown nowhere, which is a strange gap for an advisory engine, since it is the one number that argues *against* the card it belongs to. Rendered only above zero (`⚠ this detector has been refused as a misdiagnosis N× — weigh the evidence above before acting`): a clean detector says nothing rather than boasting, and a zero on every card trains the operator to stop reading the line. |
 
-**Populating the action arm.** Every mutating verb flows through the ActionRunner, so the action arm is fed by its structured `onOutcome` hook — operator actions from the type-CONFIRM menu, and (since v0.30) auto-ping's remediation probes, which reuse the same ping verb (§11.12); the sweep and verification probes ride the non-learning `probe` verb (v0.38.1). The wiring is: `createActionRunner.run()` fires `o.onOutcome?.(kind, nodeId, true, undefined, origin, sentAt)` on success and `o.onOutcome?.(kind, nodeId, false, refusal, origin)` on failure, both only for an action that feeds the ledger (`learn`; the engine's sweep and verification probes, device control and config writes do not) (in `run()`, zwaveActions.ts) → `main()` in `index.ts` routes it to `zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin, sentAt)` → `outcomes.recordAction(...)`. `recordActionOutcome` applies conservative filters *before* the ledger sees it:
+**Populating the action arm.** Every mutating verb flows through the ActionRunner, so the action arm is fed by its structured `onOutcome` hook — operator actions from the type-CONFIRM menu, and (since v0.30) auto-ping's remediation probes, which reuse the same ping verb (§11.12); the sweep and verification probes ride the non-learning `probe` verb (v0.38.1). The wiring is: `createActionRunner.run()` fires `o.onOutcome?.(kind, nodeId, true, undefined, origin, sentAt, aliveAtLaunch)` on success and `o.onOutcome?.(kind, nodeId, false, refusal, origin, sentAt)` on failure (a launch stamp on both since v0.72.0), both only for an action that feeds the ledger (`learn`; the engine's sweep and verification probes, device control and config writes do not) (in `run()`, zwaveActions.ts) → `main()` in `index.ts` routes it to `zwaveData.recordActionOutcome(kind, nodeId, ok, refusal, origin, sentAt, aliveAtLaunch)` → `outcomes.recordAction(...)`. `recordActionOutcome` applies conservative filters *before* the ledger sees it:
 
 - **Mesh-wide actions dropped.** `nodeId == null` (rebuildAll / stopRebuild) is not attributed — it cannot be credited to any one node's episode without confounding.
 - **A failure that is not a driver refusal is dropped.** `if (refusal !== 'refused') return;` A transport or WS failure was not "taken", and it indicts nothing.
@@ -2890,7 +2891,7 @@ for (const [k, ep] of open) {
 }
 ```
 
-The `skip` predicate is `(key) => this.pendingResolve.has(key)` — an episode whose symptom already went absent (it is in its confirmation window, recovering unaided) is **excluded** from attribution. This is the critical anti-theft guard: an action taken *after* the symptom already cleared must not steal credit for a spontaneous recovery, or the action arm would inflate itself with self-heals. "First action per episode wins" (`ep.action == null`) because a later action cannot be cleanly credited.
+The `skip` predicate is `(key) => absentSince(key) <= sentAt` (v0.72.0; `pendingResolve.has(key)` before) — an episode whose symptom had already gone absent when the action was **launched** (it is in its confirmation window, recovering unaided) is **excluded** from attribution; one that went absent while the action ran may be the action's doing, and is attributed. This is the critical anti-theft guard: an action taken *after* the symptom already cleared must not steal credit for a spontaneous recovery, or the action arm would inflate itself with self-heals. "First action per episode wins" (`ep.action == null`) because a later action cannot be cleanly credited.
 
 **Folding a resolved episode into an arm** happens in `resolve()`, after `computeVerdict`:
 
@@ -2901,6 +2902,21 @@ elif verdict == 'unverifiable':        (nothing)                        // hones
 elif ep.action == null:                control[kind]      = bump(control[kind],      improved)
 else:                                  action[kind|act]   = bump(action[kind|act],   improved)
 ```
+
+#### Who acted, when an arm last learned, and what died after (v0.72.0)
+
+The action arm was never operator-only: the dead-node ladder's pings feed it too, and a ladder ping is selection, not treatment — it acts only after a dwell, on nodes it chose for being Dead. v0.72.0 records the actor and reads claims from the operator alone:
+
+- **Actor arms.** `recordAction` takes `meta: { origin, aliveAtAction }`, stored on the episode's action (first action wins, as before). `resolve()` bumps the pooled `action` map exactly as v0.71.0 did — so a rollback reads the same numbers — and also `actorArms[kind|act|origin]` (`'you'` when no origin is given, so legacy callers keep meaning what they meant), with `actorNodes` for provenance. **`efficacyFor` reads the `|you` arm**; the ladder's is shown on ENGINE (`ladder ping n≈… · shown, never claimed`) and never claimed. Whatever the pooled arm learned before actors were recorded is a separate decayed snapshot (`legacyArms`, with the node count it had then, `legacyNodes`), taken when a pre-v0.72.0 ledger loads and decayed with the pooled arm's own updates; while its weight is ≥ ½ it is shown as its own unclaimed row, `(learned before v0.72.0, all origins: ping n≈…, N nodes — not claimed)`.
+- **`lastAt`.** Every bump stamps the tally with the resolve time; ENGINE's ladder rows show it (`last scored 72.0h ago`), so a ladder arm frozen for weeks no longer reads like a live one. Absent in older files. (The operator and control bits do not render it yet.)
+- **Dated from the launch.** `atMs` is the action's `sentAt`, success and refusal alike, and an episode whose **breach began after the action was sent** (`dwellStartMs`, not the open tick) is confounded, not credited — otherwise a heal would be credited for repairing a route episode its own route deletion caused.
+- **Neither arm when the outcome is unclear (v0.72.0 second review).** The runner's settle carries an effect: `ok`, `none` (the call never left, or the driver refused it) or `maybe` (it reached the driver without reporting success — a heal that returned false, an outcome unknown, a failure after the send). A `maybe` confounds every open episode on the node — and, for an outcome unknown, every episode that opens on it until the reply bound has passed — so a heal that "may have partly changed routes" cannot let its episode close as a spontaneous recovery. And two learned actions whose runs overlapped on one node credit neither: when one replies while another launched on the node ran at any point during it, the node's episodes are confounded rather than handed to whichever replied first — after `Esc`, a quick ping could otherwise take a long heal's credit.
+- **Deaths after an action.** `noteDeadAfterAction(node, kind, at)` — called by the data layer wherever it marks a Dead or flapped node's episode confounded — counts, once per episode and at once (so an abandoned episode keeps it), a death within `KILLED_AFTER_MS` (15 min) of an action the node was alive for (`aliveAtAction`, read before the await). Never for `dead-flap`, whose definition is the death; never for the ladder, whose pings target Dead nodes; and never for a death on one of this add-on's own measurement probes (a probe still unanswered inside `ANSWER_GRACE_MS` when the node died). ENGINE shows it as `healNode: Dead ≤15m after ×2`, ranked with a measured regression.
+- **Route symptoms after an action.** A route-kind episode (`ROUTE_EFFECT_KINDS`) whose breach began while an action on the same node was running, or within `KILLED_AFTER_MS` after it settled, is counted against that action and actor as possible harm — never credit (`route symptoms opened ≤15m after: healNode (you) ×1`). Judged from the breach start (`dwellStartMs`), not dwell maturity, and only for a node that was Alive at launch: the route churn of the ladder reviving a Dead node is not the ping's harm.
+- **Windows open at the launch (v0.72.0 review).** The runner reports every learned verb's launch before the await (`onLaunch`) and its settle after (`onSettled`; an *outcome unknown* settles at its reply bound). The ledger keeps one record per launch per node, opening at the launch and closing `KILLED_AFTER_MS` after the settle; a death or a breach is judged against an action the node was Alive for whose window covers it — one still RUNNING at that moment first (the earliest-launched of those), otherwise the latest-launched — so a death during a twenty-minute heal is the heal's even if a quick ping ran and settled meanwhile, and a later ladder ping to the now-Dead node does not erase the heal's window. A launch that never left the add-on (the settle's effect is `none`: no device, socket not open) opens no window, holds nothing and cannot overlap. While an action runs on a node — or the controller reports a mesh-wide route rebuild — that node's episodes are held open (`planEpisodeLifecycle`'s `holdUntil`), and their confirmation window restarts at the settle: the after-window that scores them is a settled one, not the action's own last minutes, and an after-window check burst sent before an action settled — however quick the action — is sent again in it. A mesh-wide rebuild also confounds every open episode. A symptom is treated as already recovering only if it went absent before the action was sent.
+- **Live span.** Every closure is bucketed by how long its symptom was live — from `dwellStartMs` to the first tick it was seen absent, the clock the transient split uses — into `[0,10) [10,30) [30,60) [60,∞)` minutes, split scored (improved / no-change / worse, not confounded) from unscored, in a 30-day ring of daily slots. ENGINE's `live ≥10m: a/b scored since MM-DD` bit is the revisit condition of DESIGN §3.5: only episodes live that long could ever be evidence for an automatic action.
+
+The closure line names the actor and the live span (`improved after healNode (you) live=12m`), prints the confounded tag on an attributed closure too, and adds `(node went Dead ≤15m after the action)` when that was counted. All new ledger fields are optional in `/data/outcomes.json`, which stays `v: 1`; a `reset()` (identity *start fresh*) and `loadJSON` clear every one of them.
 
 ### 9.4 The verdict and the statistical-honesty guards
 
@@ -3013,7 +3029,7 @@ The computation encodes two more honesty rules:
 ```ts
 efficacyFor(kind, act):
   base = baseRate(kind)                 // control ok/n, or null if control.n < minEpisodes (4)
-  t = action[kind|act];  n = t?.n ?? 0;  ok = t?.ok ?? 0
+  t = actorArms[kind|act|you];  n = t?.n ?? 0;  ok = t?.ok ?? 0   // the OPERATOR's arm since v0.72.0
   if (n < minEpisodes) return { expectedEfficacy: null, n, baseRate: base, ready: false }
   rate  = ok / n
   beats = base != null && wilsonLower(ok, n) >= base + minEffect   // the Wilson lower bound, not the point estimate (v0.26); cannot beat an UNMEASURED base rate
@@ -3044,7 +3060,7 @@ The full read path each frame: Remedy `symptomBlock` → `planFor(sym, node, { w
 
 **Persistence.** The store persists to `OUTCOMES_PATH` (`outcomesPath` in config.ts, exported as `/data/outcomes.json`; absent → in-memory only). `save()` is atomic (write `${path}.tmp`, then `renameSync`); `load()` is a no-op if the path is unset/missing and swallows corrupt JSON ("starting fresh"). It is loaded once at startup (`this.outcomes?.load()`), flushed by a 5-minute `setInterval` (`.unref()`'d so it never holds the event loop open), and flushed again on shutdown. The store is only constructed when baselines exist (`this.baselines ? createOutcomeStore(...) : null`) — no baselines, no outcome learning.
 
-`toJSON` writes `{ v: 1, homeId, control, action, fp, unver, unverUnprobe, splitRule, unverTransient, unverUndersampled, confounded, armNodes, controlNodes }`. Every key is written on every save (`homeId` as `null` when no controller id is bound or loaded; see the Mesh Identity chapter, v0.64.0). Everything but `v`, `control`, `action` and `fp` was added later at the same `v: 1`, and on load every key after `v` is optional: an older file without one starts that structure empty. **Open episodes are deliberately NOT persisted** — an episode spanning a restart lost its before-window's continuity and cannot yield an honest verdict, so it re-opens fresh when the symptom is re-detected. `loadJSON` refuses any payload whose `v !== 1`, runs every `control`/`action` tally through `validTally` (finite, `n >= 0`, `ok >= 0`, `ok <= n + 1e-9`, and — when present — `0 <= bad <= n` with `ok + bad <= n`) before admitting it, and admits only finite, non-negative values into the count maps.
+`toJSON` writes `{ v: 1, homeId, control, action, fp, unver, unverUnprobe, splitRule, unverTransient, unverUndersampled, confounded, armNodes, controlNodes, actorArms, actorNodes, killedAfter, routeAfter, liveSpan, legacyArms }` (the last six since v0.72.0; `loadJSON` parses them last and entry by entry, so one malformed entry drops only itself). Every key is written on every save (`homeId` as `null` when no controller id is bound or loaded; see the Mesh Identity chapter, v0.64.0). Everything but `v`, `control`, `action` and `fp` was added later at the same `v: 1`, and on load every key after `v` is optional: an older file without one starts that structure empty. **Open episodes are deliberately NOT persisted** — an episode spanning a restart lost its before-window's continuity and cannot yield an honest verdict, so it re-opens fresh when the symptom is re-detected. `loadJSON` refuses any payload whose `v !== 1`, runs every `control`/`action` tally through `validTally` (finite, `n >= 0`, `ok >= 0`, `ok <= n + 1e-9`, and — when present — `0 <= bad <= n` with `ok + bad <= n`) before admitting it, and admits only finite, non-negative values into the count maps.
 
 **The split marker (v0.64.6).** `splitRule` is always written as `'live-span'` (optional on load; `v` stays 1). `loadJSON` restores `unverTransient`/`unverUndersampled` only from a ledger carrying it. An older ledger split them on open-to-resolve time, which filed every brief episode as `undersampled`, and closed episodes are not kept to re-split them, so both restart at 0. When a non-zero tally was discarded, the store also logs the discarded totals, marks itself dirty so the marker reaches disk, and hands a one-shot notice (`takeLoadNotice()`) that `zwaveData` pushes into the Log ring as an `engine` event — after the start-up load, and after an identity keep or resume, which reload the ledger. An older ledger with nothing to discard loads silently, and its marker is written by the next save something else triggers. Both tallies are display-only; no arm, planner or alarm reads them.
 
@@ -3055,6 +3071,8 @@ The full read path each frame: Remedy `symptomBlock` → `planFor(sym, node, { w
 **Option hygiene.** `clean()` strips `undefined` keys (and `log`) from the options before the `{ ...DEFAULTS, ...clean(opts) }` spread, so an explicitly-passed `undefined` can never clobber a default with `undefined`.
 
 ### 9.7a Why auto-ping's own efficacy is NOT measured (v0.37)
+
+> Since v0.72.0 the ladder's pings are booked to their own actor arm (§9.3) and shown, never claimed; the only path by which any verb could be admitted to run automatically is the pre-registered randomized protocol in DESIGN §3.5.
 
 `node-down` (§7.2.3) surfaces the ordinary outage — a node the driver has marked
 Dead past a dwell — which until v0.37 produced **no symptom at all**: `dead-flap`
@@ -3442,9 +3460,17 @@ Every other chapter of this reference describes how the TUI *reads* the mesh. Th
 1. a **master gate** (`write_actions_enabled`) that must be flipped on at all, and
 2. a **deliberate, per-action, type-`CONFIRM` modal** that no timer, engine, or streaming event can bypass.
 
-This is the concrete expression of the add-on's founding constraint: **the remediation engine is advisory by the owner's decision.** The M2–M6 engine detects symptoms, learns action efficacy, and (M4) *ranks candidate remedies* — and the act of executing a *recommendation* always routes through the human-driven Actions Menu described here. The designed-but-unbuilt `executor` / `auto_remediation` / `auto_safe` tiers would have their own gate.
+This is the concrete expression of the add-on's founding constraint: **the remediation engine is advisory by the owner's decision.** The M2–M6 engine detects symptoms, learns action efficacy, and (M4) *ranks candidate remedies* — and the act of executing a *recommendation* always routes through the human-driven Actions Menu described here. The `executor` / `auto_remediation` / `auto_safe` tiers were evaluated in v0.72.0 and not built: no verb passes the admission rule (DESIGN §3.5; `server/src/zwave/admission.ts`), so the automatic set is empty and is pinned empty by the type checker.
 
-One deliberate exception exists since v0.30: **auto-ping** (§11.12) is a code path from a detector (Dead-past-dwell, the fixed-cadence liveness sweep, or an outcome-ledger verification request) to a WS `button.press` ping or (v0.70.0 ladder, v0.71.0 sweep and verification) one `zwave_js.refresh_value` routed read, with no human in the loop. It is off by default, double-gated behind `write_actions_enabled`, and restricted to two frames that change no device state and have nothing to undo. Every other mutating verb — every action this chapter catalogues — fires only when a person types `CONFIRM` and presses Enter.
+One deliberate exception exists since v0.30: **auto-ping** (§11.12) is a code path from a detector (Dead-past-dwell, the fixed-cadence liveness sweep, or an outcome-ledger verification request) to a WS `button.press` ping or (v0.70.0 ladder, v0.71.0 sweep and verification) one `zwave_js.refresh_value` routed read, with no human in the loop. It is off by default, double-gated behind `write_actions_enabled`, and restricted to two frames that command no device and leave nothing to undo. Every other mutating verb — every action this chapter catalogues — fires only when a person types `CONFIRM` and presses Enter.
+
+**The safety model, stated completely (v0.72.0).** What runs with no one present is auto-ping's three lanes — the dead-node ladder, the liveness sweep and the verification bursts — and nothing else. Those frames never command a device, but they have three effects an operator accepts by enabling auto-ping:
+
+1. **An answer can change Home Assistant state.** If HA held a device's state wrong, the Report corrects it, and every automation triggered by that state reacts to the corrected value as if the device had changed.
+2. **A read can move a route.** A routed read that fails over leaves the controller using the route that worked (§11.12's reroute accounting).
+3. **A missed frame drops queued commands.** A listening device that does not acknowledge is marked Dead, and the driver rejects every transaction queued to it at that moment — an automation's command included — until the device is heard again.
+
+Everything that can change a device, delete a route, wipe an interview or remove a node — `healNode`, `rebuildAll`, `stopRebuild`, `removeFailed`, `reInterview`, `controlEntity`, `setConfigParam` — is in `NEVER_AUTO` and can run only behind the typed `CONFIRM`; no option, ledger reading or efficacy claim can move a verb out of that set (*evidence qualifies efficacy, never safety*). One switch stops every autonomous frame at once: **`Z` on ENGINE**, or `input_boolean.zwave_tui_pause_autonomy` in Home Assistant (§11.12). While paused, a mains device that fails when nothing tries to talk to it is not noticed: `quiet-node` fires only after max(6 h, 3 sweep intervals) of silence plus its dwell, and then for every idle mains node, failed or not. A pause older than 24 hours raises `binary_sensor.zwave_tui_degraded` while auto-ping is running for it to stop.
 
 The chapter closes with the **authentication** layer that decides who is allowed to sit at that keyboard in the first place.
 
@@ -3465,7 +3491,7 @@ The mutating surface is split across four pure-ish modules plus the session stat
 
 ### 11.2 The ActionRunner — verbs & WS command shapes
 
-`createActionRunner(o: ActionRunnerOptions)` (in `zwaveActions.ts`) returns an object implementing the `ActionRunner` interface (`server/src/types.ts`). Eleven verbs — the seven mesh-maintenance verbs tabled below; `probe` (v0.38.1: the same `button.press` as `ping`, run with `learn=false`; since v0.71.0 only the FALLBACK frame of auto-ping's sweep and verification lanes, for a node with no switch/light value, §11.12); `routedRead` (v0.70.0: one `zwave_js.refresh_value` on the node's own switch/light value, run with `learn=false` — the dead-node ladder's follow-up read, and since v0.71.0, with `purpose: 'probe'`, the sweep and verification frame, logged as `probe node N (routed read)`, §11.12); and the v0.23 operator verbs `controlEntity` / `setConfigParam`, whose command shapes are in §2.8, not in the table below — each returning `Promise<ActionResult>` where `ActionResult = { ok: boolean; message: string }`. The exact WS command shapes were **probed against the live driver** and are documented in the file header; they fall into three families:
+`createActionRunner(o: ActionRunnerOptions)` (in `zwaveActions.ts`) returns an object implementing the `ActionRunner` interface (`server/src/types.ts`). Eleven verbs — the seven mesh-maintenance verbs tabled below; `probe` (v0.38.1: the same `button.press` as `ping`, run with `learn=false`; since v0.71.0 only the FALLBACK frame of auto-ping's sweep and verification lanes, for a node with no switch/light value, §11.12); `routedRead` (v0.70.0: one `zwave_js.refresh_value` on the node's own switch/light value, run with `learn=false` — the dead-node ladder's follow-up read, and since v0.71.0, with `purpose: 'probe'`, the sweep and verification frame, logged as `probe node N (routed read)`, §11.12); and the v0.23 operator verbs `controlEntity` / `setConfigParam`, whose command shapes are in §2.8, not in the table below — each returning `Promise<ActionResult>` where `ActionResult = { ok: boolean; message: string; unknown?: boolean }` (`unknown` since v0.72.0 — see *Reading the reply* below). The exact WS command shapes were **probed against the live driver** and are documented in the file header; they fall into three families:
 
 ```
 verb            impact       WS command (via HaWsClient.send)
@@ -3482,30 +3508,60 @@ removeFailed    destructive  zwave_js/remove_failed_node  { device_id } (destruc
 
 Three helpers build the command envelope and encode the runner's *resolution* responsibilities:
 
-- **`deviceCmd(type, nodeId)`** resolves `nodeId → HA device_id` via the injected `deviceIdOf`. Throws `node ${nodeId} has no device` if unknown. Used by `refreshValues`, `reInterview`, `healNode`, `removeFailed`.
-- **`entryCmd(type)`** resolves the current `zwave_js` config-entry id via `entryId()`. Throws `no zwave_js entry` if not yet discovered. Used by `rebuildAll`, `stopRebuild`.
+- **`deviceCmd(type, nodeId, replyMs?)`** resolves `nodeId → HA device_id` via the injected `deviceIdOf`. Throws `node ${nodeId} has no device` if unknown. Used by `refreshValues`, `reInterview`, `healNode`, `removeFailed`. Since v0.72.0 it **returns** Home Assistant's reply instead of discarding it, and `replyMs` sets a long reply bound while the wait for the socket stays 10 s (`send(cmd, { readyMs, replyMs })`).
+- **`entryCmd(type)`** resolves the current `zwave_js` config-entry id via `entryId()`. Throws `no zwave_js entry` if not yet discovered. Used by `rebuildAll`, `stopRebuild`. Returns the reply (v0.72.0).
 - **`ping`** is the odd one out: it does *not* use a `zwave_js/*` command. It resolves `nodeId → button.*_ping entity_id` via `pingEntityOf` and fires a generic `call_service` on `domain: 'button', service: 'press'`. Throws `node ${n} has no ping button` if the node exposes no ping entity.
 
 These callbacks are wired in `index.ts` (step 4b) against the data layer: `entryId: () => zwaveData.getEntryId()`, `deviceIdOf`, `pingEntityOf`, and the two hooks (`log`, `onOutcome`) described in §11.8.
 
 #### The `run()` wrapper — gate, log, execute, learn
 
-Every verb is a thin call into a shared `run(kind, nodeId, verb, fn, learn, origin)` closure that enforces a fixed lifecycle (`createActionRunner()` in `zwaveActions.ts`):
+Every verb is a thin call into a shared `run(kind, nodeId, verb, fn, learn, origin, opts)` closure that enforces a fixed lifecycle (`createActionRunner()` in `zwaveActions.ts`):
 
 ```
 if (!o.enabled) return { ok:false, message:'write actions are disabled' };   // ← master gate (defence in depth)
 log('info', node, `${verb} …`);                                             // start line → event ring
+sentAt = now(); aliveAtLaunch = statusOf(node) === Alive;                   // both read BEFORE the await (v0.64.5, v0.72.0)
+if (opts.busy) inFlight.set(seq, { kind, node, since: sentAt });            // one-node rebuild/removal, one entry per launch (v0.72.0)
+if (learn) onLaunch?.(kind, node, origin, sentAt, aliveAtLaunch);           // the ledger's harm windows open here
 try {
-  await fn();
-  log('info', node, `${verb} → ok`);
-  if (learn) onOutcome?.(kind, node, true, undefined, origin, sentAt);      // M5 hook (success; sentAt read before the await, v0.64.5)
-  return { ok:true, message:`${verb}: ok` };
+  reply = await fn();
+  v = opts.interpret ? opts.interpret(reply) : { ok:true };                 // read the reply (v0.72.0)
+  if (!v.ok) { log('error', …); if (learn) onOutcome?.(kind, node, false, 'transport', origin); return { ok:false, … }; }
+  log('info', node, `${verb} → ok[ — note]`);
+  if (learn) onOutcome?.(kind, node, true, undefined, origin, sentAt, aliveAtLaunch);
+  return { ok:true, message:`${verb}: ok[ — note]` };
 } catch (e) {
+  if (opts.unknownAfterMs && (HA WS timeout | connection closed)) {         // v0.72.0
+    log('warn', node, `${verb} → outcome unknown — …`); return { ok:false, unknown:true, … };   // never learned
+  }
   log('error', node, `${verb} → failed: ${msg}`);
-  if (learn) onOutcome?.(kind, node, false, refusal, origin);               // M5 hook (failure; refusal classified, v0.43.1)
+  if (learn) onOutcome?.(kind, node, false, refusal, origin, sentAt);       // failure; refusal classified (v0.43.1), dated at launch (v0.72.0)
   return { ok:false, message: msg };
+} finally {
+  if (unknown) inFlight.get(seq).until = sentAt + unknownAfterMs; else inFlight.delete(seq);   // an unknown keeps auto-ping down to its reply bound
+  if (learn) onSettled?.(kind, node, origin, sentAt, settledAt, effect);   // effect: ok | none | maybe (§9.3)
 }
 ```
+
+#### Reading the reply (v0.72.0)
+
+Until v0.72.0 every verb reported `ok` when Home Assistant replied at all, and the reply itself was thrown away. Four verbs return a value that says whether the driver did it:
+
+| Verb | Reply | Reported |
+|---|---|---|
+| `healNode` | `false` | ✗ `did not complete — the driver returned false (the node did not answer, or neighbour discovery or route deletion failed); its routes may be partly changed` |
+| `healNode` | `true` | ✓ with the note `driver reports success; a failed return-route assignment is not reported` (zwave-js does not retry, or fail on, the SUC-return-route step) |
+| `rebuildAll` | `false` | ✗ `not started — a route rebuild is already running` |
+| `stopRebuild` | `false` | ✗ `nothing to stop — no route rebuild was running` |
+| `setConfigParam` | `status: 'accepted'` | ✓ |
+| `setConfigParam` | `status: 'queued'`, sleeping device | ✓ `queued — the device applies it at its next wake-up` |
+| `setConfigParam` | `status: 'queued'`, listening or unknown device | ✗ `not confirmed — the device was or went offline while Home Assistant waited; the value may not be set; re-read it` |
+| `setConfigParam` | no status | ✓ `Home Assistant returned no status` |
+
+A reply that says "did not" is booked as `'transport'` — it indicts no detector and is not learned. **Two verbs wait long for their reply:** `healNode` (`HEAL_TIMEOUT_MS`, 20 min: up to five neighbour-discovery attempts of about 123 s each, plus the route steps) and `removeFailed` (`REMOVE_FAILED_TIMEOUT_MS`, 3 min: the driver pings the node up to three times first). Every other verb keeps the client's 10 s default, and every verb still waits at most 10 s for the socket itself, so a command confirmed while Home Assistant is unreachable fails at once rather than firing unattended when the connection returns. On those two verbs a reply timeout or a dropped socket is reported as a warning — `outcome unknown — …; the driver may still be working` — with `unknown: true`; it is never learned, and an unknown removal never forgets the node's baselines.
+
+While `healNode` or `removeFailed` runs, `operatorActionInFlight()` returns it, and auto-ping stands down with the suppression `operator-action` (§11.12): a probe sent while the driver deletes and reassigns a node's routes measures the rebuild. Every learned verb takes an `origin` (`'you'` by default, v0.72.0), and `onOutcome` carries `aliveAtLaunch` — whether the node's status was Alive when the action was sent (Unknown and Asleep are not), read before the await — for the ledger's actor arms and its deaths-after count (§9.3).
 
 Two consequences worth stating explicitly:
 
@@ -3593,7 +3649,7 @@ menuOpen, menuIndex, menuSnapshot, menuTarget   // frozen menu (§11.7)
 ```
 
 `feed()` dispatches keys through a **priority ladder** (order matters):
-`resize` → `ctrlc` (universal disconnect) → `denied` (any key quits) → `login` gate → `/`-filter capture → **`actionInFlight` (swallow all keys)** → **`pendingAction` (type-CONFIRM capture)** → **`actionNotice` (any key dismisses)** → **`menuOpen` (menu navigation)** → `a` (open menu) → shortcut keys → normal navigation.
+`resize` → `ctrlc` (universal disconnect) → `denied` (any key quits) → `login` gate → `/`-filter capture → **`Z` on ENGINE (pause every autonomous write, v0.72.0 — taken ahead of every card; acknowledged on the WORKING card and carried onto the next result when an action or CONFIRM box is up)** → **`actionInFlight` (swallow all keys but `Esc`, which detaches the action)** → `paramEdit` → **`pendingAction` (type-CONFIRM capture)** → **`actionNotice` (any key dismisses)** → **`menuOpen` (menu navigation)** → `a` (open menu) → shortcut keys → normal navigation.
 
 #### Entry points → `beginAction`
 
@@ -3613,7 +3669,7 @@ Shortcut mapping (`handleActionKey`, only when `enabled`):
 | `R` | `rebuildAll` | arms type-CONFIRM |
 | `x` | `removeFailed` | arms type-CONFIRM |
 
-Note there is **no shortcut for `refreshValues` or `stopRebuild`** — those are reachable only through the menu. And `p` is the *only* path that skips confirmation, because a ping is a harmless reachability probe.
+Note there is **no shortcut for `refreshValues` or `stopRebuild`** — those are reachable only through the menu. And `p` is the *only* mesh action that skips confirmation, because a ping is a harmless reachability probe. `Z` on ENGINE (v0.72.0) is also immediate and needs no write-actions gate — it removes writes and sends nothing; resuming is the guarded direction (Controller 3 → `A` → *Resume automatic writes*, typed `CONFIRM`).
 
 #### Type-CONFIRM capture
 
@@ -3627,7 +3683,9 @@ Note there is **no shortcut for `refreshValues` or `stopRebuild`** — those are
 
 #### Execute → working → outcome
 
-`executeAction(action)` (`session.ts`) sets `actionInFlight`, forces a full repaint (`WORKING` card via `centeredNotice`), then `switch`es on `action.kind` to the matching runner method (node-scoped verbs pass `action.nodeId!`). Any throw is caught into `{ ok:false, message }`. On resolve it clears the in-flight flag and sets `actionNotice` to `✓  <label>` or `✗  <message>`, shown as a `RESULT` card ("press any key to continue · see the Log screen for history"). While in flight, `feed()` **swallows every key** so a second action can't be launched over a running one.
+`executeAction(action)` (`session.ts`) sets `actionInFlight`, forces a full repaint (`WORKING` card via `centeredNotice`), then `switch`es on `action.kind` to the matching runner method (node-scoped verbs pass `action.nodeId!`). Any throw is caught into `{ ok:false, message }`. On resolve it clears the in-flight flag and sets `actionNotice` to `✓  <label>` or `✗  <message>`, shown as a `RESULT` card ("press any key to continue · see the Log screen for history"). While in flight, `feed()` **swallows every key but `Esc` and `Z` on ENGINE** (the pause is taken ahead of the WORKING and RESULT cards, v0.72.0 review) so a second action can't be launched over a running one.
+
+**`Esc` leaves it running (v0.72.0).** A route rebuild can take twenty minutes and a dispatched WS command cannot be recalled, so holding the terminal hostage bought nothing. `Esc` on the `WORKING` card (which now says `Esc: leave it running`) marks that action's sequence number detached, clears the in-flight flag and shows `◷ <label> — running in the background · its result will be in the Log (e)`. When the detached call resolves, its result is dropped from the screen — the runner's own ring lines already carry it — so it can never replace a newer card. After `Esc` another action can be started; the runner tracks every running rebuild or removal on its own, so auto-ping's `operator-action` stand-down lasts until the last of them settles. The RESULT card shows the reply's note (a heal's unreported return-route step, a config write queued for a sleeper's wake-up) under the verdict, and an *outcome unknown* as a yellow `◷`, not a red failure.
 
 ### 11.7 Security guards
 
@@ -3641,19 +3699,19 @@ The confirm flow is hardened against several concrete attacks and race condition
 
 - **Read-only selection is explicit, not silent.** Selecting a menu row while `!actions.enabled` closes the menu and posts `✗ Read-only — set write_actions_enabled in the add-on config to unlock actions.` — a keypress is never silently ignored.
 
-- **In-flight lockout.** All keys are swallowed during `actionInFlight`, preventing double-submission.
+- **In-flight lockout.** All keys but `Esc` (detach) and `Z` on ENGINE (pause) are swallowed during `actionInFlight`, preventing double-submission. After `Esc` another action can be started; the ledger then credits neither of two overlapping actions on one node (§9.3).
 
 - **Menu never offers a no-op.** The `rebuildAll`/`stopRebuild` mutual exclusion tracks live controller state, so the operator can't fire a rebuild-start while one is already running.
 
 ### 11.8 The `onOutcome` hook → M5 learning ledger
 
-The runner's optional `onOutcome(kind, nodeId, ok, refusal?, origin?, sentAt?)` fires **after each action resolves** (both success and failure paths of `run()`, for the actions that feed the ledger). It is wired in `index.ts` to `zwaveData.recordActionOutcome`, which attributes the action to the node's open episodes in the M5 outcome ledger.
+The runner's optional `onOutcome(kind, nodeId, ok, refusal?, origin?, sentAt?, aliveAtLaunch?)` fires **after each action resolves** (both success and failure paths of `run()`, for the actions that feed the ledger). It is wired in `index.ts` to `zwaveData.recordActionOutcome`, which attributes the action to the node's open episodes in the M5 outcome ledger.
 
 `recordActionOutcome` (`zwaveData.ts`) is deliberately conservative about what becomes learning data:
 
 - **Mesh-wide actions (`nodeId == null`) are dropped.** `rebuildAll`/`stopRebuild` cannot be credited to any single node's episode without confounding, so they are not attributed.
 - **A failure becomes episode data only when it is a driver refusal** (v0.43.1). `run()` classifies each failure on the driver's own error: a `removeFailed` the driver refuses because the node is not failed is `'refused'`; anything else, a transient WS error included, is `'transport'` and is dropped (`if (refusal !== 'refused') return`). A refusal is recorded with `refused = true` against only the symptom kinds whose plan offered the action (`refusalScope`), so it yields `refused-misdiagnosis` for `ghost-suspect` and leaves the node's other symptoms alone (§9.3).
-- **Actions against an already-recovering symptom are skipped** — `recordAction` is passed a `skip` predicate over `this.pendingResolve`, so an action landing during a symptom's confirmation window isn't credited with a recovery that was happening anyway.
+- **Actions against an already-recovering symptom are skipped** — `recordAction` is passed a `skip` predicate over `this.pendingResolve`, so an action **launched after** the symptom went absent isn't credited with a recovery that was happening anyway (v0.72.0: dated from the launch, not the reply).
 
 This is the one thread by which manual operator behaviour feeds the learning engine — and it is strictly *observational*: the ledger learns from what the human chose to do; it never chooses.
 
@@ -3747,7 +3805,7 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 | `dummyHash` + `byName.has(...) && ok` | `createAuthPolicy()` → `verify`, `loginPolicy.ts` | Username enumeration by timing; collision auth |
 | Explicit read-only notice on locked select | `selectMenuItem()` in `session.ts` | A keypress being silently ignored |
 | Frozen `menuTarget` + `menuSnapshot` at open | `openMenu()` in `session.ts` | Streaming events / rebuild flips moving a row or target under the cursor |
-| Keys swallowed while `actionInFlight` | `feed()` in `session.ts` | Double-submitting an action |
+| Keys swallowed while `actionInFlight` (all but `Esc`, which detaches, and `Z` on ENGINE) | `feed()` in `session.ts` | Double-submitting an action; after `Esc` a second action may start, and the ledger's overlap confound (§9.3) keeps it from taking the first one's credit |
 | Login buffers length-bounded, input ignored while verifying | `handleLoginKey()` in `session.ts` | Buffer abuse; keys racing an in-flight scrypt |
 | `mode='denied'` when enabled w/o users | `TuiSession` constructor, `session.ts` | Silently allowing LAN access on misconfig |
 | Per-source-IP telnet cap (4) + idle reclaim + TCP keepalive | `telnet/server.ts` | One host taking every telnet slot; silent sockets holding slots forever |
@@ -3757,6 +3815,17 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 | `X-Ingress-Path` **and** the pinned Supervisor address | `index.ts`, `auth.ts` | Forged ingress header from the LAN port; a sibling add-on forging ingress trust |
 
 ### 11.12 Auto-ping — the autonomous writes (v0.30, extended v0.36)
+
+> **One pause for every autonomous write (v0.72.0).** `server/src/zwave/autonomyPause.ts`. Auto-ping's three lanes — the dead-node ladder, the liveness sweep and the verification bursts — are everything this add-on sends on its own, and one switch stops all three, the ladder included. It has two sources, and either pauses:
+>
+> - **The TUI.** `Z` on ENGINE pauses at once — no `CONFIRM`, and no write-actions gate, because it removes writes and sends nothing. Controller 3 → `A` offers exactly one of *Pause automatic writes* / *Resume automatic writes*; both take the typed `CONFIRM`, and both are answerable on a read-only install (they act on this add-on's own state, like the identity answers — `isLocalDecisionKind`). The pause is persisted in `/data/autonomy.json` and has no expiry.
+> - **Home Assistant.** `input_boolean.zwave_tui_pause_autonomy`, which the owner creates as a Toggle helper if wanted — the entity id must be exactly that. The add-on reads it from the `state_changed` feed and from the full `get_states` read (before the registry check, so it is read even before the registry loads) and never writes it. `on` pauses; `off` clears this source; a toggle last seen pausing that is **absent** from a full read stays paused (`missing`) — only a `state_changed` to nothing (a deletion) or a TUI resume forgets it. A missing toggle has no switch to turn off, so its exits are to recreate the helper (off) or to resume from the TUI, which forgets it; ENGINE and the resume notice say so.
+>
+> Resuming one source never lifts the other — except that a TUI resume forgets a toggle that has gone missing, which has no switch left to turn off (the menu offers *Resume* for that case too): a TUI resume while the toggle is on says `✓ Resumed from the TUI — still paused by Home Assistant`. **It fails closed** every way it can be unsure: an unreadable, malformed or unknown-version pause file reads as paused (says so at WARN, and is rewritten valid so the pause keeps its age); a toggle that has been seen and then reads `unavailable`/`unknown` pauses; a toggle last seen pausing (remembered in the pause file) pauses after a restart until this run reads it — the state feed can fail to start, and the dead-node ladder is exempt from the boot window; and a toggle missing from a full state read (Home Assistant lists `input_boolean` late at startup) stays paused if it was last seen pausing — only a `state_changed` to nothing, a deletion, forgets it. A state LIST older than an event already applied (a snapshot landing after a newer event) is ignored; events are always applied. The HA source's age is when this add-on first saw it pausing, kept through later readings and restarts of either side — not its `last_changed`, which Home Assistant restamps on every restart — so the 24-hour escalation cannot be postponed. Two things do not fail closed: a save that fails keeps the pause in memory only (logged at ERROR), and a rollback to an earlier version ignores `/data/autonomy.json` and runs unpaused.
+>
+> In `decideAutoPings`, `paused` ranks **below** `storm`, `no-capability-data` and `operator-action` — every suppressor above it sends nothing too, and the first two raise `binary_sensor.zwave_tui_degraded`, which a pause must not hide. It is decided after the dead-node pass, so escalation, which sends nothing, continues: a node that had already spent its budget — including one whose last step is an owed routed read, which a pause cannot send — is still announced as given up and still summons a person. Probes already out are still judged; nothing new is owed while paused (`requestVerification` refuses, and entering a pause clears `verifyOwed`); an after-window burst the pause refused is not marked sent, so it goes out if the confirmation window is still open when the pause lifts; and every episode open while the pause is what stops auto-ping is confounded (§9.3), because it got none of the reads the rest of the baseline gets. Each transition is logged once at WARN to the add-on log and the Log screen. ENGINE and `sensor.zwave_tui_engine` read the pause from its own state, not from auto-ping's last pass, so it shows the moment `Z` is pressed, before auto-ping's first pass, beneath a higher-ranked suppressor (`also paused …`), and with auto-ping off (`nothing to stop while auto-ping is off`); the masthead chip shows it on every screen, with its age (`⚠ AUTO-PING PAUSED 7h`), while auto-ping is running and nothing outranks it (with auto-ping off there is nothing to pause, so no chip), and drops it at once on a resume. ENGINE names who paused and since when, with a resume path that fits 80 columns, and the sensor publishes `paused_by` and `paused_since`. A pause older than `PAUSE_ESCALATE_MS` (24 h) raises `binary_sensor.zwave_tui_degraded` with the reason `automatic writes paused Nh (by …) — nothing checks the mesh` while auto-ping is running for it to stop — a transient suppressor ranked above it (a heal, a rebuild, the boot window) does not clear the alarm; a pause over an auto-ping that is off, disabled or behind the master gate changes nothing and raises nothing. Only a full state LIST can be stale: one older than an event already applied on this Home Assistant connection is ignored (and logged at WARN), while a `state_changed` event is always applied, whatever its stamp — so a backward step of Home Assistant's clock can never swallow the owner turning the pause on. The order resets with every connection and is never taken from the stamp in the pause file. The recommendation sensor does not call a Dead node "being worked by the ladder" while the ladder is paused or suppressed.
+>
+> **An operator's one-node rebuild or removal stands auto-ping down (v0.72.0).** While any `healNode` or `removeFailed` is awaited — each tracked on its own — and, after an *outcome unknown*, until its reply bound has passed, `ActionRunner.operatorActionInFlight()` is set, and `decideAutoPings` returns `operator-action` (below `storm` and `no-capability-data`, which raise degraded; reported as `boot-window` inside the boot window). A probe sent while the driver deletes and reassigns a node's routes measures the rebuild, and a death on it would be charged to the operator's action.
 
 > **A probe's answer is judged from evidence, not from the call (v0.36).** The ping verb is `call_service button.press`, and HA's zwave_js ping button starts `node.async_ping()` as a background task and returns without waiting for it. (Through v0.64.4 this note said the button awaits the ping, which is wrong; the conclusion never depended on it — `async_ping` raises nothing when the node stays silent either way.) The service call therefore fulfils whether or not the node answered, so the `.catch` around it can only ever fire on "this node has no ping button" or a WebSocket transport fault — never on the outcome auto-ping exists to detect. Through v0.35 the two `did not answer` log lines were unreachable for their stated purpose. `judgeProbeAnswers` now asks the only question that can be answered: `ANSWER_GRACE_MS` (90 s) after a probe, did the node's `lastSeen` advance past the moment we sent it? A node absent from the roster is judged **neither** way — a roster gap is not evidence of a failed probe. **Consecutive misses are counted (v0.36.5)** and the line says which (`3rd consecutive miss`); any answer resets the streak, so the ordinal always means "in a row". Severity follows it: a **first** miss logs `info`, a **streak** logs `warn`. Measured on the live mesh, healthy nodes drop some probes to ordinary transient loss — about 2 % of NoOp pings in the v0.36.5 sample, 0.24 % (2 of 817 NoOps to live nodes) in the 39 h driver log reviewed for v0.71.0 — and across 35 candidates probed two-hourly that is a steady drip, and warning on each would sit a stream of false alarm beside the genuine article and teach an operator to skim past both. Nothing is suppressed; a single lost packet is simply not called a warning.
 
@@ -3880,7 +3949,7 @@ A ping can use only the stored routes (the last working route, the next-to-last,
 | Capability data | no listening candidate while any non-controller node's `isListening` is unknown ⇒ do nothing, reported `no-capability-data` (v0.52.0) | `isListening` comes only from the driver-WS flag dump; with that link dark the candidate set is empty by construction, and a pass over an empty population is not an all-clear |
 | Storm guard | ≥ 25 % of listening nodes Dead (min 4) ⇒ do nothing, warn once | A quarter of the mesh dead is a controller-level event; probing adds traffic to a struggling controller |
 
-**Observability.** The runner emits a decision trace — `auto-ping: candidates=N dead=N stale-due=N [stalest=Nm] -> probing N | suppressed: <reason>` — to both the event ring and the server log, on every state change plus a 30-minute heartbeat, so "there was nothing to do" and "this is broken" never produce identical (empty) logs. Every probe line reports the node's **measured** silence with the threshold alongside (v0.32.1) — never the threshold alone, which once masked a timestamp-parsing skew by printing a constant — and, since v0.71.0, the frame it sent (`— routed read`, or `— NoOp ping (no switch/light value to read)` / `(a routed read could not be sent in the last 30m)`); every miss line ends with its lane and frame (`— sweep routed read`). The remediation lane's outcomes are recorded through the M5 ledger (the sweep and verification probes pass `learn: false`, v0.38.1; the ordinary outage, `node-down`, opens no episode, §9.7a), so `efficacyFor('dead-flap','ping')` turns "usually wakes them up" into a measured recovery rate on the REMEDY screen; if the rate comes back poor, the honest response is to switch the feature off — and the data will say so.
+**Observability.** The runner emits a decision trace — `auto-ping: candidates=N dead=N stale-due=N [stalest=Nm] -> probing N | suppressed: <reason>` — to both the event ring and the server log, on every state change plus a 30-minute heartbeat, so "there was nothing to do" and "this is broken" never produce identical (empty) logs. Every probe line reports the node's **measured** silence with the threshold alongside (v0.32.1) — never the threshold alone, which once masked a timestamp-parsing skew by printing a constant — and, since v0.71.0, the frame it sent (`— routed read`, or `— NoOp ping (no switch/light value to read)` / `(a routed read could not be sent in the last 30m)`); every miss line ends with its lane and frame (`— sweep routed read`). The remediation lane's outcomes are recorded through the M5 ledger (the sweep and verification probes pass `learn: false`, v0.38.1; the ordinary outage, `node-down`, opens no episode, §9.7a) — since v0.72.0 in their own `engine` actor arm, shown on ENGINE (`ladder ping n≈… · shown, never claimed`) and never claimed: REMEDY's efficacy is the operator's arm alone, and whether a ping ends an outage is not scored.
 
 ### 11.13 Mesh Identity: Tagging Learned State, and Asking Before Acting (v0.64.0)
 
@@ -4077,6 +4146,10 @@ The `options:`/`schema:` order in `config.yaml` is also the on-screen order (HA
 renders the form by `schema:`), grouped from everyday settings at the top down to
 advanced ones. Every option below is a **tunable default** unless noted.
 
+v0.72.0 adds **no option**: the pause on autonomous writes is runtime state
+(`Z` on ENGINE, or the owner's own `input_boolean.zwave_tui_pause_autonomy`;
+§11.12), and automatic remediation is decided, not configurable (DESIGN §3.5).
+
 | Option (config.yaml) | Default | Schema | Env var (run script) | config.ts field | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `auth_enabled` | `false` | `bool` | `AUTH_ENABLED` (1/0) | `config.auth.enabled` | Gates DIRECT (telnet/`:8788`) access only. |
@@ -4145,7 +4218,13 @@ export HISTORY_PATH=/data/history.json    # v0.5 RSSI/RTT sparkline ring
 export EVIDENCE_PATH=/data/evidence.json  # M2 symptom-engine time series
 export BASELINES_PATH=/data/baselines.json# M3 learned per-node normals
 export OUTCOMES_PATH=/data/outcomes.json  # M5 action-efficacy ledger
+export AUTONOMY_PATH=/data/autonomy.json  # v0.72.0 the owner's pause (§11.12)
 ```
+
+`/data/autonomy.json` differs from the stores above in one respect: it is
+written only when the pause changes (TUI pause/resume, or a new reading of the
+HA toggle), and an unreadable one reads as **paused** rather than as empty —
+fail closed, because it is a safety latch, not learned state.
 
 `config.ts` reads each with the `|| null` idiom, e.g.
 `historyPath: process.env.HISTORY_PATH || null`. The semantics of that pattern are
@@ -4379,8 +4458,8 @@ remediation, so they are never attributed to the learning ledger. The learned en
 the executor / `auto_remediation` / `auto_safe` tiers are *designed* (`DESIGN.md`
 §3.5) but **not built**. The one automatic path in the shipped build is
 **auto-ping** (§11.12): a separate module that never reads the planner's
-recommendations, restricted to the idempotent ping verb, off by default and
-double-gated behind `write_actions_enabled`. As a corollary of that design, a **route rebuild is never surfaced as a
+recommendations, restricted to its ping and one routed read, off by default,
+double-gated behind `write_actions_enabled`, and paused by one switch (§11.12). As a corollary of that design, a **route rebuild is never surfaced as a
 runnable engine recommendation**: it cannot fix a physical link, it deletes
 manual priority routes, and it *throws* on Long-Range nodes — so the planner's
 protocol/topology gates strip it. (The manual `R` "rebuild ALL" key still exists
@@ -4540,10 +4619,28 @@ triggering on state can never disagree about the mesh:
   | entity | state | notable attributes |
   |---|---|---|
   | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-  | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total` |
+  | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`; since v0.72.0 `paused_by` (`["tui"]`, `["ha"]`, both, or null), `paused_since` (ISO or null) and `auto_remediation: none-admitted` |
   | `sensor.zwave_tui_summons` | count | `node_ids` |
   | `sensor.zwave_tui_symptoms` | count | `critical`, `warning`, `kinds` |
   | `sensor.zwave_tui_route_failures` | failures in 7 d, or `unknown` | `links`, `node_ids`, `last_failure_at`, `lower_bound` |
+  | `sensor.zwave_tui_recommendation` (v0.72.0) | `summons` / `action` / `physical` / `none` | `node_id`, `node_name`, `symptom`, `severity`, `since`, `headline`, `recommendation`, `cost`, `action`, `automatic` (always `false`), `manual_because`, `others`, `watching_since` |
+
+  **`sensor.zwave_tui_recommendation` is escalation, not execution** (v0.72.0;
+  `server/src/zwave/recommendation.ts`). No verb runs on its own, so a problem
+  the engine cannot solve has to reach a person; this names ONE, and the first
+  thing to try. `summons` when auto-ping gave up on a device (lowest node id;
+  `others` counts the rest). Otherwise the most severe, then oldest, symptom that
+  is not subsumed and has lasted `RECOMMEND_PERSIST_MS` (60 min): `action` when
+  its plan's first unblocked, non-destructive candidate is a verb the Actions
+  Menu runs, `physical` when it is something only a person can do — and always
+  `physical` for a `node-down` the ladder is still working. A notification never
+  leads with an irreversible step. `none` otherwise, with every field but
+  `friendly_name`, `automatic` and `watching_since` null. Symptom dwell state is
+  in memory, so the persistence clock restarts with the add-on; `watching_since`
+  says when. The attribute set is an exact allowlist — deliberately without a
+  "minutes persisting" count, which would change every minute — and none of it
+  moves per
+  tick, so an unchanged recommendation republishes byte-identically.
 
   The engine sensor's states are listed in the order the code checks them:
   `awaiting-identity-decision` (a mesh identity decision is pending; it outranks
@@ -4561,7 +4658,7 @@ triggering on state can never disagree about the mesh:
 **`degraded` is deliberately not "any symptom exists".** A warn-level symptom on
 one node is the resting state of a real mesh, and an alert that is always on is
 not an alert. It fires on a summons (the ladder gave up and is asking for a
-person — since v0.70.0, only after its pings AND the routed reads that follow them went unanswered), a critical symptom, or the engine being structurally unable to do its
+person — since v0.70.0, only after its pings AND the routed reads that follow them went unanswered), a critical symptom, a pause on automatic writes older than 24 hours while auto-ping is running for it to stop (v0.72.0), or the engine being structurally unable to do its
 job — a pending mesh-identity decision (v0.64.0; see the Mesh Identity chapter), `storm`,
 `no-capability-data` where the driver-WS flag dump is dark and the candidate
 set is empty by construction, or a statistics feed that has gone silent for ten
@@ -4594,6 +4691,18 @@ automation:
           message: >-
             {{ state_attr('binary_sensor.zwave_tui_degraded', 'reason') }}
             (nodes: {{ state_attr('sensor.zwave_tui_summons', 'node_ids') }})
+  - alias: Z-Wave problem needs a person
+    trigger:
+      - platform: state
+        entity_id: sensor.zwave_tui_recommendation
+        from: "none"
+    action:
+      - service: notify.mobile_app_iphone
+        data:
+          title: "Z-Wave: {{ state_attr('sensor.zwave_tui_recommendation', 'node_name') }}"
+          message: >-
+            {{ state_attr('sensor.zwave_tui_recommendation', 'headline') }} —
+            try: {{ state_attr('sensor.zwave_tui_recommendation', 'recommendation') }}
 ```
 
 **`published_at` is how you know the add-on is still there** (v0.66.0). Home
@@ -4640,5 +4749,5 @@ refusal gave: a JSON `message` is preferred, the text is bounded, and an
 unreadable body never makes the publish fail harder (v0.69.0):
 
 ```
-[zwave-tui] WARNING: ha-states: publish failed (HTTP 400: System is not ready with state: shutdown) for 5 of 5 entities — engine conclusions are not reaching HA
+[zwave-tui] WARNING: ha-states: publish failed (HTTP 400: System is not ready with state: shutdown) for 6 of 6 entities — engine conclusions are not reaching HA
 ```

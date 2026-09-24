@@ -11,8 +11,12 @@
  *
  * ADVISORY-ONLY (this milestone, per the owner's decision): nothing here
  * executes. The "action arm" is populated by whatever the operator runs through
- * the existing type-CONFIRM Actions Menu; symptoms that resolve untouched are
- * the control arm. The learned `expectedEfficacy` feeds back into the planner so
+ * the existing type-CONFIRM Actions Menu, and by the dead-node ladder's pings;
+ * symptoms that resolve untouched are the control arm. Since v0.72.0 each
+ * action is booked to its ACTOR as well — `${kind}|${action}|you` or `|engine`
+ * — and a claim is read only from the operator's arm: the ladder acts after a
+ * dwell, on nodes it selected for being Dead, so its arm is shown and never
+ * claimed (DOCS §9.7a). The learned `expectedEfficacy` feeds back into the planner so
  * a recommendation can honestly say "beat self-healing in N past episodes" or
  * "not distinguishable from self-healing" — it never triggers an action.
  *
@@ -26,9 +30,11 @@
  *     comparable amount of traffic (tx within a factor band), else the episode
  *     is `unverifiable` — a mesh that went quiet can fake improvement in either
  *     direction.
- *   • A driver REFUSAL (removeFailedNode throws on a live node, rebuild returns
- *     false) is `refused-misdiagnosis`, keyed to the SYMPTOM (it raises that
- *     detector's false-positive tally), and NEVER counts as action efficacy.
+ *   • A driver REFUSAL (removeFailedNode throws because the node answered) is
+ *     `refused-misdiagnosis`, keyed to the SYMPTOM (it raises that detector's
+ *     false-positive tally), and NEVER counts as action efficacy. A heal or a
+ *     rebuild that returns false is a failure to RUN (v0.72.0), which indicts
+ *     nothing and is not booked at all.
  *   • `expectedEfficacy` stays null until the action BEATS the no-action arm,
  *     not merely until minimum-attempts — and always renders with its n.
  */
@@ -96,7 +102,13 @@ export interface Episode {
    *  matured". */
   dwellStartMs?: number;
   before: WindowMetrics | null; // degraded window at/around onset
-  action: { kind: ActionKind; atMs: number; refused: boolean } | null;
+  /** `origin` and `aliveAtAction` since v0.72.0: WHO acted, and whether the
+   *  node was alive when they did. Absent on a pre-v0.72.0 caller, read as the
+   *  operator on an unknown status. `atMs` is the action's LAUNCH. */
+  action: { kind: ActionKind; atMs: number; refused: boolean; origin?: ActionActor; aliveAtAction?: boolean } | null;
+  /** The node went Dead within KILLED_AFTER_MS of an action it was alive for
+   *  (v0.72.0) — counted once, when it happened. */
+  killedAfter?: boolean;
   resolvedMs: number | null;
   after: WindowMetrics | null; // settled window after resolution
   verdict: Verdict | null;
@@ -140,6 +152,51 @@ interface Tally {
    * "not distinguishable from self-healing".
    */
   bad: number;
+  /** When this tally last learned (v0.72.0): an arm frozen for weeks reads the
+   *  same as a live one without it. Absent in older files. */
+  lastAt?: number;
+}
+
+/** Who ran an action (v0.72.0). */
+export type ActionActor = 'you' | 'engine';
+
+/**
+ * How soon after an action a death is counted against it (v0.72.0). Long
+ * enough for a rebuild's own route deletion to surface, short enough that an
+ * unrelated failure hours later is not charged to it.
+ */
+export const KILLED_AFTER_MS = 15 * 60_000;
+
+/** The symptom kinds a route change can cause (v0.72.0) — a new one opening
+ *  soon after an action on the node is counted as possible harm. */
+export const ROUTE_EFFECT_KINDS: ReadonlySet<SymptomKind> = new Set<SymptomKind>([
+  'rate-fallback', 'rtt-degraded', 'weak-signal', 'return-path-degraded', 'chronic-return-path', 'route-churn',
+]);
+
+/** Live-span buckets, in minutes: [0,10) [10,30) [30,60) [60,∞) (v0.72.0). */
+export const LIVE_SPAN_EDGES_MIN = [10, 30, 60] as const;
+/** Days of live-span history kept (v0.72.0). */
+export const LIVE_SPAN_DAYS = 30;
+
+/** One actor's arm for one (kind, action) (v0.72.0). */
+export interface ActorArmView {
+  action: ActionKind;
+  origin: ActionActor;
+  n: number;
+  ok: number;
+  bad: number;
+  nodes: number;
+  lastAt: number | null;
+  /** Episodes whose node went Dead ≤ KILLED_AFTER_MS after this actor's action. */
+  killedAfter: number;
+}
+
+/** How long episodes of a kind were live before they cleared (v0.72.0),
+ *  over the last LIVE_SPAN_DAYS days, split scored / not scored. */
+export interface LiveSpanView {
+  since: number;
+  scored: [number, number, number, number];
+  unscored: [number, number, number, number];
 }
 
 export interface OutcomeStoreOptions {
@@ -191,7 +248,34 @@ export interface OutcomeStore {
      * node is not failed — the driver said nothing whatever about RTT.
      */
     onlyKinds?: ReadonlySet<SymptomKind>,
+    /** WHO acted and whether the node was alive for it (v0.72.0). */
+    meta?: { origin?: ActionActor; aliveAtAction?: boolean },
   ): void;
+  /** An action was LAUNCHED on this node (v0.72.0) — before its reply, so the
+   *  harm windows below start at the send and cover the whole run. */
+  noteLaunch(nodeId: number | null, actionKind: ActionKind, atMs: number, meta: { origin: ActionActor; alive: boolean }): void;
+  /** That action's call returned, failed or timed out at `settledAt`; its harm
+   *  windows now close KILLED_AFTER_MS later. */
+  noteSettled(nodeId: number | null, atMs: number, settledAt: number): void;
+  /** That launch never left the add-on (third review): it opens no harm
+   *  window at all. */
+  dropLaunch(nodeId: number | null, atMs: number): void;
+  /** The node went Dead at `atMs` (v0.72.0). Counts, once per episode, against
+   *  an action the node was alive for whose window covers the death — one still
+   *  running then first, else the latest-launched (see coveringAction). Never for dead-flap, whose
+   *  definition is the death. */
+  noteDeadAfterAction(nodeId: number | null, kind: SymptomKind, atMs: number): void;
+  /** Every actor's arm for a kind (v0.72.0). */
+  actorArms(kind: SymptomKind): ActorArmView[];
+  /** The pooled, all-origin arm (v0.72.0) — what v0.71.0 and earlier learned —
+   *  with its node provenance and `legacyN`: the decayed weight still owed to
+   *  episodes learned before actors were recorded. */
+  pooledArm(kind: SymptomKind, action: ActionKind): { n: number; lastAt: number | null; nodes: number; legacyN: number; legacyNodes: number } | null;
+  /** Live-span tally for a kind, or null before the first closure (v0.72.0). */
+  liveSpan(kind: SymptomKind, now?: number): LiveSpanView | null;
+  /** Route-kind episodes that opened ≤ KILLED_AFTER_MS after this actor's
+   *  action on the same node (v0.72.0) — possible harm, never credit. */
+  routeSymptomsAfter(action: ActionKind, origin: ActionActor): number;
   /** Close an episode: the symptom resolved. Computes + folds the verdict.
    *  `absentSinceMs` is when the caller first saw the symptom absent — the start
    *  of its confirmation window (v0.64.6). The transient/undersampled split
@@ -723,19 +807,73 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   };
   // Per (kind ▸ action) action arm — deliberately NOT banded; see the note in resolve().
   const action = new Map<string, Tally>();
+  // v0.72.0 — per ACTOR: `${kind}|${action}|${origin}`. The pooled map above
+  // keeps learning exactly as before, so a rollback reads consistent data.
+  const actorArms = new Map<string, Tally>();
+  const actorNodes = new Map<string, Set<number>>();
+  // Episodes whose node died ≤ KILLED_AFTER_MS after the actor's action, same key.
+  const killedAfter = new Map<string, number>();
+  // Route-kind episodes opened ≤ KILLED_AFTER_MS after an action: `${action}|${origin}`.
+  const routeAfter = new Map<string, number>();
+  // The latest action per node, from its LAUNCH (v0.72.0 review): `until` is
+  // Infinity while it runs and settle + KILLED_AFTER_MS once it returns. Both
+  // harm counts are judged against it, and only when the node was ALIVE for it
+  // — a ping to a Dead node is the ladder reviving it, and the route churn of
+  // a revival is not the ping's harm. Not persisted: a window of minutes does
+  // not survive a restart meaningfully.
+  // One entry PER LAUNCH (v0.72.0 second review): a quick verb launched during
+  // a long heal must not replace the heal's window, and a later ladder ping to
+  // the now-Dead node must not erase the heal's.
+  type LaunchRec = { kind: ActionKind; atMs: number; origin: ActionActor; alive: boolean; until: number; settledAt?: number };
+  const recent = new Map<number, Map<number, LaunchRec>>();
+  const RECENT_KEEP_MS = 86_400_000;
+  const putLaunch = (nodeId: number, r: LaunchRec): void => {
+    const m = recent.get(nodeId) ?? new Map<number, LaunchRec>();
+    for (const [at, e] of m) if (e.until < r.atMs - RECENT_KEEP_MS) m.delete(at);
+    m.set(r.atMs, r);
+    recent.set(nodeId, m);
+  };
+  // An action still RUNNING at `t` wins (third review) — the earliest-launched
+  // of those, the long one a quick verb ran inside; only when none is running
+  // does the latest-launched window that covers `t` take it. So a death during
+  // a twenty-minute heal is the heal's even if a ping ran and settled meanwhile.
+  const coveringAction = (nodeId: number, t: number): LaunchRec | null => {
+    let running: LaunchRec | null = null;
+    let settled: LaunchRec | null = null;
+    for (const e of recent.get(nodeId)?.values() ?? []) {
+      if (!e.alive || t < e.atMs || t > e.until) continue;
+      if (e.settledAt == null || t <= e.settledAt) {
+        if (running == null || e.atMs < running.atMs) running = e;
+      } else if (settled == null || e.atMs > settled.atMs) settled = e;
+    }
+    return running ?? settled;
+  };
+  // The part of each pooled arm learned before actors were recorded (v0.72.0
+  // review): a snapshot taken when a pre-v0.72.0 file loads, decayed with the
+  // pooled arm's own updates. `pooled.n − Σ actor.n` cannot give it — every arm
+  // decays over its own sequence of updates.
+  const legacy = new Map<string, Tally>();
+  // …and how many distinct nodes had taught the pooled arm at that snapshot
+  // (v0.72.0 second review): the pooled arm's own node set keeps growing.
+  const legacyNodes = new Map<string, number>();
+  // How long closed episodes were live: kind → first count + a day-keyed ring.
+  const liveSpans = new Map<SymptomKind, { since: number; days: Map<number, { s: number[]; u: number[] }> }>();
 
   const key = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
   const aKey = (kind: SymptomKind, act: ActionKind): string => `${kind}|${act}`;
+  const actorKey = (kind: SymptomKind, act: ActionKind, origin: ActionActor | undefined): string => `${kind}|${act}|${origin ?? 'you'}`;
+  const DAY_MS = 86_400_000;
 
   // Takes the VERDICT, not a boolean (v0.44.0): a boolean cannot carry the
   // difference between "did nothing" and "made it worse".
-  const bump = (t: Tally | undefined, verdict: Verdict): Tally => {
+  const bump = (t: Tally | undefined, verdict: Verdict, at: number): Tally => {
     const cur = t ?? { n: 0, ok: 0, bad: 0 };
     const keep = 1 - cfg.decay;
     return {
       n: cur.n * keep + 1,
       ok: cur.ok * keep + (verdict === 'improved' ? 1 : 0),
       bad: cur.bad * keep + (verdict === 'worse' ? 1 : 0),
+      lastAt: at,
     };
   };
 
@@ -750,13 +888,30 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     open(nodeId, kind, onsetMs, before, openOpts): void {
       const k = key(nodeId, kind);
       if (open.has(k)) return; // one open episode per key (matches the detector lifecycle)
+      // A route-kind symptom that opens soon after an action on this node may
+      // be that action's side effect (v0.72.0): a heal deletes every return
+      // route first. Counted against the actor as possible harm.
+      // From the BREACH, not dwell maturity: a breach that began before the
+      // action is not its side effect, however late it matured.
+      const start = openOpts?.dwellStartMs ?? onsetMs;
+      const r = nodeId == null ? null : coveringAction(nodeId, start);
+      if (r && ROUTE_EFFECT_KINDS.has(kind)) {
+        const rk = `${r.kind}|${r.origin}`;
+        routeAfter.set(rk, (routeAfter.get(rk) ?? 0) + 1);
+        dirty = true;
+      }
       open.set(k, {
         kind, nodeId, onsetMs, before, action: null, resolvedMs: null, after: null, verdict: null,
         ...(openOpts?.dwellStartMs != null ? { dwellStartMs: openOpts.dwellStartMs } : {}),
       });
     },
 
-    recordAction(nodeId, actionKind, refused, atMs, skip, onlyKinds): void {
+    recordAction(nodeId, actionKind, refused, atMs, skip, onlyKinds, meta): void {
+      // A caller that never reported the launch (a direct store user) still
+      // gets its harm windows, from `atMs`.
+      if (nodeId != null && !refused && !recent.has(nodeId)) {
+        putLaunch(nodeId, { kind: actionKind, atMs, origin: meta?.origin ?? 'you', alive: meta?.aliveAtAction === true, until: atMs + KILLED_AFTER_MS, settledAt: atMs });
+      }
       // Attribute to EVERY open episode on this node (an action targets a node;
       // any of its active symptoms could be the one it addresses). First action
       // per episode wins — a later action can't cleanly be credited. Skip
@@ -778,8 +933,90 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
           ep.confounded = true;
           continue;
         }
-        if (ep.action == null) ep.action = { kind: actionKind, atMs, refused };
+        // OPENED AFTER THE ACTION WAS SENT (v0.72.0). `atMs` is the launch, so
+        // an episode that opened while a heal was running — a route episode the
+        // heal's own route deletion caused — would be credited to the heal for
+        // repairing its own side effect. Neither arm.
+        if ((ep.dwellStartMs ?? ep.onsetMs) > atMs) {
+          ep.confounded = true;
+          continue;
+        }
+        if (ep.action == null) {
+          ep.action = {
+            kind: actionKind, atMs, refused,
+            ...(meta?.origin != null ? { origin: meta.origin } : {}),
+            ...(meta?.aliveAtAction != null ? { aliveAtAction: meta.aliveAtAction } : {}),
+          };
+        }
       }
+    },
+
+    noteLaunch(nodeId, actionKind, atMs, meta): void {
+      if (nodeId == null) return;
+      putLaunch(nodeId, { kind: actionKind, atMs, origin: meta.origin, alive: meta.alive, until: Infinity });
+    },
+
+    noteSettled(nodeId, atMs, settledAt): void {
+      if (nodeId == null) return;
+      const r = recent.get(nodeId)?.get(atMs);
+      if (r) { r.settledAt = settledAt; r.until = settledAt + KILLED_AFTER_MS; }
+    },
+
+    dropLaunch(nodeId, atMs): void {
+      if (nodeId == null) return;
+      recent.get(nodeId)?.delete(atMs);
+    },
+
+    noteDeadAfterAction(nodeId, kind, atMs): void {
+      const ep = open.get(key(nodeId, kind));
+      if (!ep || ep.killedAfter || kind === 'dead-flap' || nodeId == null) return;
+      // The node's LATEST action (v0.72.0 review), not the episode's first: a
+      // death two minutes after a heal belongs to the heal, not to the ping
+      // that preceded it by ten.
+      const a = coveringAction(nodeId, atMs);
+      if (!a) return;
+      ep.killedAfter = true;
+      // Counted NOW, not at resolve: an episode abandoned or lost to a restart
+      // must not take the death with it.
+      const k = actorKey(kind, a.kind, a.origin);
+      killedAfter.set(k, (killedAfter.get(k) ?? 0) + 1);
+      dirty = true;
+    },
+
+    actorArms(kind): ActorArmView[] {
+      const keys = new Set<string>();
+      for (const k of [...actorArms.keys(), ...killedAfter.keys()]) if (k.startsWith(`${kind}|`)) keys.add(k);
+      return [...keys].sort().map((k) => {
+        const [, act, origin] = k.split('|') as [string, ActionKind, ActionActor];
+        const t = actorArms.get(k);
+        return {
+          action: act, origin, n: t?.n ?? 0, ok: t?.ok ?? 0, bad: t?.bad ?? 0,
+          nodes: actorNodes.get(k)?.size ?? 0, lastAt: t?.lastAt ?? null, killedAfter: killedAfter.get(k) ?? 0,
+        };
+      });
+    },
+
+    pooledArm(kind, act) {
+      const k = aKey(kind, act);
+      const t = action.get(k);
+      return t ? { n: t.n, lastAt: t.lastAt ?? null, nodes: armNodes.get(k)?.size ?? 0, legacyN: legacy.get(k)?.n ?? 0, legacyNodes: legacyNodes.get(k) ?? 0 } : null;
+    },
+
+    liveSpan(kind, now = Date.now()): LiveSpanView | null {
+      const ls = liveSpans.get(kind);
+      if (!ls) return null;
+      const scored: [number, number, number, number] = [0, 0, 0, 0];
+      const unscored: [number, number, number, number] = [0, 0, 0, 0];
+      const from = Math.floor(now / DAY_MS) - (LIVE_SPAN_DAYS - 1);
+      for (const [day, d] of ls.days) {
+        if (day < from) continue;
+        for (let i = 0; i < 4; i++) { scored[i] += d.s[i] ?? 0; unscored[i] += d.u[i] ?? 0; }
+      }
+      return { since: ls.since, scored, unscored };
+    },
+
+    routeSymptomsAfter(act, origin): number {
+      return routeAfter.get(`${act}|${origin}`) ?? 0;
     },
 
     markConfounded(nodeId, kind): void {
@@ -801,6 +1038,25 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // device the caller knows and the ledger does not.
       if (resolveOpts?.unprobeable) ep.unprobeable = true;
       ep.verdict = computeVerdict(ep);
+      // HOW LONG IT WAS LIVE (v0.72.0), from the same clock the transient split
+      // uses — the dwell start — to the first tick it was seen absent. Counted
+      // for every closure, scored or not: a future automatic action could only
+      // ever act on an episode live that long, and whether such episodes can
+      // be scored at all is the question this answers.
+      {
+        const start = ep.dwellStartMs ?? ep.onsetMs - DWELL_MS;
+        const liveMin = ((resolveOpts?.absentSinceMs ?? resolvedMs) - start) / 60_000;
+        const b = liveMin >= LIVE_SPAN_EDGES_MIN[2] ? 3 : liveMin >= LIVE_SPAN_EDGES_MIN[1] ? 2 : liveMin >= LIVE_SPAN_EDGES_MIN[0] ? 1 : 0;
+        const scoredClose = (ep.verdict === 'improved' || ep.verdict === 'no-change' || ep.verdict === 'worse') && !ep.confounded;
+        const ls = liveSpans.get(kind) ?? { since: resolvedMs, days: new Map() };
+        const day = Math.floor(resolvedMs / DAY_MS);
+        const d = ls.days.get(day) ?? { s: [0, 0, 0, 0], u: [0, 0, 0, 0] };
+        (scoredClose ? d.s : d.u)[b] += 1;
+        ls.days.set(day, d);
+        for (const k of [...ls.days.keys()]) if (k <= day - LIVE_SPAN_DAYS) ls.days.delete(k);
+        liveSpans.set(kind, ls);
+        dirty = true;
+      }
 
       if (ep.verdict === 'refused-misdiagnosis') {
         fp.set(kind, (fp.get(kind) ?? 0) + 1);
@@ -886,7 +1142,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         dirty = true;
       } else if (ep.action == null) {
         // Control arm: a symptom that resolved with no action taken.
-        control.set(kind, bump(control.get(kind), ep.verdict));
+        control.set(kind, bump(control.get(kind), ep.verdict, resolvedMs));
         noteNode(controlNodes as unknown as Map<string, Set<number>>, kind, ep.nodeId);
         dirty = true;
       } else {
@@ -897,8 +1153,20 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         // confound. Both arms stay marginal (a documented diurnal-confound
         // limitation — see baseRate/efficacyFor).
         const ak = aKey(kind, ep.action.kind);
-        action.set(ak, bump(action.get(ak), ep.verdict));
+        action.set(ak, bump(action.get(ak), ep.verdict, resolvedMs));
+        // The pre-actor share of this arm decays by the same step, and gains nothing.
+        const lg = legacy.get(ak);
+        if (lg) {
+          const keep = 1 - cfg.decay;
+          if (lg.n * keep < 0.01) { legacy.delete(ak); legacyNodes.delete(ak); }
+          else legacy.set(ak, { n: lg.n * keep, ok: lg.ok * keep, bad: lg.bad * keep });
+        }
         noteNode(armNodes, ak, ep.nodeId);
+        // …and per actor (v0.72.0). An undefined origin is the operator, so
+        // legacy callers keep meaning what they meant.
+        const xk = actorKey(kind, ep.action.kind, ep.action.origin);
+        actorArms.set(xk, bump(actorArms.get(xk), ep.verdict, resolvedMs));
+        noteNode(actorNodes, xk, ep.nodeId);
         dirty = true;
       }
       // The per-window evidence counts ride the closure line (v0.38.2). Three
@@ -937,10 +1205,13 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         ? ' (undersampled — this node reports too rarely to reach the floor, whatever the duration)'
         : ep.transient
         ? ' (transient — degraded state ended before its evidence floor)'
-        : ep.confounded && ep.action == null && ep.verdict !== 'unverifiable' && ep.verdict !== 'refused-misdiagnosis'
-          ? ' (confounded — the node died, was remediated, or was re-routed by our own probe mid-episode; credited to neither arm)'
+        : ep.confounded && ep.verdict !== 'unverifiable' && ep.verdict !== 'refused-misdiagnosis'
+          ? ' (confounded — the node died, was remediated, was re-routed by our own probe, or the checks were paused mid-episode; credited to neither arm)'
           : '';
-      log(`episode ${k} ${ep.verdict}${ep.action ? ' after ' + ep.action.kind : ' (no action)'} [before ${win(ep.before)} | after ${win(ep.after)}]${tag}`);
+      const liveM = Math.round(((resolveOpts?.absentSinceMs ?? resolvedMs) - (ep.dwellStartMs ?? ep.onsetMs - DWELL_MS)) / 60_000);
+      const who = ep.action ? ` after ${ep.action.kind} (${ep.action.origin ?? 'you'})` : ' (no action)';
+      const killed = ep.killedAfter ? ` (node went Dead ≤${KILLED_AFTER_MS / 60_000}m after the action)` : '';
+      log(`episode ${k} ${ep.verdict}${who} live=${liveM}m [before ${win(ep.before)} | after ${win(ep.after)}]${tag}${killed}`);
       return ep;
     },
 
@@ -982,9 +1253,12 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
 
     efficacyFor(kind, act): Efficacy {
       const base = this.baseRate(kind);
-      const t = action.get(aKey(kind, act));
+      // THE OPERATOR'S ARM (v0.72.0), not the pooled one. The ladder acts only
+      // after a dwell, on nodes it selected for being Dead, so what it learns
+      // is selection, not efficacy — shown on ENGINE, never claimed here.
+      const t = actorArms.get(actorKey(kind, act, 'you'));
       const n = t?.n ?? 0, ok = t?.ok ?? 0, harmed = t?.bad ?? 0;
-      const nodes = armNodes.get(aKey(kind, act))?.size ?? 0;
+      const nodes = actorNodes.get(actorKey(kind, act, 'you'))?.size ?? 0;
       // The CONTROL arm's own evidence (v0.44.0). `baseRate` was published as a
       // bare percentage while the action arm beside it carried n and provenance
       // — so "vs 80% self-heal" could be four episodes on one node, and the
@@ -1067,6 +1341,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
 
     reset(): void {
       open.clear(); control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); unverUndersampled.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
+      actorArms.clear(); actorNodes.clear(); killedAfter.clear(); routeAfter.clear(); recent.clear(); liveSpans.clear(); legacy.clear(); legacyNodes.clear();
       // WITHOUT THIS the caller's `reset(); save();` is a silent no-op (v0.44.0)
       // — save() returns early on a false `dirty`, so the OLD mesh's ledger
       // stayed on disk after a stick swap and a restart reloaded it onto the
@@ -1187,6 +1462,14 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         confounded: [...confoundedTally.entries()],
         armNodes: [...armNodes.entries()].map(([k, v]) => [k, [...v]] as [string, number[]]),
         controlNodes: [...controlNodes.entries()].map(([k, v]) => [k, [...v]] as [SymptomKind, number[]]),
+        // v0.72.0 — OPTIONAL, `v` stays 1: an older add-on ignores them.
+        actorArms: [...actorArms.entries()],
+        actorNodes: [...actorNodes.entries()].map(([k, v]) => [k, [...v]] as [string, number[]]),
+        killedAfter: [...killedAfter.entries()],
+        routeAfter: [...routeAfter.entries()],
+        liveSpan: [...liveSpans.entries()].map(([k, v]) => [k, { since: v.since, days: [...v.days.entries()].map(([d, x]) => [d, x.s, x.u]) }]),
+        legacyArms: [...legacy.entries()],
+        legacyNodes: [...legacyNodes.entries()],
         // Open episodes are intentionally NOT persisted — an episode spanning a
         // restart lost its before-window's continuity and can't yield an honest
         // verdict; it re-opens fresh when the symptom is re-detected.
@@ -1194,39 +1477,77 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
     },
 
     loadJSON(raw): void {
-      const o = raw as { v?: number; control?: [SymptomKind, Tally][]; action?: [string, Tally][]; fp?: [SymptomKind, number][]; unver?: [SymptomKind, number][]; unverUnprobe?: [SymptomKind, number][]; unverTransient?: [SymptomKind, number][]; unverUndersampled?: [SymptomKind, number][]; splitRule?: string; confounded?: [SymptomKind, number][]; armNodes?: [string, number[]][]; controlNodes?: [SymptomKind, number[]][] };
+      const o = raw as { v?: number; control?: unknown; action?: unknown; fp?: unknown; unver?: unknown; unverUnprobe?: unknown; unverTransient?: unknown; unverUndersampled?: unknown; splitRule?: string; confounded?: unknown; armNodes?: unknown; controlNodes?: unknown;
+        actorArms?: unknown; actorNodes?: unknown; killedAfter?: unknown; routeAfter?: unknown; liveSpan?: unknown; legacyArms?: unknown; legacyNodes?: unknown };
       if (!o || o.v !== 1) return;
       control.clear(); action.clear(); fp.clear(); unver.clear(); unverUnprobe.clear(); unverTransient.clear(); unverUndersampled.clear(); confoundedTally.clear(); armNodes.clear(); controlNodes.clear();
-      for (const [k, t] of o.control ?? []) if (validTally(t)) control.set(k, normalizeTally(t));
-      for (const [k, t] of o.action ?? []) if (validTally(t)) action.set(k, normalizeTally(t));
-      for (const [k, v] of o.fp ?? []) if (Number.isFinite(v) && v >= 0) fp.set(k, v);
+      actorArms.clear(); actorNodes.clear(); killedAfter.clear(); routeAfter.clear(); recent.clear(); liveSpans.clear(); legacy.clear(); legacyNodes.clear();
+      // EVERY field entry-guarded (v0.72.0 review): one malformed entry used to
+      // throw after the maps were cleared, load() fell back to "starting
+      // fresh", and the next save overwrote the arms with nothing. A bad entry
+      // now drops only itself.
+      const pairs = (x: unknown): [string, unknown][] =>
+        Array.isArray(x) ? x.filter((e): e is [string, unknown] => Array.isArray(e) && e.length >= 2 && typeof e[0] === 'string') : [];
+      const tallyOk = (t: unknown): t is Tally => t != null && typeof t === 'object' && validTally(t as Tally);
+      const count = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+      const nodeSet = (v: unknown): Set<number> | null => (Array.isArray(v) ? new Set(v.filter((x): x is number => Number.isFinite(x))) : null);
+      for (const [k, t] of pairs(o.control)) if (tallyOk(t)) control.set(k as SymptomKind, normalizeTally(t));
+      for (const [k, t] of pairs(o.action)) if (tallyOk(t)) action.set(k, normalizeTally(t));
+      for (const [k, v] of pairs(o.fp)) if (count(v)) fp.set(k as SymptomKind, v);
       // Absent in pre-v0.36 files — an older ledger simply starts this counter at 0.
-      for (const [k, v] of o.unver ?? []) if (Number.isFinite(v) && v >= 0) unver.set(k, v);
-      for (const [k, v] of o.unverUnprobe ?? []) if (Number.isFinite(v) && v >= 0) unverUnprobe.set(k, v);
+      for (const [k, v] of pairs(o.unver)) if (count(v)) unver.set(k as SymptomKind, v);
+      for (const [k, v] of pairs(o.unverUnprobe)) if (count(v)) unverUnprobe.set(k as SymptomKind, v);
       // The transient/undersampled split is restored only from a ledger that
       // counted it on the live-span rule (v0.64.6). An older one split on
       // open-to-resolve time, which filed every brief episode as undersampled,
       // and closed episodes are not kept to re-split them — so both restart at
       // 0, and the discard is announced rather than silent.
       if (o.splitRule === 'live-span') {
-        for (const [k, v] of o.unverTransient ?? []) if (Number.isFinite(v) && v >= 0) unverTransient.set(k, v);
-        for (const [k, v] of o.unverUndersampled ?? []) if (Number.isFinite(v) && v >= 0) unverUndersampled.set(k, v);
+        for (const [k, v] of pairs(o.unverTransient)) if (count(v)) unverTransient.set(k as SymptomKind, v);
+        for (const [k, v] of pairs(o.unverUndersampled)) if (count(v)) unverUndersampled.set(k as SymptomKind, v);
       } else {
         let t = 0;
         let u = 0;
-        for (const [, v] of o.unverTransient ?? []) if (Number.isFinite(v) && v >= 0) t += v;
-        for (const [, v] of o.unverUndersampled ?? []) if (Number.isFinite(v) && v >= 0) u += v;
+        for (const [, v] of pairs(o.unverTransient)) if (count(v)) t += v;
+        for (const [, v] of pairs(o.unverUndersampled)) if (count(v)) u += v;
         if (t + u > 0) {
           log(`outcomes: discarded ${t} transient + ${u} undersampled tallies written before v0.64.6 — they were split on open-to-resolve time, which filed every brief episode as undersampled, and closed episodes are not kept to re-split them; both counts restart at 0`);
           loadNotice = `${Math.round(t + u)} transient/undersampled tallies reset — split rule changed (v0.64.6)`;
           dirty = true; // the marker must reach disk, or the next load discards again
         }
       }
-      for (const [k, v] of o.confounded ?? []) if (Number.isFinite(v) && v >= 0) confoundedTally.set(k, v);
+      for (const [k, v] of pairs(o.confounded)) if (count(v)) confoundedTally.set(k as SymptomKind, v);
       // Absent in pre-v0.36.5 files: an older ledger simply reports 0 nodes,
       // which the renderer treats as "provenance unknown" rather than as one.
-      for (const [k, v] of o.armNodes ?? []) if (Array.isArray(v)) armNodes.set(k, new Set(v.filter((x) => Number.isFinite(x))));
-      for (const [k, v] of o.controlNodes ?? []) if (Array.isArray(v)) controlNodes.set(k, new Set(v.filter((x) => Number.isFinite(x))));
+      for (const [k, v] of pairs(o.armNodes)) { const n = nodeSet(v); if (n) armNodes.set(k, n); }
+      for (const [k, v] of pairs(o.controlNodes)) { const n = nodeSet(v); if (n) controlNodes.set(k as SymptomKind, n); }
+      // v0.72.0's optional fields.
+      for (const [k, t] of pairs(o.actorArms)) if (tallyOk(t)) actorArms.set(k, normalizeTally(t));
+      for (const [k, v] of pairs(o.actorNodes)) { const n = nodeSet(v); if (n) actorNodes.set(k, n); }
+      for (const [k, v] of pairs(o.killedAfter)) if (count(v)) killedAfter.set(k, v);
+      for (const [k, v] of pairs(o.routeAfter)) if (count(v)) routeAfter.set(k, v);
+      const ok4 = (a: unknown): a is number[] => Array.isArray(a) && a.length === 4 && a.every((x) => Number.isFinite(x) && x >= 0);
+      for (const [k, raw] of pairs(o.liveSpan)) {
+        const v = raw as { since?: unknown; days?: unknown } | null;
+        if (!v || typeof v !== 'object' || typeof v.since !== 'number' || !Number.isFinite(v.since) || !Array.isArray(v.days)) continue;
+        const days = new Map<number, { s: number[]; u: number[] }>();
+        for (const e of v.days) {
+          if (!Array.isArray(e)) continue;
+          const [d, sc, un] = e as unknown[];
+          if (typeof d === 'number' && Number.isFinite(d) && ok4(sc) && ok4(un)) days.set(d, { s: [...sc], u: [...un] });
+        }
+        liveSpans.set(k as SymptomKind, { since: v.since, days });
+      }
+      // The pre-actor share of each pooled arm, and the nodes that taught it:
+      // carried in a v0.72.0 file, and SNAPSHOT from the pooled arm when an
+      // older file (no actor arms) loads.
+      if (o.actorArms === undefined) {
+        for (const [k, t] of action) legacy.set(k, { n: t.n, ok: t.ok, bad: t.bad });
+        for (const [k, set] of armNodes) legacyNodes.set(k, set.size);
+      } else {
+        for (const [k, t] of pairs(o.legacyArms)) if (tallyOk(t)) legacy.set(k, normalizeTally(t));
+        for (const [k, v] of pairs(o.legacyNodes)) if (count(v)) legacyNodes.set(k, v);
+      }
     },
   };
 }
@@ -1249,6 +1570,14 @@ export function planEpisodeLifecycle(
   pending: Map<string, number>,
   now: number,
   confirmMs: number,
+  /** When an action on the episode's node — or a mesh-wide rebuild — last
+   *  settled, Infinity while one is still running, or null (v0.72.0 review).
+   *  The confirmation window counts from the LATER of the first absence and
+   *  that settle, so a heal still in flight cannot let its episode close
+   *  "(no action)" into the self-healing arm, and the after-window that scores
+   *  the episode is a settled one, not the heal's own last minutes. The
+   *  first-absence time is kept for the live-span measure. */
+  holdUntil?: (nodeId: number | null) => number | null,
 ): { toOpen: { nodeId: number | null; kind: SymptomKind }[]; toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number }[] } {
   const epKey = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
   // A symptom is "live" (must NOT resolve) whenever it is present — INCLUDING
@@ -1272,7 +1601,9 @@ export function planEpisodeLifecycle(
     if (live.has(ep.key)) continue;
     const since = pending.get(ep.key) ?? now;
     pending.set(ep.key, since);
-    if (now - since >= confirmMs) {
+    const held = holdUntil?.(ep.nodeId) ?? null;
+    const start = held == null ? since : Math.max(since, held);
+    if (now - start >= confirmMs) {
       toResolve.push({ nodeId: ep.nodeId, kind: ep.kind, key: ep.key, absentSinceMs: since });
       pending.delete(ep.key);
     }
@@ -1292,9 +1623,10 @@ function validTally(t: Tally): boolean {
   return !!t && Number.isFinite(t.n) && Number.isFinite(t.ok) && t.n >= 0 && t.ok >= 0 && t.ok <= t.n + 1e-9 && badOk && jointOk;
 }
 
-/** Fill in `bad` for tallies restored from a pre-v0.44.0 ledger. */
+/** Fill in `bad` for tallies restored from a pre-v0.44.0 ledger; keep a
+ *  finite `lastAt` (v0.72.0) and drop anything else there. */
 function normalizeTally(t: Tally): Tally {
-  return { n: t.n, ok: t.ok, bad: Number.isFinite(t.bad) ? t.bad : 0 };
+  return { n: t.n, ok: t.ok, bad: Number.isFinite(t.bad) ? t.bad : 0, ...(Number.isFinite(t.lastAt) ? { lastAt: t.lastAt } : {}) };
 }
 
 /** Drop undefined option keys so `{...DEFAULTS, ...opts}` never overwrites a

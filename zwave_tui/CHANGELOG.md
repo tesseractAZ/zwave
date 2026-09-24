@@ -1,5 +1,159 @@
 # Changelog
 
+## 0.72.0
+
+### Changed — automatic remediation is decided: no verb is admitted
+
+The executor tier of DESIGN.md §3.5 is decided rather than deferred. A verb may
+run with no operator present only if it passes five properties as the add-on is
+wired: no effect on a device or on Home Assistant state that automations trigger
+on; an in-band result; a fixed frame count at no more than Normal priority with
+no queue-blocking controller command; nothing persistent to undo; and an effect
+the outcome ledger can measure apart from what the control arm already receives.
+`src/zwave/admission.ts` records each verb's failed properties beside the source
+line that fails it, and the ENGINE header and the start-up log say
+`automatic remediation: none admitted`. The admissible set is empty and pinned by
+the type checker (`AutoVerb = never`). Rebuild, rebuild-all, stop-rebuild,
+re-interview, remove-failed, device control and configuration writes form a fixed
+never-automatic set that no option, ledger reading or efficacy claim reaches. The
+two verbs that already run on their own — the ladder's ping and the sweep's
+routed read — predate the rule, fail it, and are recorded as such. The read-class
+verbs fail on measurement: since 0.71.0 every probeable episode in both arms
+receives five routed reads when it opens and five when it confirms, and a value
+refresh on a switch or dimmer is that same Get. In 18.2 days of symptom history
+on the reference mesh, `rtt-degraded` ran 152 times with a median of 5 minutes,
+and none reached an hour. No new autonomous frame ships. The randomized-holdout
+protocol any future admission must pass, and the condition for revisiting, are
+recorded in §3.5. DOCS §11 states the safety model completely: the checks that
+run on their own command no device, but an answer can correct a stale Home
+Assistant state that automations react to, a read that fails over moves the
+route, and a missed frame marks a device Dead and drops what was queued to it.
+
+### Added — one pause for every autonomous write
+
+`Z` on the ENGINE screen pauses auto-ping's liveness sweep, verification bursts
+and dead-node ladder at once; it needs no CONFIRM and no write-actions gate,
+because it sends nothing, and it is taken even over a running action's card. Controller 3 → `A` offers exactly one of *Pause* /
+*Resume automatic writes*, both behind the typed CONFIRM and both answerable on a
+read-only install. An optional `input_boolean.zwave_tui_pause_autonomy` in Home
+Assistant pauses it too; the add-on reads that toggle, from the state feed and
+the full state read, and never creates or writes it. Either source pauses, and
+resuming one never lifts the other — except that a TUI resume forgets a toggle that has gone missing. The pause persists in `/data/autonomy.json`
+(`AUTONOMY_PATH`) and fails closed: an unreadable file (rewritten valid, so the
+pause keeps its age), a toggle that was seen and then became unavailable, a
+toggle last seen pausing that this run has not yet re-read, and one missing from
+a full state read all read as paused; only a deletion event — or a TUI resume,
+for a toggle that has gone missing — forgets the toggle, and a state list older
+than an event already applied on the connection is ignored (events are always
+applied). The HA pause is aged
+from when the add-on first saw it, not from `last_changed`, which Home Assistant
+restamps on every restart. The suppression `paused` stops every lane, the
+ladder included, and ranks below `storm` and `no-capability-data`, so a pause
+never hides the two conditions that raise `binary_sensor.zwave_tui_degraded`; it
+is decided after the dead-node pass, so a node that had already spent its
+budget still summons a person. Probes already sent are still judged; nothing is
+owed while paused; a check burst the pause refused goes out if its window is
+still open when the pause lifts; and an episode open while the pause stops
+auto-ping is credited to neither arm. ENGINE and the engine sensor read the
+pause from its own state, so it shows at once, before auto-ping's first pass,
+beneath any other suppression and with auto-ping off; the masthead chip shows it
+with its age, on every screen, while auto-ping is running and nothing outranks it. ENGINE names who paused, since when
+and how to resume — including when the HA toggle has gone missing, which a TUI
+resume then forgets — and `sensor.zwave_tui_engine` gains `paused_by`,
+`paused_since` and `auto_remediation: none-admitted`. A pause older than 24
+hours raises `binary_sensor.zwave_tui_degraded` while auto-ping is running for
+it to stop. `Z` pressed during a running action or a CONFIRM box is
+acknowledged on the WORKING card and carried onto the next result.
+Auto-ping also stands down, as `operator-action` (below `storm` and
+`no-capability-data`), while any one-node route rebuild or failed-node removal
+the operator started is running — each tracked on its own, and one whose
+outcome is unknown until its reply bound has passed.
+
+### Fixed — manual results say what happened
+
+`rebuild_node_routes`, `begin_rebuilding_routes` and `stop_rebuilding_routes`
+return a boolean, and `set_config_parameter` returns `accepted` or `queued`. The
+runner discarded all four and logged `ok`, and a rebuild that returned false was
+learned as a successful action. False now reads as did-not-complete,
+already-running or nothing-to-stop, and it is never learned; a successful node
+rebuild notes that a failed return-route assignment is not reported. A queued
+configuration write on a sleeping device says it waits for the next wake-up; on
+a listening or FLiRS device it reads *not confirmed*, because there it means the
+device was, or went, offline while Home Assistant waited. A node rebuild waits up to 20
+minutes for its reply and a failed-node removal up to 3 minutes, instead of the
+10-second default that reported a still-running rebuild as `failed: HA WS
+timeout`, while the wait for the socket stays 10 seconds; a reply timeout or a
+dropped connection on either reads `outcome unknown`, is not learned, and never
+forgets a node. The RESULT card shows the reply's note under the verdict, and an
+unknown outcome as a yellow `◷` rather than a red failure. Esc leaves a long
+action running, and its result lands in the Log without replacing a newer
+card.
+
+### Changed — the ledger records who acted, when an arm last learned, and what died after
+
+A learned action carries its origin, and success and refusal alike are dated
+from the launch rather than from Home Assistant's reply; an episode whose breach
+began after the action was sent is credited to neither arm. Arms are kept per origin
+beside the unchanged pooled arm. Efficacy claims read the operator's arm only;
+the dead-node ladder's arm is shown on ENGINE and never claimed, because it acts
+only after a dwell, on nodes it selected, and what the pooled arm learned before
+this release is shown as its own unclaimed row, a decayed snapshot of the
+pre-actor share. Every tally now records when it last scored (tallies learned
+earlier read "before v0.72.0"). The runner reports each learned action's launch
+before the reply and its settle after it, and the ledger's harm windows run
+from the launch to 15 minutes after the settle, against the action running on
+the node at the time or else its latest-launched one: a node that goes Dead in that window, having been Alive at launch, is
+counted against that action at once — never for `dead-flap`, a ladder ping to a
+Dead node, or a death on one of this add-on's own measurement probes — and a
+route-kind symptom whose breach began in it is counted as possible harm. While
+an action runs on a node, that node's episodes are held open, so a long heal
+cannot let its episode close into the self-healing arm — its confirmation
+restarts at the settle, so it is scored on a settled after-window — and a
+symptom counts as already recovering only if it cleared before the action was
+sent. An action that reached the driver without reporting success (a heal that
+returned false, an outcome unknown) and two actions that overlapped on one node
+credit neither arm (an unknown one also confounds episodes opening before its
+reply bound), a launch that never left the add-on opens no harm window, a death
+during a running heal is the heal's even if a quick verb ran inside it, and a
+mesh-wide route rebuild holds and confounds every open episode. Each kind
+keeps a 30-day tally of how long its closed episodes stayed live, scored apart
+from unscored, which is the number that decides whether any future trial could
+finish on a given mesh. An attributed closure that was confounded now says so,
+and the add-on log's closure line names who acted and how long the symptom was
+live. The ledger file stays at `v: 1`, and a malformed optional entry drops only
+itself.
+
+### Added — `sensor.zwave_tui_recommendation`
+
+A published state that names the one problem worth a person's attention and the
+first thing to try: `summons` when auto-ping gave up on a device; otherwise, for
+the most severe and oldest symptom that has lasted 60 minutes, `action` when its
+plan's first unblocked, non-destructive step is a verb the Actions Menu runs and
+`physical` when only a person can do it — always `physical` for a device the
+dead-node ladder is actively working; `none` otherwise. It always carries
+`automatic: false`, its attributes are an exact allowlist with nothing that
+changes by the minute, so an unchanged recommendation republishes identically,
+and the persistence clock restarts with the add-on (`watching_since`). It names
+node names and planner text, which SECURITY.md now lists among what the add-on
+publishes. On the reference mesh's
+18.2-day history it would have raised in three distinct windows. DOCS §12.11
+includes a sample notification automation.
+
+### Corrected
+
+- RESEARCH.md §2.4: the second rebuild step, AssignSUCReturnRoute, is one
+  unretried and non-fatal call; only steps 1, 3 and 4 retry.
+- DESIGN.md: the action arm was never operator-only, and the time-of-day banding
+  of the action arm is superseded.
+- DOCS §11: the checks that run on their own were described as changing no
+  device state; the three side effects above are now stated.
+- Option help for `write_actions_enabled` and `auto_ping_enabled` (en, es-419):
+  the ping shortcut is the only mesh command without CONFIRM, recommendations
+  never run on their own, whether auto-ping ends an outage is not scored, and
+  what its pings learn is shown on ENGINE in their own row and never claimed.
+
+112 new tests pin these — no verb is admitted and the admission table covers every verb, every autonomous write stops while either pause source is on and fails closed on an unreadable file or a missing toggle, an old full read never undoes a newer event, the 24-hour notice waits for a pause that is actually stopping something, a reply is read for what it says, an unsent launch holds and confounds nothing, overlapping actions credit neither, a death is charged to the action running at the time, the recommendation names one problem with its exact attribute set and never a destructive first step — and 150 more mutants show each guard is load-bearing. Full run: 1017 killed, 0 survived, 12 equivalent.
+
 ## 0.71.0
 
 ### Fixed — the add-on's own probes were marking working devices Dead

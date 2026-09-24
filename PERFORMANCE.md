@@ -204,6 +204,8 @@ found it as a testing problem.
 
 ## 4. What the engine has learned
 
+> *As of 2026-09-07; superseded by the ENGINE actor rows (v0.72.0), which split each arm by who acted (the ladder rows also show when they last learned) — the two ping arms below had not learned between this snapshot and 2026-09-23.*
+
 Live readings, 2026-09-07 (§4a/§4b describe the mesh these were learned on).
 
 **Baseline coverage**, for the four-hour band current at the time of reading:

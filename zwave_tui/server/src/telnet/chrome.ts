@@ -39,9 +39,17 @@ function linkTag(link: LinkState): string {
  * Row 0 — the system masthead. Product ident on the left; link state, home id
  * (wide terminals only), and the timestamp on the right.
  */
+/** A duration in one short word: 45m, 7h, 3d. */
+export function ageWord(ms: number): string {
+  const m = Math.max(0, Math.floor(ms / 60_000));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return h < 48 ? `${h}h` : `${Math.floor(h / 24)}d`;
+}
+
 export function masthead(
   view: ViewState,
-  o: { link: LinkState; homeId: number | null; now: number; apSuppressed?: string | null; statsStaleMs?: number | null },
+  o: { link: LinkState; homeId: number | null; now: number; apSuppressed?: string | null; statsStaleMs?: number | null; pausedSince?: number | null },
 ): string {
   // A SUPPRESSED SWEEP IS A STANDING CONDITION (v0.47.0), and it was legible
   // only on the ENGINE screen. An operator on OVERVIEW watching a node go quiet
@@ -49,8 +57,17 @@ export function masthead(
   // looked the same as one being actively watched. Rendered on EVERY screen,
   // and NOTHING when the sweep is running: an always-on chip is noise, and a
   // test that only ever asserts its presence passes for one.
-  const apChip = o.apSuppressed && o.apSuppressed !== 'none'
-    ? c.yellow(`⚠ AUTO-PING ${o.apSuppressed.toUpperCase()}`)
+  // A pause carries its AGE (v0.72.0): it has no expiry, and "paused" alone
+  // reads the same at five minutes and five days.
+  // The pause comes from its own state (v0.72.0 review), so the chip appears
+  // the moment Z is pressed rather than a pass later; a higher-ranked
+  // suppression still names itself.
+  const pausedNow = o.pausedSince != null && (o.apSuppressed === 'none' || o.apSuppressed === 'paused');
+  // Resumed, but auto-ping has not run a pass yet: nothing is paused any more.
+  const shown = pausedNow ? 'paused' : o.apSuppressed === 'paused' ? null : o.apSuppressed;
+  const apChip = shown && shown !== 'none'
+    ? c.yellow(`⚠ AUTO-PING ${shown.toUpperCase()}` +
+      (shown === 'paused' && o.pausedSince != null ? ' ' + ageWord(o.now - o.pausedSince) : ''))
     : null;
   // A LIVE ROSTER IS NOT A LIVE FEED (v0.61.0). `linkState` reads
   // `lastUpdated()` — the roster POLL — so the masthead read ONLINE while the
@@ -341,16 +358,23 @@ export interface FrameOpts {
  * [telemetry] · body (padded to fill) · command bar. Returns EXACTLY
  * `view.rows` lines ≤ `view.cols` — the screen only has to supply its body.
  */
-export function frame(view: ViewState, data: DataProvider, o: FrameOpts): string[] {
-  const out: string[] = [];
+/** The masthead's inputs, built in ONE place (third review): OVERVIEW built
+ *  its own and lost the pause chip when the chip learned to read the pause. */
+export function mastheadOpts(data: DataProvider): Parameters<typeof masthead>[1] {
   const statsAt = data.lastStatsUpdated?.() ?? null;
-  out.push(masthead(view, {
+  return {
     link: linkState(data),
     homeId: data.controller()?.homeId ?? null,
     now: Date.now(),
     apSuppressed: data.autoPingState?.()?.suppressed ?? null,
+    pausedSince: data.autonomyPause?.()?.since ?? null,
     statsStaleMs: statsAt == null ? null : Date.now() - statsAt,
-  }));
+  };
+}
+
+export function frame(view: ViewState, data: DataProvider, o: FrameOpts): string[] {
+  const out: string[] = [];
+  out.push(masthead(view, mastheadOpts(data)));
   out.push(titleRule(view, o.title, o.rightStatus ?? ''));
   if (o.telemetry != null) out.push(truncate(o.telemetry, view.cols));
   const top = out.length;

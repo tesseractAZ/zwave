@@ -44,6 +44,8 @@ let rosterNodes: Array<Record<string, unknown>> = [NODE7];
 const DEV_ID = 'dev-7';
 /** Override for the entity registry (v0.70.0). null = the default single switch. */
 let entityRegistry: Array<Record<string, unknown>> | null = null;
+/** More rows for get_states (v0.72.0) — the owner's pause toggle. Reset in finally. */
+let extraStates: Array<Record<string, unknown>> = [];
 
 function cannedResult(cmd: Record<string, unknown>): unknown {
   switch (cmd.type) {
@@ -54,7 +56,7 @@ function cannedResult(cmd: Record<string, unknown>): unknown {
     case 'config/entity_registry/list':
       return entityRegistry ?? [{ entity_id: 'switch.node_seven', device_id: DEV_ID, disabled_by: null, platform: 'zwave_js', original_name: 'Node Seven Switch' }];
     case 'get_states':
-      return [{ entity_id: 'switch.node_seven', state: 'on', attributes: {} }];
+      return [{ entity_id: 'switch.node_seven', state: 'on', attributes: {} }, ...extraStates];
     case 'zwave_js/network_status':
       // A zwave_js config-entry reload (driver restart, add-on update,
       // integration reload) fails exactly this call while it is out (v0.65.0).
@@ -841,14 +843,19 @@ test('a refused removeFailed reaches the ledger as refused-misdiagnosis; a trans
     const sym = { kind: 'ghost-suspect', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
 
     shadow.updateEpisodes([sym], t0);
-    zd.recordActionOutcome('removeFailed', 7, false, 'transport');
+    // On the episodes' clock, like the refusal below: otherwise the ledger's
+    // "opened after the action" rule confounds the episode and this assertion
+    // would pass whether or not the transport failure was stopped.
+    zd.recordActionOutcome('removeFailed', 7, false, 'transport', 'you', t0 + 1_000);
     shadow.updateEpisodes([], t0 + 60_000);
     shadow.updateEpisodes([], t0 + 12 * 60_000);
     assert.equal(zd.falsePositives('ghost-suspect'), 0,
       'a transport failure must never be held against a detector');
 
     shadow.updateEpisodes([sym], t0 + 20 * 60_000);
-    zd.recordActionOutcome('removeFailed', 7, false, 'refused');
+    // On the episodes' clock (v0.72.0): the ledger keeps an episode that opened
+    // AFTER the action was sent out of it, so the stamp must be comparable.
+    zd.recordActionOutcome('removeFailed', 7, false, 'refused', 'you', t0 + 20 * 60_000 + 1_000);
     shadow.updateEpisodes([], t0 + 21 * 60_000);
     shadow.updateEpisodes([], t0 + 33 * 60_000);
     assert.equal(zd.falsePositives('ghost-suspect'), 1,
@@ -2269,4 +2276,357 @@ test('a death on a node whose statistics feed is not live says so — its lastSe
     R.priv.noteDeadCrossing(7, false);
     assert.deepEqual(R.zd.drainDeadEvents().map((d) => d.feedLive), [false]);
   } finally { R.stop(); }
+});
+
+/* ── v0.72.0: the owner's pause reaches the data layer ─────────────────── */
+
+test('the HA pause toggle is read from get_states even before the registry loads, and its state_changed is never a value row (v0.72.0)', async () => {
+  const { PAUSE_ENTITY } = await import('../src/zwave/autonomyPause');
+  const ha = fakeHa();
+  entityRegistry = [];
+  extraStates = [{ entity_id: PAUSE_ENTITY, state: 'on', attributes: {}, last_changed: '2026-09-23T14:02:00.000Z' }];
+  const zd = await bootedZwaveData(ha);
+  try {
+    await waitFor(() => zd.autonomyPause() != null);
+    assert.deepEqual(zd.autonomyPause()?.by, ['ha']);
+    const since = zd.autonomyPause()!.since;
+    assert.ok(Math.abs(since - Date.now()) < 60_000, 'aged from when this add-on first saw it pausing, not last_changed');
+    const before = zd.events().length;
+    for (const h of [...(ha.handlers.get('state_changed') ?? [])]) {
+      h({ event: { data: { entity_id: PAUSE_ENTITY, old_state: { state: 'on' }, new_state: { state: 'off', last_changed: '2026-09-23T15:00:00.000Z' } } } } as never);
+    }
+    assert.equal(zd.autonomyPause(), null, 'off clears the HA source');
+    const added = zd.events().slice(0, zd.events().length - before);
+    assert.ok(added.every((e) => e.kind !== 'value'), `the toggle is not logged as a device value: ${JSON.stringify(added)}`);
+    assert.ok(added.some((e) => e.source === 'engine' && e.severity === 'warn' && /autonomy: RESUMED/.test(e.text)),
+      'the transition reaches the Log ring at WARN');
+  } finally {
+    entityRegistry = null;
+    extraStates = [];
+    zd.stop();
+  }
+});
+
+test('a toggle absent from a full read keeps a remembered pause; a deletion event forgets it (v0.72.0 review)', async () => {
+  const { PAUSE_ENTITY } = await import('../src/zwave/autonomyPause');
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-pause-absent-'));
+  const path = join(dir, 'autonomy.json');
+  // Seeded, so the assertion below cannot pass on "never remembered" (the
+  // first cut of this test did exactly that).
+  writeFileSync(path, JSON.stringify({ v: 1, tui: null, ha: { last: 'on', at: 1, since: 1 } }));
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha, { autonomyPath: path });
+  try {
+    await waitFor(() => /missing from Home Assistant's states/.test(zd.autonomyPause()?.reason ?? ''));
+    assert.deepEqual(zd.autonomyPause()?.by, ['ha'], 'the full read ran and did not unpause');
+    for (const h of [...(ha.handlers.get('state_changed') ?? [])]) {
+      h({ event: { data: { entity_id: PAUSE_ENTITY, old_state: { state: 'on' }, new_state: null } } } as never);
+    }
+    assert.equal(zd.autonomyPause(), null, 'deleted');
+    const { readFileSync } = await import('node:fs');
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).ha, null, 'and forgotten on disk');
+  } finally { zd.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('an action is dated from its LAUNCH: a symptom that cleared while it ran is credited to it, and the episode waits for it (v0.72.0 review)', async () => {
+  const R = await rerouteZd('zwtui-launch-');
+  try {
+    const real = R.priv.snapshot();
+    R.priv.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+    const oc = (R.zd as unknown as { outcomes: { openEpisodeDetails: () => { kind: string; actionKind: string | null; confounded: boolean }[] } }).outcomes;
+    const t0 = 1_800_000_000_000;
+    const sym = [{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }];
+    R.priv.updateEpisodes(sym, t0);
+    R.zd.noteActionLaunched('healNode', 7, 'you', t0 + 60_000, true);          // a long heal starts
+    R.priv.updateEpisodes([], t0 + 2 * 60_000);                               // the symptom clears DURING it
+    R.priv.updateEpisodes([], t0 + 20 * 60_000);                              // confirmation window long past…
+    assert.equal(oc.openEpisodeDetails().length, 1, '…but the episode waits for the heal');
+    R.zd.recordActionOutcome('healNode', 7, true, undefined, 'you', t0 + 60_000, true);
+    R.zd.noteActionSettled('healNode', 7, 'you', t0 + 60_000, t0 + 20 * 60_000);
+    assert.equal(oc.openEpisodeDetails()[0].actionKind, 'healNode', 'credited: it cleared after the heal was sent');
+    assert.equal(oc.openEpisodeDetails()[0].confounded, false);
+    R.priv.updateEpisodes([], t0 + 29 * 60_000);
+    assert.equal(oc.openEpisodeDetails().length, 1, 'the confirmation window restarts at the settle (second review)…');
+    R.priv.updateEpisodes([], t0 + 31 * 60_000);
+    assert.equal(oc.openEpisodeDetails().length, 0, '…and it closes a full window after it');
+  } finally { R.stop(); }
+});
+
+test('FLiRS counts as listening for commands; a sleeper does not; unknown stays unknown (v0.72.0 review)', async () => {
+  const R = await rerouteZd('zwtui-flirs-');
+  try {
+    const dl = (R.zd as unknown as { driverListening: Map<number, { isListening: boolean | null; isFrequentListening: boolean | null }> }).driverListening;
+    dl.set(7, { isListening: false, isFrequentListening: true });
+    assert.equal(R.zd.listensForCommands(7), true);
+    dl.set(7, { isListening: false, isFrequentListening: false });
+    assert.equal(R.zd.listensForCommands(7), false);
+    dl.set(7, { isListening: false, isFrequentListening: null });
+    assert.equal(R.zd.listensForCommands(7), null);
+    dl.delete(7);
+    assert.equal(R.zd.listensForCommands(7), null);
+  } finally { R.stop(); }
+});
+
+test('entering a pause clears what verification owed, and nothing is owed while paused (v0.72.0)', async () => {
+  const R = await rerouteZd('zwtui-pause-owed-');
+  try {
+    const req = (R.zd as unknown as { requestVerification: (n: number) => boolean }).requestVerification.bind(R.zd);
+    assert.equal(req(7), true);
+    assert.equal(R.zd.verifyOwedCount(), 1, 'precondition: a burst is owed');
+    R.zd.pauseAutonomy('tui');
+    assert.equal(R.zd.verifyOwedCount(), 0, 'the pause cleared it');
+    assert.equal(req(7), false, 'refused while paused');
+    assert.equal(R.zd.verifyOwedCount(), 0);
+    assert.deepEqual(R.zd.resumeAutonomy(), { resumed: true, stillPausedBy: null });
+    assert.equal(req(7), true, 'accepted again once resumed');
+  } finally { R.stop(); }
+});
+
+test('an episode open during a pause is confounded — it got none of the checks the baseline gets (v0.72.0)', async () => {
+  const R = await rerouteZd('zwtui-pause-confound-');
+  try {
+    const real = R.priv.snapshot();
+    const asAlive = real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+    R.priv.snapshot = () => asAlive;
+    const marked: Array<[number | null, string]> = [];
+    const orig = R.priv.outcomes.markConfounded.bind(R.priv.outcomes);
+    R.priv.outcomes.markConfounded = (n, k) => { marked.push([n, k]); orig(n, k); };
+    const t0 = 1_800_000_000_000;
+    const syms = ['rtt-degraded', 'dead-flap'].map((kind) => ({ kind, nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }));
+    R.priv.updateEpisodes(syms, t0);
+    assert.equal(marked.length, 0, 'running: nothing confounded');
+    R.zd.pauseAutonomy('tui');
+    R.priv.updateEpisodes(syms, t0 + 30_000);
+    assert.equal(marked.length, 0, 'auto-ping off: the pause changes nothing these episodes would have received (v0.72.0 review)');
+    R.zd.setAutoPingSnapshot(() => ({ suppressed: 'paused' }) as never);
+    R.priv.updateEpisodes(syms, t0 + 60_000);
+    assert.deepEqual([...new Set(marked.map(([n, k]) => `${n}:${k}`))].sort(), ['7:dead-flap', '7:rtt-degraded'],
+      'every open episode, dead-flap included: the pause is external to what it measures');
+  } finally { R.stop(); }
+});
+
+test('a check burst the pause refused is still owed when the pause lifts inside its window (v0.72.0)', async () => {
+  const R = await rerouteZd('zwtui-pause-burst-');
+  try {
+    const real = R.priv.snapshot();
+    const asAlive = real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+    R.priv.snapshot = () => asAlive;
+    const t0 = 1_800_000_000_000;
+    const sym = [{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }];
+    R.priv.updateEpisodes(sym, t0);                 // open (and its onset burst)
+    R.priv.updateEpisodes([], t0 + 60_000);         // gone → confirmation window
+    R.zd.pauseAutonomy('tui');
+    assert.equal(R.zd.verifyOwedCount(), 0, 'the pause cleared the onset burst');
+    R.priv.updateEpisodes([], t0 + 60_000 + 6 * 60_000); // the after-window burst comes due while paused
+    assert.equal(R.zd.verifyOwedCount(), 0, 'refused while paused');
+    R.zd.resumeAutonomy();
+    R.priv.updateEpisodes([], t0 + 60_000 + 7 * 60_000);
+    assert.equal(R.zd.verifyOwedCount(), 1, 'the refused burst was not marked sent: it goes out after the resume');
+  } finally { R.stop(); }
+});
+
+test('the ledger learns WHO acted, dated from the launch; a death ≤15 min after an operator action is counted, a later one is not (v0.72.0)', async () => {
+  const R = await rerouteZd('zwtui-actor-');
+  try {
+    const real = R.priv.snapshot();
+    let status = NodeStatus.Alive;
+    R.priv.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, status, isListening: true } : n));
+    const oc = (R.zd as unknown as { outcomes: { openEpisodeDetails: () => { kind: string; actionKind: string | null; confounded: boolean }[];
+      actorArms: (k: string) => { origin: string; killedAfter: number }[] } }).outcomes;
+    const t0 = 1_800_000_000_000;
+    const sym = [{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }];
+    R.priv.updateEpisodes(sym, t0);
+    R.zd.recordActionOutcome('refreshValues', 7, true, undefined, 'you', t0 + 1_000, true);
+    assert.equal(oc.openEpisodeDetails()[0].actionKind, 'refreshValues', 'attributed at the launch stamp');
+    status = NodeStatus.Dead;
+    R.priv.updateEpisodes(sym, t0 + 1_000 + 5 * 60_000);
+    assert.equal(oc.actorArms('rtt-degraded').find((x) => x.origin === 'you')?.killedAfter, 1, 'Dead 5 min after: counted');
+    assert.equal(oc.openEpisodeDetails()[0].confounded, true, 'and confounded');
+  } finally { R.stop(); }
+  const Q = await rerouteZd('zwtui-actor-late-');
+  try {
+    const real = Q.priv.snapshot();
+    let status = NodeStatus.Alive;
+    Q.priv.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, status, isListening: true } : n));
+    const oc = (Q.zd as unknown as { outcomes: { actorArms: (k: string) => { origin: string; killedAfter: number }[] } }).outcomes;
+    const t0 = 1_800_000_000_000;
+    const sym = [{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }];
+    Q.priv.updateEpisodes(sym, t0);
+    Q.zd.recordActionOutcome('refreshValues', 7, true, undefined, 'you', t0 + 1_000, true);
+    status = NodeStatus.Dead;
+    Q.priv.updateEpisodes(sym, t0 + 1_000 + 20 * 60_000);
+    assert.equal(oc.actorArms('rtt-degraded').length, 0, 'Dead 20 min after: not charged');
+  } finally { Q.stop(); }
+});
+
+test('a death on one of OUR measurement probes is not charged to the operator\'s action (v0.72.0)', async () => {
+  const R = await rerouteZd('zwtui-own-kill-');
+  try {
+    const real = R.priv.snapshot();
+    R.priv.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Dead, isListening: true } : n));
+    const oc = (R.zd as unknown as { outcomes: { actorArms: (k: string) => { origin: string; killedAfter: number }[] } }).outcomes;
+    const t0 = Date.now();
+    const sym = [{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }];
+    R.priv.updateEpisodes(sym, t0);
+    R.zd.recordActionOutcome('refreshValues', 7, true, undefined, 'you', t0 + 1, true);
+    R.zd.noteMeasurementProbe(7, Date.now(), 'sweep', 'read');
+    R.priv.noteDeadCrossing(7, true);           // died with our probe unanswered
+    R.priv.updateEpisodes(sym, t0 + 60_000);
+    assert.equal(oc.actorArms('rtt-degraded').find((x) => x.origin === 'you')?.killedAfter ?? 0, 0);
+  } finally { R.stop(); }
+});
+
+/* ── v0.72.0 second review ─────────────────────────────────────────────── */
+
+async function episodeRig(prefix: string) {
+  const R = await rerouteZd(prefix);
+  const real = R.priv.snapshot();
+  R.priv.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+  const oc = (R.zd as unknown as { outcomes: { openEpisodeDetails: () => { kind: string; actionKind: string | null; confounded: boolean }[] } }).outcomes;
+  const t0 = 1_800_000_000_000;
+  const sym = [{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }];
+  R.priv.updateEpisodes(sym, t0);
+  return { R, oc, t0, sym };
+}
+
+test('a heal that reached the driver but did not report success confounds the node\'s episodes (second review)', async () => {
+  const E = await episodeRig('zwtui-maybe-');
+  try {
+    E.R.zd.noteActionLaunched('healNode', 7, 'you', E.t0 + 1_000, true);
+    E.R.zd.noteActionSettled('healNode', 7, 'you', E.t0 + 1_000, E.t0 + 90_000, 'maybe');
+    assert.equal(E.oc.openEpisodeDetails()[0].confounded, true, 'it cannot close as a spontaneous recovery');
+  } finally { E.R.stop(); }
+  const F = await episodeRig('zwtui-none-');
+  try {
+    F.R.zd.noteActionLaunched('healNode', 7, 'you', F.t0 + 1_000, true);
+    F.R.zd.noteActionSettled('healNode', 7, 'you', F.t0 + 1_000, F.t0 + 2_000, 'none');
+    assert.equal(F.oc.openEpisodeDetails()[0].confounded, false, 'a call that never left changes nothing');
+  } finally { F.R.stop(); }
+});
+
+test('two learned actions that overlapped on a node credit neither — the reply order decides nothing (second review)', async () => {
+  // On the REAL clock (the overlap check reads Date.now() at the reply, as in
+  // production): with a synthetic episode clock the ledger's opened-after rule
+  // confounded the episode and the test passed with the overlap rule removed.
+  const R = await rerouteZd('zwtui-overlap-');
+  const real = R.priv.snapshot();
+  R.priv.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+  const oc = (R.zd as unknown as { outcomes: { openEpisodeDetails: () => { kind: string; actionKind: string | null; confounded: boolean }[] } }).outcomes;
+  const t0 = Date.now() - 10 * 60_000;
+  R.priv.updateEpisodes([{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }], t0);
+  const E = { R, oc };
+  try {
+    const now = Date.now();
+    E.R.zd.noteActionLaunched('healNode', 7, 'you', now - 60_000, true);   // a long heal, left running after Esc
+    E.R.zd.noteActionLaunched('ping', 7, 'you', now - 30_000, true);
+    E.R.zd.recordActionOutcome('ping', 7, true, undefined, 'you', now - 30_000, true); // the ping answers first
+    const ep = E.oc.openEpisodeDetails()[0];
+    assert.equal(ep.actionKind, null, 'the ping does not take the heal\'s credit');
+    assert.equal(ep.confounded, true);
+  } finally { E.R.stop(); }
+});
+
+test('a mesh-wide rebuild holds every episode open and confounds it (second review)', async () => {
+  const E = await episodeRig('zwtui-meshrebuild-');
+  try {
+    const lc = E.R.zd as unknown as { lastController: Record<string, unknown> | null };
+    lc.lastController = { ...(lc.lastController ?? {}), isRebuildingRoutes: true };
+    E.R.priv.updateEpisodes([], E.t0 + 60_000);
+    E.R.priv.updateEpisodes([], E.t0 + 30 * 60_000);
+    assert.equal(E.oc.openEpisodeDetails().length, 1, 'held while the controller rebuilds');
+    assert.equal(E.oc.openEpisodeDetails()[0].confounded, true);
+    lc.lastController = { ...lc.lastController, isRebuildingRoutes: false };
+    E.R.priv.updateEpisodes([], E.t0 + 31 * 60_000);             // the rebuild ends here
+    E.R.priv.updateEpisodes([], E.t0 + 40 * 60_000);
+    assert.equal(E.oc.openEpisodeDetails().length, 1, 'a full confirmation window after the rebuild ended');
+    E.R.priv.updateEpisodes([], E.t0 + 42 * 60_000);
+    assert.equal(E.oc.openEpisodeDetails().length, 0);
+  } finally { E.R.stop(); }
+});
+
+test('an after-window burst sent while an action ran is sent again once it settles (second review)', async () => {
+  const E = await episodeRig('zwtui-burst-hold-');
+  try {
+    // Probes are spaced per node, so each drain call must move the clock on.
+    const drain = () => { let t = Date.now() + 10 * 86_400_000; while (E.R.zd.drainVerifyRequests(t).length) t += 3_600_000; };
+    E.R.priv.updateEpisodes([], E.t0 + 60_000);                      // symptom gone: confirmation starts
+    drain();
+    E.R.priv.updateEpisodes([], E.t0 + 6 * 60_000 + 1_000);          // the after-window burst goes out on the old clock…
+    assert.equal(E.R.zd.verifyOwedCount(), 1, 'fixture guard: the burst was sent before the heal');
+    drain();
+    E.R.zd.noteActionLaunched('healNode', 7, 'you', E.t0 + 7 * 60_000, true);   // …then a heal starts
+    E.R.priv.updateEpisodes([], E.t0 + 10 * 60_000);                 // held: that burst no longer fits
+    E.R.zd.noteActionSettled('healNode', 7, 'you', E.t0 + 7 * 60_000, E.t0 + 12 * 60_000, 'ok');
+    E.R.priv.updateEpisodes([], E.t0 + 13 * 60_000);
+    assert.equal(E.R.zd.verifyOwedCount(), 0, 'not yet: the settled after-window starts 5 min after the settle');
+    E.R.priv.updateEpisodes([], E.t0 + 17 * 60_000 + 1_000);
+    assert.equal(E.R.zd.verifyOwedCount(), 1, 'sent again, inside the settled after-window');
+  } finally { E.R.stop(); }
+});
+
+test('a Home Assistant reconnect resets the toggle\'s reading order (second and third review)', async () => {
+  const { PAUSE_ENTITY } = await import('../src/zwave/autonomyPause');
+  const ha = fakeHa();
+  extraStates = [{ entity_id: PAUSE_ENTITY, state: 'off', attributes: {}, last_changed: '2026-01-01T00:00:00.000Z' }];
+  const zd = await bootedZwaveData(ha);
+  const fetchStates = (zd as unknown as { fetchEntityStates: () => Promise<void> }).fetchEntityStates.bind(zd);
+  try {
+    await waitFor(() => (ha.handlers.get('state_changed') ?? []).length > 0);
+    for (const h of [...(ha.handlers.get('state_changed') ?? [])]) {
+      h({ event: { data: { entity_id: PAUSE_ENTITY, old_state: null, new_state: { state: 'on', last_changed: new Date().toISOString() } } } } as never);
+    }
+    assert.deepEqual(zd.autonomyPause()?.by, ['ha'], 'the live event pauses');
+    await fetchStates();
+    assert.deepEqual(zd.autonomyPause()?.by, ['ha'], 'a state list older than that event is ignored');
+    ha.fireReady();
+    await waitFor(() => zd.autonomyPause() == null, 4000);   // the new connection's full read applies
+  } finally { extraStates = []; zd.stop(); }
+});
+
+test('an episode that opens while an UNKNOWN heal may still be running is confounded; a never-sent heal holds nothing (third review)', async () => {
+  const R = await rerouteZd('zwtui-maybe-later-');
+  try {
+    const real = R.priv.snapshot();
+    R.priv.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+    const oc = (R.zd as unknown as { outcomes: { openEpisodeDetails: () => { kind: string; confounded: boolean }[] } }).outcomes;
+    const t0 = 1_800_000_000_000;
+    R.zd.noteActionLaunched('healNode', 7, 'you', t0, true);
+    R.zd.noteActionSettled('healNode', 7, 'you', t0, t0 + 20 * 60_000, 'maybe');     // closed socket: unknown until t0+20m
+    const sym = [{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0 + 5 * 60_000, basis: 'measured', evidence: [], narrative: '' }];
+    R.priv.updateEpisodes(sym, t0 + 6 * 60_000);                                   // opens after the return
+    R.priv.updateEpisodes(sym, t0 + 7 * 60_000);
+    assert.equal(oc.openEpisodeDetails()[0].confounded, true);
+  } finally { R.stop(); }
+  const Q = await rerouteZd('zwtui-none-hold-');
+  try {
+    const real = Q.priv.snapshot();
+    Q.priv.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+    const oc = (Q.zd as unknown as { outcomes: { openEpisodeDetails: () => unknown[] } }).outcomes;
+    const t0 = 1_800_000_000_000;
+    const sym = [{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }];
+    Q.priv.updateEpisodes(sym, t0);
+    Q.zd.noteActionLaunched('healNode', 7, 'you', t0 + 1_000, true);
+    // A socket that never came up: the call failed after its 10 s ready wait —
+    // long enough that a kept hold would push the close past the window below.
+    Q.zd.noteActionSettled('healNode', 7, 'you', t0 + 1_000, t0 + 5 * 60_000, 'none');
+    Q.priv.updateEpisodes([], t0 + 60_000);
+    Q.priv.updateEpisodes([], t0 + 11 * 60_000 + 1_000);
+    assert.equal(oc.openEpisodeDetails().length, 0, 'nothing held: the heal never left');
+  } finally { Q.stop(); }
+});
+
+test('a quick action between two ticks still re-arms the after-window burst (third review)', async () => {
+  const E = await episodeRig('zwtui-quick-burst-');
+  try {
+    const drain = () => { let t = Date.now() + 10 * 86_400_000; while (E.R.zd.drainVerifyRequests(t).length) t += 3_600_000; };
+    E.R.priv.updateEpisodes([], E.t0 + 60_000);
+    drain();
+    E.R.priv.updateEpisodes([], E.t0 + 6 * 60_000 + 1_000);
+    assert.equal(E.R.zd.verifyOwedCount(), 1, 'fixture guard: burst sent');
+    drain();
+    E.R.zd.noteActionLaunched('ping', 7, 'you', E.t0 + 7 * 60_000, true);
+    E.R.zd.noteActionSettled('ping', 7, 'you', E.t0 + 7 * 60_000, E.t0 + 7 * 60_000 + 2_000, 'ok'); // between ticks
+    E.R.priv.updateEpisodes([], E.t0 + 12 * 60_000 + 3_000);
+    assert.equal(E.R.zd.verifyOwedCount(), 1, 'the burst is sent again for the settled after-window');
+  } finally { E.R.stop(); }
 });

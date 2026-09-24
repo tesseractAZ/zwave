@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStates, startHaStates, failureReason, ENTITY_DEGRADED, ENTITY_SUMMONS, ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ROUTE_FAIL_WINDOW_MS } from '../src/haStates';
+import { buildStates, startHaStates, failureReason, ENTITY_DEGRADED, ENTITY_SUMMONS, ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ENTITY_RECOMMENDATION, ROUTE_FAIL_WINDOW_MS } from '../src/haStates';
 import type { DataProvider, Symptom } from '../src/types';
 
 const AP = (over: Record<string, unknown> = {}) => ({
@@ -19,6 +19,10 @@ const data = (over: Partial<DataProvider> = {}): DataProvider => ({
   symptoms: () => [],
   engineStatus: () => ({ enabled: true, ready: 3, total: 38, timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 22, rssiReady: 22, band: 0, bands: 6 }),
   autoPingState: () => AP() as never,
+  autonomyPause: () => null,
+  autonomyPauseOverdue: () => false,
+  nodeById: () => undefined,
+  efficacyFor: () => null,
   ...over,
 } as never);
 
@@ -74,13 +78,14 @@ test('the publisher no-ops without a token, and never throws on a Core restart',
   // Bare dev and the test suite must never reach the network; and when HA Core
   // restarts every POST fails at once — which must not crash the add-on.
   let calls = 0;
-  const noToken = startHaStates({ data: data(), fetchImpl: (async () => { calls += 1; return new Response('', { status: 200 }); }) as never });
+  const noToken = startHaStates({ writeActions: false, data: data(), fetchImpl: (async () => { calls += 1; return new Response('', { status: 200 }); }) as never });
   await noToken.publishNow();
   noToken.stop();
   assert.equal(calls, 0, 'no token ⇒ no network');
 
   const logs: string[] = [];
   const failing = startHaStates({
+    writeActions: false,
     data: data(), token: 't', log: (m) => logs.push(m),
     fetchImpl: (async () => { throw new Error('ECONNREFUSED'); }) as never,
   });
@@ -171,6 +176,7 @@ test('a publish failure is logged at WARN — the one line that must outlive log
   const plain: string[] = [], warned: string[] = [];
   const log = Object.assign((m: string) => plain.push(m), { warn: (m: string) => warned.push(m) });
   const h = startHaStates({
+    writeActions: false,
     data: data(), token: 't', log, intervalMs: 1_000_000,
     fetchImpl: (async () => ({ ok: false, status: 502 })) as never,
   });
@@ -185,6 +191,7 @@ test('a bare log function still works — the warn sink is optional (v0.66.1)', 
   // Tests and bare dev pass a plain function; it must be called exactly as before.
   const plain: string[] = [];
   const h = startHaStates({
+    writeActions: false,
     data: data(), token: 't', log: (m: string) => plain.push(m), intervalMs: 1_000_000,
     fetchImpl: (async () => ({ ok: false, status: 400 })) as never,
   });
@@ -208,6 +215,7 @@ test('one entity HA rejects does not stop the other three publishing (v0.68.0)',
   // silently muted every conclusion behind it for as long as it kept failing.
   const posted: string[] = [];
   const h = startHaStates({
+    writeActions: false,
     data: data(), token: 't', log: () => {}, intervalMs: 1_000_000,
     fetchImpl: (async (url: string) => {
       posted.push(url);
@@ -227,6 +235,7 @@ test('a steady outage logs once — the latch is the message, not the count besi
   const warned: string[] = [];
   const log = Object.assign(() => {}, { warn: (m: string) => warned.push(m) });
   const h = startHaStates({
+    writeActions: false,
     data: data(), token: 't', log, intervalMs: 1_000_000,
     fetchImpl: (async (url: string) =>
       // tick 1 fails all four; tick 2 fails only the first — same cause, new count
@@ -244,6 +253,7 @@ test('a publish requested mid-tick joins that tick instead of doubling it (v0.68
   let release!: () => void;
   const gate = new Promise<void>((r) => { release = r; });
   const h = startHaStates({
+    writeActions: false,
     data: data(), token: 't', log: () => {}, intervalMs: 1_000_000,
     fetchImpl: (async () => { calls += 1; await gate; return { ok: true, status: 200 }; }) as never,
   });
@@ -330,6 +340,7 @@ test('a refused publish names the REASON the refusal gave (v0.69.0)', async () =
   const warned: string[] = [];
   const log = Object.assign(() => {}, { warn: (m: string) => warned.push(m) });
   const h = startHaStates({
+    writeActions: false,
     data: data(), token: 't', log, intervalMs: 1_000_000,
     fetchImpl: (async () => ({ ok: false, status: 400,
       text: async () => JSON.stringify({ result: 'error', message: 'System is not ready with state: shutdown' }) })) as never,
@@ -346,4 +357,95 @@ test('an odd or empty refusal body never makes a failing publish fail harder (v0
   assert.equal(await failureReason({ text: async () => { throw new Error('boom'); } }), '', 'a reader that throws');
   assert.equal(await failureReason({ text: async () => '<html>Bad\n  Gateway</html>' }), ': <html>Bad Gateway</html>', 'plain text, whitespace collapsed');
   assert.ok((await failureReason({ text: async () => 'x'.repeat(5_000) })).length <= 162, 'bounded');
+});
+
+test('a pause is published on the engine sensor, and does NOT degrade the mesh until it is overdue (v0.72.0)', () => {
+  const since = Date.parse('2026-09-23T14:02:00Z');
+  const paused = { by: ['tui' as const], since, reason: 'paused from the TUI' };
+  const fresh = buildStates(data({ autoPingState: () => AP({ suppressed: 'paused' }) as never, autonomyPause: () => paused }), since + 3_600_000);
+  assert.equal(by(fresh, ENTITY_ENGINE).state, 'suppressed:paused');
+  assert.deepEqual(by(fresh, ENTITY_ENGINE).attrs.paused_by, ['tui']);
+  assert.equal(by(fresh, ENTITY_ENGINE).attrs.paused_since, '2026-09-23T14:02:00.000Z');
+  assert.equal(by(fresh, ENTITY_ENGINE).attrs.auto_remediation, 'none-admitted');
+  assert.equal(by(fresh, ENTITY_DEGRADED).state, 'off', 'a fresh pause is what the owner asked for');
+  const old = buildStates(data({ autoPingState: () => AP({ suppressed: 'paused' }) as never, autonomyPause: () => paused, autonomyPauseOverdue: () => true }), since + 25 * 3_600_000);
+  assert.equal(by(old, ENTITY_DEGRADED).state, 'on', 'a pause past 24 h is itself the degraded condition');
+  assert.match(String(by(old, ENTITY_DEGRADED).attrs.reason), /automatic writes paused 25h \(by tui\) — nothing checks the mesh/);
+  const running = buildStates(data());
+  assert.equal(by(running, ENTITY_ENGINE).attrs.paused_by, null);
+  assert.equal(by(running, ENTITY_ENGINE).attrs.paused_since, null);
+});
+
+test('a pause never hides no-capability-data from the degraded alarm (v0.72.0)', () => {
+  // `paused` ranks below storm and no-capability-data in decideAutoPings, so a
+  // paused add-on that has gone blind still reports the blindness.
+  const s = buildStates(data({ autoPingState: () => AP({ suppressed: 'no-capability-data' }) as never,
+    autonomyPause: () => ({ by: ['ha'], since: Date.now(), reason: 'x' }) }));
+  assert.equal(by(s, ENTITY_DEGRADED).state, 'on');
+});
+
+test('the recommendation is the sixth entity; the other five keep their ids and keys, the engine gaining exactly three (v0.72.0)', () => {
+  const s = buildStates(data(), 1_800_000_000_000, { writeActions: true, startedAt: 1_799_999_000_000 });
+  assert.deepEqual(s.map((x) => x.entity), [ENTITY_DEGRADED, ENTITY_SUMMONS, 'sensor.zwave_tui_symptoms', ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ENTITY_RECOMMENDATION]);
+  assert.deepEqual(Object.keys(by(s, ENTITY_ENGINE).attrs),
+    ['friendly_name', 'detectors_ready', 'detectors_unmeasured', 'detectors_total', 'rtt_ready', 'paused_by', 'paused_since', 'auto_remediation']);
+  const r = by(s, ENTITY_RECOMMENDATION);
+  assert.equal(r.state, 'none');
+  assert.equal(r.attrs.automatic, false);
+  assert.equal(r.attrs.watching_since, new Date(1_799_999_000_000).toISOString());
+  const again = buildStates(data(), 1_800_000_060_000, { writeActions: true, startedAt: 1_799_999_000_000 });
+  assert.equal(JSON.stringify(by(again, ENTITY_RECOMMENDATION)), JSON.stringify(r), 'an unchanged recommendation republishes byte-identically');
+});
+
+test('an overdue pause degrades the mesh only while it is what stops auto-ping; an active recommendation republishes byte-identically (v0.72.0 review)', () => {
+  const since = Date.parse('2026-09-23T14:02:00Z');
+  const paused = { by: ['tui' as const], since, reason: 'x' };
+  const stopping = buildStates(data({ autoPingState: () => AP({ suppressed: 'paused' }) as never, autonomyPause: () => paused, autonomyPauseOverdue: () => true }), since + 25 * 3_600_000);
+  assert.equal(by(stopping, ENTITY_DEGRADED).state, 'on');
+  const idle = buildStates(data({ autoPingState: () => AP({ suppressed: 'write-actions-off' }) as never, autonomyPause: () => paused, autonomyPauseOverdue: () => true }), since + 25 * 3_600_000);
+  assert.equal(by(idle, ENTITY_DEGRADED).state, 'off', 'a pause that changes nothing is not an alarm');
+  const sym = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: since, basis: 'measured', evidence: [], narrative: '' } as never;
+  const at = since + 2 * 3_600_000;
+  const a = buildStates(data({ symptoms: () => [sym] }), at, { writeActions: true, startedAt: since - 1 });
+  const b = buildStates(data({ symptoms: () => [sym] }), at + 60_000, { writeActions: true, startedAt: since - 1 });
+  assert.notEqual(by(a, ENTITY_RECOMMENDATION).state, 'none', 'fixture guard: a recommendation is raised');
+  assert.equal(JSON.stringify(by(b, ENTITY_RECOMMENDATION)), JSON.stringify(by(a, ENTITY_RECOMMENDATION)), 'nothing in it moves per minute');
+});
+
+test('the publisher hands the recommendation the master gate it was started with (v0.72.0)', async () => {
+  // dead-flap's plan leads with a ping: an `action` with write actions on, and
+  // `physical` with them off. Only the gate passed to startHaStates decides it.
+  const sym = { kind: 'dead-flap', nodeId: 7, severity: 'crit', sinceMs: Date.now() - 2 * 3_600_000, basis: 'measured', evidence: [], narrative: '' } as never;
+  const posted = async (writeActions: boolean): Promise<string> => {
+    const bodies: { url: string; body: string }[] = [];
+    const h = startHaStates({
+      writeActions, data: data({ symptoms: () => [sym],
+        nodeById: (id: number) => ({ nodeId: id, name: `Node ${id}`, isListening: true, isLongRange: false, isController: false, status: 'alive', stats: {}, entities: [] }) as never }),
+      token: 't', intervalMs: 1_000_000,
+      fetchImpl: (async (url: string, init: { body: string }) => { bodies.push({ url, body: init.body }); return new Response('', { status: 200 }); }) as never,
+    });
+    await h.publishNow();
+    h.stop();
+    return JSON.parse(bodies.find((b) => b.url.endsWith(ENTITY_RECOMMENDATION))!.body).state;
+  };
+  assert.equal(await posted(true), 'action');
+  assert.equal(await posted(false), 'physical');
+});
+
+test('a transient suppressor above an overdue pause does not clear its alarm (second review)', () => {
+  const since = Date.parse('2026-09-23T14:02:00Z');
+  const paused = { by: ['ha' as const], since, reason: 'x' };
+  for (const sup of ['operator-action', 'rebuilding-routes', 'boot-window', 'none']) {
+    const s = buildStates(data({ autoPingState: () => AP({ suppressed: sup }) as never, autonomyPause: () => paused, autonomyPauseOverdue: () => true }), since + 25 * 3_600_000);
+    assert.equal(by(s, ENTITY_DEGRADED).state, 'on', sup);
+  }
+  const off = buildStates(data({ autoPingState: () => null, autonomyPause: () => paused, autonomyPauseOverdue: () => true }), since + 25 * 3_600_000);
+  assert.equal(by(off, ENTITY_DEGRADED).state, 'off', 'auto-ping not running: the pause changes nothing');
+});
+
+test('a storm names itself in degraded\'s reason even under an overdue pause (third review)', () => {
+  const since = Date.parse('2026-09-23T14:02:00Z');
+  const s = buildStates(data({ autoPingState: () => AP({ suppressed: 'storm' }) as never, autonomyPause: () => ({ by: ['tui'], since, reason: 'x' }), autonomyPauseOverdue: () => true }), since + 30 * 3_600_000);
+  assert.equal(by(s, ENTITY_DEGRADED).state, 'on');
+  assert.match(String(by(s, ENTITY_DEGRADED).attrs.reason), /storm/);
 });

@@ -24,6 +24,7 @@
  */
 
 import type { DataProvider } from './types';
+import { buildRecommendation } from './zwave/recommendation';
 import { ROUTE_FAIL_RING } from './zwave/evidenceStore';
 
 // (constants below are re-exported through index.ts's startup banner too)
@@ -42,6 +43,8 @@ export const ENTITY_SUMMONS = 'sensor.zwave_tui_summons';
 export const ENTITY_SYMPTOMS = 'sensor.zwave_tui_symptoms';
 export const ENTITY_ENGINE = 'sensor.zwave_tui_engine';
 export const ENTITY_ROUTE_FAILURES = 'sensor.zwave_tui_route_failures';
+/** The one problem that needs a person, and the first thing to try (v0.72.0). */
+export const ENTITY_RECOMMENDATION = 'sensor.zwave_tui_recommendation';
 
 /** Route failures are counted over a WEEK (v0.68.0). A 24 h window is non-zero
  *  95 % of the time on the reference mesh and never ranks the chronic link above
@@ -109,6 +112,17 @@ export interface HaStatesOptions {
   log?: ((msg: string) => void) & { warn?: (msg: string) => void };
   fetchImpl?: typeof fetch;
   intervalMs?: number;
+  /** The master gate (v0.72.0): the recommendation names a verb only when the
+   *  operator could run it. */
+  writeActions: boolean;
+  /** When this add-on started — the recommendation's persistence clock. */
+  startedAt?: number;
+}
+
+/** What buildStates needs beyond the data (v0.72.0). */
+export interface BuildOpts {
+  writeActions: boolean;
+  startedAt: number;
 }
 
 /** One published entity. */
@@ -126,7 +140,7 @@ export interface StatePost {
  *  same threshold the TUI's own stale-feed chip uses (v0.65.0). */
 const STATS_FEED_DEAD_MS = 10 * 60_000;
 
-export function buildStates(data: DataProvider, now: number = Date.now()): StatePost[] {
+export function buildStates(data: DataProvider, now: number = Date.now(), bo: BuildOpts = { writeActions: false, startedAt: now }): StatePost[] {
   const syms = data.symptoms();
   const crit = syms.filter((s) => s.severity === 'crit').length;
   const warn = syms.filter((s) => s.severity === 'warn').length;
@@ -175,10 +189,25 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
   const statsSilentMs = statsAt == null ? null : now - statsAt;
   const statsBlind = statsSilentMs != null && statsSilentMs > STATS_FEED_DEAD_MS;
   const rf = routeFailureTally(data, now);
+  // A PAUSE IS NOT SILENCE FOREVER (v0.72.0). While paused nothing is sent, so
+  // a mains device that fails without traffic is not noticed — quiet-node fires
+  // only after max(6 h, 3 sweeps) plus its dwell, and then for every idle mains
+  // node. Past PAUSE_ESCALATE_MS the pause
+  // itself is the degraded condition. A fresh pause raises nothing: it is what
+  // the owner asked for.
+  const pause = data.autonomyPause();
+  // Only a pause that stops something (v0.72.0 review): with auto-ping not
+  // running at all — absent, disabled, or behind the master gate — a pause
+  // changes nothing. A transient suppressor ranked above it (a heal, a
+  // rebuild, the boot window) does not clear an overdue pause (second review):
+  // the alarm would flap; storm and no-capability raise degraded themselves.
+  const pauseOverdue = pause != null && ap != null && ap.suppressed !== 'disabled' &&
+    ap.suppressed !== 'write-actions-off' && data.autonomyPauseOverdue(now);
   const degraded = summonsNodes.length > 0
     || crit > 0
     || ident != null
     || statsBlind
+    || pauseOverdue
     || (ap != null && (ap.suppressed === 'storm' || ap.suppressed === 'no-capability-data'));
 
   return [
@@ -225,7 +254,11 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
             ? `${summonsNodes.length} node(s) need a human`
             : crit > 0
               ? `${crit} critical symptom(s)`
-              : `auto-ping ${engineState}`,
+              // A storm or a blind add-on names itself (third review): an
+              // overdue pause must not hide what the mesh is doing.
+              : pauseOverdue && ap?.suppressed !== 'storm' && ap?.suppressed !== 'no-capability-data'
+                ? `automatic writes paused ${Math.round((now - pause!.since) / 3_600_000)}h (by ${pause!.by.join(' + ')}) — nothing checks the mesh`
+                : `auto-ping ${engineState}`,
       },
     },
     {
@@ -261,6 +294,10 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
         detectors_unmeasured: eng.timeoutWindowBlind,
         detectors_total: eng.total,
         rtt_ready: eng.rttReady,
+        // v0.72.0: who paused the autonomous writes, and since when.
+        paused_by: pause?.by ?? null,
+        paused_since: pause == null ? null : new Date(pause.since).toISOString(),
+        auto_remediation: 'none-admitted',
       },
     },
     // ROUTE FAILURES (v0.68.0). Recorded per node since v0.3x and shown on the
@@ -290,6 +327,21 @@ export function buildStates(data: DataProvider, now: number = Date.now()): State
         lower_bound: rf.lowerBound,
       },
     },
+    // THE ONE PROBLEM THAT NEEDS A PERSON (v0.72.0) — see recommendation.ts.
+    // Its attributes are an exact allowlist, and none of them moves per tick,
+    // so an unchanged recommendation republishes byte-identically.
+    (() => {
+      const r = buildRecommendation({
+        symptoms: syms,
+        nodeOf: (id) => data.nodeById(id),
+        writeActions: bo.writeActions,
+        efficacyFor: (k, a) => data.efficacyFor(k, a),
+        ap,
+        startedAt: bo.startedAt,
+        now,
+      });
+      return { entity: ENTITY_RECOMMENDATION, state: r.state, attrs: { ...r.attrs } };
+    })(),
   ];
 }
 
@@ -325,6 +377,7 @@ export function startHaStates(
   const log: NonNullable<HaStatesOptions['log']> = opts.log ?? ((): void => {});
   const doFetch = opts.fetchImpl ?? fetch;
   const base = opts.baseUrl ?? 'http://supervisor/core/api';
+  const startedAt = opts.startedAt ?? Date.now();
   let lastErr: string | null = null;
 
   const publishOnce = async (): Promise<void> => {
@@ -332,7 +385,7 @@ export function startHaStates(
     let tickErr: string | null = null;
     let failed = 0;
     let total = 0;
-    for (const s of buildStates(opts.data)) {
+    for (const s of buildStates(opts.data, Date.now(), { writeActions: opts.writeActions, startedAt })) {
       total += 1;
       try {
         const res = await doFetch(`${base}/states/${s.entity}`, {

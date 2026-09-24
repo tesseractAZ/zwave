@@ -32,7 +32,8 @@ seriously.
   one — mesh maintenance (ping / refresh / re-interview / rebuild-routes /
   remove-failed), device control (on/off/toggle, open/close, lock/unlock), and
   config writes — still requires the operator to open the Actions Menu and type
-  the literal word **CONFIRM** (only a bare `p` ping shortcut is immediate).
+  the literal word **CONFIRM** (only a bare `p` ping shortcut is immediate — and
+  `Z` on ENGINE, which pauses automatic writes and sends nothing).
   Device control and config writes are operator-initiated only.
 - **The engine recommends; exactly one narrow path acts on its own.** The engine
   is advisory by default: it diagnoses, and what it proposes waits for a person.
@@ -47,25 +48,43 @@ seriously.
   routed read — a single Get on the node's own switch/light value — which
   follows an unanswered ladder ping (v0.70.0) and is what the liveness sweep and
   the verification probes send (v0.71.0). Both transmit, so this is a genuine
-  automatic path and is named here as one. Neither changes a device's state or
-  configuration, though a read's Report can correct a stale Home Assistant state.
+  automatic path and is named here as one. Neither commands a device, but they
+  have three effects (DOCS §11): a Report that corrects a stale Home Assistant
+  state is a state change automations react to; a read that fails over leaves
+  the controller on the route that worked; and a device that misses a frame is
+  marked Dead, and the driver rejects every command queued to it at that moment.
   It is bounded: `auto_ping_max_attempts` per outage on a widening backoff, a
   15-minute hold after a node is revived from a death on its own probe, and
-  suppressed during storms, route rebuilds, restarts and while the controller
-  reports its radio off (the nightly NVM backup). Nothing else — a full value
+  suppressed during storms, route rebuilds (whole network, or one device the
+  operator is rebuilding or removing), restarts, while the controller reports
+  its radio off (the nightly NVM backup), and while the owner has paused it. Nothing else — a full value
   refresh, re-interview, rebuild-routes, remove-failed, device control, config
-  writes — has any automatic path whatsoever.
-- **One decision is answerable without write actions.** `write_actions_enabled`
-  gates mesh mutations. The mesh-identity decision below mutates nothing on the
-  mesh — it answers a question about the add-on's own `/data` — so it is
-  offered in read-only installs too. Gating it there would leave a read-only
+  writes — has any automatic path whatsoever. Since v0.72.0 that is a decision,
+  not a deferral: no verb passes the admission rule (DESIGN §3.5), the automatic
+  set is pinned empty by the type checker, and the seven state-changing verbs are
+  in a fixed never-automatic set no option or efficacy reading can reach.
+- **One pause stops every autonomous frame (v0.72.0).** `Z` on the ENGINE screen,
+  or the owner's own `input_boolean.zwave_tui_pause_autonomy`, stops auto-ping's
+  three lanes at once, the dead-node ladder included. It fails closed — an
+  unreadable pause file, or a toggle last seen pausing and not yet re-read (or
+  missing from Home Assistant's state list), reads as paused. A pause set from
+  the TUI is resumed there, behind the typed **CONFIRM**; one set by the toggle
+  lifts only when the toggle is turned off or deleted, and a TUI resume leaves
+  it in place — unless the toggle has gone missing, when the TUI resume forgets it. The
+  add-on only reads the toggle; it creates and writes nothing in Home
+  Assistant's configuration.
+- **Two kinds of decision are answerable without write actions.**
+  `write_actions_enabled` gates mesh mutations. The mesh-identity decision below
+  and the pause on automatic writes mutate nothing on the mesh — they answer a
+  question about the add-on's own `/data` — so they are offered in read-only
+  installs too. Gating it there would leave a read-only
   monitor that swapped a stick held indefinitely: no learned state, the HA
   `degraded` flag latched on, and no reachable way to clear it. It still
   requires the typed **CONFIRM**.
 - **All mesh mutations ride the Home Assistant WebSocket** (authenticated with
   the Supervisor token). The separate, unauthenticated **driver WebSocket**
   (`ws://core-zwave-js:3000`) is used **strictly read-only**, behind a closed
-  four-command allowlist — `set_api_schema`, `start_listening`, and the
+  four-command allowlist (unchanged in v0.72.0) — `set_api_schema`, `start_listening`, and the
   log-stream pair `start_listening_logs` / `stop_listening_logs` — and is
   **never proxied or re-exposed** to the TUI, ingress, or logs. None of the four
   transmits over RF: the log pair toggles this client's own receive flag and
@@ -104,11 +123,14 @@ seriously.
   because U+009B is an 8-bit CSI and U+009D an 8-bit OSC, and xterm.js executes
   both. Inbound console WebSocket frames are size-capped.
 - **What the add-on writes to Home Assistant, and what it does not.** Besides
-  operator-initiated mesh actions, the add-on publishes five *diagnostic* states
+  operator-initiated mesh actions, the add-on publishes six *diagnostic* states
   over the Core REST API — a degraded flag, a count of nodes needing attention,
-  a live symptom count, the engine's own run state, and a week's route failures
-  ranked by link. They carry node ids, counts, symptom kinds and timestamps; **no credentials, no device state, and nothing about
-  the network beyond what the TUI already shows an authenticated operator.** A
+  a live symptom count, the engine's own run state, a week's route failures
+  ranked by link, and (v0.72.0) one recommendation naming a node, its symptom
+  and the first step to try, as free text drawn from the planner. They carry
+  node ids and names, counts, symptom kinds, planner text and timestamps; **no
+  credentials, no device state, and nothing about the network beyond what the
+  TUI already shows an authenticated operator.** A
   held mesh-identity decision raises the same `degraded` flag with the two home
   ids in its `reason` — a home id is a network identifier, not a secret, and it
   is already on the Controller screen. It writes no other entity, and it sends

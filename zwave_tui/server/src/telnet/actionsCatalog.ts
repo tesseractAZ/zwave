@@ -40,7 +40,7 @@ export type MenuGroup = 'maintenance' | 'control' | 'config' | 'system';
  * not on the mesh — so putting them in `ActionKind` would make them scoreable
  * by a ledger that can never observe their effect on a symptom.
  */
-export type MenuActionKind = ActionKind | 'identityKeep' | 'identityFresh' | 'identityResume';
+export type MenuActionKind = ActionKind | 'identityKeep' | 'identityFresh' | 'identityResume' | 'autonomyPause' | 'autonomyResume';
 
 /**
  * The mesh-identity answers, as ONE predicate.
@@ -56,6 +56,23 @@ export type IdentityMenuKind = 'identityKeep' | 'identityFresh' | 'identityResum
 
 export function isIdentityKind(kind: MenuActionKind): kind is IdentityMenuKind {
   return kind === 'identityKeep' || kind === 'identityFresh' || kind === 'identityResume';
+}
+
+/** The owner's pause on every autonomous write (v0.72.0). */
+export type AutonomyMenuKind = 'autonomyPause' | 'autonomyResume';
+
+export function isAutonomyKind(kind: MenuActionKind): kind is AutonomyMenuKind {
+  return kind === 'autonomyPause' || kind === 'autonomyResume';
+}
+
+/**
+ * The decisions that act on the add-on's OWN state rather than on the mesh —
+ * the identity answers and the autonomy pause (v0.72.0). ONE predicate for the
+ * read-only exemption and the menu footer, so a new kind cannot be answerable
+ * at one site and "locked" at the other (the v0.64.1 footer defect).
+ */
+export function isLocalDecisionKind(kind: MenuActionKind): kind is IdentityMenuKind | AutonomyMenuKind {
+  return isIdentityKind(kind) || isAutonomyKind(kind);
 }
 
 export type MenuPayload =
@@ -165,6 +182,24 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
     needsNode: false,
   },
   {
+    kind: 'autonomyPause',
+    label: 'Pause automatic writes',
+    scope: 'system',
+    impact: 'safe',
+    desc: 'Stop everything this add-on sends on its own: auto-ping\u2019s sweep, verification and dead-node ladder.',
+    impactNote: 'Sends nothing. Kept across restarts until resumed. While paused, a mains device that fails when nothing talks to it is not noticed; once the pause is older than 24 h it raises binary_sensor.zwave_tui_degraded while auto-ping is running for it to stop.',
+    needsNode: false,
+  },
+  {
+    kind: 'autonomyResume',
+    label: 'Resume automatic writes',
+    scope: 'system',
+    impact: 'caution',
+    desc: 'Lift the pause set from this TUI.',
+    impactNote: 'auto-ping\u2019s sweep, verification and dead-node ladder start sending again at the next tick. A pause set in Home Assistant (input_boolean.zwave_tui_pause_autonomy) stays until that toggle is off — unless the toggle has gone missing, which this forgets.',
+    needsNode: false,
+  },
+  {
     kind: 'stopRebuild',
     label: 'Stop route rebuild',
     scope: 'system',
@@ -216,6 +251,9 @@ export interface MenuContext {
   cursorScreen?: boolean;
   /** A network route rebuild is currently in progress (controller flag). */
   rebuilding: boolean;
+  /** The TUI source of the autonomy pause is on (v0.72.0): exactly one of
+   *  Pause / Resume is offered. REQUIRED — see identityPending. */
+  autonomyPausedByTui: boolean;
 }
 
 /** One row in the built menu: a descriptor plus whether it's actionable now.
@@ -257,6 +295,9 @@ export function buildMenu(ctx: MenuContext): MenuItem[] {
     // only fail, on the screen where the operator is least sure what to press.
     if (d.kind === 'identityResume' && !ctx.identityResumable) continue;
     if (d.kind === 'rebuildAll' && ctx.rebuilding) continue;
+    // Exclusive, like rebuildAll/stopRebuild: the row that would change something.
+    if (d.kind === 'autonomyPause' && ctx.autonomyPausedByTui) continue;
+    if (d.kind === 'autonomyResume' && !ctx.autonomyPausedByTui) continue;
     const disabled = d.needsNode && !ctx.hasNode;
     items.push({
       desc: d,

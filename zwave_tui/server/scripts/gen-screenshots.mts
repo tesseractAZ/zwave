@@ -270,6 +270,8 @@ const DATA: DataProvider = {
   requestConfigParams: () => {},
   pendingIdentity: () => null,
   resolveIdentityDecision: () => false,
+    autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
 };
 
 const view = (screen: ScreenView, over: Partial<ViewState> = {}): ViewState => ({
@@ -403,7 +405,7 @@ const shots: Array<[string, string[], string]> = [
 
 // The Actions Menu is a modal, not a screen — render it separately.
 const menuItems = [
-  ...buildMenu({ scope: 'device', hasNode: true, rebuilding: false, identityPending: false, identityResumable: false }),
+  ...buildMenu({ scope: 'device', hasNode: true, rebuilding: false, identityPending: false, identityResumable: false, autonomyPausedByTui: false }),
   ...buildEntityRows([
     { entityId: 'light.kitchen_ceiling', domain: 'light', name: 'Kitchen Ceiling', state: 'on', attrs: {} },
     { entityId: 'lock.front_door', domain: 'lock', name: 'Front Door', state: 'locked', attrs: {} },
@@ -420,7 +422,7 @@ shots.push(['actions-menu',
 shots.push(['network-actions',
   renderActionsMenu(view('overview'), {
     scope: 'network',
-    items: buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false }),
+    items: buildMenu({ scope: 'network', hasNode: false, rebuilding: false, identityPending: false, identityResumable: false, autonomyPausedByTui: false }),
     index: 0, targetLabel: null, locked: false,
   }),
   'NETWORK ACTIONS — the mesh-wide operations, kept out of any single device\u2019s menu']);

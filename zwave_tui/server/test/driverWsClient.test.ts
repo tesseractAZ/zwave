@@ -434,6 +434,8 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       requestConfigParams: () => {},
       pendingIdentity: () => null,
       resolveIdentityDecision: () => false,
+    autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
       ackEvent: (seq: number) => seq === 42,
       routeStability: (n: number) => ({ changes: n, hours: 48 }),
       // v0.35 additions — each one an exemplar from the SAME family the hole

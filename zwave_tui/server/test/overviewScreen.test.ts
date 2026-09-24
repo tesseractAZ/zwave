@@ -23,6 +23,8 @@ const ctrl = { homeId: 3586281591 } as ControllerSnapshot;
 const data: DataProvider = {
   pendingIdentity: () => null,
   resolveIdentityDecision: () => false,
+    autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
   nodes: () => nodes, nodeById: (id) => nodes.find((n) => n.nodeId === id), controller: () => ctrl, events: () => [],
   scoreFor: (id) => scores[id] ?? { score: 90, grade: 'A', state: 'ok', flags: [] },
   noiseFloor: () => -92, hasRealNoise: () => true, history: () => ({ rssi: [-60, -59, -58], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }),
@@ -270,4 +272,11 @@ test('an ALIVE but never-measured node does not render a fabricated grade (v0.59
   assert.ok(row, 'node 3 must render');
   assert.doesNotMatch(row, /\b10\b/, `a never-measured node must not show a fabricated score: "${row.trim()}"`);
   assert.match(row, /—/, `it shows the no-measurement dash instead: "${row.trim()}"`);
+});
+
+test('OVERVIEW shows the PAUSED chip too — it builds its masthead with the shared options (third review)', () => {
+  const since = Date.now() - 2 * 3_600_000;
+  const d: DataProvider = { ...data, autoPingState: () => ({ suppressed: 'none' }) as never, autonomyPause: () => ({ by: ['tui'], since, reason: 'x' }) };
+  const top = renderOverview({ view: mkView(120, 20, 0), data: d, visibleNodes: nodes, filtering: false, actionsEnabled: true }).map(strip)[0];
+  assert.match(top, /⚠ AUTO-PING PAUSED 2h/);
 });

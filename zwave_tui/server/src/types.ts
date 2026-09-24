@@ -200,6 +200,8 @@ export type LogKind =
 import type { IdentityChoice, IdentityDecision } from './zwave/homeTag';
 import type { Symptom, SymptomKind } from './zwave/symptoms';
 import type { AutoPingSnapshot } from './zwave/autoPing';
+import type { PauseState } from './zwave/autonomyPause';
+import type { ActorArmView, LiveSpanView } from './zwave/outcomes';
 import type { DriverWsState } from './zwave/driverWsClient';
 export type { DriverWsState } from './zwave/driverWsClient';
 import type { CoarseBucket } from './zwave/evidenceStore';
@@ -478,6 +480,22 @@ export interface DataProvider {
   engineStatus(): EngineStatus;
   /** The mesh-identity decision awaiting an operator answer, or null (v0.64.0). */
   pendingIdentity(): IdentityDecision | null;
+  /** Every actor's arm for a kind (v0.72.0). */
+  actorArms(kind: SymptomKind): ActorArmView[];
+  /** The pooled, all-origin arm (v0.72.0) — what v0.71.0 and earlier learned. */
+  pooledArm(kind: SymptomKind, action: ActionKind): { n: number; lastAt: number | null; nodes: number; legacyN: number; legacyNodes: number } | null;
+  /** How long closed episodes of a kind were live (v0.72.0). */
+  liveSpan(kind: SymptomKind): LiveSpanView | null;
+  /** Route-kind episodes opened ≤15 min after this actor's action (v0.72.0). */
+  routeSymptomsAfter(action: ActionKind, origin: 'you' | 'engine'): number;
+  /** The owner's pause on every autonomous write, or null when running (v0.72.0). */
+  autonomyPause(): PauseState | null;
+  /** Pause from the TUI. Idempotent; sends nothing. */
+  pauseAutonomy(by: 'tui'): PauseState;
+  /** Lift the TUI pause; says whether Home Assistant's toggle still holds one. */
+  resumeAutonomy(): { resumed: boolean; stillPausedBy: 'ha' | null };
+  /** True once a pause has outlived PAUSE_ESCALATE_MS (v0.72.0). */
+  autonomyPauseOverdue(now: number): boolean;
   /** Answer it: `keep` re-adopts the old learning, `fresh` archives it. */
   resolveIdentityDecision(choice: IdentityChoice): boolean;
   /** M5 learned efficacy of an action against a symptom kind, or null when the
@@ -730,6 +748,9 @@ export type InputEvent =
 export interface ActionResult {
   ok: boolean;
   message: string;
+  /** Home Assistant stopped answering before the driver did (v0.72.0): the
+   *  action may still be running, and its result is not known. Never learned. */
+  unknown?: boolean;
 }
 
 /** The kinds of mutating action the TUI can request. The first seven are
@@ -793,12 +814,18 @@ export interface ActionRunner {
    * and 'revive' (the default) the dead ladder's follow-up.
    */
   routedRead(nodeId: number, purpose?: 'revive' | 'probe'): Promise<ActionResult>;
-  refreshValues(nodeId: number): Promise<ActionResult>;
-  reInterview(nodeId: number): Promise<ActionResult>;
-  healNode(nodeId: number): Promise<ActionResult>;
-  rebuildAll(): Promise<ActionResult>;
-  stopRebuild(): Promise<ActionResult>;
-  removeFailed(nodeId: number): Promise<ActionResult>;
+  /** `origin` on every learned verb (v0.72.0): the ledger keeps an arm per
+   *  actor, and a verb with no origin could only ever be booked to the operator. */
+  refreshValues(nodeId: number, origin?: 'you' | 'engine'): Promise<ActionResult>;
+  reInterview(nodeId: number, origin?: 'you' | 'engine'): Promise<ActionResult>;
+  healNode(nodeId: number, origin?: 'you' | 'engine'): Promise<ActionResult>;
+  rebuildAll(origin?: 'you' | 'engine'): Promise<ActionResult>;
+  stopRebuild(origin?: 'you' | 'engine'): Promise<ActionResult>;
+  removeFailed(nodeId: number, origin?: 'you' | 'engine'): Promise<ActionResult>;
+  /** A single-device route rebuild or removal the runner is waiting on
+   *  (v0.72.0), or null. Auto-ping stands down for it — a probe sent while the
+   *  driver deletes and reassigns a node's routes measures the rebuild. */
+  operatorActionInFlight(): { kind: 'healNode' | 'removeFailed'; nodeId: number; since: number } | null;
   /** v0.23: actuate a device entity (on/off/toggle/lock/unlock/open/close) via
    *  call_service. `nodeId` is for logging/attribution only; the entity's domain
    *  (from `entityId`) selects the service. */

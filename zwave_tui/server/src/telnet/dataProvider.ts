@@ -38,6 +38,8 @@ import type {
 } from '../types';
 import type { CoarseBucket } from '../zwave/evidenceStore';
 import type { DriverWsState } from '../zwave/driverWsClient';
+import type { PauseState } from '../zwave/autonomyPause';
+import type { ActorArmView, LiveSpanView } from '../zwave/outcomes';
 import { scoreNode, DEFAULT_NOISE_FLOOR, rssiReading } from '../zwave/health';
 
 /**
@@ -104,6 +106,22 @@ export interface ZwaveDataSource {
   autoPingState(): AutoPingSnapshot | null;
   /** The mesh-identity decision awaiting an operator answer, or null (v0.64.0). */
   pendingIdentity(): IdentityDecision | null;
+  /** Every actor's arm for a kind (v0.72.0). */
+  actorArms(kind: SymptomKind): ActorArmView[];
+  /** The pooled, all-origin arm (v0.72.0) — what v0.71.0 and earlier learned. */
+  pooledArm(kind: SymptomKind, action: ActionKind): { n: number; lastAt: number | null; nodes: number; legacyN: number; legacyNodes: number } | null;
+  /** How long closed episodes of a kind were live (v0.72.0). */
+  liveSpan(kind: SymptomKind): LiveSpanView | null;
+  /** Route-kind episodes opened ≤15 min after this actor's action (v0.72.0). */
+  routeSymptomsAfter(action: ActionKind, origin: 'you' | 'engine'): number;
+  /** The owner's pause on every autonomous write, or null when running (v0.72.0). */
+  autonomyPause(): PauseState | null;
+  /** Pause from the TUI. Idempotent; sends nothing. */
+  pauseAutonomy(by: 'tui'): PauseState;
+  /** Lift the TUI pause; says whether Home Assistant's toggle still holds one. */
+  resumeAutonomy(): { resumed: boolean; stillPausedBy: 'ha' | null };
+  /** True once a pause has outlived PAUSE_ESCALATE_MS (v0.72.0). */
+  autonomyPauseOverdue(now: number): boolean;
   /** Answer it: `keep` re-adopts the old learning, `fresh` archives it. */
   resolveIdentityDecision(choice: IdentityChoice): boolean;
   /** Driver-WS lifecycle line (v0.43.0). REQUIRED — see ackEvent. */
@@ -242,6 +260,14 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     controlArm: (k) => zd.controlArm(k),
     autoPingState: () => zd.autoPingState(),
     pendingIdentity: () => zd.pendingIdentity(),
+    actorArms: (k) => zd.actorArms(k),
+    pooledArm: (k, a) => zd.pooledArm(k, a),
+    liveSpan: (k) => zd.liveSpan(k),
+    routeSymptomsAfter: (a, o) => zd.routeSymptomsAfter(a, o),
+    autonomyPause: () => zd.autonomyPause(),
+    pauseAutonomy: (by: 'tui') => zd.pauseAutonomy(by),
+    resumeAutonomy: () => zd.resumeAutonomy(),
+    autonomyPauseOverdue: (t: number) => zd.autonomyPauseOverdue(t),
     resolveIdentityDecision: (c: 'fresh' | 'keep') => zd.resolveIdentityDecision(c),
     driverWsStatus: () => zd.driverWsStatus(),
     driverWsState: () => zd.driverWsState(),
@@ -365,6 +391,14 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     controlArm: (kind) => zwaveData.controlArm(kind),
     autoPingState: () => zwaveData.autoPingState(),
     pendingIdentity: () => zwaveData.pendingIdentity(),
+    actorArms: (kind) => zwaveData.actorArms(kind),
+    pooledArm: (kind, a) => zwaveData.pooledArm(kind, a),
+    liveSpan: (kind) => zwaveData.liveSpan(kind),
+    routeSymptomsAfter: (a, o) => zwaveData.routeSymptomsAfter(a, o),
+    autonomyPause: () => zwaveData.autonomyPause(),
+    pauseAutonomy: (by: 'tui') => zwaveData.pauseAutonomy(by),
+    resumeAutonomy: () => zwaveData.resumeAutonomy(),
+    autonomyPauseOverdue: (t: number) => zwaveData.autonomyPauseOverdue(t),
     resolveIdentityDecision: (c: 'fresh' | 'keep') => zwaveData.resolveIdentityDecision(c),
     driverWsStatus: () => zwaveData.driverWsStatus(),
     driverWsState: () => zwaveData.driverWsState(),
