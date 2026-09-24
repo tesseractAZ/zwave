@@ -2505,7 +2505,16 @@ test('a heal that reached the driver but did not report success confounds the no
 });
 
 test('two learned actions that overlapped on a node credit neither — the reply order decides nothing (second review)', async () => {
-  const E = await episodeRig('zwtui-overlap-');
+  // On the REAL clock (the overlap check reads Date.now() at the reply, as in
+  // production): with a synthetic episode clock the ledger's opened-after rule
+  // confounded the episode and the test passed with the overlap rule removed.
+  const R = await rerouteZd('zwtui-overlap-');
+  const real = R.priv.snapshot();
+  R.priv.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
+  const oc = (R.zd as unknown as { outcomes: { openEpisodeDetails: () => { kind: string; actionKind: string | null; confounded: boolean }[] } }).outcomes;
+  const t0 = Date.now() - 10 * 60_000;
+  R.priv.updateEpisodes([{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }], t0);
+  const E = { R, oc };
   try {
     const now = Date.now();
     E.R.zd.noteActionLaunched('healNode', 7, 'you', now - 60_000, true);   // a long heal, left running after Esc
@@ -2597,7 +2606,9 @@ test('an episode that opens while an UNKNOWN heal may still be running is confou
     const sym = [{ kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }];
     Q.priv.updateEpisodes(sym, t0);
     Q.zd.noteActionLaunched('healNode', 7, 'you', t0 + 1_000, true);
-    Q.zd.noteActionSettled('healNode', 7, 'you', t0 + 1_000, t0 + 1_000, 'none');  // "node 7 has no device"
+    // A socket that never came up: the call failed after its 10 s ready wait —
+    // long enough that a kept hold would push the close past the window below.
+    Q.zd.noteActionSettled('healNode', 7, 'you', t0 + 1_000, t0 + 5 * 60_000, 'none');
     Q.priv.updateEpisodes([], t0 + 60_000);
     Q.priv.updateEpisodes([], t0 + 11 * 60_000 + 1_000);
     assert.equal(oc.openEpisodeDetails().length, 0, 'nothing held: the heal never left');
