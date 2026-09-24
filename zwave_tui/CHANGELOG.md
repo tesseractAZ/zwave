@@ -152,6 +152,8 @@ includes a sample notification automation.
   never run on their own, whether auto-ping ends an outage is not scored, and
   what its pings learn is shown on ENGINE in their own row and never claimed.
 
+112 new tests pin these — no verb is admitted and the admission table covers every verb, every autonomous write stops while either pause source is on and fails closed on an unreadable file or a missing toggle, an old full read never undoes a newer event, the 24-hour notice waits for a pause that is actually stopping something, a reply is read for what it says, an unsent launch holds and confounds nothing, overlapping actions credit neither, a death is charged to the action running at the time, the recommendation names one problem with its exact attribute set and never a destructive first step — and 150 more mutants show each guard is load-bearing. Full run: 1017 killed, 0 survived, 12 equivalent.
+
 ## 0.71.0
 
 ### Fixed — the add-on's own probes were marking working devices Dead
