@@ -1004,13 +1004,15 @@ test('the verification probe line carries its own spacing and the contention (v0
   h.tick();
   const first = lines.find((l) => /verification probe/.test(l))!;
   assert.match(first, /burst start/, 'the first probe of a burst has no prior gap to report');
-  assert.match(first, /2 owed/, 'and states how many nodes are dividing the queue');
+  assert.match(first, /, 2 nodes owed\)/, 'and states how many NODES are dividing the queue (v0.72.1: a bare "2 owed" read as this node\'s backlog)');
 
   lines.length = 0;
+  owed = 1;
   clock += 140_000; // two ticks later
   h.tick();
   const second = lines.find((l) => /verification probe/.test(l))!;
   assert.match(second, /\+140s/, `the measured gap must appear, got: ${second}`);
+  assert.match(second, /, 1 node owed\)/, `one node is singular, got: ${second}`);
   h.stop();
 });
 
@@ -2168,10 +2170,15 @@ test('a sweep kill whose retry fails says so on the next rung — no second "wit
   clock = T + BOOT_WINDOW_MS + MIN; h.tick();                        // the sweep
   clock += MIN; nodes = [node(1, { isController: true }), dead(7, old)]; h.tick();   // killed; attempt 1
   for (let i = 0; i < 10; i++) { clock += MIN; h.tick(); }            // stays Dead through the 10 m backoff
+  for (let i = 0; i < 35; i++) { clock += MIN; h.tick(); }            // … and the 30 m one
   h.stop();
   assert.equal(ring.filter((m) => /probing without the dwell/.test(m)).length, 1, `only the first retry skips the dwell: ${ring.join(' | ')}`);
   assert.ok(ring.some((m) => /node 7 is still Dead after the immediate retry — probing \(attempt 2\/3\)/.test(m)),
     `the second rung names itself: ${ring.join(' | ')}`);
+  // v0.72.1: the third rung said "after the immediate retry" too.
+  assert.equal(ring.filter((m) => /after the immediate retry/.test(m)).length, 1, `only the second rung follows the immediate retry: ${ring.join(' | ')}`);
+  assert.ok(ring.some((m) => /node 7 is still Dead after attempt 2 — probing \(attempt 3\/3\)/.test(m)),
+    `the third rung names the attempt before it: ${ring.join(' | ')}`);
 });
 
 /* ── v0.65.0: the controller's receiver goes down every night ──────────────
@@ -2809,7 +2816,7 @@ test('a node with no switch/light value is swept by the NoOp probe(), and each l
   assert.deepEqual(R.of('probeRead').map((c) => c.id), [100]);
   assert.ok(R.lines.some((l) => /^auto-ping: node 50 liveness sweep .* — NoOp ping \(no switch\/light value to read\)$/.test(l)),
     `the sweep line says which frame and why: ${JSON.stringify(R.lines)}`);
-  assert.ok(R.lines.some((l) => /^auto-ping: node 100 verification probe \(episode evidence, burst start, \d+ owed\) — routed read$/.test(l)));
+  assert.ok(R.lines.some((l) => /^auto-ping: node 100 verification probe \(episode evidence, burst start, \d+ nodes? owed\) — routed read$/.test(l)));
 });
 
 test('without probeRead the measurement lines carry no frame suffix, exactly v0.70.0 (v0.71.0)', async () => {
