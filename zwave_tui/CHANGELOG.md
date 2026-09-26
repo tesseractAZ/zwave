@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.72.1
+
+### Fixed — a summons no longer says a ping often revives the node
+
+`sensor.zwave_tui_recommendation` in state `summons` carried the planner's
+node-down headline, "a ping often revives it", after auto-ping had already
+spent its attempts on the node without an answer. The headline now states what
+the ladder did: "auto-ping gave up after N unanswered attempts". When the
+ladder gave up because its pings never left the add-on, it says the node itself
+was not tested. Before the ladder gives up, the planner's headline still leads.
+
+One new test pins the wording in all three cases, and 3 new mutants show each
+branch is load-bearing.
+
 ## 0.72.0
 
 ### Changed — automatic remediation is decided: no verb is admitted

@@ -3202,6 +3202,20 @@ const MUTANTS = [
     repl: "    for (const [a, k] of yourDeaths) bit(c.yellow(`${a}: \u00d7${k}`), 0);",
     what: "a death after the operator\u2019s action is named" },
   // ── v0.72.0: sensor.zwave_tui_recommendation — escalation, not execution.
+  // v0.72.1: a summons named the planner's node-down headline ("a ping often
+  // revives it") after the ladder had already spent its pings.
+  { id: "recommend-summons-planner-headline", file: "src/zwave/recommendation.ts", tests: ["recommendation"],
+    find: "    return fill(s, 'summons', firstStep(plan.candidates, true), summonsHeadline(g), given.length - 1);",
+    repl: "    return fill(s, 'summons', firstStep(plan.candidates, true), plan.headline, given.length - 1);",
+    what: "a summons headline says what the ladder did" },
+  { id: "recommend-summons-unsent-wins", file: "src/zwave/recommendation.ts", tests: ["recommendation"],
+    find: "  if (g.launchGaveUp && !g.gaveUp) return",
+    repl: "  if (g.launchGaveUp) return",
+    what: "a ladder that did test the node never says it was not tested" },
+  { id: "recommend-summons-unsent-untold", file: "src/zwave/recommendation.ts", tests: ["recommendation"],
+    find: "  if (g.launchGaveUp && !g.gaveUp) return",
+    repl: "  if (false) return",
+    what: "a ladder whose pings never left says the node was not tested" },
   { id: "recommend-persist-zero", file: "src/zwave/recommendation.ts", tests: ["recommendation"],
     find: "    .filter((s) => s.subsumedBy == null && i.now - s.sinceMs >= RECOMMEND_PERSIST_MS)",
     repl: "    .filter((s) => s.subsumedBy == null && i.now - s.sinceMs >= 0)",
