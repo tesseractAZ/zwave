@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.72.1
+
+### Fixed — a summons no longer says a ping often revives the node
+
+`sensor.zwave_tui_recommendation` in state `summons` carried the planner's
+node-down headline, "a ping often revives it", after auto-ping had already
+spent its attempts on the node without an answer. The headline now states what
+the ladder did: "auto-ping gave up after N unanswered attempts". When the
+ladder gave up because its pings never left the add-on, it says the node itself
+was not tested. Before the ladder gives up, the planner's headline still leads.
+
+### Fixed — two auto-ping log lines said something other than what happened
+
+- After a node went Dead with the add-on's own sweep or verification probe to
+  it unanswered, every later ladder attempt was logged as "is still Dead after
+  the immediate retry". Only the second attempt follows that retry. The third
+  now reads "is still Dead after attempt 2".
+- Each verification probe line ended "N owed", where N is the number of NODES
+  the whole fleet's verification queue is serving. Printed beside one node, it
+  read as that node's own count of remaining probes, and it rose and fell as
+  other nodes' bursts overlapped. The line now reads "N nodes owed" ("1 node
+  owed").
+
+One new test pins the summons wording in all three cases and two tests are
+extended for the log lines. Five new mutants show each change is load-bearing,
+and the three existing mutants anchored on the verification line are
+re-pointed.
+
 ## 0.72.0
 
 ### Changed — automatic remediation is decided: no verb is admitted

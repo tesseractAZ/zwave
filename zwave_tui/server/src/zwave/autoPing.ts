@@ -1773,7 +1773,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       const msg = state.probeDeath.has(nodeId)
         ? (attempt === 1
           ? `auto-ping: node ${nodeId} went Dead with our ${killedBy === 'verify' ? 'verification' : 'sweep'} probe to it unanswered — probing without the dwell `
-          : `auto-ping: node ${nodeId} is still Dead after the immediate retry — probing `) +
+          // Only the second rung follows the immediate retry (v0.72.1: the
+          // third said so too).
+          : `auto-ping: node ${nodeId} is still Dead after ${attempt === 2 ? 'the immediate retry' : `attempt ${attempt - 1}`} — probing `) +
           `(attempt ${attempt}/${o.config.maxAttempts})`
         : `auto-ping: node ${nodeId} has been Dead past the dwell — ` +
           `probing (attempt ${attempt}/${o.config.maxAttempts})`;
@@ -1857,7 +1859,9 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       const gap = decision.verifyFirst.includes(nodeId) || sinceMs == null
         ? 'burst start'
         : `+${Math.round(sinceMs / 1000)}s`;
-      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)` + frameNote(frame, nodeId, t);
+      // The count is the FLEET's queue, not this node's (v0.72.1: printed bare
+      // beside one node it read as that node's own backlog).
+      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t);
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       // MEASUREMENT lane too (v0.38.1) — a verification probe exists to fill

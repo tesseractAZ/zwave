@@ -26,7 +26,7 @@
 
 import type { NodeSnapshot, Efficacy, ActionKind } from '../types';
 import type { Symptom, SymptomKind } from './symptoms';
-import type { AutoPingSnapshot } from './autoPing';
+import type { AutoPingSnapshot, AutoPingNodeState } from './autoPing';
 import { planFor, type PlanCandidate } from './planner';
 import { manualBecause } from './admission';
 
@@ -61,6 +61,15 @@ export interface Recommendation {
 }
 
 const SEVERITY_RANK: Record<Symptom['severity'], number> = { crit: 0, warn: 1, watch: 2 };
+
+/** The headline for a summons (v0.72.1). The planner's node-down headline
+ *  says a ping often revives the node — true before the ladder runs, false
+ *  once it has spent its attempts. A ladder whose launches never left the
+ *  add-on did not test the node at all, and says so. */
+function summonsHeadline(g: AutoPingNodeState): string {
+  if (g.launchGaveUp && !g.gaveUp) return 'Node is DOWN — auto-ping could not send its pings, so the node itself was not tested';
+  return `Node is DOWN — auto-ping gave up after ${g.attempts} unanswered attempt${g.attempts === 1 ? '' : 's'}`;
+}
 
 /** The first candidate a notification may lead with. */
 function firstStep(cands: PlanCandidate[], physicalOnly: boolean): PlanCandidate | null {
@@ -105,7 +114,7 @@ export function buildRecommendation(i: RecommendationInput): Recommendation {
     const s: Symptom = i.symptoms.find((x) => x.kind === 'node-down' && x.nodeId === g.nodeId)
       ?? { kind: 'node-down', nodeId: g.nodeId, severity: 'crit', sinceMs: g.deadSinceMs ?? i.now, basis: 'measured', evidence: [], narrative: '' };
     const plan = planFor(s, i.nodeOf(g.nodeId), ctx);
-    return fill(s, 'summons', firstStep(plan.candidates, true), plan.headline, given.length - 1);
+    return fill(s, 'summons', firstStep(plan.candidates, true), summonsHeadline(g), given.length - 1);
   }
 
   // 2. The oldest, most severe symptom that has lasted long enough.

@@ -49,6 +49,22 @@ test('a node the ladder gave up on outranks every symptom (v0.72.0)', () => {
   assert.equal(r.attrs.symptom, 'node-down');
 });
 
+test('a summons headline says what the ladder did, never that a ping often revives it (v0.72.1)', () => {
+  const down = sym('node-down', 7, 2 * 3_600_000, { severity: 'crit' });
+  const gave = buildRecommendation(inp({ symptoms: [down], ap: AP([apNode(7, { deadSinceMs: NOW - 2 * 3_600_000, attempts: 3, gaveUp: true })]) }));
+  assert.equal(gave.state, 'summons');
+  assert.equal(gave.attrs.headline, 'Node is DOWN — auto-ping gave up after 3 unanswered attempts');
+  const one = buildRecommendation(inp({ symptoms: [down], ap: AP([apNode(7, { deadSinceMs: NOW - 3_600_000, attempts: 1, gaveUp: true })]) }));
+  assert.equal(one.attrs.headline, 'Node is DOWN — auto-ping gave up after 1 unanswered attempt');
+  const unsent = buildRecommendation(inp({ symptoms: [down], ap: AP([apNode(7, { deadSinceMs: NOW - 3_600_000, attempts: 0, launchGaveUp: true })]) }));
+  assert.equal(unsent.attrs.headline, 'Node is DOWN — auto-ping could not send its pings, so the node itself was not tested');
+  const both = buildRecommendation(inp({ symptoms: [down], ap: AP([apNode(7, { deadSinceMs: NOW - 3_600_000, attempts: 3, gaveUp: true, launchGaveUp: true })]) }));
+  assert.match(String(both.attrs.headline), /gave up after 3/, 'a ladder that did test the node says so');
+  // Before the ladder gives up the planner's headline still leads.
+  const paused = buildRecommendation(inp({ symptoms: [down], ap: AP([apNode(7, { deadSinceMs: NOW - 2 * 3_600_000, attempts: 1 })], 'paused') }));
+  assert.match(String(paused.attrs.headline), /a ping often revives it/);
+});
+
 test('the first step is never destructive and never blocked: signal problems and a ghost are physical (v0.72.0)', () => {
   for (const kind of ['rate-fallback', 'chatty-device', 'ghost-suspect'] as SymptomKind[]) {
     const r = buildRecommendation(inp({ symptoms: [sym(kind, 7, 61 * 60_000)] }));

@@ -1061,8 +1061,8 @@ const MUTANTS = [
     what: "the ladder's own remediation probe reaches the SERVER log, not only the ring" },
   { id: 'autoping-verify-visible', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Re-pointed in v0.71.0: the line names its frame.
-    find: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)` + frameNote(frame, nodeId, t);\n      o.log('info', nodeId, msg);\n      o.log2?.(msg);",
-    repl: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)` + frameNote(frame, nodeId, t);\n      o.log('info', nodeId, msg);",
+    find: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t);\n      o.log('info', nodeId, msg);\n      o.log2?.(msg);",
+    repl: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t);\n      o.log('info', nodeId, msg);",
     what: 'the VERIFICATION probe — the evidence a verdict rests on — is on the record too' },
   { id: 'autoping-trace', file: 'src/zwave/autoPing.ts',
     // Reverts to the state the feature was FOUND in: enabled, healthy, and
@@ -1543,8 +1543,8 @@ const MUTANTS = [
     // auto-ping itself diagnosed as a no-op, and which made the v0.36.0 deploy
     // unverifiable from outside.
     // Re-pointed in v0.71.0: the line names its frame.
-    find: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)` + frameNote(frame, nodeId, t);\n      o.log('info', nodeId, msg);\n      o.log2?.(msg);",
-    repl: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} owed)` + frameNote(frame, nodeId, t);\n      o.log('info', nodeId, msg);\n      o.log2?.debug?.(msg);",
+    find: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t);\n      o.log('info', nodeId, msg);\n      o.log2?.(msg);",
+    repl: "      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t);\n      o.log('info', nodeId, msg);\n      o.log2?.debug?.(msg);",
     what: 'an autonomous write is visible in BOTH the event ring and the server log' },
   { id: 'verify-drain-past-the-gates', file: 'src/zwave/autoPing.ts', tests: ['autoPing'],
     // Re-creates the v0.36.0/.1 seam defect: resolving the ledger's queue BEFORE
@@ -3202,6 +3202,32 @@ const MUTANTS = [
     repl: "    for (const [a, k] of yourDeaths) bit(c.yellow(`${a}: \u00d7${k}`), 0);",
     what: "a death after the operator\u2019s action is named" },
   // ── v0.72.0: sensor.zwave_tui_recommendation — escalation, not execution.
+  // v0.72.1: the verification line printed the fleet's queue depth bare
+  // ("2 owed") beside one node, where it read as that node's own backlog.
+  { id: "verify-owed-names-nodes", file: "src/zwave/autoPing.ts", tests: ["autoPing"],
+    find: "${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)",
+    repl: "${decision.verifyOwed} owed)",
+    what: "the verification line says the queue counts nodes" },
+  // v0.72.1: the ladder's third rung after a probe kill said "after the
+  // immediate retry", which only the second rung follows.
+  { id: "ladder-third-rung-names-attempt", file: "src/zwave/autoPing.ts", tests: ["autoPing"],
+    find: "is still Dead after ${attempt === 2 ? 'the immediate retry' : `attempt ${attempt - 1}`} — probing ",
+    repl: "is still Dead after the immediate retry — probing ",
+    what: "the third rung names the attempt before it" },
+  // v0.72.1: a summons named the planner's node-down headline ("a ping often
+  // revives it") after the ladder had already spent its pings.
+  { id: "recommend-summons-planner-headline", file: "src/zwave/recommendation.ts", tests: ["recommendation"],
+    find: "    return fill(s, 'summons', firstStep(plan.candidates, true), summonsHeadline(g), given.length - 1);",
+    repl: "    return fill(s, 'summons', firstStep(plan.candidates, true), plan.headline, given.length - 1);",
+    what: "a summons headline says what the ladder did" },
+  { id: "recommend-summons-unsent-wins", file: "src/zwave/recommendation.ts", tests: ["recommendation"],
+    find: "  if (g.launchGaveUp && !g.gaveUp) return",
+    repl: "  if (g.launchGaveUp) return",
+    what: "a ladder that did test the node never says it was not tested" },
+  { id: "recommend-summons-unsent-untold", file: "src/zwave/recommendation.ts", tests: ["recommendation"],
+    find: "  if (g.launchGaveUp && !g.gaveUp) return",
+    repl: "  if (false) return",
+    what: "a ladder whose pings never left says the node was not tested" },
   { id: "recommend-persist-zero", file: "src/zwave/recommendation.ts", tests: ["recommendation"],
     find: "    .filter((s) => s.subsumedBy == null && i.now - s.sinceMs >= RECOMMEND_PERSIST_MS)",
     repl: "    .filter((s) => s.subsumedBy == null && i.now - s.sinceMs >= 0)",
