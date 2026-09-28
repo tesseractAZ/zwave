@@ -76,6 +76,29 @@ test('a sleeper\'s declared report interval comes from the dump, then from value
   }
 });
 
+test('a sleeper that finishes its interview after the dump is watched from its ready event (v0.73.1)', async () => {
+  // A node still interviewing is dumped with no values; before v0.73.1 it
+  // stayed unwatched until the next reconnect re-sent the dump.
+  const srv = await mockServer({ nodes: [{ nodeId: 44, isListening: false, isFrequentListening: true, statistics: {}, values: [] }] });
+  const declared: [number, unknown][] = [];
+  const c = createDriverWsClient({ url: srv.url, callbacks: { onNodeDeclared: (id, d) => declared.push([id, d]) } });
+  c.start();
+  try {
+    await waitFor(() => declared.length >= 1);
+    assert.deepEqual(declared[0], [44, { reason: 'no-declared-interval' }]);
+    srv.push({ source: 'node', event: 'ready', nodeId: 44, nodeState: { nodeId: 44, isListening: false, isFrequentListening: true, statistics: {},
+      values: [{ commandClass: 112, endpoint: 0, property: 1, value: 70, metadata: { label: 'Heartbeat Interval', unit: 'minutes' } }] } });
+    await waitFor(() => declared.length >= 2);
+    assert.deepEqual(declared[1], [44, { ms: 70 * 60_000, source: 'heartbeat' }]);
+    srv.push({ source: 'node', event: 'value updated', nodeId: 44, args: { commandClass: 112, endpoint: 0, property: 1, newValue: 60 } });
+    await waitFor(() => declared.length >= 3);
+    assert.deepEqual(declared[2], [44, { ms: 60 * 60_000, source: 'heartbeat' }], 'and its value events are followed from then on');
+  } finally {
+    c.stop();
+    await srv.close();
+  }
+});
+
 test('the radio coming back on is remembered, and the log stream says since when it has watched (v0.73.0)', async () => {
   const srv = await mockServer();
   const c = createDriverWsClient({ url: srv.url, callbacks: {} });

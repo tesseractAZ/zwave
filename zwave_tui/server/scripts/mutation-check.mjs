@@ -3202,6 +3202,12 @@ const MUTANTS = [
     repl: "    for (const [a, k] of yourDeaths) bit(c.yellow(`${a}: \u00d7${k}`), 0);",
     what: "a death after the operator\u2019s action is named" },
   // ── v0.72.0: sensor.zwave_tui_recommendation — escalation, not execution.
+  // v0.73.1: a node still interviewing at dump time is dumped with no values;
+  // its declaration arrives with its `ready` event.
+  { id: "mr-ready-ignored", file: "src/zwave/driverWsClient.ts", tests: ["driverWsClient"],
+    find: "      onNodeState(ev.nodeState);\n",
+    repl: "",
+    what: "a node that becomes ready after the dump is watched without a reconnect" },
   // v0.73.0: the missed-report watch for sleeping nodes.
   { id: "mr-watch-boundary", file: "src/zwave/missedReport.ts", tests: ["missedReport"],
     find: "    : silentMs > MISSED_WATCH_MULT * d.ms + extra ? 'watch'",
@@ -3256,8 +3262,8 @@ const MUTANTS = [
     repl: "        (a.propertyKey ?? null) === ref.propertyKey) {",
     what: "only the declaring value's events are read" },
   { id: "mr-dump-listening-too", file: "src/zwave/driverWsClient.ts", tests: ["driverWsClient"],
-    find: "      if (node.isListening === false) {\n        const found",
-    repl: "      if (node.isListening !== undefined) {\n        const found",
+    find: "    if (node.isListening === false) {\n      const found",
+    repl: "    if (node.isListening !== undefined) {\n      const found",
     what: "declarations are kept for sleepers alone" },
   { id: "mr-rf-on-forgotten", file: "src/zwave/driverWsClient.ts", tests: ["driverWsClient"],
     find: "    if (rf === 'on') lastRfOnAt = now;\n",

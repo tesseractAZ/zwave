@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.73.1
+
+### Fixed — a sleeper still interviewing at connect time is watched once it is ready
+
+The driver-WS state dump carries no values for a node whose interview has not
+finished, so such a sleeper had no declared interval and stayed unwatched until
+the next reconnect re-sent the dump. The node's `ready` event carries its full
+state. It is now read the same way as the dump, so the declaration arrives as
+soon as the node is ready, and the value events for it are followed from then
+on.
+
+One new test pins it and one new mutant shows it is load-bearing.
+
 ## 0.73.0
 
 ### Added — `missed-report`: a sleeping device that stops reporting is no longer invisible

@@ -590,6 +590,36 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     }
   }
 
+  /** One node's state — from the dump, or from its `ready` event (v0.73.1:
+   *  a node still interviewing at dump time is dumped with no values, so its
+   *  declaration arrives only when it becomes ready). */
+  function onNodeState(n: unknown): boolean {
+    if (!n || typeof n !== 'object') return false;
+    const node = n as Record<string, unknown>;
+    const nodeId = saneNodeId(node.nodeId);
+    if (nodeId == null) return false;
+    cb.onNodeFlags?.(nodeId, {
+      isListening: typeof node.isListening === 'boolean' ? node.isListening : null,
+      isFrequentListening: node.isFrequentListening === true ? true : node.isFrequentListening === false ? false : null,
+    });
+    const stats = node.statistics as Record<string, unknown> | undefined;
+    const seen = parseLastSeen(stats?.lastSeen);
+    if (seen != null) cb.onNodeLastSeen?.(nodeId, seen);
+    // Sleeping nodes only: the declaration is kept for them alone, so the
+    // map is bounded by the mesh's battery devices (v0.73.0).
+    if (node.isListening === false) {
+      const found = findDeclared(Array.isArray(node.values) ? (node.values as DumpValue[]) : []);
+      if ('ref' in found) {
+        declaredRefs.set(nodeId, found.ref);
+        cb.onNodeDeclared?.(nodeId, declaredFrom(found.ref, found.value));
+      } else {
+        declaredRefs.delete(nodeId);
+        cb.onNodeDeclared?.(nodeId, { reason: found.reason });
+      }
+    } else declaredRefs.delete(nodeId);
+    return true;
+  }
+
   function onStateDump(stateBlob: unknown): void {
     if (!stateBlob || typeof stateBlob !== 'object') return;
     const s = stateBlob as Record<string, unknown>;
@@ -602,30 +632,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     const nodes = Array.isArray(s.nodes) ? s.nodes : [];
     let flagged = 0;
     for (const n of nodes) {
-      if (!n || typeof n !== 'object') continue;
-      const node = n as Record<string, unknown>;
-      const nodeId = saneNodeId(node.nodeId);
-      if (nodeId == null) continue;
-      cb.onNodeFlags?.(nodeId, {
-        isListening: typeof node.isListening === 'boolean' ? node.isListening : null,
-        isFrequentListening: node.isFrequentListening === true ? true : node.isFrequentListening === false ? false : null,
-      });
-      flagged += 1;
-      const stats = node.statistics as Record<string, unknown> | undefined;
-      const seen = parseLastSeen(stats?.lastSeen);
-      if (seen != null) cb.onNodeLastSeen?.(nodeId, seen);
-      // Sleeping nodes only: the declaration is kept for them alone, so the
-      // map is bounded by the mesh's battery devices (v0.73.0).
-      if (node.isListening === false) {
-        const found = findDeclared(Array.isArray(node.values) ? (node.values as DumpValue[]) : []);
-        if ('ref' in found) {
-          declaredRefs.set(nodeId, found.ref);
-          cb.onNodeDeclared?.(nodeId, declaredFrom(found.ref, found.value));
-        } else {
-          declaredRefs.delete(nodeId);
-          cb.onNodeDeclared?.(nodeId, { reason: found.reason });
-        }
-      } else declaredRefs.delete(nodeId);
+      if (onNodeState(n)) flagged += 1;
     }
     log(`driver-ws: state dump processed (${flagged} nodes, bgRSSI ${bg ? 'present' : 'absent'})`);
   }
@@ -678,6 +685,10 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       const stats = ev.statistics as Record<string, unknown> | undefined;
       const seen = parseLastSeen(stats?.lastSeen);
       if (seen != null) cb.onNodeLastSeen?.(nodeId, seen);
+      return;
+    }
+    if (ev.source === 'node' && ev.event === 'ready') {
+      onNodeState(ev.nodeState);
       return;
     }
     // A new value for exactly the value that declares a sleeping node's report
