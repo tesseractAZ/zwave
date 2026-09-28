@@ -34,7 +34,7 @@ function sparseRing(now: number, rssi: number, events: Ev[], denseTx = 0): Evide
 function inp(now: number, ring: EvidenceSample[], over: Partial<NodeSnapshot> = {}): DetectInput {
   return { now, nodes: [node(1), node(18, over)], controller: { backgroundRSSI: LIVE_FLOOR } as unknown as ControllerSnapshot, baselines: bl,
     latest: () => ring[ring.length - 1], recent: (id) => (id === 18 ? ring : []), coarse: () => [] as CoarseBucket[], controllerSamples: () => [],
-    coverage: () => null, rateRun: () => null, recordingSince: () => T - 30 * 86_400_000, hasRealNoise: () => true } as DetectInput;
+    coverage: () => null, rateRun: () => null, recordingSince: () => T - 30 * 86_400_000, sleeperWatch: () => null, hasRealNoise: () => true } as DetectInput;
 }
 /** Tick every 10 s for `mins` minutes; return every minute a weak-signal was emitted. */
 let lastEvidence: unknown = null;

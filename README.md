@@ -305,7 +305,7 @@ re-asserted every 30 seconds:
 | entity | state | notable attributes |
 | --- | --- | --- |
 | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `paused_by`, `paused_since`, `auto_remediation` |
+| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `paused_by`, `paused_since`, `auto_remediation`, `sleepers_watched`, `sleepers_total` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
 | `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind or before the roster has loaded) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |

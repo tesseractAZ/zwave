@@ -200,6 +200,7 @@ export type LogKind =
 import type { IdentityChoice, IdentityDecision } from './zwave/homeTag';
 import type { Symptom, SymptomKind } from './zwave/symptoms';
 import type { AutoPingSnapshot } from './zwave/autoPing';
+import type { SleeperWatch } from './zwave/missedReport';
 import type { PauseState } from './zwave/autonomyPause';
 import type { ActorArmView, LiveSpanView } from './zwave/outcomes';
 import type { DriverWsState } from './zwave/driverWsClient';
@@ -490,6 +491,8 @@ export interface DataProvider {
   routeSymptomsAfter(action: ActionKind, origin: 'you' | 'engine'): number;
   /** The owner's pause on every autonomous write, or null when running (v0.72.0). */
   autonomyPause(): PauseState | null;
+  /** Every sleeping node's missed-report watch status (v0.73.0). */
+  sleeperWatches(): SleeperWatch[];
   /** Pause from the TUI. Idempotent; sends nothing. */
   pauseAutonomy(by: 'tui'): PauseState;
   /** Lift the TUI pause; says whether Home Assistant's toggle still holds one. */

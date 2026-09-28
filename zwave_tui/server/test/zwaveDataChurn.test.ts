@@ -1729,6 +1729,32 @@ test('the driver-WS readings reach the engine through zwaveData, not only the cl
   }
 });
 
+test('a sleeper\'s declared interval crosses the production hop into the missed-report watch (v0.73.0)', async () => {
+  // Injected stubs prove the consumer, never the wiring: the dump's
+  // declaration must reach sleeperWatches() through the real callback.
+  const seen = new Date(Date.now() - 10 * 60_000).toISOString();
+  const srv = await mockServer({ nodes: [{
+    nodeId: 7, isListening: false, isFrequentListening: true, statistics: { lastSeen: seen },
+    values: [{ commandClass: 112, endpoint: 0, property: 1, value: 70, metadata: { label: 'Heartbeat Interval', unit: 'minutes' } }],
+  }] });
+  const ha = fakeHa();
+  const zd = await bootedZwaveData(ha, { refreshMs: 60, driverWsUrl: srv.url });
+  try {
+    // The declaration lands with the dump; the flags reach the snapshot on its next rebuild.
+    await waitFor(() => zd.sleeperWatches().some((w) => w.nodeId === 7 && w.watched), 6000);
+    const w = zd.sleeperWatches().find((x) => x.nodeId === 7)!;
+    assert.equal(w.periodMs, 70 * 60_000);
+    assert.equal(w.source, 'heartbeat');
+    assert.equal(w.watched, true, `watched: ${JSON.stringify(w)}`);
+    assert.equal(w.severity, null, 'ten minutes into a 70-minute heartbeat is healthy');
+    srv.push({ source: 'node', event: 'value updated', nodeId: 7, args: { commandClass: 112, endpoint: 0, property: 1, newValue: 0 } });
+    await waitFor(() => zd.sleeperWatches().find((x) => x.nodeId === 7)?.reason === 'interval-disabled', 6000);
+  } finally {
+    zd.stop();
+    await srv.close();
+  }
+});
+
 test('a config-entry reload anchors the driver-restart burst window even with the driver-WS dark (v0.65.0 review)', async () => {
   // `driverReconnectedAt()` used to read ONLY the driver-WS version handshake.
   // A driver restart is the event most likely to take that link down, and in

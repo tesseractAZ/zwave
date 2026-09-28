@@ -52,6 +52,7 @@ function data(over: Partial<DataProvider> = {}): DataProvider {
     openEpisodes: () => [], controlArm: () => null, autoPingState: () => null,
     actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
     autonomyPause: () => null,
+    sleeperWatches: () => [],
     ...over,
   } as DataProvider;
 }
@@ -559,6 +560,7 @@ test('a paused ENGINE names who paused, since when, and how to resume — and fi
       const raw = renderEngine(ctx(cols, 24, {
         autoPingState: () => AP({ suppressed: 'paused' }),
         autonomyPause: () => ({ by: [...by], since, reason: 'x' }),
+        sleeperWatches: () => [],
       }));
       const joined = plain(raw);
       assert.match(joined, new RegExp(`suppressed: paused \\(by ${by[0]} since \\d\\d:\\d\\d, 2\\.0h\\)`), `${cols}: ${joined}`);
@@ -651,4 +653,17 @@ test('at 80 columns a missing HA toggle is still named on ENGINE (fourth review)
   const hint = plain(raw).split('\n').find((l) => /resume:/.test(l)) ?? '';
   assert.match(hint, /Controller 3 → A \(HA toggle gone\)/, hint);
   for (const l of raw) assert.ok(visLen(l) <= 80);
+});
+
+test('ENGINE says how many sleepers the missed-report watch covers, and why each other one is not (v0.73.0)', () => {
+  const w = (nodeId: number, watched: boolean, reason: string | null) =>
+    ({ nodeId, watched, reason, periodMs: null, source: null, silentMs: null, radioAllowance: false, severity: null }) as never;
+  const out = plain(renderEngine(ctx(120, 40, {
+    driverWsStatus: () => 'live (schema 41, home 3586281591)', driverWsState: () => 'live',
+    sleeperWatches: () => [w(60, true, null), w(61, true, null), w(63, false, 'no-declared-interval')],
+  })));
+  assert.match(out, /SLEEPERS {2}2 of 3 watched for a missed report/);
+  assert.match(out, /#63 declares no report interval/);
+  const none = plain(renderEngine(ctx(120, 40, { driverWsStatus: () => 'live', driverWsState: () => 'live', sleeperWatches: () => [] })));
+  assert.doesNotMatch(none, /SLEEPERS/, 'a mesh with no sleepers has no row');
 });

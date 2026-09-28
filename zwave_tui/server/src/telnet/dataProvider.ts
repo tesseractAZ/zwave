@@ -38,6 +38,7 @@ import type {
 } from '../types';
 import type { CoarseBucket } from '../zwave/evidenceStore';
 import type { DriverWsState } from '../zwave/driverWsClient';
+import type { SleeperWatch } from '../zwave/missedReport';
 import type { PauseState } from '../zwave/autonomyPause';
 import type { ActorArmView, LiveSpanView } from '../zwave/outcomes';
 import { scoreNode, DEFAULT_NOISE_FLOOR, rssiReading } from '../zwave/health';
@@ -116,6 +117,8 @@ export interface ZwaveDataSource {
   routeSymptomsAfter(action: ActionKind, origin: 'you' | 'engine'): number;
   /** The owner's pause on every autonomous write, or null when running (v0.72.0). */
   autonomyPause(): PauseState | null;
+  /** Every sleeping node's missed-report watch status (v0.73.0). */
+  sleeperWatches(): SleeperWatch[];
   /** Pause from the TUI. Idempotent; sends nothing. */
   pauseAutonomy(by: 'tui'): PauseState;
   /** Lift the TUI pause; says whether Home Assistant's toggle still holds one. */
@@ -265,6 +268,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     liveSpan: (k) => zd.liveSpan(k),
     routeSymptomsAfter: (a, o) => zd.routeSymptomsAfter(a, o),
     autonomyPause: () => zd.autonomyPause(),
+    sleeperWatches: () => zd.sleeperWatches(),
     pauseAutonomy: (by: 'tui') => zd.pauseAutonomy(by),
     resumeAutonomy: () => zd.resumeAutonomy(),
     autonomyPauseOverdue: (t: number) => zd.autonomyPauseOverdue(t),
@@ -396,6 +400,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     liveSpan: (kind) => zwaveData.liveSpan(kind),
     routeSymptomsAfter: (a, o) => zwaveData.routeSymptomsAfter(a, o),
     autonomyPause: () => zwaveData.autonomyPause(),
+    sleeperWatches: () => zwaveData.sleeperWatches(),
     pauseAutonomy: (by: 'tui') => zwaveData.pauseAutonomy(by),
     resumeAutonomy: () => zwaveData.resumeAutonomy(),
     autonomyPauseOverdue: (t: number) => zwaveData.autonomyPauseOverdue(t),

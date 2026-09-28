@@ -54,6 +54,7 @@
 
 import WebSocket from 'ws';
 import type { LogSink } from '../logger';
+import { findDeclared, declaredFrom, type Declared, type DeclaredRef, type DumpValue } from './missedReport';
 
 /** The ONLY commands this client may ever send. Frozen — see header. */
 export const DRIVER_WS_ALLOWLIST: readonly string[] = Object.freeze([
@@ -81,6 +82,9 @@ export interface DriverWsCallbacks {
   onHomeId?: (homeId: number) => void;
   /** An S2 SPAN-resync log event was attributed to a node (v0.26). */
   onS2Resync?: (nodeId: number) => void;
+  /** A sleeping node's declared report interval, from the state dump and then
+   *  from the value events for that one value (v0.73.0). */
+  onNodeDeclared?: (nodeId: number, declared: Declared) => void;
 }
 
 export interface DriverWsClientOptions {
@@ -150,6 +154,11 @@ export interface DriverWsClient {
    *  `RF_OFF_MAX_MS`, and whenever the link is not live: a stale suppression
    *  must expire on its own. */
   controllerRfOffSince(): number | null;
+  /** When the controller radio last came back on, or null (v0.73.0). */
+  lastRfOnAt(): number | null;
+  /** Since when the log stream has been watched without a break on this
+   *  connection; null while it is dark (v0.73.0). */
+  rfWatchSince(): number | null;
 }
 
 interface VersionMsg {
@@ -348,6 +357,15 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   /** When the controller last reported its receiver OFF (v0.65.0), or null.
    *  Read through the deadline in `controllerRfOffSince()` — never raw. */
   let rfOffSince: number | null = null;
+  /** When the controller last reported its receiver back ON (v0.73.0). Kept
+   *  across reconnects: it is history, and the missed-report watch reads it
+   *  together with `logsLiveSince`, which is not. */
+  let lastRfOnAt: number | null = null;
+  /** When this connection's log stream was acknowledged, or null (v0.73.0). */
+  let logsLiveSince: number | null = null;
+  /** Per sleeping node, the value that declares its report interval — so a
+   *  later value event for exactly that value can be matched (v0.73.0). */
+  const declaredRefs = new Map<number, DeclaredRef>();
   /** True only between a successful start_listening_logs ack and the next
    *  disconnect / storm-stop — the S2 lane's liveness (see s2LaneLive). */
   let logsAcked = false;
@@ -423,6 +441,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     // and a `Turning RF on` that lands while we are disconnected is lost — so
     // the suppression never survives a reconnect (v0.65.0).
     rfOffSince = null;
+    logsLiveSince = null;
     logStormStopped = false;
     logsAcked = false;
     logEvWindowStart = 0;
@@ -553,6 +572,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
             ? 'driver-ws: log stream active (S2 SPAN-resync watch)'
             : `driver-ws: log stream unavailable (${safeTag(m.errorCode ?? 'refused')}) — S2 watch dormant`);
           logsAcked = success;
+          logsLiveSince = success ? Date.now() : null;
           if (!success) logsMsgId = null;
           return;
         }
@@ -594,6 +614,18 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       const stats = node.statistics as Record<string, unknown> | undefined;
       const seen = parseLastSeen(stats?.lastSeen);
       if (seen != null) cb.onNodeLastSeen?.(nodeId, seen);
+      // Sleeping nodes only: the declaration is kept for them alone, so the
+      // map is bounded by the mesh's battery devices (v0.73.0).
+      if (node.isListening === false) {
+        const found = findDeclared(Array.isArray(node.values) ? (node.values as DumpValue[]) : []);
+        if ('ref' in found) {
+          declaredRefs.set(nodeId, found.ref);
+          cb.onNodeDeclared?.(nodeId, declaredFrom(found.ref, found.value));
+        } else {
+          declaredRefs.delete(nodeId);
+          cb.onNodeDeclared?.(nodeId, { reason: found.reason });
+        }
+      } else declaredRefs.delete(nodeId);
     }
     log(`driver-ws: state dump processed (${flagged} nodes, bgRSSI ${bg ? 'present' : 'absent'})`);
   }
@@ -623,6 +655,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     const rf = controllerRfEvent(ev);
     if (rf === 'off') rfOffSince = now;
     else if (rf === 'on') rfOffSince = null;
+    if (rf === 'on') lastRfOnAt = now;
     const nodeId = s2ResyncNodeId(ev);
     if (nodeId != null) cb.onS2Resync?.(nodeId);
   }
@@ -647,7 +680,19 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       if (seen != null) cb.onNodeLastSeen?.(nodeId, seen);
       return;
     }
-    // Every other event type (values, notifications, inclusion …) is ignored:
+    // A new value for exactly the value that declares a sleeping node's report
+    // interval (v0.73.0). Nothing else from a value event is read or kept.
+    if (ev.source === 'node' && (ev.event === 'value updated' || ev.event === 'value added')) {
+      const nodeId = saneNodeId(ev.nodeId);
+      const ref = nodeId == null ? undefined : declaredRefs.get(nodeId);
+      const a = ev.args as Record<string, unknown> | undefined;
+      if (nodeId != null && ref && a && a.commandClass === ref.commandClass && (a.endpoint ?? 0) === ref.endpoint &&
+        a.property === ref.property && (a.propertyKey ?? null) === ref.propertyKey) {
+        cb.onNodeDeclared?.(nodeId, declaredFrom(ref, a.newValue));
+      }
+      return;
+    }
+    // Every other event type (notifications, inclusion …) is ignored:
     // HA's authenticated WS remains the source of truth for all of it.
   }
 
@@ -662,6 +707,8 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     s2LaneFault(): 'refused' | 'storm-stopped' | null {
       return s2Fault({ logsAcked, logsMsgId, logStormStopped, live: state === 'live' });
     },
+    lastRfOnAt: () => lastRfOnAt,
+    rfWatchSince: () => (logsAcked && !logStormStopped && state === 'live' ? logsLiveSince : null),
     controllerRfOffSince(): number | null {
       return rfOffActive(rfOffSince, Date.now(), { live: state === 'live', logsAcked, stormStopped: logStormStopped });
     },

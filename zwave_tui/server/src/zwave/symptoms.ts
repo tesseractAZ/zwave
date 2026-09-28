@@ -17,6 +17,7 @@
  * updates it and returns the current symptom list.
  */
 
+import type { SleeperWatch } from './missedReport';
 import type { NodeSnapshot, ControllerSnapshot, NodeStatus } from '../types';
 import { NodeStatus as NS } from '../types';
 import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage, RateRun } from './evidenceStore';
@@ -61,6 +62,16 @@ export type SymptomKind =
    * sleeping sensor a standing alert.
    */
   | 'quiet-node'
+  /**
+   * A SLEEPING node silent past the report interval it declares (v0.73.0):
+   * its Wake Up interval, or a Configuration parameter labelled as a
+   * heartbeat, read from the driver's value DB. `watch` past 1.5 intervals,
+   * `warn` past 2.5, with one more interval when the silence spans the
+   * controller's nightly radio-off (see missedReport.ts). The sleeping
+   * counterpart of `quiet-node`; nothing is learned from traffic, so a device
+   * that declares no interval is never watched.
+   */
+  | 'missed-report'
   | 'rate-fallback'
   | 'route-churn'
   | 's2-desync'
@@ -128,6 +139,9 @@ export interface DetectInput {
   sweepMs?: number;
   /** Store-level: epoch ms evidence collection began (coverage floor). */
   recordingSince: () => number | null;
+  /** A sleeping node's missed-report watch status, or null for a node that
+   *  does not sleep (v0.73.0). */
+  sleeperWatch: (node: NodeSnapshot) => SleeperWatch | null;
   /** Is the noise floor a real measurement (driver-WS) vs the −95 fallback? */
   hasRealNoise: () => boolean;
 }
@@ -406,6 +420,31 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
           kind: 'quiet-node', nodeId: id, severity: 'warn', sinceMs: since, basis: 'measured',
           evidence: [{ label: 'last heard', value: `${silentH}h ago` }],
           narrative: `${node.name} is a mains node that has not been heard from in ${silentH}h, far past the liveness sweep's cadence. The driver still reports it Alive because it marks a node Dead only when a transmission it attempted fails. Silence this long on a device that never sleeps is the earlier signal.`,
+        });
+      }
+    }
+
+    // missed-report — a sleeping node silent past its DECLARED report
+    // interval (v0.73.0). The decision is missedReport.ts's; this block only
+    // dwells it and words it.
+    {
+      const w = input.sleeperWatch(node);
+      const b = w != null && w.severity != null;
+      const since = dwell(state, key(id, 'missed-report'), b, now);
+      if (since != null && w != null && w.severity != null && w.periodMs != null && w.silentMs != null) {
+        breaching = true;
+        const periodMin = Math.round(w.periodMs / 60_000);
+        const silentMin = Math.round(w.silentMs / 60_000);
+        const what = w.source === 'wake-up' ? 'Wake Up interval' : 'heartbeat interval';
+        out.push({
+          kind: 'missed-report', nodeId: id, severity: w.severity, sinceMs: since, basis: 'measured',
+          evidence: [
+            { label: 'last heard', value: `${silentMin} min ago` },
+            { label: 'declared', value: `${what} ${periodMin} min` },
+          ],
+          narrative: `${node.name} is a sleeping device that declares a ${what} of ${periodMin} min and has not been heard from in ${silentMin} min.` +
+            (w.radioAllowance ? ' One extra interval was allowed because the silence spans a controller radio-off, when a report can be lost.' : '') +
+            ' A battery that has run down, or a device out of range, stops reporting before the driver can mark it Dead.',
         });
       }
     }
