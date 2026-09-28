@@ -1,3 +1,4 @@
+import type { SleeperWatch } from '../src/zwave/missedReport';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { detectSymptoms, windowTimeoutRate, type DetectInput, type SymptomState } from '../src/zwave/symptoms';
@@ -56,6 +57,7 @@ interface Fixture {
   controller?: ControllerSnapshot | null;
   now?: number;
   hasRealNoise?: boolean;
+  sleeperWatch?: (n: NodeSnapshot) => SleeperWatch | null;
 }
 function input(f: Fixture): DetectInput {
   return {
@@ -70,6 +72,7 @@ function input(f: Fixture): DetectInput {
     coverage: (id) => f.cov?.get(id) ?? null,
     rateRun: (id) => (f.recent.get(id) ?? []).reduce<RateRun | null>(foldRateRun, null),
     recordingSince: () => T - 30 * 86_400_000,
+    sleeperWatch: (n) => f.sleeperWatch?.(n) ?? null,
     hasRealNoise: () => f.hasRealNoise ?? true,
   };
 }
@@ -865,4 +868,28 @@ test('a 9.6k same-route regression is a WARNING — even after a send cut short 
   assert.ok(at8, 'live at T+8');
   assert.equal(at8!.sym.severity, 'warn', 'severity follows the run\'s reading, not the newest sample');
   assert.equal(at8!.sym.evidence[0].value, '9.6k');
+});
+
+/* ── missed-report (v0.73.0) ────────────────────────────────────────────── */
+
+test('missed-report: a sleeper past its declared interval fires after the dwell, with its evidence (v0.73.0)', () => {
+  const P = 70 * MIN;
+  const sleeper = node(61, { isListening: false, name: 'Hallway Closet Motion' });
+  let sev: 'watch' | 'warn' | null = 'watch';
+  const watch = (n: NodeSnapshot) => (n.nodeId !== 61 ? null : {
+    nodeId: 61, watched: true, reason: null, periodMs: P, source: 'heartbeat' as const,
+    silentMs: 1.6 * P, radioAllowance: false, severity: sev,
+  });
+  const state: SymptomState = new Map();
+  const inp = (now: number) => input({ now, nodes: [sleeper], recent: new Map(), sleeperWatch: watch });
+  assert.equal(detectSymptoms(inp(T), state).filter((s) => s.kind === 'missed-report').length, 0, 'arming, not fired');
+  const fired = settle(inp, state, T, 6).filter((s) => s.kind === 'missed-report');
+  assert.equal(fired.length, 1);
+  assert.equal(fired[0].severity, 'watch');
+  assert.equal(fired[0].nodeId, 61);
+  assert.deepEqual(fired[0].evidence, [{ label: 'last heard', value: '112 min ago' }, { label: 'declared', value: 'heartbeat interval 70 min' }]);
+  sev = 'warn';
+  assert.equal(detectSymptoms(inp(T + 7 * MIN), state).find((s) => s.kind === 'missed-report')?.severity, 'warn');
+  sev = null;
+  assert.equal(detectSymptoms(inp(T + 8 * MIN), state).filter((s) => s.kind === 'missed-report').length, 0, 'a report clears it at once');
 });

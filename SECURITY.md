@@ -84,7 +84,7 @@ seriously.
 - **All mesh mutations ride the Home Assistant WebSocket** (authenticated with
   the Supervisor token). The separate, unauthenticated **driver WebSocket**
   (`ws://core-zwave-js:3000`) is used **strictly read-only**, behind a closed
-  four-command allowlist (unchanged in v0.72.0) — `set_api_schema`, `start_listening`, and the
+  four-command allowlist (unchanged in v0.73.0) — `set_api_schema`, `start_listening`, and the
   log-stream pair `start_listening_logs` / `stop_listening_logs` — and is
   **never proxied or re-exposed** to the TUI, ingress, or logs. None of the four
   transmits over RF: the log pair toggles this client's own receive flag and
@@ -92,7 +92,11 @@ seriously.
   implicit — zwave-js-server's log forwarder is a *single global transport*
   whose first subscriber's filter is silently applied to every other client, so
   this client subscribes with **no filter** rather than narrowing a stream the
-  operator's own Z-Wave log viewer shares.
+  operator's own Z-Wave log viewer shares. Since v0.73.0 the client also reads,
+  for sleeping nodes only, the one value that declares a node's report interval
+  (its Wake Up interval, or a Configuration parameter labelled as a heartbeat)
+  from the state dump and from the value events for that value. It keeps the
+  number and nothing else, and sends nothing new.
 - **Trust model.** Access over the Home Assistant sidebar (ingress) is already
   HA-authenticated, and the panel is **admin-only** (`panel_admin: true`) — the
   console can remove a failed node and, with write actions on, unlock a lock.

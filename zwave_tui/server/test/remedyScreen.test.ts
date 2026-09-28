@@ -23,6 +23,7 @@ function data(symptoms: Symptom[], efficacyFor: DataProvider['efficacyFor'] = ()
     pendingIdentity: () => null,
     resolveIdentityDecision: () => false,
     autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    sleeperWatches: () => [],
     actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
     nodes: () => nodes, nodeById: (id) => nodes.find((n) => n.nodeId === id), controller: () => ctrl, events: () => [],
     scoreFor: () => ({ score: 90, grade: 'A', state: 'ok', flags: [] }),

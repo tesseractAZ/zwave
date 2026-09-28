@@ -13,6 +13,7 @@ function mockData(over: Partial<DataProvider> = {}): DataProvider {
   return {
     pendingIdentity: () => null, resolveIdentityDecision: () => false,
     autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    sleeperWatches: () => [],
     actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
     nodes: () => [], nodeById: () => undefined, controller: () => ctrl, events: () => [],
     scoreFor: () => ({ score: 0, grade: 'F', state: 'unknown', flags: [] }),

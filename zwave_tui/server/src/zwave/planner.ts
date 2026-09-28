@@ -219,6 +219,13 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
       break;
     }
 
+    case 'missed-report': {
+      headline = 'Sleeping device missed its declared report — check it in person';
+      candidates.push({ action: null, title: 'Check the battery, then trigger the device to make it report', rationale: 'The device declared how often it reports and has now missed that by half an interval or more. A sleeping device cannot be asked to report on demand: a Wake Up device takes commands only when it wakes, so the useful checks are physical — a fresh battery, then a trigger (motion, a button, opening a door) that makes it transmit. If it reports, the watch clears on its own.', basis: 'lore', cost: 'physical', blocked: null });
+      candidates.push({ action: null, title: 'Check its range if a fresh battery does not help', rationale: 'A device that was moved, or whose nearest repeater lost power, can stop reaching the controller. A report that arrives right after moving it closer is the answer.', basis: 'lore', cost: 'physical', blocked: null });
+      break;
+    }
+
     case 'chatty-device': {
       headline = 'Tune the device’s reporting — it is flooding the mesh';
       candidates.push({ action: null, title: 'Reduce its reporting (change-based, not timed) or re-include without S0', rationale: 'A device sending orders of magnitude more reports than the mesh median degrades everyone. Fix the cause: raise its reporting thresholds, prefer change-based over timed reports, and avoid S0 security on sensors (it triples the airtime). These are device-config changes, done in the Z-Wave JS UI.', basis: 'source', cost: 'physical', blocked: null });

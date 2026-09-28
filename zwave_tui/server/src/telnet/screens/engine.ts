@@ -30,6 +30,7 @@
  * exactly-`view.rows` contract and discloses anything it cannot fit.
  */
 
+import { UNWATCHED_TEXT, type UnwatchedReason } from '../../zwave/missedReport';
 import { ADMISSION_SUMMARY } from '../../zwave/admission';
 import { PAUSE_ENTITY } from '../../zwave/autonomyPause';
 import { c, truncate, visLen } from '../ansi';
@@ -319,6 +320,16 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     // alarm. There is ample vertical room here.
     const fault = data.driverLinkFault?.() ?? null;
     if (fault) push('  ' + c.yellow(`⚠ ${fault}`));
+    // The missed-report watch (v0.73.0): how many sleeping devices it can
+    // actually alarm on, and why each other one cannot.
+    const sw = data.sleeperWatches();
+    if (sw.length > 0) {
+      const watched = sw.filter((w) => w.watched).length;
+      push(fitBits(c.label('SLEEPERS') + '  ', [
+        `${watched} of ${sw.length} watched for a missed report`,
+        ...sw.filter((w) => !w.watched && w.reason != null).map((w) => c.grey(`#${w.nodeId} ${UNWATCHED_TEXT[w.reason as UnwatchedReason]}`)),
+      ], view.cols));
+    }
     push('');
   }
 

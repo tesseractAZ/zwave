@@ -67,6 +67,7 @@ import {
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
+import { sleeperWatch, type Declared, type SleeperWatch } from './missedReport';
 import { detectSymptoms, symptomaticNodes, armingNodes, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
@@ -494,6 +495,8 @@ export interface ZwaveData {
   confoundedCount(kind: SymptomKind): number;
   driverWsStatus(): string;
   driverWsState(): DriverWsState;
+  /** Every sleeping node's missed-report watch status (v0.73.0). */
+  sleeperWatches(now?: number): SleeperWatch[];
   s2LaneFault(): 'refused' | 'storm-stopped' | null;
   openEpisodes(): OpenEpisodeSummary[] | null;
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
@@ -796,6 +799,9 @@ class ZwaveDataImpl implements ZwaveData {
   private driverLastSeen = new Map<number, number>();
   /** Driver-reported capability flags per node. */
   private driverListening = new Map<number, { isListening: boolean | null; isFrequentListening: boolean | null }>();
+  /** Each sleeping node's declared report interval (v0.73.0), from the
+   *  driver's value DB. Cleared with the capability flags it depends on. */
+  private driverDeclared = new Map<number, Declared>();
   /** homeId the driver server reported — cross-checked against HA's. */
   private driverHomeId: number | null = null;
   /** Latched once a driver/HA homeId mismatch is proven (permanent this run —
@@ -1061,6 +1067,10 @@ class ZwaveDataImpl implements ZwaveData {
               if (!this.driverHomeOk()) return;
               this.driverListening.set(nodeId, flags);
             },
+            onNodeDeclared: (nodeId, declared) => {
+              if (!this.driverHomeOk()) return;
+              this.driverDeclared.set(nodeId, declared);
+            },
             onS2Resync: (nodeId) => {
               // S2 SPAN-resync log event (v0.26). Same event-accumulator
               // discipline as flaps: count now, drain into the next evidence
@@ -1200,6 +1210,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.driverBgRssi = null;
       this.driverLastSeen.clear();
       this.driverListening.clear();
+      this.driverDeclared.clear();
       this.driverWs?.stop();
       this.log(`driver-ws: server homeId ${this.driverHomeId} ≠ HA homeId ${this.lastHomeId} — telemetry PURGED + client stopped (check driver_ws_url)`);
     }
@@ -1218,6 +1229,29 @@ class ZwaveDataImpl implements ZwaveData {
    *  retry in Ns (attempt N)`) contain none of the words a naive regex looks
    *  for, so all of them read as healthy. The client has carried a proper
    *  enum since it shipped; publish that and let the prose stay prose. */
+  /** One sleeping node's missed-report watch status (v0.73.0). */
+  private sleeperWatchFor(node: NodeSnapshot, now: number): SleeperWatch | null {
+    // The watch hears through the driver link, so the driver's own lastSeen
+    // counts even where HA has no statistics for the node yet — the merged
+    // stats drop it in that case.
+    const drv = this.driverHomeOk() ? this.driverLastSeen.get(node.nodeId) ?? null : null;
+    const ha = node.stats?.lastSeen ?? null;
+    const seen = drv == null ? ha : ha == null ? drv : Math.max(ha, drv);
+    return sleeperWatch({
+      node: seen === ha ? node : { ...node, stats: { ...node.stats, lastSeen: seen } },
+      declared: this.driverDeclared.get(node.nodeId) ?? null,
+      linkLive: this.driverWs?.state() === 'live' && this.driverHomeOk(),
+      lastRfOnAt: this.driverWs?.lastRfOnAt() ?? null,
+      rfWatchSince: this.driverWs?.rfWatchSince() ?? null,
+      now,
+    });
+  }
+
+  /** Every sleeping node's missed-report watch status (v0.73.0). */
+  sleeperWatches(now: number = Date.now()): SleeperWatch[] {
+    return this.lastNodes.map((n) => this.sleeperWatchFor(n, now)).filter((w): w is SleeperWatch => w != null);
+  }
+
   driverWsState(): DriverWsState {
     return this.driverWs?.state() ?? 'disabled';
   }
@@ -1330,6 +1364,7 @@ class ZwaveDataImpl implements ZwaveData {
         // the old constant.
         sweepMs: this.autoPingSnapshotFn?.()?.config.staleMs || undefined,
         recordingSince: () => ev.recordingSince(),
+        sleeperWatch: (n) => this.sleeperWatchFor(n, now),
         hasRealNoise: () =>
           this.driverBgRssi != null && now - this.driverBgRssi.at <= 90_000 && this.driverHomeOk(),
       },
@@ -2416,6 +2451,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.missingSince.delete(id);
           this.driverLastSeen.delete(id);
           this.driverListening.delete(id);
+          this.driverDeclared.delete(id);
           // M5: abandon any open episodes for the departed node — their after-
           // window would be empty, and a node-id reuse after replace_failed_node
           // must start clean (mirrors the evidence eviction).
@@ -2527,6 +2563,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.driverBgRssi = null;
         this.driverLastSeen.clear();
         this.driverListening.clear();
+        this.driverDeclared.clear();
         // M3 engine state is node-id-keyed — a different network invalidates it.
         this.baselines?.reset();
         this.symptomState.clear();

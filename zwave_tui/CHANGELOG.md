@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.73.0
+
+### Added — `missed-report`: a sleeping device that stops reporting is no longer invisible
+
+A battery device that stopped reporting was covered by no layer. The driver
+rarely transmits to a sleeping node, so it seldom marks one Dead. The liveness
+sweep covers mains nodes only, and `quiet-node` is gated on
+`isListening === true`. The new symptom kind `missed-report` watches sleeping
+nodes against the report interval each device DECLARES:
+
+- The declaration is the node's Wake Up interval (Command Class 132), or else a
+  Configuration parameter whose label contains "heartbeat", in seconds, minutes
+  or hours. It is read from the driver's value DB through the driver-WS state
+  dump, then kept current from the value events for that one value.
+- Silence past 1.5 declared intervals raises a `watch`, and past 2.5 a `warn`.
+  A silence spanning a controller radio-off gets one more interval, because a
+  heartbeat sent during the nightly NVM backup is lost and not retried. So does
+  a silence the driver's log stream did not watch throughout.
+- A node is watched only while it sleeps, is not Dead (`node-down` owns that),
+  declares a readable interval above 0, has been heard, and the driver-WS link
+  is live. `sensor.zwave_tui_engine` gains `sleepers_watched` and
+  `sleepers_total`, and ENGINE's `SLEEPERS` row names each sleeper that is not
+  watched and why.
+- The first step offered is physical: a fresh battery, then a trigger that makes
+  the device transmit.
+
+Nothing is learned from traffic. A learned cadence could not tell a device's
+timer from a household routine, and two adversarial design rounds each found
+new false alarms in the rules added to separate them. A device that declares no
+interval is therefore not watched, and ENGINE says so. The driver-WS client
+sends nothing new; it reads one more value from what it already receives.
+
+### Corrected
+
+- DOCS: the driver does transmit to FLiRS devices (a NoOp at each driver start,
+  and Supervision replies) and can mark them Dead. Only Wake Up devices are
+  never marked Dead.
+
+13 new tests pin these. They cover each way a sleeper is not watched, both
+thresholds and their boundaries, the radio-off allowance and its limits, the
+declaration's source and units, a value event read only for the declaring
+value, the production hop from the dump to the watch, and the published counts.
+20 new mutants show each rule is load-bearing.
+
 ## 0.72.1
 
 ### Fixed — a summons no longer says a ping often revives the node

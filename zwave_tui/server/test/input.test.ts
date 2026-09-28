@@ -18,6 +18,7 @@ const data: DataProvider = {
   pendingIdentity: () => null,
   resolveIdentityDecision: () => false,
     autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    sleeperWatches: () => [],
     actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
   nodes: () => [node], nodeById: () => node, controller: () => null, events: () => [],
   scoreFor: () => score, noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }),

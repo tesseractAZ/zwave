@@ -196,6 +196,7 @@ export function buildStates(data: DataProvider, now: number = Date.now(), bo: Bu
   // itself is the degraded condition. A fresh pause raises nothing: it is what
   // the owner asked for.
   const pause = data.autonomyPause();
+  const sleepers = data.sleeperWatches();
   // Only a pause that stops something (v0.72.0 review): with auto-ping not
   // running at all — absent, disabled, or behind the master gate — a pause
   // changes nothing. A transient suppressor ranked above it (a heal, a
@@ -298,6 +299,11 @@ export function buildStates(data: DataProvider, now: number = Date.now(), bo: Bu
         paused_by: pause?.by ?? null,
         paused_since: pause == null ? null : new Date(pause.since).toISOString(),
         auto_remediation: 'none-admitted',
+        // v0.73.0: how many sleeping devices the missed-report watch can alarm
+        // on. Counts only — they move when a device or the link changes, never
+        // with the clock.
+        sleepers_watched: sleepers.filter((w) => w.watched).length,
+        sleepers_total: sleepers.length,
       },
     },
     // ROUTE FAILURES (v0.68.0). Recorded per node since v0.3x and shown on the

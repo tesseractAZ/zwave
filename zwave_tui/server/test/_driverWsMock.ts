@@ -14,7 +14,7 @@ import { WebSocketServer, type WebSocket as WsSocket } from 'ws';
  * A minimal mock zwave-js-server: records every command the client sends
  * (the allowlist proof), answers the handshake, and lets tests push events.
  */
-export async function mockServer(over: { minSchema?: number; maxSchema?: number; homeId?: number } = {}) {
+export async function mockServer(over: { minSchema?: number; maxSchema?: number; homeId?: number; nodes?: unknown[] } = {}) {
   const wss = new WebSocketServer({ port: 0 });
   await new Promise<void>((r) => wss.once('listening', () => r()));
   const commands: string[] = [];
@@ -36,9 +36,14 @@ export async function mockServer(over: { minSchema?: number; maxSchema?: number;
           result: {
             state: {
               controller: { statistics: { backgroundRSSI: { channel0: { average: -101, current: -99 }, channel1: { average: -97, current: -95 }, timestamp: 1 } } },
-              nodes: [
+              nodes: over.nodes ?? [
                 { nodeId: 6, isListening: true, isFrequentListening: false, statistics: { lastSeen: '2026-07-16T20:00:00.000Z' } },
-                { nodeId: 44, isListening: false, isFrequentListening: true, statistics: {} },
+                { nodeId: 44, isListening: false, isFrequentListening: true, statistics: {},
+                  // v0.73.0: a Ring-style heartbeat parameter, beside one that is not.
+                  values: [
+                    { commandClass: 112, endpoint: 0, property: 2, value: 5, metadata: { label: 'Application Retries' } },
+                    { commandClass: 112, endpoint: 0, property: 1, value: 70, metadata: { label: 'Heartbeat Interval', unit: 'minutes' } },
+                  ] },
               ],
             },
           },

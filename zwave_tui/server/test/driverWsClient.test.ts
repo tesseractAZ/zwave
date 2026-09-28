@@ -50,6 +50,54 @@ function collect() {
 
 /* ── Handshake + state dump ──────────────────────────────────────────────── */
 
+test('a sleeper\'s declared report interval comes from the dump, then from value events for that value alone (v0.73.0)', async () => {
+  const srv = await mockServer();
+  const declared: [number, unknown][] = [];
+  const c = createDriverWsClient({ url: srv.url, callbacks: { onNodeDeclared: (id, d) => declared.push([id, d]) } });
+  c.start();
+  try {
+    await waitFor(() => declared.length >= 1);
+    assert.deepEqual(declared, [[44, { ms: 70 * 60_000, source: 'heartbeat' }]], 'the sleeper only — node 6 listens');
+    const valueEvent = (nodeId: number, property: number, newValue: unknown, commandClass = 112) =>
+      srv.push({ source: 'node', event: 'value updated', nodeId, args: { commandClass, endpoint: 0, property, newValue, prevValue: 70 } });
+    valueEvent(44, 2, 3);            // another parameter on the same node
+    valueEvent(6, 1, 60);            // the same parameter number on a node that listens
+    valueEvent(44, 1, 60, 132);      // another command class
+    valueEvent(44, 1, 60);           // the heartbeat itself
+    await waitFor(() => declared.length >= 2);
+    await sleep(100);
+    assert.deepEqual(declared.slice(1), [[44, { ms: 60 * 60_000, source: 'heartbeat' }]]);
+    srv.push({ source: 'node', event: 'value added', nodeId: 44, args: { commandClass: 112, endpoint: 0, property: 1, newValue: 0 } });
+    await waitFor(() => declared.length >= 3);
+    assert.deepEqual(declared[2], [44, { reason: 'interval-disabled' }]);
+  } finally {
+    c.stop();
+    await srv.close();
+  }
+});
+
+test('the radio coming back on is remembered, and the log stream says since when it has watched (v0.73.0)', async () => {
+  const srv = await mockServer();
+  const c = createDriverWsClient({ url: srv.url, callbacks: {} });
+  c.start();
+  try {
+    await waitFor(() => c.rfWatchSince() != null);
+    assert.equal(c.lastRfOnAt(), null);
+    const before = Date.now();
+    srv.push({ source: 'driver', event: 'logging', message: 'Turning RF on...', context: { source: 'controller' } });
+    await waitFor(() => c.lastRfOnAt() != null);
+    assert.ok((c.lastRfOnAt() as number) >= before);
+    const since = c.rfWatchSince() as number;
+    assert.ok(since <= before, 'the stream was watched from before the radio came back');
+    srv.dropClient();
+    await waitFor(() => c.rfWatchSince() == null || (c.rfWatchSince() as number) > since);
+    assert.ok(c.lastRfOnAt() != null, 'the radio history survives a reconnect');
+  } finally {
+    c.stop();
+    await srv.close();
+  }
+});
+
 test('handshake: negotiates min(serverMax, OUR_MAX), starts listening, delivers the state dump', async () => {
   const srv = await mockServer({ maxSchema: 42 });
   const { got, callbacks } = collect();
@@ -435,6 +483,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       pendingIdentity: () => null,
       resolveIdentityDecision: () => false,
     autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    sleeperWatches: () => [],
     actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
       ackEvent: (seq: number) => seq === 42,
       routeStability: (n: number) => ({ changes: n, hours: 48 }),

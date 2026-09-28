@@ -68,6 +68,7 @@ function mkData(o: DataOver = {}): { data: DataProvider; nodes: NodeSnapshot[] }
     pendingIdentity: () => null,
     resolveIdentityDecision: () => false,
     autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    sleeperWatches: () => [],
     actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
   };
   return { data, nodes };

@@ -20,6 +20,7 @@ const data = (over: Partial<DataProvider> = {}): DataProvider => ({
   engineStatus: () => ({ enabled: true, ready: 3, total: 38, timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 22, rssiReady: 22, band: 0, bands: 6 }),
   autoPingState: () => AP() as never,
   autonomyPause: () => null,
+  sleeperWatches: () => [],
   autonomyPauseOverdue: () => false,
   nodeById: () => undefined,
   efficacyFor: () => null,
@@ -384,11 +385,13 @@ test('a pause never hides no-capability-data from the degraded alarm (v0.72.0)',
   assert.equal(by(s, ENTITY_DEGRADED).state, 'on');
 });
 
-test('the recommendation is the sixth entity; the other five keep their ids and keys, the engine gaining exactly three (v0.72.0)', () => {
+test('the recommendation is the sixth entity; the other five keep their ids and keys, the engine gaining exactly three (v0.72.0) and two more (v0.73.0)', () => {
   const s = buildStates(data(), 1_800_000_000_000, { writeActions: true, startedAt: 1_799_999_000_000 });
   assert.deepEqual(s.map((x) => x.entity), [ENTITY_DEGRADED, ENTITY_SUMMONS, 'sensor.zwave_tui_symptoms', ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ENTITY_RECOMMENDATION]);
   assert.deepEqual(Object.keys(by(s, ENTITY_ENGINE).attrs),
-    ['friendly_name', 'detectors_ready', 'detectors_unmeasured', 'detectors_total', 'rtt_ready', 'paused_by', 'paused_since', 'auto_remediation']);
+    ['friendly_name', 'detectors_ready', 'detectors_unmeasured', 'detectors_total', 'rtt_ready', 'paused_by', 'paused_since', 'auto_remediation',
+      // v0.73.0: the missed-report watch's two counts.
+      'sleepers_watched', 'sleepers_total']);
   const r = by(s, ENTITY_RECOMMENDATION);
   assert.equal(r.state, 'none');
   assert.equal(r.attrs.automatic, false);
@@ -448,4 +451,13 @@ test('a storm names itself in degraded\'s reason even under an overdue pause (th
   const s = buildStates(data({ autoPingState: () => AP({ suppressed: 'storm' }) as never, autonomyPause: () => ({ by: ['tui'], since, reason: 'x' }), autonomyPauseOverdue: () => true }), since + 30 * 3_600_000);
   assert.equal(by(s, ENTITY_DEGRADED).state, 'on');
   assert.match(String(by(s, ENTITY_DEGRADED).attrs.reason), /storm/);
+});
+
+test('the engine publishes how many sleepers the missed-report watch covers (v0.73.0)', () => {
+  const w = (nodeId: number, watched: boolean) =>
+    ({ nodeId, watched, reason: watched ? null : 'link-not-live', periodMs: null, source: null, silentMs: null, radioAllowance: false, severity: null }) as never;
+  const s = buildStates(data({ sleeperWatches: () => [w(60, true), w(61, true), w(63, false)] }), 1_800_000_000_000, { writeActions: true, startedAt: 1_799_999_000_000 });
+  const a = by(s, ENTITY_ENGINE).attrs;
+  assert.equal(a.sleepers_watched, 2);
+  assert.equal(a.sleepers_total, 3);
 });

@@ -18,6 +18,7 @@ function mkData(controller: ControllerSnapshot | null = null): DataProvider {
     pendingIdentity: () => null,
     resolveIdentityDecision: () => false,
     autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    sleeperWatches: () => [],
     actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
     nodes: () => [node], nodeById: () => node, controller: () => controller, events: () => [], scoreFor: () => score,
     noiseFloor: () => -95, hasRealNoise: () => false, history: () => ({ rssi: [], rtt: [] }), historyLong: () => ({ rssi: [], rtt: [] }), lastUpdated: () => 0,
@@ -804,6 +805,7 @@ function pauseData() {
   const d: DataProvider = {
     ...mkData(),
     autonomyPause: st,
+    sleeperWatches: () => [],
     pauseAutonomy: () => { if (tui == null) tui = Date.now(); return st()!; },
     resumeAutonomy: () => { const resumed = tui != null; tui = null; return { resumed, stillPausedBy: ha ? 'ha' : null }; },
   };
@@ -973,6 +975,7 @@ test('a pause held only by a MISSING toggle can be resumed from the menu, and sa
   const d: DataProvider = {
     ...mkData(),
     autonomyPause: () => (missing ? { by: ['ha'], since: Date.now() - 60_000, reason: 'missing', haMissing: true } : null),
+    sleeperWatches: () => [],
     resumeAutonomy: () => { const r = missing; missing = false; return { resumed: r, stillPausedBy: null }; },
   };
   const { runner } = mkActions();

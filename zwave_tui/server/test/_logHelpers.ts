@@ -98,6 +98,7 @@ export function mockData(opts: { events?: LogEvent[]; nodes?: NodeSnapshot[] } =
     pendingIdentity: () => null,
     resolveIdentityDecision: () => false,
     autonomyPause: () => null, pauseAutonomy: () => ({ by: ["tui"], since: 0, reason: "" }), resumeAutonomy: () => ({ resumed: false, stillPausedBy: null }), autonomyPauseOverdue: () => false,
+    sleeperWatches: () => [],
     actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
     nodeById: (id) => byId.get(id),
     controller: () => null,
