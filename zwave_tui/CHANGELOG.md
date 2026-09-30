@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.73.2
+
+### Fixed — a SmartStart provisioning entry was read as a node
+
+Home Assistant lists a device that is provisioned for SmartStart but not yet
+included as a `zwave_js` device identified `provision_<DSK>`. The registry join
+split every identifier on `-` and took the second block as the node id, so a
+provisioned thermostat became "node 40489": the join counted 40 nodes, and the
+node-status and statistics subscriptions for it failed as `not_found`. Only an
+identifier of the form `<home_id>-<node_id>` (optionally followed by `-…`),
+with a node id from 1 to 4000, now names a node.
+
+One new test pins it and two new mutants show both halves are load-bearing.
+
 ## 0.73.1
 
 ### Fixed — a sleeper still interviewing at connect time is watched once it is ready

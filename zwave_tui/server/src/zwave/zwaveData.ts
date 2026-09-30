@@ -655,15 +655,22 @@ function emptyStats(): NodeStats {
   };
 }
 
-/** Extract the numeric node id from a device's zwave_js identifiers. */
-function nodeIdOfDevice(d: RawDevice): number | null {
+/** Highest node id a Z-Wave network can hold (Long Range ends at 4000). */
+const MAX_NODE_ID = 4000;
+
+/** Extract the numeric node id from a device's zwave_js identifiers.
+ *  Only `<home_id>-<node_id>` (optionally followed by `-…`) names a node. A
+ *  SmartStart provisioning entry is also a zwave_js device, identified
+ *  `provision_<DSK>`, and splitting that on '-' read the DSK's second block
+ *  as a node id (v0.73.2: a provisioned thermostat became "node 40489"). */
+export function nodeIdOfDevice(d: RawDevice): number | null {
   const ids = d.identifiers;
   if (!Array.isArray(ids)) return null;
   for (const id of ids) {
-    // Each identifier is a tuple like ['zwave_js', '<home_id>-<node_id>...'].
     if (Array.isArray(id) && id[0] === 'zwave_js' && typeof id[1] === 'string') {
-      const n = Number(id[1].split('-')[1]);
-      if (Number.isInteger(n)) return n;
+      const m = /^\d+-(\d+)(?:-|$)/.exec(id[1]);
+      const n = m ? Number(m[1]) : NaN;
+      if (Number.isInteger(n) && n >= 1 && n <= MAX_NODE_ID) return n;
     }
   }
   return null;
