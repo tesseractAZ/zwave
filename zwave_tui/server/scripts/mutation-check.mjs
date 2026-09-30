@@ -3202,6 +3202,16 @@ const MUTANTS = [
     repl: "    for (const [a, k] of yourDeaths) bit(c.yellow(`${a}: \u00d7${k}`), 0);",
     what: "a death after the operator\u2019s action is named" },
   // ── v0.72.0: sensor.zwave_tui_recommendation — escalation, not execution.
+  // v0.73.2: a SmartStart provisioning entry (`provision_<DSK>`) was read as
+  // a node — its DSK's second block became "node 40489".
+  { id: "identifier-provision-is-a-node", file: "src/zwave/zwaveData.ts", tests: ["zwaveDataChurn"],
+    find: "      const m = /^\\d+-(\\d+)(?:-|$)/.exec(id[1]);",
+    repl: "      const m = /-(\\d+)(?:-|$)/.exec(id[1]);",
+    what: "only <homeId>-<nodeId> names a node" },
+  { id: "identifier-no-ceiling", file: "src/zwave/zwaveData.ts", tests: ["zwaveDataChurn"],
+    find: "n >= 1 && n <= MAX_NODE_ID",
+    repl: "n >= 1",
+    what: "a node id past the Long Range ceiling is not a node" },
   // v0.73.1: a node still interviewing at dump time is dumped with no values;
   // its declaration arrives with its `ready` event.
   { id: "mr-ready-ignored", file: "src/zwave/driverWsClient.ts", tests: ["driverWsClient"],

@@ -2656,3 +2656,16 @@ test('a quick action between two ticks still re-arms the after-window burst (thi
     assert.equal(E.R.zd.verifyOwedCount(), 1, 'the burst is sent again for the settled after-window');
   } finally { E.R.stop(); }
 });
+
+test('a SmartStart provisioning entry is not a node; only <homeId>-<nodeId> names one (v0.73.2)', async () => {
+  const { nodeIdOfDevice } = await import('../src/zwave/zwaveData');
+  const dev = (...ids: string[]) => ({ id: 'd', identifiers: ids.map((i) => ['zwave_js', i]) }) as never;
+  assert.equal(nodeIdOfDevice(dev('3586281591-24')), 24);
+  assert.equal(nodeIdOfDevice(dev('3586281591-24-634:20548:12593')), 24, 'the product-info form names the same node');
+  // A provisioned-but-not-included device: its DSK split on '-' read "40489".
+  assert.equal(nodeIdOfDevice(dev('provision_54395-40489-23484-30355-06849-02156-46894-51931')), null);
+  assert.equal(nodeIdOfDevice(dev('3586281591-0')), null);
+  assert.equal(nodeIdOfDevice(dev('3586281591-4001')), null, 'past the Long Range ceiling');
+  assert.equal(nodeIdOfDevice(dev('3586281591-4000')), 4000);
+  assert.equal(nodeIdOfDevice(dev('provision_1-2', '3586281591-7')), 7, 'a later identifier still counts');
+});
