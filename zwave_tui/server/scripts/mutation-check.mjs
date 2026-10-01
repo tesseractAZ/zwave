@@ -3202,6 +3202,23 @@ const MUTANTS = [
     repl: "    for (const [a, k] of yourDeaths) bit(c.yellow(`${a}: \u00d7${k}`), 0);",
     what: "a death after the operator\u2019s action is named" },
   // ── v0.72.0: sensor.zwave_tui_recommendation — escalation, not execution.
+  // v0.73.4 review: latch, FLiRS string flag, unknown flags, link wiring.
+  { id: "mr-flirs-string-unknown", file: "src/zwave/driverWsClient.ts", tests: ["driverWsClient"],
+    find: "node.isFrequentListening === true || (typeof node.isFrequentListening === 'string' && node.isFrequentListening !== '')",
+    repl: "node.isFrequentListening === true",
+    what: "a FLiRS node's string wake-up period reads as FLiRS" },
+  { id: "mr-latch-falls", file: "src/zwave/missedReport.ts", tests: ["missedReport"],
+    find: "(w.severity == null || RANK[prev.severity] > RANK[w.severity])",
+    repl: "(w.severity == null)",
+    what: "a raised severity never falls without a report" },
+  { id: "mr-unknown-flags-sleeper", file: "src/zwave/missedReport.ts", tests: ["missedReport"],
+    find: "  if (n.isController || n.isListening !== false) return null;",
+    repl: "  if (n.isController || n.isListening === true) return null;",
+    what: "unknown flags are not a sleeper" },
+  { id: "mr-linklive-wiring", file: "src/zwave/zwaveData.ts", tests: ["zwaveDataChurn"],
+    find: "      linkLive: this.driverWs?.state() === 'live' && this.driverHomeOk(),",
+    repl: "      linkLive: true,",
+    what: "a dropped driver link makes the watch blind" },
   // v0.73.2: a SmartStart provisioning entry (`provision_<DSK>`) was read as
   // a node — its DSK's second block became "node 40489".
   { id: "identifier-provision-is-a-node", file: "src/zwave/zwaveData.ts", tests: ["zwaveDataChurn"],

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { NodeStatus, type NodeSnapshot } from '../src/types';
 import {
-  unitMs, findDeclared, declaredFrom, sleeperWatch, MISSED_WATCH_MULT, MISSED_WARN_MULT,
+  unitMs, findDeclared, declaredFrom, sleeperWatch, latchWatch, MISSED_WATCH_MULT, MISSED_WARN_MULT,
   type WatchInput, type Declared,
 } from '../src/zwave/missedReport';
 
@@ -57,7 +57,7 @@ test('a mains node or the controller is not a sleeper at all (v0.73.0)', () => {
 });
 
 test('every way a sleeper is not watched is named (v0.73.0)', () => {
-  assert.equal(sleeperWatch(inp({ node: node({ isListening: null }) }))?.reason, 'flags-unknown');
+  assert.equal(sleeperWatch(inp({ node: node({ isListening: null }) })), null, 'unknown flags are not a sleeper (v0.73.4)');
   assert.equal(sleeperWatch(inp({ node: node({ status: NodeStatus.Dead }) }))?.reason, 'dead');
   assert.equal(sleeperWatch(inp({ declared: null }))?.reason, 'no-declared-interval');
   assert.equal(sleeperWatch(inp({ declared: { reason: 'interval-disabled' } }))?.reason, 'interval-disabled');
@@ -93,4 +93,28 @@ test('a silence spanning a radio-off, or not watched throughout, gets one more i
   assert.equal(sleeperWatch(inp({ node: s, rfWatchSince: NOW - 10 * MIN }))!.severity, null, 'nor a stream that started after the last report');
   assert.equal(sleeperWatch(inp({ node: silent(2.6 * P), lastRfOnAt: NOW - 30 * MIN }))!.severity, 'watch', 'the allowance is one interval, not a pass');
   assert.equal(sleeperWatch(inp({ node: silent(3.6 * P), lastRfOnAt: NOW - 30 * MIN }))!.severity, 'warn');
+});
+
+test('a raised severity holds until the node reports, whatever widens the threshold afterwards (v0.73.4)', () => {
+  const seen = NOW - 1.6 * P;
+  const watch = sleeperWatch(inp({ node: silent(1.6 * P) }))!;
+  assert.equal(watch.severity, 'watch');
+  let l = latchWatch(watch, seen, undefined);
+  assert.deepEqual(l.next, { seen, periodMs: P, severity: 'watch' });
+  // The nightly radio-off comes back on after the watch fired: unlatched, it
+  // would widen the threshold and clear the symptom with no report.
+  const widened = sleeperWatch(inp({ node: silent(1.6 * P), lastRfOnAt: NOW - 1 }))!;
+  assert.equal(widened.severity, null, 'precondition: the allowance alone clears it');
+  l = latchWatch(widened, seen, l.next);
+  assert.equal(l.w.severity, 'watch', 'held');
+  const warn = latchWatch({ ...widened, severity: 'warn' }, seen, l.next);
+  assert.equal(warn.w.severity, 'warn', 'and it can still rise');
+  assert.equal(latchWatch({ ...widened, severity: 'watch' }, seen, warn.next).w.severity, 'warn', 'but never fall');
+  // A report (a new lastSeen) or a new declared interval releases it.
+  assert.equal(latchWatch(widened, seen + 1, warn.next).w.severity, null);
+  assert.equal(latchWatch({ ...widened, periodMs: 2 * P }, seen, warn.next).w.severity, null);
+  // A blind or Dead reading neither alarms nor forgets.
+  const blind = latchWatch({ ...widened, watched: false, reason: 'link-not-live', severity: null }, seen, warn.next);
+  assert.equal(blind.w.severity, null);
+  assert.deepEqual(blind.next, warn.next);
 });

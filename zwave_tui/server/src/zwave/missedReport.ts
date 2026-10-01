@@ -16,7 +16,8 @@
  * declares nothing is not watched, and says so.
  *
  * A node is WATCHED only while all of these hold:
- *   1. it sleeps (the driver reports isListening === false);
+ *   1. it sleeps (the driver reports isListening === false; a node whose
+ *      flags are not known yet is not counted as a sleeper at all);
  *   2. it is not Dead (node-down owns a Dead node);
  *   3. its declared interval is readable and > 0;
  *   4. the driver-WS link is live (otherwise every report may not reach us);
@@ -39,7 +40,6 @@ export const MISSED_WARN_MULT = 2.5;
 
 /** Why a sleeping node is not watched. */
 export type UnwatchedReason =
-  | 'flags-unknown'
   | 'dead'
   | 'no-declared-interval'
   | 'interval-disabled'
@@ -48,7 +48,6 @@ export type UnwatchedReason =
   | 'never-heard';
 
 export const UNWATCHED_TEXT: Record<UnwatchedReason, string> = {
-  'flags-unknown': 'sleep flags unknown',
   dead: 'Dead (node-down owns it)',
   'no-declared-interval': 'declares no report interval',
   'interval-disabled': 'report interval disabled (0)',
@@ -153,15 +152,36 @@ export interface WatchInput {
   now: number;
 }
 
+/** What the watch last raised for a node, held until it reports again. */
+export interface WatchLatch { seen: number; periodMs: number; severity: 'watch' | 'warn' }
+
+const RANK = { watch: 1, warn: 2 } as const;
+
+/** Hold a raised severity until the node reports or its declared interval
+ *  changes (v0.73.4 review). The radio-off allowance is evidence about a
+ *  heartbeat that MIGHT be lost; one that arrives after a threshold was
+ *  crossed cannot explain the miss that crossed it, yet it widened the
+ *  threshold and cleared the symptom — logged "cleared" with no report. The
+ *  same happened when the log stream went dark or reconnected. A blind or
+ *  Dead reading leaves the latch as it is. */
+export function latchWatch(w: SleeperWatch, seen: number | null, prev: WatchLatch | undefined): { w: SleeperWatch; next: WatchLatch | undefined } {
+  if (!w.watched) return { w, next: prev };
+  if (seen == null || w.periodMs == null) return { w, next: undefined };
+  const same = prev != null && prev.seen === seen && prev.periodMs === w.periodMs;
+  const held = same && prev != null && (w.severity == null || RANK[prev.severity] > RANK[w.severity]) ? prev.severity : w.severity;
+  return { w: held === w.severity ? w : { ...w, severity: held }, next: held == null ? undefined : { seen, periodMs: w.periodMs, severity: held } };
+}
+
 /** A sleeping node's watch status, or null for a node that does not sleep. */
 export function sleeperWatch(i: WatchInput): SleeperWatch | null {
   const n = i.node;
-  if (n.isController || n.isListening === true) return null;
+  // Unknown flags are not a sleeper (v0.73.4 review): before the first driver
+  // dump, every mains node was counted and listed as "sleep flags unknown".
+  if (n.isController || n.isListening !== false) return null;
   const base: SleeperWatch = { nodeId: n.nodeId, watched: false, reason: null, periodMs: null, source: null, silentMs: null, radioAllowance: false, severity: null };
   const d = i.declared;
   if (d != null && 'ms' in d) { base.periodMs = d.ms; base.source = d.source; }
   const not = (reason: UnwatchedReason): SleeperWatch => ({ ...base, reason });
-  if (n.isListening == null) return not('flags-unknown');
   if (n.status === NodeStatus.Dead) return not('dead');
   if (d == null) return not('no-declared-interval');
   if (!('ms' in d)) return not(d.reason);

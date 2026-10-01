@@ -99,6 +99,25 @@ test('a sleeper that finishes its interview after the dump is watched from its r
   }
 });
 
+test('a FLiRS node is FLiRS: the server sends its wake-up period as a string (v0.73.4)', async () => {
+  const srv = await mockServer({ nodes: [
+    { nodeId: 60, isListening: false, isFrequentListening: '1000ms', statistics: {} },
+    { nodeId: 61, isListening: false, isFrequentListening: '250ms', statistics: {} },
+    { nodeId: 62, isListening: false, isFrequentListening: false, statistics: {} },
+    { nodeId: 63, isListening: false, statistics: {} },
+  ] });
+  const flags = new Map<number, boolean | null>();
+  const c = createDriverWsClient({ url: srv.url, callbacks: { onNodeFlags: (id, f) => flags.set(id, f.isFrequentListening) } });
+  c.start();
+  try {
+    await waitFor(() => flags.size >= 4);
+    assert.deepEqual([...flags.entries()].sort((a, b) => a[0] - b[0]), [[60, true], [61, true], [62, false], [63, null]]);
+  } finally {
+    c.stop();
+    await srv.close();
+  }
+});
+
 test('the radio coming back on is remembered, and the log stream says since when it has watched (v0.73.0)', async () => {
   const srv = await mockServer();
   const c = createDriverWsClient({ url: srv.url, callbacks: {} });
@@ -113,7 +132,8 @@ test('the radio coming back on is remembered, and the log stream says since when
     const since = c.rfWatchSince() as number;
     assert.ok(since <= before, 'the stream was watched from before the radio came back');
     srv.dropClient();
-    await waitFor(() => c.rfWatchSince() == null || (c.rfWatchSince() as number) > since);
+    // Strictly later: accepting null here passed the moment the socket dropped.
+    await waitFor(() => c.rfWatchSince() != null && (c.rfWatchSince() as number) > since, 8000);
     assert.ok(c.lastRfOnAt() != null, 'the radio history survives a reconnect');
   } finally {
     c.stop();

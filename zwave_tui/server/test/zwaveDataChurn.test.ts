@@ -1739,6 +1739,7 @@ test('a sleeper\'s declared interval crosses the production hop into the missed-
   }] });
   const ha = fakeHa();
   const zd = await bootedZwaveData(ha, { refreshMs: 60, driverWsUrl: srv.url });
+  let closed = false;
   try {
     // The declaration lands with the dump; the flags reach the snapshot on its next rebuild.
     await waitFor(() => zd.sleeperWatches().some((w) => w.nodeId === 7 && w.watched), 6000);
@@ -1747,11 +1748,24 @@ test('a sleeper\'s declared interval crosses the production hop into the missed-
     assert.equal(w.source, 'heartbeat');
     assert.equal(w.watched, true, `watched: ${JSON.stringify(w)}`);
     assert.equal(w.severity, null, 'ten minutes into a 70-minute heartbeat is healthy');
+    // The radio-off evidence crosses the hop too (v0.73.4 review: only the pure
+    // module pinned the guards' inputs).
+    srv.push({ event: 'logging', context: { type: 'controller' }, message: 'Turning RF on...' });
+    await waitFor(() => zd.sleeperWatches().find((x) => x.nodeId === 7)?.radioAllowance === true, 6000);
     srv.push({ source: 'node', event: 'value updated', nodeId: 7, args: { commandClass: 112, endpoint: 0, property: 1, newValue: 0 } });
     await waitFor(() => zd.sleeperWatches().find((x) => x.nodeId === 7)?.reason === 'interval-disabled', 6000);
+    // And so does the link: with the driver gone the watch is blind. (The
+    // interval is declared again first: reasons are checked in order.)
+    srv.push({ source: 'node', event: 'value updated', nodeId: 7, args: { commandClass: 112, endpoint: 0, property: 1, newValue: 70 } });
+    await waitFor(() => zd.sleeperWatches().find((x) => x.nodeId === 7)?.watched === true, 6000);
+    const closing = srv.close();
+    srv.dropClient();
+    await closing;
+    closed = true;
+    await waitFor(() => zd.sleeperWatches().find((x) => x.nodeId === 7)?.reason === 'link-not-live', 6000);
   } finally {
     zd.stop();
-    await srv.close();
+    if (!closed) await srv.close();
   }
 });
 

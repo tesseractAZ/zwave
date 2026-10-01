@@ -221,7 +221,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
 
     case 'missed-report': {
       headline = 'Sleeping device missed its declared report — check it in person';
-      candidates.push({ action: null, title: 'Check the battery, then trigger the device to make it report', rationale: 'The device declared how often it reports and has now missed that by half an interval or more. A sleeping device cannot be asked to report on demand: a Wake Up device takes commands only when it wakes, so the useful checks are physical — a fresh battery, then a trigger (motion, a button, opening a door) that makes it transmit. If it reports, the watch clears on its own.', basis: 'lore', cost: 'physical', blocked: null });
+      candidates.push({ action: null, title: 'Check the battery, then trigger the device to make it report', rationale: 'The device declared how often it reports and has now missed that by half an interval or more. A Wake Up device takes commands only when it wakes, and although a FLiRS device can be reached at any time, an answer to us is not the report it missed — so the useful checks are physical — a fresh battery, then a trigger (motion, a button, opening a door) that makes it transmit. If it reports, the watch clears on its own.', basis: 'lore', cost: 'physical', blocked: null });
       candidates.push({ action: null, title: 'Check its range if a fresh battery does not help', rationale: 'A device that was moved, or whose nearest repeater lost power, can stop reaching the controller. A report that arrives right after moving it closer is the answer.', basis: 'lore', cost: 'physical', blocked: null });
       break;
     }

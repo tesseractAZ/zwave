@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.73.4
+
+### Fixed — a FLiRS device read as "unknown"
+
+At the schema this add-on negotiates, zwave-js-server sends a node's FLiRS
+flag as its wake-up period (`false`, `"250ms"` or `"1000ms"`), not as a
+boolean. The client mapped the string forms to "unknown", so no FLiRS device
+was ever recognised as one. Among other effects, a configuration write to a
+FLiRS device was not reported as queued. The string forms now read as FLiRS.
+
+### Fixed — the missed-report watch no longer clears a symptom with no report
+
+- The one-interval radio-off allowance widened a threshold even when the
+  radio-off, a log-stream storm stop or a driver-WS reconnect came after that
+  threshold had been crossed. A missed slot on a dead device could then be
+  logged `missed-report cleared`, or fall from `warn` to `watch`, with no report
+  from the device. A raised severity now holds until the node reports again or
+  its declared interval changes.
+- A node whose sleep flags are not known yet (before the first driver dump) is
+  no longer counted as a sleeper or listed on the SLEEPERS row.
+- The narrative names both reasons an extra interval may be allowed. The plan
+  card no longer says a sleeping device cannot be asked to report: a FLiRS
+  device can be reached at any time.
+
+### Corrected
+
+DOCS §1.2 lists the events the driver-WS client now reads. §7.2.3 counts 16
+kinds and lists `missed-report`. The SLEEPERS row is described as naming the
+unwatched sleepers that fit the width.
+
+3 new tests and 4 new mutants pin these, with one test that passed for the
+wrong reason tightened, and the production-hop test now carrying the
+radio-off evidence and a dropped link.
+
 ## 0.73.3
 
 ### Security — dependency updates
