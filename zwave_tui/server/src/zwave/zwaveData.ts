@@ -67,7 +67,7 @@ import {
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
-import { sleeperWatch, type Declared, type SleeperWatch } from './missedReport';
+import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
 import { detectSymptoms, symptomaticNodes, armingNodes, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
@@ -809,6 +809,8 @@ class ZwaveDataImpl implements ZwaveData {
   /** Each sleeping node's declared report interval (v0.73.0), from the
    *  driver's value DB. Cleared with the capability flags it depends on. */
   private driverDeclared = new Map<number, Declared>();
+  /** The missed-report severity each sleeper last raised (v0.73.4). */
+  private sleeperLatch = new Map<number, WatchLatch>();
   /** homeId the driver server reported — cross-checked against HA's. */
   private driverHomeId: number | null = null;
   /** Latched once a driver/HA homeId mismatch is proven (permanent this run —
@@ -1218,6 +1220,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.driverLastSeen.clear();
       this.driverListening.clear();
       this.driverDeclared.clear();
+      this.sleeperLatch.clear();
       this.driverWs?.stop();
       this.log(`driver-ws: server homeId ${this.driverHomeId} ≠ HA homeId ${this.lastHomeId} — telemetry PURGED + client stopped (check driver_ws_url)`);
     }
@@ -1244,7 +1247,7 @@ class ZwaveDataImpl implements ZwaveData {
     const drv = this.driverHomeOk() ? this.driverLastSeen.get(node.nodeId) ?? null : null;
     const ha = node.stats?.lastSeen ?? null;
     const seen = drv == null ? ha : ha == null ? drv : Math.max(ha, drv);
-    return sleeperWatch({
+    const w = sleeperWatch({
       node: seen === ha ? node : { ...node, stats: { ...node.stats, lastSeen: seen } },
       declared: this.driverDeclared.get(node.nodeId) ?? null,
       linkLive: this.driverWs?.state() === 'live' && this.driverHomeOk(),
@@ -1252,6 +1255,10 @@ class ZwaveDataImpl implements ZwaveData {
       rfWatchSince: this.driverWs?.rfWatchSince() ?? null,
       now,
     });
+    if (w == null) { this.sleeperLatch.delete(node.nodeId); return null; }
+    const l = latchWatch(w, seen, this.sleeperLatch.get(node.nodeId));
+    if (l.next) this.sleeperLatch.set(node.nodeId, l.next); else this.sleeperLatch.delete(node.nodeId);
+    return l.w;
   }
 
   /** Every sleeping node's missed-report watch status (v0.73.0). */
@@ -2459,6 +2466,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.driverLastSeen.delete(id);
           this.driverListening.delete(id);
           this.driverDeclared.delete(id);
+          this.sleeperLatch.delete(id);
           // M5: abandon any open episodes for the departed node — their after-
           // window would be empty, and a node-id reuse after replace_failed_node
           // must start clean (mirrors the evidence eviction).
@@ -2571,6 +2579,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.driverLastSeen.clear();
         this.driverListening.clear();
         this.driverDeclared.clear();
+        this.sleeperLatch.clear();
         // M3 engine state is node-id-keyed — a different network invalidates it.
         this.baselines?.reset();
         this.symptomState.clear();

@@ -443,7 +443,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
             { label: 'declared', value: `${what} ${periodMin} min` },
           ],
           narrative: `${node.name} is a sleeping device that declares a ${what} of ${periodMin} min and has not been heard from in ${silentMin} min.` +
-            (w.radioAllowance ? ' One extra interval was allowed because the silence spans a controller radio-off, when a report can be lost.' : '') +
+            (w.radioAllowance ? ' One extra interval was allowed because a controller radio-off, or a stretch the driver\'s log stream did not watch, falls inside the silence, and a report sent then can be lost.' : '') +
             ' A battery that has run down, or a device out of range, stops reporting before the driver can mark it Dead.',
         });
       }

@@ -600,7 +600,11 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     if (nodeId == null) return false;
     cb.onNodeFlags?.(nodeId, {
       isListening: typeof node.isListening === 'boolean' ? node.isListening : null,
-      isFrequentListening: node.isFrequentListening === true ? true : node.isFrequentListening === false ? false : null,
+      // At schema >= 3 the server sends the FLiRS wake-up period as a string
+      // (`false | "250ms" | "1000ms"`), not a boolean (v0.73.4: every real
+      // FLiRS node read as unknown).
+      isFrequentListening: node.isFrequentListening === true || (typeof node.isFrequentListening === 'string' && node.isFrequentListening !== '')
+        ? true : node.isFrequentListening === false ? false : null,
     });
     const stats = node.statistics as Record<string, unknown> | undefined;
     const seen = parseLastSeen(stats?.lastSeen);
