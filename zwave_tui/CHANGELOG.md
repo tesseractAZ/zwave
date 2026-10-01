@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.73.3
+
+### Security — dependency updates
+
+- `fastify` 5.12.3 → 5.12.5: a Denial of Service through an unhandled
+  exception on HTTP/2 trailer responses (the add-on serves HTTP/1).
+- `fast-uri` 3.1.7 → 3.1.8 and 4.1.4 → 4.2.1, both reached through the HTTP
+  server's schema compilers: inconsistent host case normalisation, and mailto
+  header injection, through percent-encoded input.
+
+No code change. `npm audit` reports no vulnerabilities in production
+dependencies.
+
 ## 0.73.2
 
 ### Fixed — a SmartStart provisioning entry was read as a node
