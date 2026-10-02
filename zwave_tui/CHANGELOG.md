@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.74.0
+
+### Added — `repeated-frames`: a link that works one way is no longer invisible
+
+A node that does not hear the controller's acknowledgement sends the same frame
+again, and the driver drops each S2 copy as a duplicate. On the reference mesh
+one dimmer, switched by an automation, repeated one reply 20 times in a minute.
+The only trace was a driver log line no surface read.
+
+- The driver-WS client now matches that log line in the stream it already
+  receives, and keeps only the node id and the time.
+- A burst is 5 or more drops from one node within a minute. The new symptom kind
+  `repeated-frames` (watch) fires after the dwell while the node has had two
+  bursts in 24 hours, or one of 15 or more, and never on a Dead node.
+- Over two measured days that flagged one node. Four other nodes, each with one
+  burst of 5–13, were not flagged.
+- The plan leads with the physical path, with a direct-link card for a
+  Long-Range node. A route rebuild is offered only blocked, because it helps
+  only after the path changed, and it deletes priority routes (RESEARCH §4.1).
+- It opens no ledger episode: a 24-hour count cannot be scored per sample, and
+  an episode would queue verification reads to the node whose link is failing.
+- When the driver's log lane is dark, ENGINE says that s2-desync and
+  repeated-frames detection are both off.
+
+Drop times are kept in memory only, so a restart starts the count again. The
+symptom holds while its bursts stay inside the 24-hour lookback.
+
+5 new tests and 12 new mutants pin these. They cover the hop from the driver's
+log line to the bursts accessor, the detector reading that record inside
+zwaveData, the episode skip, and the Long-Range card.
+
 ## 0.73.4
 
 ### Fixed — a FLiRS device read as "unknown"

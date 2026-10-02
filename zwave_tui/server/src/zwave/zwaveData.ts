@@ -67,6 +67,7 @@ import {
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
+import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
 import { detectSymptoms, symptomaticNodes, armingNodes, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
@@ -497,6 +498,8 @@ export interface ZwaveData {
   driverWsState(): DriverWsState;
   /** Every sleeping node's missed-report watch status (v0.73.0). */
   sleeperWatches(now?: number): SleeperWatch[];
+  /** A node's duplicate-frame bursts in the last 24 h (v0.74.0). */
+  duplicateBursts(nodeId: number, now?: number): Burst[];
   s2LaneFault(): 'refused' | 'storm-stopped' | null;
   openEpisodes(): OpenEpisodeSummary[] | null;
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
@@ -809,6 +812,8 @@ class ZwaveDataImpl implements ZwaveData {
   /** Each sleeping node's declared report interval (v0.73.0), from the
    *  driver's value DB. Cleared with the capability flags it depends on. */
   private driverDeclared = new Map<number, Declared>();
+  /** When the driver dropped each node's S2 frames as duplicates (v0.74.0). */
+  private dupDrops = new Map<number, number[]>();
   /** The missed-report severity each sleeper last raised (v0.73.4). */
   private sleeperLatch = new Map<number, WatchLatch>();
   /** homeId the driver server reported — cross-checked against HA's. */
@@ -1076,6 +1081,10 @@ class ZwaveDataImpl implements ZwaveData {
               if (!this.driverHomeOk()) return;
               this.driverListening.set(nodeId, flags);
             },
+            onDuplicateDrop: (nodeId) => {
+              if (!this.driverHomeOk()) return;
+              this.dupDrops.set(nodeId, noteDrop(this.dupDrops.get(nodeId) ?? [], Date.now()));
+            },
             onNodeDeclared: (nodeId, declared) => {
               if (!this.driverHomeOk()) return;
               this.driverDeclared.set(nodeId, declared);
@@ -1221,6 +1230,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.driverListening.clear();
       this.driverDeclared.clear();
       this.sleeperLatch.clear();
+      this.dupDrops.clear();
       this.driverWs?.stop();
       this.log(`driver-ws: server homeId ${this.driverHomeId} ≠ HA homeId ${this.lastHomeId} — telemetry PURGED + client stopped (check driver_ws_url)`);
     }
@@ -1259,6 +1269,11 @@ class ZwaveDataImpl implements ZwaveData {
     const l = latchWatch(w, seen, this.sleeperLatch.get(node.nodeId));
     if (l.next) this.sleeperLatch.set(node.nodeId, l.next); else this.sleeperLatch.delete(node.nodeId);
     return l.w;
+  }
+
+  /** A node's duplicate-frame bursts in the last 24 h (v0.74.0). */
+  duplicateBursts(nodeId: number, now: number = Date.now()): Burst[] {
+    return burstsOf(this.dupDrops.get(nodeId) ?? [], now);
   }
 
   /** Every sleeping node's missed-report watch status (v0.73.0). */
@@ -1379,6 +1394,7 @@ class ZwaveDataImpl implements ZwaveData {
         sweepMs: this.autoPingSnapshotFn?.()?.config.staleMs || undefined,
         recordingSince: () => ev.recordingSince(),
         sleeperWatch: (n) => this.sleeperWatchFor(n, now),
+        duplicateBursts: (id) => this.duplicateBursts(id, now),
         hasRealNoise: () =>
           this.driverBgRssi != null && now - this.driverBgRssi.at <= 90_000 && this.driverHomeOk(),
       },
@@ -1458,6 +1474,10 @@ class ZwaveDataImpl implements ZwaveData {
       // starvation. The symptom still surfaces on REMEDY; it simply does not
       // pretend to be an experiment.
       if (s.kind === 'node-down') continue;
+      // Nor does repeated-frames (v0.74.0 review): it is a 24 h count of
+      // duplicate bursts, which no per-sample metric can score, and an episode
+      // would queue verification reads to the very node whose link is failing.
+      if (s.kind === 'repeated-frames') continue;
       // An UNPROBEABLE node opens no episode either (v0.38.1). Its evidence
       // windows can never be filled — no lane may wake a sleeping battery or
       // FLiRS device — so every episode it opened closed `unverifiable` by
@@ -2467,6 +2487,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.driverListening.delete(id);
           this.driverDeclared.delete(id);
           this.sleeperLatch.delete(id);
+          this.dupDrops.delete(id);
           // M5: abandon any open episodes for the departed node — their after-
           // window would be empty, and a node-id reuse after replace_failed_node
           // must start clean (mirrors the evidence eviction).
@@ -2580,6 +2601,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.driverListening.clear();
         this.driverDeclared.clear();
         this.sleeperLatch.clear();
+        this.dupDrops.clear();
         // M3 engine state is node-id-keyed — a different network invalidates it.
         this.baselines?.reset();
         this.symptomState.clear();

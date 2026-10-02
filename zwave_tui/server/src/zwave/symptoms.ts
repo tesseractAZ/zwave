@@ -18,6 +18,7 @@
  */
 
 import type { SleeperWatch } from './missedReport';
+import { repeatsFrames, type Burst } from './repeatedFrames';
 import type { NodeSnapshot, ControllerSnapshot, NodeStatus } from '../types';
 import { NodeStatus as NS } from '../types';
 import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage, RateRun } from './evidenceStore';
@@ -72,6 +73,13 @@ export type SymptomKind =
    * that declares no interval is never watched.
    */
   | 'missed-report'
+  /**
+   * A node that keeps repeating its frames (v0.74.0): the driver dropped its S2
+   * frames as duplicates in bursts, because the node did not hear the
+   * controller's acknowledgement. The link works one way. `watch` while it has
+   * had two bursts in 24 h, or one large one (see repeatedFrames.ts).
+   */
+  | 'repeated-frames'
   | 'rate-fallback'
   | 'route-churn'
   | 's2-desync'
@@ -142,6 +150,8 @@ export interface DetectInput {
   /** A sleeping node's missed-report watch status, or null for a node that
    *  does not sleep (v0.73.0). */
   sleeperWatch: (node: NodeSnapshot) => SleeperWatch | null;
+  /** The node's duplicate-frame bursts in the last 24 h (v0.74.0). */
+  duplicateBursts: (nodeId: number) => Burst[];
   /** Is the noise floor a real measurement (driver-WS) vs the −95 fallback? */
   hasRealNoise: () => boolean;
 }
@@ -445,6 +455,26 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
           narrative: `${node.name} is a sleeping device that declares a ${what} of ${periodMin} min and has not been heard from in ${silentMin} min.` +
             (w.radioAllowance ? ' One extra interval was allowed because a controller radio-off, or a stretch the driver\'s log stream did not watch, falls inside the silence, and a report sent then can be lost.' : '') +
             ' A battery that has run down, or a device out of range, stops reporting before the driver can mark it Dead.',
+        });
+      }
+    }
+
+    // repeated-frames — a link that works one way (v0.74.0). The bursts are
+    // repeatedFrames.ts's; this block dwells and words them.
+    {
+      const bursts = input.duplicateBursts(id);
+      const b = node.status !== NS.Dead && repeatsFrames(bursts);
+      const since = dwell(state, key(id, 'repeated-frames'), b, now);
+      if (since != null) {
+        breaching = true;
+        const largest = Math.max(...bursts.map((x) => x.n));
+        out.push({
+          kind: 'repeated-frames', nodeId: id, severity: 'watch', sinceMs: since, basis: 'measured',
+          evidence: [
+            { label: 'bursts (24 h)', value: String(bursts.length) },
+            { label: 'largest burst', value: `${largest} repeats in 1 min` },
+          ],
+          narrative: `${node.name} repeated the same frame up to ${largest} times within a minute, ${bursts.length === 1 ? 'once' : `${bursts.length} times`} in the last 24 hours, and the driver dropped the copies as duplicates. A device repeats a frame when it does not hear the controller's acknowledgement, so the controller hears this node but its replies do not reliably reach it: the link works one way. Each burst also crowds the mesh for everyone.`,
         });
       }
     }

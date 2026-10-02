@@ -96,7 +96,9 @@ seriously.
   for sleeping nodes only, the one value that declares a node's report interval
   (its Wake Up interval, or a Configuration parameter labelled as a heartbeat)
   from the state dump and from the value events for that value. It keeps the
-  number and nothing else, and sends nothing new.
+  number and nothing else, and sends nothing new. Since v0.74.0 it also
+  matches the driver's log line for a duplicate S2 frame dropped from a node,
+  and keeps only that node id and the time.
 - **Trust model.** Access over the Home Assistant sidebar (ingress) is already
   HA-authenticated, and the panel is **admin-only** (`panel_admin: true`) — the
   console can remove a failed node and, with write actions on, unlock a lock.

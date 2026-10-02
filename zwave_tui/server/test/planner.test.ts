@@ -25,7 +25,7 @@ const ALL_KINDS = [
   'return-path-degraded', 'chronic-return-path', 'dead-flap', 'node-down', 'quiet-node',
   'rate-fallback', 'route-churn', 'rtt-degraded', 'weak-signal', 'chatty-device',
   'ghost-suspect', 'controller-degraded', 'edge-cluster', 'mesh-interference',
-  's2-desync', 'missed-report',
+  's2-desync', 'missed-report', 'repeated-frames',
 ] as const satisfies readonly SymptomKind[];
 // Compile-time exhaustiveness: if this errors, a SymptomKind is missing above.
 type _MissingKind = Exclude<SymptomKind, (typeof ALL_KINDS)[number]>;
@@ -73,6 +73,7 @@ test('Long-Range nodes never receive a route/repeater/heal candidate (rebuild TH
     for (const c of p.candidates) {
       assert.notEqual(c.action, 'healNode', `${kind}: no heal on LR`);
       assert.ok(!/repeater/i.test(c.title), `${kind}: no repeater title on LR ("${c.title}")`);
+      if (kind === 'repeated-frames') assert.ok(!/repeater/i.test(c.rationale), `${kind}: no repeater advice on LR ("${c.rationale}")`);
     }
   }
 });

@@ -137,8 +137,8 @@ DRIVER_SCHEMA_MIN = 32   DRIVER_SCHEMA_MAX = 41
 - **Read-only telemetry only**: the `start_listening` state dump plus
   `statistics updated` events for `backgroundRSSI` and `lastSeen`, plus driver
   `logging` events matched client-side for S2 resyncs (v0.26) and the
-  controller's `Turning RF off` / `Turning RF on` (v0.65.0), their payloads
-  never stored. Node flags come from the dump and from a node's `ready` event
+  controller's `Turning RF off` / `Turning RF on` (v0.65.0) and duplicate S2
+  frames dropped from a node (v0.74.0), their payloads never stored. Node flags come from the dump and from a node's `ready` event
   (v0.73.1). For sleeping nodes only, the one value that declares a node's
   report interval is read from the dump, the `ready` event and that value's
   `value added` / `value updated` events (v0.73.0). Every other event type is
@@ -154,7 +154,7 @@ DRIVER_SCHEMA_MIN = 32   DRIVER_SCHEMA_MAX = 41
 | | HA Core WS (Surface A) | Driver WS (Surface B) |
 | --- | --- | --- |
 | Auth | `SUPERVISOR_TOKEN` bearer | none (privileged, read-only) |
-| Carries | roster, registries, node/ctrl stats, activity, **all actions** | background RSSI, `lastSeen`, `isListening`/FLiRS, and the driver log stream (S2 resyncs since v0.26; controller RF off/on since v0.65.0) |
+| Carries | roster, registries, node/ctrl stats, activity, **all actions** | background RSSI, `lastSeen`, `isListening`/FLiRS, and the driver log stream (S2 resyncs since v0.26; controller RF off/on since v0.65.0; duplicate S2 frames since v0.74.0) |
 | Direction | read **and write** | read only (4-command allowlist) |
 | Failure mode | reconnect w/ backoff; blocks readiness | dormant, dependent detectors go quiet |
 | File | `ha/haWsClient.ts` | `zwave/driverWsClient.ts` |
@@ -2186,9 +2186,9 @@ therefore de-asserts and clears its dwell entry, and only a condition that is
 *still happening* can mature. `symptoms.test.ts` pins both directions — a stale
 burst must not fire, an active one must.
 
-#### 7.2.3 The 16 `SymptomKind`s
+#### 7.2.3 The 17 `SymptomKind`s
 
-The `SymptomKind` union declares **16** kinds, and **all sixteen have live detector bodies** in `detectSymptoms` (the sixteenth, `missed-report`, since v0.73.0). `quiet-node` was the last reserved name — declared since the DESIGN table and unemitted for eleven minor versions, the final instance of the declared-but-unreachable class this cycle cleared:
+The `SymptomKind` union declares **17** kinds, and **all seventeen have live detector bodies** in `detectSymptoms` (`missed-report` since v0.73.0, `repeated-frames` since v0.74.0). `quiet-node` was the last reserved name — declared since the DESIGN table and unemitted for eleven minor versions, the final instance of the declared-but-unreachable class this cycle cleared:
 
 | # | kind | scope | severity | basis | implemented? |
 | --- | --- | --- | --- | --- | --- |
@@ -2208,6 +2208,7 @@ The `SymptomKind` union declares **16** kinds, and **all sixteen have live detec
 | 13 | `mesh-interference` | mesh | warn | measured/inferred | yes |
 | 14 | `s2-desync` | node | watch/warn | measured | yes (v0.26) |
 | 15 | `missed-report` | node | watch/warn | measured | yes (v0.73.0) |
+| 16 | `repeated-frames` | node | watch | measured | yes (v0.74.0) |
 
 `edge-cluster` is the only **cluster-scoped** kind: its `nodeId` is the shared upstream repeater (the actionable node), and a new optional `Symptom.members[]` carries the affected downstream node ids. It sits between the per-node detectors and the mesh-wide event.
 
@@ -2515,7 +2516,7 @@ export function planAll(
 ): Plan[];
 ```
 
-`planFor` is a single `switch (symptom.kind)` over the sixteen `SymptomKind`s (§8.4). It never reads a clock, a store, or the network — its only inputs are the symptom, the node snapshot (which may be `undefined`), and the `PlanContext` (the write-actions gate and an optional M5 efficacy lookup). `planAll` is the batch entry point used to plan a whole symptom list; it drops symptoms subsumed under a mesh event (§8.7) before mapping.
+`planFor` is a single `switch (symptom.kind)` over the seventeen `SymptomKind`s (§8.4). It never reads a clock, a store, or the network — its only inputs are the symptom, the node snapshot (which may be `undefined`), and the `PlanContext` (the write-actions gate and an optional M5 efficacy lookup). `planAll` is the batch entry point used to plan a whole symptom list; it drops symptoms subsumed under a mesh event (§8.7) before mapping.
 
 Data trace into the planner:
 
@@ -2610,6 +2611,7 @@ The full as-built table (LR variants noted separately in §8.5):
 | `node-down` | "Node is DOWN — the driver proved it, a ping often revives it" | `ping` "Ping the node" — source / **safe**, gated w/ probes | `action: null` "Power-cycle the device, then exclude/re-include if it persists" — lore / physical | — |
 | `quiet-node` | "Node is quiet — confirm reachability before assuming a fault" | `ping` "Ping (consented reachability check)" — source / **caution**, gated w/ probes | `action: null` "Check it is powered and in range before assuming a fault" — lore / physical | — |
 | `missed-report` (v0.73.0) | "Sleeping device missed its declared report — check it in person" | `action: null` "Check the battery, then trigger the device to make it report" — lore / **physical** | `action: null` "Check its range if a fresh battery does not help" — lore / **physical** | — |
+| `repeated-frames` (v0.74.0) | "The node does not reliably hear the controller — fix the path first" | `action: null` "Check what sits between it and the controller" — lore / **physical** | `healNode` "Rebuild routes — only after the path changed" — source / disruptive, **blocked** (no topology change) | — |
 | `rate-fallback` | "Route regressed below 100k — repeater/placement" | `repeaterCandidate()` | `healNode` "Rebuild routes (only if a device moved)" — source / disruptive, **blocked** `no topology change` | — |
 | `return-path-degraded`, `chronic-return-path`, `weak-signal`, `rtt-degraded` *(shared arm)* | "Improve the RF path — a repeater or relocation, not a rebuild" | `repeaterCandidate()` — lore / physical | `refreshValues` "Refresh values (re-poll, non-mutating)" — source / **safe**, gated | `healNode` "Rebuild routes — **NOT recommended here**" — source / disruptive, **blocked** `no topology change — won't help` |
 | `route-churn` | "Route keeps changing — marginal repeater or intermittent interference" | `action: null` "Firm up the marginal repeater on that path" — lore / physical | `healNode` "Rebuild routes — **NOT recommended (will re-churn)**" — source / disruptive, **blocked** `physical-link symptom — won't settle it` | — |
@@ -3856,6 +3858,8 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 > **Probing is impossible for battery/FLiRS nodes, and their episodes are permanently unscoreable.** `isPingCandidate` is `!isController && isListening === true`, so a sleeping device is never swept, never verification-probed, and never remediation-probed — waking one every cadence to ask whether it is alive would flatten it. The consequence is worth stating because it bounds everything above: the verification machinery of §9.7 helps quiet-but-**listening** nodes only (35 of 39 on the reference mesh), and an episode on a sleeping node closes `unverifiable` **by construction**, for a reason that is neither a fault nor fixable. Note that this dilutes the "could not be scored" counter (§9.7), which was built to flag evidence *starvation* — a fixable condition — and now also accumulates this permanent, expected one.
 >
 > **Those nodes have no liveness coverage from either layer (v0.65.0, live audit).** The driver marks a node Dead only when a transmission it attempted fails, and it rarely attempts one to a sleeping device (a FLiRS device gets a NoOp at each driver start and Supervision replies, and can be marked Dead from those; a Wake Up device is never marked Dead); this add-on never sweeps them, and `quiet-node` is gated on `isListening === true`. So a battery sensor that stops reporting altogether is invisible to both. On the reference mesh that is 3 of 39 nodes (two motion sensors reporting every ~71 min, one every ~61 min). The audit measured their cadence over 49 h: **zero missed slots** — no gap on any of the three exceeded 1.01x that node's own median — but the jitter around the period is percent-scale, not a fraction of a percent. Worst gap over median: ~71.19 min +0.39 % (5 gaps outside 0.1 %), ~71.28 min +0.00 % (none), ~61.04 min +0.93 % (4), with the outliers scattered across both days rather than clustered on the driver restarts or the 07:00 UTC blackouts. That is the data the original design note lacked when it worried that watching sleeping nodes would make "every sleeping sensor a standing alert", and it says which watch is safe: one keyed on a MISSED SLOT (say 1.5x the node's own measured period) is cheap and low-false-positive, while one sized on the period's jitter must allow several percent — a tenth of one would have alerted nine times in 48 h on a mesh this audit calls healthy. It was built in v0.73.0 as `missed-report`, keyed on the interval each device DECLARES rather than on a measured period (below).
+
+> **Repeated frames (v0.74.0).** A node that does not hear the controller's acknowledgement sends the same frame again, and the driver drops each S2 copy as a duplicate (`Dropping message with invalid payload (Reason: Duplicate command …)`, logged with the node's context). The driver-WS client matches that line in the log stream it already receives and keeps only the node id and the time. A **burst** is 5 or more drops from one node within a minute; `repeated-frames` (watch) fires after the usual dwell while the node has had 2 bursts in 24 h, or one burst of 15 or more, and never on a Dead node. Drop times are kept in memory only, so a restart starts the count again. A burst's minute starts at its first drop, and the symptom holds for the 24 h its bursts stay inside the lookback, so the recommendation sensor can name the node for most of a day after one large burst. It opens no ledger episode: a 24 h count is not a per-sample metric, and an episode would queue verification reads to the node whose link is failing. When the log lane is dark, ENGINE says that s2-desync and repeated-frames detection are both off. On the reference mesh, over two measured days, one dimmer switched by an automation repeated one reply 20 times in a minute (flagged), and four other nodes each had one burst of 5–13 (not flagged). The plan leads with the physical path (a direct-link card for a Long-Range node); a route rebuild is offered only blocked, because it helps only after the path changed (RESEARCH §4.1).
 
 > **The missed-report watch (v0.73.0).** A sleeping node (`isListening === false`) raises `missed-report` when it has been silent past **1.5×** the report interval it declares (`watch`), or past **2.5×** (`warn`), after the usual dwell. The declaration is read from the driver's value DB: a Wake Up interval (Command Class 132, seconds), or else a Configuration parameter whose label contains "heartbeat" and whose unit is seconds, minutes or hours. It comes from the driver-WS state dump, or from the node's `ready` event when the node was still interviewing at dump time (v0.73.1), and then from the value events for that one value. A silence that spans a controller radio-off (the nightly NVM backup, seen as `Turning RF on` in the driver's log stream) gets one more interval, because a heartbeat sent then is lost and not retried. The same extra interval applies when the log stream was not watched throughout the silence. A node is **watched** only while it sleeps, is not Dead (`node-down` owns that), declares a readable interval above 0, has been heard at least once, and the driver-WS link is live. `sensor.zwave_tui_engine` publishes `sleepers_watched` and `sleepers_total`, and ENGINE's `SLEEPERS` row counts the watched sleepers and names those that are not, with why, as many as fit the width (the rest shed as `+N`). A node whose sleep flags are not known yet is not counted as a sleeper (v0.73.4). A raised `watch` or `warn` holds until the node reports again or its declared interval changes: a radio-off or a log-stream gap that arrives after a threshold was crossed cannot explain the miss that crossed it, so it no longer clears the symptom (v0.73.4). Nothing is learned from traffic. A learned cadence could not tell a device's timer from a household routine (a lock used twice a day, a door sensor): two adversarial design rounds each found new false alarms in the rules added to separate them. So a device that declares no interval is not watched, and says so. On the reference mesh the three sleepers declare `Heartbeat Interval` 70, 70 and 60 min, and run about 1.7 % slow (~71.2 min for 70), well inside the 1.5× margin.
 

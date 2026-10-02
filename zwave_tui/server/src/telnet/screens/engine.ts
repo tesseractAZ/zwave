@@ -306,8 +306,8 @@ export function renderEngine(ctx: ScreenCtx): string[] {
       [tone(st), c.grey(ws), ...(s2 ? [c.yellowB(`S2 lane ${s2}`)] : [])], view.cols));
     if (s2) {
       push('    ' + c.yellow(s2 === 'storm-stopped'
-        ? 's2-desync detection is OFF — the log backstop stopped the lane after a burst; it returns on reconnect.'
-        : 's2-desync detection is OFF — the driver refused the log subscription. Raise its log level to verbose.'));
+        ? 's2-desync and repeated-frames detection is OFF — the log backstop stopped the lane after a burst; it returns on reconnect.'
+        : 's2-desync and repeated-frames detection is OFF — the driver refused the log subscription. Raise its log level to verbose.'));
     }
     // THE CAUSE, ON ITS OWN ROW (v0.47.0). A homeId mismatch PURGES driver
     // telemetry, and the operator saw only the bare word `stopped` — the one

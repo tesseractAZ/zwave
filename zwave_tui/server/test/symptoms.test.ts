@@ -58,6 +58,7 @@ interface Fixture {
   now?: number;
   hasRealNoise?: boolean;
   sleeperWatch?: (n: NodeSnapshot) => SleeperWatch | null;
+  duplicateBursts?: (id: number) => { at: number; n: number }[];
 }
 function input(f: Fixture): DetectInput {
   return {
@@ -73,6 +74,7 @@ function input(f: Fixture): DetectInput {
     rateRun: (id) => (f.recent.get(id) ?? []).reduce<RateRun | null>(foldRateRun, null),
     recordingSince: () => T - 30 * 86_400_000,
     sleeperWatch: (n) => f.sleeperWatch?.(n) ?? null,
+    duplicateBursts: (id) => f.duplicateBursts?.(id) ?? [],
     hasRealNoise: () => f.hasRealNoise ?? true,
   };
 }
@@ -892,4 +894,17 @@ test('missed-report: a sleeper past its declared interval fires after the dwell,
   assert.equal(detectSymptoms(inp(T + 7 * MIN), state).find((s) => s.kind === 'missed-report')?.severity, 'warn');
   sev = null;
   assert.equal(detectSymptoms(inp(T + 8 * MIN), state).filter((s) => s.kind === 'missed-report').length, 0, 'a report clears it at once');
+});
+
+test('repeated-frames: a node repeating its frames fires after the dwell, never on a Dead node (v0.74.0)', () => {
+  const T0 = T;
+  const big = [{ at: T0 - 3_600_000, n: 20 }];
+  const inp = (now: number, status = NodeStatus.Alive) => input({ now, nodes: [node(16, { status, name: 'Laundry Room Lights' })], recent: new Map(), duplicateBursts: (id) => (id === 16 ? big : []) });
+  const state: SymptomState = new Map();
+  assert.equal(detectSymptoms(inp(T0), state).filter((s) => s.kind === 'repeated-frames').length, 0, 'arming');
+  const fired = settle(inp, state, T0, 6).filter((s) => s.kind === 'repeated-frames');
+  assert.equal(fired.length, 1);
+  assert.deepEqual(fired[0].evidence, [{ label: 'bursts (24 h)', value: '1' }, { label: 'largest burst', value: '20 repeats in 1 min' }]);
+  const dead: SymptomState = new Map();
+  assert.equal(settle((n) => inp(n, NodeStatus.Dead), dead, T0, 6).filter((s) => s.kind === 'repeated-frames').length, 0, 'node-down owns a Dead node');
 });

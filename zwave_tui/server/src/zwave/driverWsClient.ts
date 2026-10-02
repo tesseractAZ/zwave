@@ -82,6 +82,8 @@ export interface DriverWsCallbacks {
   onHomeId?: (homeId: number) => void;
   /** An S2 SPAN-resync log event was attributed to a node (v0.26). */
   onS2Resync?: (nodeId: number) => void;
+  /** The driver dropped a node's S2 frame as a duplicate (v0.74.0). */
+  onDuplicateDrop?: (nodeId: number) => void;
   /** A sleeping node's declared report interval, from the state dump and then
    *  from the value events for that one value (v0.73.0). */
   onNodeDeclared?: (nodeId: number, declared: Declared) => void;
@@ -226,6 +228,23 @@ export function s2ResyncNodeId(ev: Record<string, unknown>): number | null {
   if (msg.includes('SPAN extension')) return nodeId;
   if (msg.includes('cannot decode command')) return nodeId;
   return null;
+}
+
+/** The node whose S2 frame the driver just dropped as a DUPLICATE, or null
+ *  (v0.74.0). The driver logs it under the controller with a node context
+ *  (zwave-js 15.29 Driver.ts: `Dropping message with invalid payload (Reason:
+ *  Duplicate command (sequence number N))`). A node repeats a frame when it
+ *  does not hear the controller's acknowledgement, so a burst of these is a
+ *  link that works one way. Only the node id leaves this function. */
+export function duplicateDropNodeId(ev: Record<string, unknown>): number | null {
+  if (ev.event !== 'logging') return null;
+  const ctx = ev.context as Record<string, unknown> | undefined;
+  if (!ctx || typeof ctx !== 'object' || ctx.type !== 'node') return null;
+  const nodeId = saneNodeId(ctx.nodeId);
+  if (nodeId == null) return null;
+  const raw = ev.message;
+  const msg = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.filter((x) => typeof x === 'string').join(' ') : '';
+  return msg.includes('Dropping message with invalid payload') && msg.includes('Duplicate command') ? nodeId : null;
 }
 
 /** How long a `Turning RF off` may stand without its `Turning RF on` (v0.65.0).
@@ -570,7 +589,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
           // watch to dormant, it never touches the main listener.
           log(success
             ? 'driver-ws: log stream active (S2 SPAN-resync watch)'
-            : `driver-ws: log stream unavailable (${safeTag(m.errorCode ?? 'refused')}) — S2 watch dormant`);
+            : `driver-ws: log stream unavailable (${safeTag(m.errorCode ?? 'refused')}) — S2 and duplicate-frame watches dormant`);
           logsAcked = success;
           logsLiveSince = success ? Date.now() : null;
           if (!success) logsMsgId = null;
@@ -658,7 +677,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       // viewer) are untouched. Re-arms on the next reconnect.
       logStormStopped = true;
       send('stop_listening_logs');
-      log(`driver-ws: log stream storm (>${LOG_STORM_PER_MIN}/min — driver log level raised?) — S2 watch paused until reconnect`);
+      log(`driver-ws: log stream storm (>${LOG_STORM_PER_MIN}/min — driver log level raised?) — S2 and duplicate-frame watches paused until reconnect`);
       return;
     }
     // The radio going down is not a node event, and it gates a WRITE lane, so
@@ -669,6 +688,8 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     if (rf === 'on') lastRfOnAt = now;
     const nodeId = s2ResyncNodeId(ev);
     if (nodeId != null) cb.onS2Resync?.(nodeId);
+    const dupNode = duplicateDropNodeId(ev);
+    if (dupNode != null) cb.onDuplicateDrop?.(dupNode);
   }
 
   function onEvent(ev: Record<string, unknown> | null): void {
