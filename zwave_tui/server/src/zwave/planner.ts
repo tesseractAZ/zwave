@@ -219,6 +219,21 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
       break;
     }
 
+    case 'repeated-frames': {
+      headline = 'The node does not reliably hear the controller — fix the path first';
+      const rfLR = isLR(node, symptom.nodeId);
+      // Long-Range is a direct link: no repeater or route can help it (review).
+      candidates.push(rfLR
+        ? { action: null, title: 'Close the distance or clear the obstruction (Long-Range is a direct link)', rationale: 'The node keeps repeating its frames because the controller\'s acknowledgements do not reach it. A Long-Range node talks to the controller directly, so only distance, obstruction or the antenna placement can change that: move the device or the controller, or clear what sits between them.', basis: 'lore', cost: 'physical', blocked: null }
+        : { action: null, title: 'Check what sits between it and the controller', rationale: 'The node keeps repeating its frames because the controller\'s acknowledgements do not reach it: the link works one way. A repeater on the way that is often switched off, a metal box, or distance does this. A mains device placed between this node and the controller strengthens the return path.', basis: 'lore', cost: 'physical', blocked: null });
+      if (!rfLR) {
+        // Offered only to say when it can help (RESEARCH §4.1): a rebuild does
+        // not fix a physically bad link, and it deletes priority routes.
+        candidates.push({ action: 'healNode', title: 'Rebuild routes — only after the path changed', rationale: 'A rebuild re-discovers neighbours and assigns new return routes, which is the path the acknowledgement travels, so it can help AFTER a repeater was added or a device moved. On an unchanged path the repeats come back, and it deletes any manual priority routes.', basis: 'source', cost: 'disruptive', blocked: 'no topology change — fix the path first' });
+      }
+      break;
+    }
+
     case 'missed-report': {
       headline = 'Sleeping device missed its declared report — check it in person';
       candidates.push({ action: null, title: 'Check the battery, then trigger the device to make it report', rationale: 'The device declared how often it reports and has now missed that by half an interval or more. A Wake Up device takes commands only when it wakes, and although a FLiRS device can be reached at any time, an answer to us is not the report it missed — so the useful checks are physical — a fresh battery, then a trigger (motion, a button, opening a door) that makes it transmit. If it reports, the watch clears on its own.', basis: 'lore', cost: 'physical', blocked: null });

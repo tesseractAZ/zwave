@@ -1748,6 +1748,12 @@ test('a sleeper\'s declared interval crosses the production hop into the missed-
     assert.equal(w.source, 'heartbeat');
     assert.equal(w.watched, true, `watched: ${JSON.stringify(w)}`);
     assert.equal(w.severity, null, 'ten minutes into a 70-minute heartbeat is healthy');
+    // Duplicate-frame drops cross the hop into the repeated-frames bursts (v0.74.0).
+    for (let k = 0; k < 20; k++) {
+      srv.push({ event: 'logging', context: { type: 'node', source: 'controller', nodeId: 7 }, message: `Dropping message with invalid payload (Reason: Duplicate command (sequence number ${k}))` });
+    }
+    await waitFor(() => (zd.duplicateBursts(7)[0]?.n ?? 0) >= 20, 6000);
+    assert.equal(zd.duplicateBursts(7).length, 1, 'twenty drops inside a minute are one burst');
     // The radio-off evidence crosses the hop too (v0.73.4 review: only the pure
     // module pinned the guards' inputs).
     srv.push({ event: 'logging', context: { type: 'controller' }, message: 'Turning RF on...' });
@@ -2682,4 +2688,27 @@ test('a SmartStart provisioning entry is not a node; only <homeId>-<nodeId> name
   assert.equal(nodeIdOfDevice(dev('3586281591-4001')), null, 'past the Long Range ceiling');
   assert.equal(nodeIdOfDevice(dev('3586281591-4000')), 4000);
   assert.equal(nodeIdOfDevice(dev('provision_1-2', '3586281591-7')), 7, 'a later identifier still counts');
+});
+
+test('the detector reads the drop record: repeated-frames fires from zwaveData, and opens no episode (v0.74.0 review)', async () => {
+  // The hop test stops at the public accessor; this pins the DetectInput wiring
+  // and the episode skip. A listening node, so only the skip keeps it out.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-rf-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    const priv = zd as unknown as { runEngine: (now: number) => void; dupDrops: Map<number, number[]>; lastNodes: NodeSnapshot[];
+      outcomes: { openEpisodeDetails: () => { kind: string }[] } };
+    priv.lastNodes = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true, status: NodeStatus.Alive } : n));
+    const t0 = Date.now();
+    priv.dupDrops.set(7, Array.from({ length: 20 }, (_, k) => t0 - 60_000 + k * 1_000));
+    priv.runEngine(t0);
+    priv.runEngine(t0 + 6 * 60_000);
+    assert.ok(zd.symptoms().some((x) => x.kind === 'repeated-frames' && x.nodeId === 7), `symptoms: ${JSON.stringify(zd.symptoms().map((x) => x.kind))}`);
+    assert.ok(!priv.outcomes.openEpisodeDetails().some((e) => e.kind === 'repeated-frames'), 'no episode for a 24 h count');
+  } finally { zd.stop(); }
 });
