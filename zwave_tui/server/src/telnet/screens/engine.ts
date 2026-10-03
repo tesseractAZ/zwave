@@ -60,7 +60,7 @@ const SCORED_KINDS: SymptomKind[] = [
  * `unscoreableReason` has a sentence for, bound in both directions by a test so
  * a future unscoreable kind cannot be silently omitted here.
  */
-const UNSCORED_KINDS: SymptomKind[] = ['node-down'];
+const UNSCORED_KINDS: SymptomKind[] = ['node-down', 'missed-report', 'repeated-frames'];
 
 /**
  * Roll-up wording, longest first for `pick`.
@@ -83,6 +83,15 @@ const UNSCORED_NOTE_FORMS: string[] = [
   '○ not scored by design — see REMEDY.',
   '○ not scored — see REMEDY.',
 ];
+
+/** Each unscored kind's own reason, longest first; the short forms are the
+ *  shared generic ones (v0.74.1: missed-report and repeated-frames opened no
+ *  episode and got no row, so their absence went unexplained). */
+const UNSCORED_FORMS: Partial<Record<SymptomKind, string[]>> = {
+  'node-down': UNSCORED_NOTE_FORMS,
+  'missed-report': ['○ not scored by design — a sleeping device cannot be probed, so no episode opens. See its REMEDY card.', ...UNSCORED_NOTE_FORMS.slice(2)],
+  'repeated-frames': ['○ not scored by design — a 24 h count of duplicate bursts, not a per-sample reading. See its REMEDY card.', ...UNSCORED_NOTE_FORMS.slice(2)],
+};
 
 /** Actions the ledger can carry an arm for. */
 const ARM_ACTIONS: ActionKind[] = ['ping', 'refreshValues', 'reInterview', 'healNode'];
@@ -544,7 +553,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
   for (const kind of UNSCORED_KINDS) {
     if (unscoreableReason(kind) == null) continue;   // the oracle is the authority
     push('  ' + c.white(kind));
-    push('    ' + c.grey(pick(view.cols - 4, UNSCORED_NOTE_FORMS)));
+    push('    ' + c.grey(pick(view.cols - 4, UNSCORED_FORMS[kind] ?? UNSCORED_NOTE_FORMS)));
   }
   if (!anyLearned) {
     push('  ' + c.grey('○ nothing learned yet — no episode of any scored kind has closed.'));

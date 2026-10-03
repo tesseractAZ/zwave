@@ -62,11 +62,30 @@ export function weight(n: number): string {
  * recovery metric at all — so the sentence is per-kind and is NOT derived from
  * the metric.
  */
+/** A share as a percentage that never rounds into a claim (v0.74.1): "100%"
+ *  only when every one counted, "0%" only when none did, and a share that
+ *  rounds to either end reads ">99%" or "<1%". 474 of 475 printed "100%". */
+export function honestPct(num: number, den: number): string {
+  if (!(den > 0)) return '—';
+  if (num >= den) return '100%';
+  if (num <= 0) return '0%';
+  const p = (num / den) * 100;
+  if (p < 1) return '<1%';
+  if (p > 99) return '>99%';
+  return `${Math.round(p)}%`;
+}
+
 export function unscoreableReason(kind: string): string | null {
   switch (kind) {
     case 'node-down':
       return 'not measured by the ledger: an outage episode ends exactly when the node stops being '
         + 'Dead, so every closure would score as a recovery — there is no control arm to compare against.';
+    case 'missed-report':
+      return 'not measured by the ledger: a sleeping device cannot be probed, so neither side of an '
+        + 'episode could ever reach its evidence floor — no episode is opened (v0.74.1).';
+    case 'repeated-frames':
+      return 'not measured by the ledger: it is a 24-hour count of duplicate bursts, which no per-sample '
+        + 'reading can score, and an episode would send verification reads to the failing link (v0.74.1).';
     default:
       return null;
   }

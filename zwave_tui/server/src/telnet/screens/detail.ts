@@ -24,6 +24,7 @@
  * cached DataProvider values and returns exactly view.rows lines ≤ view.cols.
  */
 
+import { honestPct } from '../ledgerText';
 import { c, lr, padEnd, truncate, visLen } from '../ansi';
 import { gauge, meter, signalBars, sparkline } from '../gauges';
 import {
@@ -374,7 +375,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       const freshTone = pct == null ? c.grey : pct >= 80 ? c.green : pct >= 40 ? c.yellow : c.red;
       const samples =
         c.white(String(cov.samples)) +
-        c.grey(' · fresh ') + freshTone(pct == null ? '—' : `${cov.freshSamples} (${pct}% lifetime)`);
+        c.grey(' · fresh ') + freshTone(pct == null ? '—' : `${cov.freshSamples} (${honestPct(cov.freshSamples, cov.samples)} lifetime)`);
       const span =
         coarse.length > 0
           // "span", deliberately: first-bucket-to-now, NOT continuous coverage —
@@ -492,7 +493,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         const caveat = preEpoch
           ? c.grey(inner - KV_GUTTER >= caveatLong.trim().length ? caveatLong : caveatShort)
           : '';
-        body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${pct}%)`) + self, inner));
+        body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${honestPct(cov.probesAnswered, cov.probesAsked)})`) + self, inner));
         // THE FRAME (v0.71.0). The sweep sends a routed read wherever the node
         // has a switch/light value, and an answered read is a different fact
         // from an answered ping: the ping could use only the stored routes, the
@@ -518,8 +519,8 @@ export function renderDetail(ctx: ScreenCtx): string[] {
             const p = pctOf(rk, ra);
             const q = pctOf(nk, na);
             const forms: [string, string][] = [
-              [`read ${rk}/${ra} (${p}%, any route)`, `ping ${nk}/${na} (${q}%, stored routes)`],
-              [`read ${rk}/${ra} (${p}%)`, `ping ${nk}/${na} (${q}%)`],
+              [`read ${rk}/${ra} (${honestPct(rk, ra)}, any route)`, `ping ${nk}/${na} (${honestPct(nk, na)}, stored routes)`],
+              [`read ${rk}/${ra} (${honestPct(rk, ra)})`, `ping ${nk}/${na} (${honestPct(nk, na)})`],
               [`read ${rk}/${ra}`, `ping ${nk}/${na}`],
             ];
             const [a, b] = forms.find(([x, y]) => x.length + 3 + y.length <= room) ?? forms[forms.length - 1];

@@ -182,7 +182,7 @@ const XTERM_CSS = readVendored('@xterm/xterm/css/xterm.css');
 
 /* ── the /console page ── */
 
-const CONSOLE_HTML = `<!doctype html>
+export const CONSOLE_HTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -262,12 +262,16 @@ const CONSOLE_HTML = `<!doctype html>
     ws.onopen = function () {
       if (retry) { clearTimeout(retry); retry = null; }
       statusEl.textContent = 'connected';
+      // It sits over the terminal's last row, which is the command bar, so it
+      // goes once the link is up (v0.74.1: it covered [Z] PAUSE on ENGINE).
+      setTimeout(function () { if (ws && ws.readyState === 1) statusEl.style.display = 'none'; }, 2000);
       // Force the first resize through even if dims() matches the stale latch.
       lastCols = 0; lastRows = 0;
       sendResize();
     };
     ws.onmessage = function (ev) { term.write(ev.data); };
     ws.onclose = function () {
+      statusEl.style.display = '';
       statusEl.textContent = 'disconnected — reconnecting…';
       retry = setTimeout(connect, 1500);
     };

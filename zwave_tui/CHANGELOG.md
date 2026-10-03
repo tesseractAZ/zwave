@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.74.1
+
+### Fixed — no share rounds into a claim
+
+DETAIL rounded every share with plain rounding. One unanswered probe in 475
+read "474/475 answered (100%)", and 748 fresh samples of 638,906 read "0%".
+A shared rule now prints "100%" only when every one counted and "0%" only when
+none did; a share that rounds to either end reads ">99%" or "<1%". It applies
+to the Probes, Samples and Frame rows, and the same screen's Windows row
+already used "<1%". A test that had pinned "999/1000 (100%)" now expects ">99%".
+
+### Fixed — the console's connection label covered the command bar
+
+The web console's "connected" label is fixed over the terminal's last row,
+which is the command bar. On ENGINE it covered `[Z] PAUSE`, the key that stops
+every autonomous write. It now leaves two seconds after the link is up, and
+comes back while the link is down.
+
+### Fixed — ENGINE names every kind it does not score
+
+`missed-report` and `repeated-frames` open no ledger episode, but only
+`node-down` had a "not scored by design" row on ENGINE, so the other two were
+absent without a word. Each now has a row with its own reason, and the ledger's
+reason sentence (shared with REMEDY) covers both.
+
+### Changed — dependency updates
+
+The server dependency updates merged after 0.74.0 (`@fastify/websocket`
+11.3.1, `tsx` and two others) ship in this release.
+
+5 new tests and 8 new mutants pin these.
+
 ## 0.74.0
 
 ### Added — `repeated-frames`: a link that works one way is no longer invisible
