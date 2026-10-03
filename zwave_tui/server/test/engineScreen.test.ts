@@ -667,3 +667,20 @@ test('ENGINE says how many sleepers the missed-report watch covers, and why each
   const none = plain(renderEngine(ctx(120, 40, { driverWsStatus: () => 'live', driverWsState: () => 'live', sleeperWatches: () => [] })));
   assert.doesNotMatch(none, /SLEEPERS/, 'a mesh with no sleepers has no row');
 });
+
+test('ENGINE names missed-report and repeated-frames as not scored, each with its own reason (v0.74.1)', () => {
+  for (const cols of [40, 60, 80, 120, 200]) {
+    const joined = plain(renderEngine(ctx(cols, 60)));
+    for (const kind of ['missed-report', 'repeated-frames']) {
+      const at = joined.split('\n').findIndex((l) => l.trim() === kind);
+      assert.ok(at >= 0, `${cols}: ${kind} must be named`);
+      const row = joined.split('\n')[at + 1] ?? '';
+      assert.match(row, /not scored/, `${cols}: ${kind} reason: "${row}"`);
+      assert.match(row, /REMEDY/, `${cols}: ${kind} keeps its pointer: "${row}"`);
+      assert.doesNotMatch(row, /outage|control arm/, `${cols}: ${kind} must not borrow node-down's reason: "${row}"`);
+    }
+  }
+  const wide = plain(renderEngine(ctx(200, 60)));
+  assert.match(wide, /sleeping device cannot be probed/);
+  assert.match(wide, /duplicate bursts/);
+});

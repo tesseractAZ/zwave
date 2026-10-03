@@ -427,6 +427,14 @@ test('the probe reply rate reaches the screen — a rate collected and never sho
   assert.match(row!, /22 self-proven/, 'and how many the node had already answered for itself');
 });
 
+test('one unanswered probe is never "100%", and a sliver of fresh samples is never "0%" (v0.74.1)', () => {
+  const out = evidenceLines(withProbes({ samples: 638906, freshSamples: 748, probesAsked: 475, probesAnswered: 474, probesSelfProven: 35, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 }));
+  const probes = out.find((l) => /^\s*Probes/.test(l)) ?? '';
+  assert.match(probes, /474\/475 answered \(>99%\)/, probes);
+  const samples = out.find((l) => /^\s*Samples/.test(l)) ?? '';
+  assert.match(samples, /fresh 748 \(<1% lifetime\)/, samples);
+});
+
 test('a node that mostly MISSES its probes is toned as such', () => {
   // Asserted on the escape codes: the tone is the finding, and stripping ANSI
   // is how a mutant painting everything green survived a fully-passing run once.
@@ -958,7 +966,7 @@ test('the Frame and Rerouted rows are never cut mid-claim, 60 to 200 columns (v0
     const lines = renderDetail(ctx(mkView(cols, 60), d.data, d.nodes)).map(strip);
     const frame = lines.find((l) => /^\s*Frame/.test(l));
     assert.ok(frame, `${cols} cols: the Frame row renders`);
-    assert.match(frame!, /read 999\/1000( \(100%(, any route)?\))? · ping 201\/234( \(86%(, stored routes)?\))?\s*$/, `${cols} cols: "${frame!.trim()}"`);
+    assert.match(frame!, /read 999\/1000( \(>99%(, any route)?\))? · ping 201\/234( \(86%(, stored routes)?\))?\s*$/, `${cols} cols: "${frame!.trim()}"`);
     assert.ok(visLen(frame!) <= cols, `${cols} cols: overflow`);
     const rr = lines.find((l) => /^\s*Rerouted/.test(l));
     assert.ok(rr, `${cols} cols: the Rerouted row renders`);
