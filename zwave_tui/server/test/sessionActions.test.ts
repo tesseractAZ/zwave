@@ -812,6 +812,17 @@ function pauseData() {
   return { d, setHa: (v: boolean) => { ha = v; }, paused: () => st() };
 }
 
+test('a lowercase z on ENGINE pauses too — the key reached for in a hurry needs no Shift (v0.74.2)', () => {
+  const P = pauseData();
+  const { runner, calls } = mkActions(false);
+  const { s, last } = mkSession(runner, P.d);
+  s.feed([key('9')]);
+  s.feed([key('z')]); s.draw();
+  assert.deepEqual(P.paused()?.by, ['tui']);
+  assert.match(strip(last()), /Automatic writes paused/);
+  assert.deepEqual(calls, []);
+});
+
 test('[Z] on ENGINE pauses at once — no CONFIRM, and with write actions OFF (v0.72.0)', () => {
   const P = pauseData();
   const { runner, calls } = mkActions(false);

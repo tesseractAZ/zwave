@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.74.2
+
+### Fixed — a lowercase z did not pause
+
+ENGINE's pause key matched only an uppercase `Z`, so a plain `z` did nothing,
+although the key exists to be reached for in a hurry and other keys (`a`, `q`)
+take either case. It now takes both. Pausing still asks nothing and sends
+nothing; resuming stays behind Controller 3 → A and the typed CONFIRM.
+
+One new test and one new mutant pin it; three mutants anchored on the handler
+are re-pointed.
+
 ## 0.74.1
 
 ### Fixed — no share rounds into a claim
