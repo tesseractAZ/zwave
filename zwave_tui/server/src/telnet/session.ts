@@ -449,7 +449,9 @@ export class TuiSession {
       // so it is taken ahead of the WORKING card and the result card (v0.72.0
       // review), which would otherwise swallow or spend the first press.
       // Resuming is the guarded direction (Controller 3 → A, typed CONFIRM).
-      if (ev.type === 'char' && ev.ch === 'Z' && this.view.screen === 'engine') {
+      // Either case (v0.74.2): lowercase z did nothing, and the key reached for
+      // in a hurry must not need Shift.
+      if (ev.type === 'char' && (ev.ch === 'Z' || ev.ch === 'z') && this.view.screen === 'engine') {
         this.pauseFromKey();
         dirty = true;
         continue;
