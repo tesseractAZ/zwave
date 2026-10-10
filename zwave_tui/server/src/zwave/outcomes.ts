@@ -442,10 +442,37 @@ export function degradedSpan(
   return samples.filter((s) => s.t >= from && s.t <= now);
 }
 
-export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetrics {
+/** The mean raw round-trip time of the k transmissions between two samples,
+ *  recovered from the driver's running average (v0.74.3). zwave-js updates
+ *  `rtt` once per acknowledged transmission, the same event that counts
+ *  `commandsTX` (Driver.ts handleSerialAPICommandResult), as
+ *  `0.75 * rtt + 0.25 * new` (Node.ts updateRTT). Scoring the average itself
+ *  let a verdict "improve" because more commands were sent — the average
+ *  forgets a slow command faster the more commands follow it — so an action
+ *  that sends many reads would look effective for its traffic alone. Null when
+ *  there is nothing new to recover (no previous average, no transmission) or
+ *  the counters disagree (a negative estimate). */
+export function rawRttOf(prevAvg: number | null, avg: number, k: number | null): number | null {
+  if (prevAvg == null || k == null || !(k >= 1)) return null;
+  const keep = 0.75 ** k;
+  const raw = (avg - keep * prevAvg) / (1 - keep);
+  return Number.isFinite(raw) && raw >= 0 ? Math.round(raw * 10) / 10 : null;
+}
+
+/** The driver's average just before a window: the seed `rawRttOf` needs for
+ *  the window's first sample (v0.74.3). */
+export function rttSeedBefore(samples: EvidenceSample[], firstT: number | undefined): number | null {
+  if (firstT == null) return null;
+  let seed: number | null = null;
+  for (const s of samples) { if (s.t >= firstT) break; if (s.rtt != null) seed = s.rtt; }
+  return seed;
+}
+
+export function windowMetrics(samples: EvidenceSample[], minTx = 5, seedRtt: number | null = null): WindowMetrics {
   let tx = 0, rx = 0, timeouts = 0, flaps = 0, s2 = 0, s2Known = 0, n = 0, freshN = 0;
   let routeChanges = 0, routeKnown = 0;
   const rssis: number[] = [], rtts: number[] = [];
+  let prevRtt: number | null = seedRtt;
   let rateKbpsMin: number | null = null;
   for (const s of samples) {
     n++;
@@ -474,9 +501,12 @@ export function windowMetrics(samples: EvidenceSample[], minTx = 5): WindowMetri
     if (s.fresh) {
       freshN++;
       if (s.rssi != null) rssis.push(s.rssi);
-      if (s.rtt != null) rtts.push(s.rtt);
+      // The raw round trips since the last sample, not the running average
+      // (v0.74.3); a sample with no new transmission adds nothing.
+      if (s.rtt != null) { const raw = rawRttOf(prevRtt, s.rtt, s.dTx); if (raw != null) rtts.push(raw); }
       if (s.rateKbps != null) rateKbpsMin = rateKbpsMin == null ? s.rateKbps : Math.min(rateKbpsMin, s.rateKbps);
     }
+    if (s.rtt != null) prevRtt = s.rtt;
   }
   return {
     samples: n, freshN,

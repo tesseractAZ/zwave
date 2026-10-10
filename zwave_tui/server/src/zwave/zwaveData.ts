@@ -70,7 +70,7 @@ import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
 import { detectSymptoms, symptomaticNodes, armingNodes, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
-import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy } from './outcomes';
+import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
 import type { DriverWsState } from './driverWsClient';
@@ -1631,8 +1631,9 @@ class ZwaveDataImpl implements ZwaveData {
   private nodeWindow(nodeId: number | null, now: number): ReturnType<typeof windowMetrics> | null {
     if (nodeId == null || !this.evidenceStore) return null;
     const WINDOW_MS = 5 * 60_000;
-    const ring = this.evidenceStore.forNode(nodeId).filter((s) => now - s.t <= WINDOW_MS);
-    return ring.length ? windowMetrics(ring) : null;
+    const all = this.evidenceStore.forNode(nodeId);
+    const ring = all.filter((s) => now - s.t <= WINDOW_MS);
+    return ring.length ? windowMetrics(ring, undefined, rttSeedBefore(all, ring[0]?.t)) : null;
   }
 
   /**
@@ -1650,8 +1651,9 @@ class ZwaveDataImpl implements ZwaveData {
   private degradedWindow(nodeId: number | null, sinceMs: number, now: number): ReturnType<typeof windowMetrics> | null {
     if (nodeId == null || !this.evidenceStore) return null;
     const WINDOW_MS = 5 * 60_000;
-    const ring = degradedSpan(this.evidenceStore.forNode(nodeId), sinceMs, now, WINDOW_MS);
-    return ring.length ? windowMetrics(ring) : null;
+    const all = this.evidenceStore.forNode(nodeId);
+    const ring = degradedSpan(all, sinceMs, now, WINDOW_MS);
+    return ring.length ? windowMetrics(ring, undefined, rttSeedBefore(all, ring[0]?.t)) : null;
   }
 
   /** Attribute an operator action's outcome to the ledger (M5). Called by the
