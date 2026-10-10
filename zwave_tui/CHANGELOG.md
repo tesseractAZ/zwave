@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.74.3
+
+### Fixed — rtt verdicts no longer reward traffic
+
+zwave-js keeps a node's `rtt` as a running average (`0.75 × rtt + 0.25 × new`,
+once per acknowledged transmission). The ledger scored rtt-degraded episodes on
+medians of that average, which forgets a slow command faster the more commands
+follow it. Episodes "improved" partly because of how often the node was probed,
+and an action that sends many reads, such as a value refresh, would have looked
+effective for its traffic alone, the effect a trial of that action would have
+measured.
+
+- Each sample now gives the mean raw round trip of the transmissions since the
+  previous sample, recovered from the average and the transmit count: `(rtt −
+  0.75^k × rtt_prev) / (1 − 0.75^k)` with `k = dTx`.
+- A sample with no new transmission adds nothing; before, it counted the same
+  average again. An estimate the counters contradict is dropped.
+- rtt-degraded tallies learned before this release were scored on the average
+  and decay out of the control arm with use.
+
+Two tests and five mutants pin the estimator, its seed and the carry-forward.
+
 ## 0.74.2
 
 ### Fixed — a lowercase z did not pause

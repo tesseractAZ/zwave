@@ -52,8 +52,11 @@ test('windowMetrics: flaps fold over ALL samples; rssi/rtt/rate are FRESH-only (
   assert.equal(m.freshN, 2, 'two fresh samples');
   assert.equal(m.rssiMedian, -85, 'median of the two FRESH rssi (−90, −80); the −50 stale read is excluded');
   assert.equal(m.rssiN, 2, 'two fresh rssi observations behind the median');
-  assert.equal(m.rttMedian, 160, 'median of the two FRESH rtt (200, 120); the stale 10 is excluded');
-  assert.equal(m.rttN, 2, 'two fresh rtt observations behind the median');
+  // rtt is scored on the RAW round trips recovered from the running average
+  // (v0.74.3): the first fresh sample has no average before it, so it yields no
+  // estimate; the stale sample adds none but carries its average forward.
+  assert.equal(m.rttN, 1, 'one raw estimate: the third sample against the stale average before it');
+  assert.equal(m.rttMedian, Math.round(((120 - 0.75 ** 10 * 10) / (1 - 0.75 ** 10)) * 10) / 10);
   assert.equal(m.rateKbpsMin, 100, 'worst FRESH negotiated rate (100); the stale non-fresh 40 does NOT count');
 });
 
@@ -1746,4 +1749,29 @@ test('a death during a running heal is the heal\'s even when a quick ping ran an
   o.dropLaunch(8, 10_000);                                      // it never left the add-on
   o.noteDeadAfterAction(8, 'rtt-degraded', 60_000);
   assert.equal(by('healNode'), 1, 'a launch that never left opens no harm window');
+});
+
+test('rtt is scored on raw round trips, so more commands cannot manufacture a recovery (v0.74.3)', async () => {
+  const { rawRttOf, rttSeedBefore } = await import('../src/zwave/outcomes');
+  // zwave-js: avg' = 0.75·avg + 0.25·raw, once per acknowledged transmission.
+  assert.equal(rawRttOf(40, 0.75 * 40 + 0.25 * 400, 1), 400, 'one command: the raw value exactly');
+  let avg = 50; for (let i = 0; i < 3; i++) avg = 0.75 * avg + 0.25 * 30;
+  assert.equal(rawRttOf(50, avg, 3), 30, 'three equal commands: their raw value');
+  assert.equal(rawRttOf(null, 60, 2), null, 'no average before it');
+  assert.equal(rawRttOf(60, 60, 0), null, 'no new transmission adds nothing');
+  assert.equal(rawRttOf(60, 60, null), null);
+  assert.equal(rawRttOf(500, 10, 1), null, 'counters that disagree give no estimate');
+  // One slow command, then normal ones: the AVERAGE decays geometrically and a
+  // window of averages "improves" faster the more probes are sent; the raw
+  // estimates say the slow command was one and the rest were normal.
+  const es = (t: number, rtt: number, dTx: number): EvidenceSample =>
+    ({ t, dTx, dRx: dTx, dTimeout: 0, dDropTx: 0, dFlaps: 0, dRouteChanges: 0, fresh: true, rtt, rssi: null, rateKbps: null } as EvidenceSample);
+  const ring: EvidenceSample[] = []; let a = 40; let t0 = 0;
+  ring.push(es(t0, a, 1));
+  a = 0.75 * a + 0.25 * 600; ring.push(es(t0 += 10_000, a, 1));            // the slow one
+  for (let i = 0; i < 6; i++) { a = 0.75 * a + 0.25 * 40; ring.push(es(t0 += 10_000, a, 1)); }
+  const after = windowMetrics(ring.slice(2), 5, rttSeedBefore(ring, ring[2].t));
+  assert.equal(after.rttMedian, 40, 'the commands after the slow one were all 40 ms');
+  assert.equal(after.rttN, 6, 'every sample in the window gives an estimate, the first one through the seed');
+  assert.equal(rttSeedBefore(ring, ring[2].t), ring[1].rtt, 'the seed is the average just before the window');
 });

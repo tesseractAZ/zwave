@@ -2813,8 +2813,8 @@ interface WindowMetrics {
   routeKnown: number;           // COUNT of samples whose route was VISIBLE — the route verdict's evidence floor
   rssiMedian: number | null;    // median of FRESH rssi readings — weak-signal recovery
   rssiN: number;                // COUNT of fresh rssi readings behind rssiMedian (its evidence floor)
-  rttMedian: number | null;     // median of FRESH rtt readings — rtt-degraded recovery
-  rttN: number;                 // COUNT of fresh rtt readings behind rttMedian (its evidence floor)
+  rttMedian: number | null;     // median of RAW round trips recovered from the driver's average (v0.74.3) — rtt-degraded recovery
+  rttN: number;                 // COUNT of raw estimates behind rttMedian (its evidence floor)
   rateKbpsMin: number | null;   // worst negotiated PHY rate over FRESH samples — rate-fallback recovery (null = no fresh sample carried a rate)
 }
 
@@ -2827,6 +2827,8 @@ interface Tally {
 
 type Verdict = 'improved' | 'no-change' | 'worse' | 'refused-misdiagnosis' | 'unverifiable';
 ```
+
+> **rtt is scored on raw round trips (v0.74.3).** zwave-js keeps `rtt` as a running average, updated once per acknowledged transmission (the same event that counts `commandsTX`) as `0.75 × rtt + 0.25 × new`. A window of those averages "recovers" faster the more commands follow a slow one, so a verdict built on them rewarded traffic, and an action that sends many reads would have looked effective for its traffic alone. The ledger now recovers, per sample, the mean raw round trip of the `k = dTx` transmissions since the previous sample: `(rtt − 0.75^k × rtt_prev) / (1 − 0.75^k)`, with `rtt_prev` the average just before the window for its first sample. A sample with no new transmission adds nothing, and an estimate the counters contradict (negative) is dropped. rtt-degraded tallies learned before v0.74.3 were scored on the average and decay out of the control arm with use.
 
 A window carries **every** recovery signal, because a symptom's recovery shows up in a *different* signal depending on its kind (§9.4). The timeout family's signal is **timeouts/tx**, consistent with the load-bearing fact that `commandsDroppedTX` does *not* count RF ACK failures — `timeoutResponse` (a reply-expecting command — a Get, a supervised Set, or a secure send's nonce Get — whose reply never arrived, node stays Alive) is the measurable per-command degradation `WindowMetrics.rate` is computed from. RSSI, RTT, and the negotiated PHY rate are all re-sampled from the driver's cached stats, so they are folded **only from `fresh` samples** — a re-read of the same cached value between stats events is not a new observation. The PHY rate needs one more caveat: zwave-js rewrites it only when a transmit report arrives (§5.7), so a fresh tick with no acknowledged transmission (`dTx` 0 — say, one where only `commandsRX` moved) carries a copied rate, or the rewrite from a send cut short by the node's S0 nonce report or S2 SOS nonce report (RESEARCH §2.2). Unlike the rate run behind the detector (§7.2.4), this recovery metric does not exclude those. Crucially, a *fresh* sample can still carry a **null** rssi/rtt (the no-signal sentinels 125/126/127, or a null rtt), so `freshN` (fresh-sample count) is **not** the count of usable readings; `rssiN`/`rttN` carry the true per-signal observation counts, which is what §9.4's evidence floors gate on. `flaps` is an event-drain count, folded over **all** samples (a flap is concrete whether or not a stats event landed).
 
