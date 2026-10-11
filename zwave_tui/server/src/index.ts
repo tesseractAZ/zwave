@@ -31,6 +31,7 @@ import { registerWsConsole } from './telnet/wsConsole';
 import { startTelnetServer } from './telnet/server';
 import { buildStates, startHaStates, ENTITY_DEGRADED, HA_STATE_PUBLISH_MS } from './haStates';
 import type { LogEvent } from './types';
+import { appArmorLabel } from './securityLabel';
 
 /* ── logging ─────────────────────────────────────────────────────────────
  * One sink for the data layer, provider and transports — now honouring the
@@ -44,6 +45,13 @@ async function main(): Promise<void> {
    *  recommendation's persistence clock starts here, and says so. */
   const bootedAt = Date.now();
   log(`Z-Wave TUI v${config.version} starting — HA ${config.haWsUrl}`);
+  // Which AppArmor profile is in force (v0.74.4): a rejected profile is
+  // otherwise silent. Only a Supervisor-run add-on is expected to enforce.
+  {
+    const aa = appArmorLabel();
+    if (aa.enforcing || !config.supervisorToken) log(`security: AppArmor ${aa.label}`);
+    else log.warn(`security: AppArmor ${aa.label} — the add-on's own profile is not in force (apparmor.txt, LOADING)`);
+  }
 
   // 1) HA Core WebSocket (SUPERVISOR_TOKEN auth; no-ops if unconfigured in dev).
   const client = createHaWsClient({
