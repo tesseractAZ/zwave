@@ -1,7 +1,8 @@
 name: Publish release
 
-# Cut a GitHub Release on a `v*.*.*` tag push: run the server tests, build and
-# push the MULTI-ARCH GHCR images (aarch64 + amd64 — installs pull these, per
+# Cut a GitHub Release for a `v*.*.*` tag (dispatched by tag-release.yml, or on
+# a hand-pushed tag): run the server tests, build and push the MULTI-ARCH GHCR
+# images (aarch64 + amd64 — installs pull these, per
 # config.yaml's `image:` key; since v0.29.4 there is no on-device build), build
 # the printable manual (.docx editable, .pdf reader-friendly), and create the
 # Release with the CHANGELOG notes + manual attached.
@@ -9,8 +10,10 @@ name: Publish release
 # NB the repo is PUBLIC, so a Release, its manual, and the images ARE public.
 #
 # The tag itself comes from the relay: squash-merge with a subject starting
-# `Release vX.Y.Z` and tag-release.yml pushes the tag automatically — no manual
-# tagging. (A merge whose subject does not start `Release v` releases nothing.)
+# `Release vX.Y.Z` and tag-release.yml pushes the tag, then starts this workflow
+# through `workflow_dispatch` (a tag pushed with GITHUB_TOKEN cannot trigger it)
+# — no manual tagging. (A merge whose subject does not start `Release v`
+# releases nothing.)
 
 on:
   push:
@@ -102,9 +105,11 @@ jobs:
       - name: Run server tests
         working-directory: zwave_tui/server
         run: npm test
-      - name: tsc --noEmit (server)
+      # The same type check CI runs (tsconfig.test.json: src, test and
+      # scripts), not the narrower tsconfig.json, which covers src only.
+      - name: Type-check (server)
         working-directory: zwave_tui/server
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
   images:
     name: Build & push image (${{ matrix.arch }})
@@ -115,8 +120,9 @@ jobs:
       matrix:
         include:
           # Each arch builds on its NATIVE runner. GitHub's free ARM64 runners
-          # for public repos remove the QEMU emulation path, which on the power
-          # add-on routinely stretched aarch64 builds to 30-60 minutes.
+          # for public repos remove the QEMU emulation path, under which an
+          # aarch64 build of this image ran past 35 minutes (see ci.yml
+          # docker-smoke).
           - arch: aarch64
             platform: linux/arm64
             runner: ubuntu-24.04-arm

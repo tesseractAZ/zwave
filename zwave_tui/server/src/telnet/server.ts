@@ -2,7 +2,8 @@
  * Telnet control-room TUI server for the Z-Wave TUI add-on.
  *
  * A raw TCP server speaking just enough of the telnet protocol to put a
- * standard `telnet` / `nc` client into character-at-a-time mode. Each
+ * standard `telnet` client into character-at-a-time mode (a raw `nc`
+ * negotiates nothing, so it stays line-buffered). Each
  * connection gets a live, keyboard-driven Z-Wave mesh dashboard rendered with
  * ANSI. No dependencies: Node's `net` + hand-rolled telnet negotiation + ANSI.
  *
@@ -14,7 +15,8 @@
  * Bind host is `::` (dual-stack). Gated by `config.telnet.enabled` at the
  * call site (index.ts): when off, this server is never started.
  *
- * SECURITY: the telnet TUI is UNAUTHENTICATED — keep it on a trusted LAN.
+ * SECURITY: unauthenticated unless the login gate is on (`auth_enabled`,
+ * auth/loginPolicy.ts) — without it, keep the port on a trusted LAN.
  */
 
 import { createServer } from 'node:net';

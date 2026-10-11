@@ -1,6 +1,6 @@
 name: Release
 
-# One-click release, mirroring the power add-on's pipeline.
+# One-click release.
 #
 #   Actions → Release → "Run workflow"
 #     1. Compute the next version (semver bump, or an explicit override)
@@ -10,14 +10,14 @@ name: Release
 #     4. Prepend a CHANGELOG section (your notes, or the commit log since the last tag)
 #     5. Open a `release/vX.Y.Z` PR with auto-merge enabled
 #
-# `main` requires a PR, so this cannot push straight to it. Once the PR merges,
+# `main` requires status checks that a freshly created commit has not run, so
+# this cannot push straight to it. Once the PR merges,
 # `tag-release.yml` creates the tag and starts `publish-release.yml`.
 #
 # The version files are bumped TOGETHER on purpose: the suite pins them to each
 # other (configContract: "server/package.json version tracks the add-on
 # version", and "server/package-lock.json version tracks server/package.json"),
-# so bumping only config.yaml — which is all the power equivalent needs — would
-# open a PR that fails its own CI.
+# so bumping only config.yaml would open a PR that fails its own CI.
 
 on:
   workflow_dispatch:
@@ -149,7 +149,8 @@ jobs:
             --body-file /tmp/pr-body.md)"
           echo "PR_URL=$pr_url" >> "$GITHUB_ENV"
           # Degrade gracefully if repo-level auto-merge is off — the PR is still
-          # open and mergeable by hand, and steps 2-3 still run on merge.
+          # open and mergeable by hand, and tag-release.yml → publish-release.yml
+          # still run on merge.
           gh pr merge --squash --auto "$pr_url" \
             || echo "::warning::Auto-merge unavailable — merge the PR manually."
 

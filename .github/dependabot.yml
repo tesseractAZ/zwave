@@ -44,7 +44,8 @@ updates:
       #   The container installs Node 22 (alpine 3.21) and CI runs 22. Types for
       #   a newer major would let `tsc` bless APIs that do not exist at runtime —
       #   a green typecheck that proves nothing. Raise this deliberately, with
-      #   the Dockerfile and ci.yml, when the runtime itself moves.
+      #   build.yaml's base, the Dockerfile, ci.yml, publish-release.yml,
+      #   package.json `engines` and .nvmrc, when the runtime itself moves.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
     groups:

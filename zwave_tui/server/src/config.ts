@@ -92,7 +92,7 @@ export const config = {
    * Persistent per-node EVIDENCE store (M2 — the symptom engine's time series;
    * atomic JSON ring on /data). The run script exports
    * `EVIDENCE_PATH=/data/evidence.json`; absent (bare dev) → null (in-memory).
-   * Flush is dirty-flagged; 5 min bounds crash loss without grinding SD cards.
+   * Flush is dirty-flagged; 15 min bounds crash loss without grinding SD cards.
    */
   evidencePath: process.env.EVIDENCE_PATH || null,
   // 5 min → 15 min in v0.26 — same precedence trap as historyFlushMs above.

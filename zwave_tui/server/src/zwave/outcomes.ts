@@ -21,7 +21,7 @@
  * "not distinguishable from self-healing" — it never triggers an action.
  *
  * The statistics are deliberately conservative (DESIGN §3.6, DR — the
- * "regression-to-mean trap" that the patio lights healing unaided already
+ * "regression-to-mean trap" that two exterior switches healing unaided already
  * demonstrated):
  *   • SUCCESS requires the symptom's own per-command rate to fall past its
  *     release threshold AND improve by a minimum EFFECT SIZE — a count dropping
@@ -556,7 +556,7 @@ export function metricOf(kind: SymptomKind): RecoveryMetric {
       return 'flap'; // Alive↔Dead transitions stopping
     case 'node-down':
       // NOT scoreable by this ledger, and the reason is structural rather than
-      // a missing signal — see DOCS §9.9. Two independent problems compound:
+      // a missing signal — see DOCS §9.7a. Two independent problems compound:
       //
       //  (1) An episode closes only when the symptom goes absent, and node-down
       //      is absent exactly when the node stops being Dead. So every closure

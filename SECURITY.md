@@ -31,9 +31,11 @@ seriously.
 - **Every mutating action is human-gated.** When write actions are enabled, each
   one — mesh maintenance (ping / refresh / re-interview / rebuild-routes /
   remove-failed), device control (on/off/toggle, open/close, lock/unlock), and
-  config writes — still requires the operator to open the Actions Menu and type
-  the literal word **CONFIRM** (only a bare `p` ping shortcut is immediate — and
-  `Z` on ENGINE, which pauses automatic writes and sends nothing).
+  config writes — still requires the operator to type the literal word
+  **CONFIRM**, whether it was chosen from the Actions Menu or armed by a shortcut
+  key (`i` re-interview, `h` rebuild one device's routes, `x` remove failed, `R`
+  rebuild all). Only the bare `p` ping shortcut runs at once — and `Z` (or `z`)
+  on ENGINE, which pauses automatic writes and sends nothing.
   Device control and config writes are operator-initiated only.
 - **The engine recommends; exactly one narrow path acts on its own.** The engine
   is advisory by default: it diagnoses, and what it proposes waits for a person.
@@ -41,13 +43,17 @@ seriously.
   `auto_ping_enabled` defaults **off** *and* it independently obeys
   `write_actions_enabled`, so both must be turned on deliberately before it can
   do anything. With both on, a **mains-powered** node still Dead after the dwell
-  is probed with no keypress, as is every non-Dead mains-powered node once per
-  `auto_ping_stale_min` (the liveness sweep) and a node an open outcome episode
-  needs a verification reading from. Two frames can go out this way: Home
+  (`auto_ping_after_min`, skipped when the node went Dead with one of the add-on's
+  own sweep or verification probes to it unanswered) is probed with no keypress,
+  as is every non-Dead mains-powered node once per `auto_ping_stale_min` (the
+  liveness sweep) and a node an open outcome episode needs a verification
+  reading from. Two frames can go out this way: Home
   Assistant's ping (the dead-node ladder), and one `zwave_js.refresh_value`
   routed read — a single Get on the node's own switch/light value — which
   follows an unanswered ladder ping (v0.70.0) and is what the liveness sweep and
-  the verification probes send (v0.71.0). Both transmit, so this is a genuine
+  the verification probes send (v0.71.0). Those two lanes fall back to the ping
+  for a node with no switch/light value to read, or for 30 minutes after its read
+  could not be sent. Both transmit, so this is a genuine
   automatic path and is named here as one. Neither commands a device, but they
   have three effects (DOCS §11): a Report that corrects a stale Home Assistant
   state is a state change automations react to; a read that fails over leaves
@@ -56,15 +62,18 @@ seriously.
   It is bounded: `auto_ping_max_attempts` per outage on a widening backoff, a
   15-minute hold after a node is revived from a death on its own probe, and
   suppressed during storms, route rebuilds (whole network, or one device the
-  operator is rebuilding or removing), restarts, while the controller reports
-  its radio off (the nightly NVM backup), and while the owner has paused it. Nothing else — a full value
-  refresh, re-interview, rebuild-routes, remove-failed, device control, config
-  writes — has any automatic path whatsoever. Since v0.72.0 that is a decision,
-  not a deferral: no verb passes the admission rule (DESIGN §3.5), the automatic
-  set is pinned empty by the type checker, and the seven state-changing verbs are
-  in a fixed never-automatic set no option or efficacy reading can reach.
-- **One pause stops every autonomous frame (v0.72.0).** `Z` on the ENGINE screen,
-  or the owner's own `input_boolean.zwave_tui_pause_autonomy`, stops auto-ping's
+  operator is rebuilding or removing), the first 5 minutes after a start (the
+  dead-node ladder waits only until the roster is ready), while the controller
+  reports its radio off (the nightly NVM backup), and while it is paused.
+  Nothing else — a full value refresh, re-interview, rebuild-routes,
+  remove-failed, device control, config writes — has any automatic path
+  whatsoever. Since v0.72.0 that is a decision, not a deferral: no verb passes
+  the admission rule (DESIGN §3.5), the automatic set is pinned empty by the
+  type checker, and the seven state-changing verbs are in a fixed
+  never-automatic set no option or efficacy reading can reach.
+- **One pause stops every autonomous frame (v0.72.0).** `Z` (or `z`) on the ENGINE
+  screen, or an `input_boolean.zwave_tui_pause_autonomy` helper created in Home
+  Assistant, stops auto-ping's
   three lanes at once, the dead-node ladder included. It fails closed — an
   unreadable pause file, or a toggle last seen pausing and not yet re-read (or
   missing from Home Assistant's state list), reads as paused. A pause set from
@@ -84,7 +93,7 @@ seriously.
 - **All mesh mutations ride the Home Assistant WebSocket** (authenticated with
   the Supervisor token). The separate, unauthenticated **driver WebSocket**
   (`ws://core-zwave-js:3000`) is used **strictly read-only**, behind a closed
-  four-command allowlist (unchanged in v0.73.0) — `set_api_schema`, `start_listening`, and the
+  four-command allowlist — `set_api_schema`, `start_listening`, and the
   log-stream pair `start_listening_logs` / `stop_listening_logs` — and is
   **never proxied or re-exposed** to the TUI, ingress, or logs. None of the four
   transmits over RF: the log pair toggles this client's own receive flag and
@@ -92,25 +101,37 @@ seriously.
   implicit — zwave-js-server's log forwarder is a *single global transport*
   whose first subscriber's filter is silently applied to every other client, so
   this client subscribes with **no filter** rather than narrowing a stream the
-  operator's own Z-Wave log viewer shares. Since v0.73.0 the client also reads,
-  for sleeping nodes only, the one value that declares a node's report interval
-  (its Wake Up interval, or a Configuration parameter labelled as a heartbeat)
-  from the state dump and from the value events for that value. It keeps the
-  number and nothing else, and sends nothing new. Since v0.74.0 it also
-  matches the driver's log line for a duplicate S2 frame dropped from a node,
-  and keeps only that node id and the time.
+  operator's own Z-Wave log viewer shares. What the client keeps is narrow.
+  From the handshake it keeps the server's home id, cross-checked against Home
+  Assistant's, and the driver and server version tags (control characters
+  stripped, length capped) for its status line. From the state dump and its events it keeps the controller's
+  per-channel background RSSI, each node's `lastSeen` and listening/FLiRS flags,
+  and, for sleeping nodes only since v0.73.0, the one value that declares a
+  node's report interval (its Wake Up interval, or a Configuration parameter
+  labelled as a heartbeat). It keeps that number and nothing else. From the log
+  stream it matches three line families locally: an S2 nonce resync attributed
+  to a node (v0.26), the controller turning its radio off and on around the
+  nightly NVM backup (v0.65.0), and, since v0.74.0, a duplicate S2 frame dropped
+  from a node. A match keeps only the node id (or the radio's off/on) and the
+  time. The line text is never logged or stored, and nothing new is sent.
 - **Trust model.** Access over the Home Assistant sidebar (ingress) is already
-  HA-authenticated, and the panel is **admin-only** (`panel_admin: true`) — the
-  console can remove a failed node and, with write actions on, unlock a lock.
+  HA-authenticated, and the panel is **admin-only** (`panel_admin: true`) — with
+  write actions on, the console can remove a failed node, rebuild every route and
+  unlock a lock.
   Ingress trust is **pinned to the address `supervisor` resolves to**, resolved
   once before the server listens, so a *sibling add-on* on the same Supervisor
-  bridge cannot forge it; resolution failure **fails closed**. Direct LAN access
-  to the telnet port and the console is gated by an optional login
-  (`auth_enabled`, users with plaintext or `scrypt:` passwords) with a shared
-  per-peer backoff that survives reconnects, charged **before** the async verify
-  so concurrent sessions contend for one counter. The login gate **fails closed**
-  (denies) when enabled with no users configured, and a row with a blank password
-  is rejected rather than becoming an account whose password is `""`.
+  bridge cannot forge it; resolution failure **fails closed**. Every session that
+  is not genuine ingress — telnet, the only port published on the LAN (`ports:`
+  maps 2324 alone), and any console connection from a peer other than the
+  Supervisor — is gated by an optional login (`auth_enabled`, users with
+  plaintext or `scrypt:` passwords; `auth_require_on_ingress` extends it to
+  ingress sessions, and `auth_idle_lock_min` re-locks an idle gated session)
+  with a shared per-peer backoff that survives reconnects, charged **before** the
+  async verify so concurrent sessions contend for one counter. The login gate
+  **fails closed** (denies) when enabled with no users configured, and a row
+  with a blank password is rejected rather than becoming an account whose
+  password is `""`. Telnet can also be switched off entirely
+  (`telnet_enabled: false`), leaving only the console.
 - **The telnet listener bounds one host.** A global 16-connection cap, a
   **per-source-IP cap of 4**, reclamation of connections that have *received*
   nothing for 30 minutes, and TCP keepalive for half-open peers. Without the
@@ -129,7 +150,8 @@ seriously.
   because U+009B is an 8-bit CSI and U+009D an 8-bit OSC, and xterm.js executes
   both. Inbound console WebSocket frames are size-capped.
 - **What the add-on writes to Home Assistant, and what it does not.** Besides
-  operator-initiated mesh actions, the add-on publishes six *diagnostic* states
+  mesh actions (the operator's, and auto-ping's ping and routed read), the add-on
+  publishes six *diagnostic* states
   over the Core REST API — a degraded flag, a count of nodes needing attention,
   a live symptom count, the engine's own run state, a week's route failures
   ranked by link, and (v0.72.0) one recommendation naming a node, its symptom
@@ -142,11 +164,12 @@ seriously.
   is already on the Controller screen. It writes no other entity, and it sends
   no notification: alerting policy is left to the operator's own automations
   rather than hardcoded here.
-- **Every persisted store is bound by home id, and a change is ASKED, not
-  assumed** (v0.64.0). The evidence envelope carries the controller's `homeId`
-  and starts fresh on a mismatch, as it always has — it is a rolling measurement
-  window that refills in hours. The three LEARNED stores — the outcome ledger,
-  the per-node baselines and the history series — now carry the tag too, and
+- **Every persisted measurement and learned store is bound by home id, and a
+  change is ASKED, not assumed** (v0.64.0). The evidence envelope carries the
+  controller's `homeId` and starts fresh on a mismatch, as it always has — it
+  is a rolling measurement window that refills in hours. The three LEARNED
+  stores — the outcome ledger, the per-node baselines and the history series —
+  now carry the tag too, and
   behave differently on purpose: a mismatch **parks** them. Memory is wiped so
   the engine cannot act on another network's learning, saves are latched off so
   nothing overwrites the file, and the operator is asked to choose: keep the
@@ -155,7 +178,9 @@ seriously.
   controller's own archived learning if it has been here before, or start fresh.
   Nothing is ever deleted: "start fresh" renames the previous network's files
   aside in `/data` as `<name>.home-<id>.json`, and an archive that cannot be
-  written leaves the decision pending rather than proceeding.
+  written leaves the decision pending rather than proceeding. The pause file
+  (`/data/autonomy.json`, v0.72.0) carries no home id: a pause only stops sends,
+  so it holds across a controller swap.
   <br>
   The prior wording was imprecise in a way worth recording: it said a controller
   swap left the learned stores "stale rather than purged". That was true only of
@@ -192,7 +217,10 @@ seriously.
 
 ## Scope
 
-In scope: the add-on server (`server/`), its HTTP/console/telnet surfaces, the
-action-runner and auth paths. Out of scope: Home Assistant Core, the Z-Wave JS
+In scope: the add-on server (`zwave_tui/server/`), its HTTP/console/telnet
+surfaces, the action-runner and auth paths, the container definition
+(`zwave_tui/Dockerfile`, `zwave_tui/config.yaml`, `zwave_tui/apparmor.txt` and
+the s6 run script), and the release workflows that publish the GHCR images
+installs pull. Out of scope: Home Assistant Core, the Z-Wave JS
 integration and driver, the Supervisor, and the physical Z-Wave radio — report
 those to their respective upstream projects.

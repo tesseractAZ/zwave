@@ -125,8 +125,8 @@ spike is therefore not a jamming signal — see the driver-pinning note.)*
 **Denominator correction:** `commandsTX` increments **only on a successful
 (OK) send**. So `(commandsDroppedTX + timeoutResponse) / commandsTX` is
 *timeouts-over-successes*, not a true attempt-failure rate. Keep the existing
-`tx<=0 ⇒ null` guard. **Re-derive the live symptom:** the two patio-light
-switches' "25–33 % TX drop" is almost certainly **`timeoutResponse`-driven**
+`tx<=0 ⇒ null` guard. **Re-derive the live symptom:** the "25–33 % TX drop" on
+the two exterior-wall switches of §6 is almost certainly **`timeoutResponse`-driven**
 (ACKed Gets, supervised Sets or nonce Gets whose reports were lost), *not*
 ACK-drop-driven — which points at return-path/route quality, not a dead link.
 
@@ -206,7 +206,8 @@ channel is only the **fallback** path when the TX report lacks a measured noise
 floor. The docs label it "dBm" (a slight misnomer; it is a dB margin).
 
 > Observed −70s RSSI against a typical ~−100 dBm floor is **~30 dB margin** —
-> further evidence the patio-light drops are **not** steady-state weak signal.
+> further evidence the drops on the two switches of §6 are **not** steady-state
+> weak signal.
 
 ### 1.5 Background RSSI / noise floor *(source)*
 `ControllerStatistics.backgroundRSSI` holds per-channel `{average, current}` for
@@ -251,7 +252,7 @@ channels unlabeled. Hardcoding risks shipping wrong diagnostics to other regions
   89 mm 27 dB**, concrete 305 mm 35 dB. "Radio waves do not propagate through
   metal"; metal masses act as reflectors producing constructive/destructive
   interference.
-- **Stucco over wire lath** (standard Phoenix/SW-US construction) — the live
+- **Stucco over wire lath** (standard US-Southwest construction) — the live
   symptom's leading explanation *(lore)*: metal lath openings (~2.5–5 cm) are ≪ λ
   (~33 cm at 908 MHz), so the mesh behaves as a partial reflective sheet /
   Faraday cage; booster-industry sources rank it in the 10–40 dB class. **No
@@ -266,7 +267,7 @@ channels unlabeled. Hardcoding risks shipping wrong diagnostics to other regions
 Shared ISM occupants: utility **AMI/smart meters** (FHSS sweeping the band every
 few seconds), **LoRaWAN / Amazon Sidewalk** (long-airtime chirps at 915),
 900 MHz cordless phones, analog baby monitors (broadband), RFID, amateur 33 cm.
-In **Phoenix specifically**, AMI meters (often on the *same* exterior stucco
+On the reference mesh, AMI meters (often on the *same* exterior stucco
 walls as the symptomatic switches) and Sidewalk are the highest-prior
 interferers. Signature heuristics (AMI = short periodic bursts; LoRa/Sidewalk =
 sparse long frames; analog monitor = continuous) are **ranked hypotheses, not
@@ -331,6 +332,16 @@ one transmission `Driver.ts handleSerialAPICommandResult` increments
 arrive in a leading event and the rate that transmission produced in a
 trailing event up to 250 ms later. Pairing a counter delta with the route rate
 therefore requires waiting out the window (DESIGN §3.1, settle deferral).
+
+**Raw round trips are recoverable** *(source — zwave-js `Node.ts` `updateRTT`
+and `Driver.ts` `handleSerialAPICommandResult`, as cited in `outcomes.ts`
+`rawRttOf`; added for v0.74.3; no empirical repro)*: `rtt` moves once per
+acknowledged transmission, the same event that increments `commandsTX`, as
+`0.75·rtt + 0.25·new`. Across a window of k = ΔcommandsTX transmissions the
+mean raw round trip is therefore `(rtt − 0.75^k·rtt_prev)/(1 − 0.75^k)`.
+Scoring the average itself rewards traffic, because it forgets a slow command
+faster the more commands follow it. Since v0.74.3 the outcome ledger scores
+`rtt-degraded` on this estimate (DESIGN §3.6).
 
 ---
 
@@ -591,7 +602,9 @@ privileged and never proxy it to untrusted surfaces; the driver-WS URL must be
   to every mains node every 120 min, through HA's ping button, which has the
   same property — and 100 of 106 mains Dead episodes over 67 days on the
   reference mesh began on one of its pings. The sweep and the verification
-  bursts now send one routed read instead; see §5.6.)*
+  bursts now send one routed read instead to every node with a switch or light
+  value to read. A node without one, or one whose read failed to launch in the
+  last 30 min, still gets the NoOp; see §5.6.)*
 - **Powerlevel CC** (class 115): `startNodeTest` + poll `getNodeTestStatus` is
   reachable, but with S2-desync and dangling-test-state risk the driver otherwise
   manages. **Defer to driver-WS phase**; if ever done via `invoke_cc_api`, always
@@ -670,7 +683,7 @@ adding/removing/moving devices or on an observed problem).
 > **This is the engine's most important rule:** only recommend `rebuild_node_routes`
 > on **evidence of topology change** (device moved, stale neighbor data, ghost
 > removed) — **never** as a response to high drop / weak-link symptoms. For the
-> patio-light switches, rebuild is the **wrong** remedy and can regress a
+> two exterior-wall switches of §6, rebuild is the **wrong** remedy and can regress a
 > marginal-but-working LWR.
 
 ### 4.2 Scheduled/nightly heals are a retracted anti-pattern *(lore, strongly sourced)*
@@ -721,7 +734,7 @@ Expected 800-series background floor ≈ **−110 dBm**; **many nodes degrading
 simultaneously, or an elevated floor on all channels ⇒ suspect the controller
 side first** and recommend extension/relocation before any per-node action. **A
 fleet-wide symptom must suppress per-node remediation.** (This is *not* the fix
-for the spatially-isolated two-node patio symptom.)
+for the spatially-isolated two-node exterior-wall symptom (§6).)
 
 ### 4.6 Repeaters, FLiRS, batteries *(source + lore)*
 - **Only mains-powered listening nodes repeat**; batteries add none. neighbors
@@ -737,7 +750,12 @@ for the spatially-isolated two-node patio symptom.)
   then wake-up destination, then RF. Any per-node action on a sleeping node
   **queues until next wake** — the executor needs a "pending until wake" state,
   and after-windows for sleeping nodes key off the **next wake report**, not a
-  clock.
+  clock. *(As built, v0.73.0: `missed-report` reads the declared interval (the
+  Wake Up interval, or a heartbeat Configuration parameter) and raises a
+  `watch` at 1.5 intervals, earlier than this 2× rule, then a `warn` at 2.5,
+  with one more interval when the silence spans a controller radio-off or a
+  stretch the log stream did not watch. A device that declares no interval is
+  not watched. DESIGN §3.3.)*
 
 ### 4.7 Traffic hygiene *(source)*
 *"Too much RF traffic can be the death of a Z-Wave network."* Polling is a **last
@@ -835,7 +853,7 @@ correlation gate runs before any per-node playbook:** if ≥ K nodes degrade in 
 same window (or controller stats degrade), classify as a **mesh-level event**
 (interference / controller / flooding) and **suppress all per-node remediation**.
 This directly fits the live symptom — two exterior-wall switches degrading
-together in a Phoenix stucco house is plausibly **one RF-environment event**.
+together in a stucco house is plausibly **one RF-environment event**.
 
 ### 5.5 Measurement discipline *(source)*
 Every surveyed successful system measures before/after and re-decides — none acts
@@ -861,7 +879,7 @@ wake.
 
 **Added for v0.71.0** (same versions, plus zwave-js-server-python 0.73.1):
 
-- **A routed read is one Get at NodeQuery priority.** `Node.pollValue` wraps the CC API with `maxSendAttempts: 1` and `priority: MessagePriority.NodeQuery` (below Normal, above Poll); zwave-js-server's `node.poll_value` passes no send options, so the SendData keeps `TransmitOptions.DEFAULT` (`0x25`). Every Binary/Multilevel Switch Get in the 37 h log carried `transmit options: 0x25`. The report wait is the frame's RTT plus the 1 s report timeout.
+- **A routed read is one Get at NodeQuery priority.** `Node.pollValue` wraps the CC API with `maxSendAttempts: 1` and `priority: MessagePriority.NodeQuery` (below Normal, above Poll); zwave-js-server's `node.poll_value` passes no send options, so the SendData keeps `TransmitOptions.DEFAULT` (`0x25`). Every Binary/Multilevel Switch Get in the 39 h log carried `transmit options: 0x25`. The report wait is the frame's RTT plus the 1 s report timeout.
 - **A Get's NoAck kills like a ping's.** It takes the same `handleMissingNodeACK` → `markAsDead` path; the difference is only that the controller keeps trying (Auto Route) after LWR, NLWR and direct fail. So a read makes a kill rarer, never impossible.
 - **An ACK without a Report is still an answer.** `lastSeen` is set on an OK TX report, and the node is marked Alive; the lost Report only moves `timeoutResponse`, and the report timeout is swallowed with a warning.
 - **A lost ACK can be followed by a Report.** The node can take the Get, its ACK can be lost, and its Report can still arrive — before the NoAck callback (zwave-js aborts the send and counts it a success: 3 of 170 `0x25` frames in the log) or after it (Dead, then Alive within a second, which a once-a-minute level sample never sees).
@@ -872,28 +890,29 @@ wake.
 
 ---
 
-## 6. Live symptom — worked diagnosis (patio-light switches)
+## 6. Live symptom — worked diagnosis (two exterior-wall switches)
 
-Applying the corpus to #6 Pool Patio Light (score 65, "DROP 33 %", RTT 189 ms,
-via n7 @ 9.6k, F+R flags, RSSI improving) and #3 South Patio Light (77, "DROP
-25 %", direct @ 100k, F):
+Applying the corpus to two exterior-wall switches on the reference mesh: switch
+A (score 65, "DROP 33 %", RTT 189 ms, via one repeater @ 9.6k, F+R flags, RSSI
+improving) and switch B (77, "DROP 25 %", direct @ 100k, F):
 
 1. **The "DROP %" is `timeoutResponse`-driven, not ACK-drops** (§0) — nodes are
    **Alive**, so the RF link *up to the ACK* works; reports are lost/slow on the
    return path.
 2. **Good RSSI (−70s) ⇒ ~30 dB controller-side margin** (§1.4) — **not** steady-
    state weak signal.
-3. **#6's 9.6k via repeater n7** (§2.2) = a **degraded/legacy route** — check
-   whether n7 or the path is 100-series/FLiRS before calling it RF impairment;
-   if n7 is 100k-capable, the 9k6 is genuine impairment on that hop.
+3. **A's 9.6k via its repeater** (§2.2) = a **degraded/legacy route** — check
+   whether the repeater or the path is 100-series/FLiRS before calling it RF
+   impairment; if the repeater is 100k-capable, the 9k6 is genuine impairment
+   on that hop.
 4. **Both on exterior stucco/wire-lath walls** (§1.7) = **RF edge nodes** — the
    physically correct fix is **a mains repeater on an interior wall between
    controller and switch**, *not* a rebuild.
 5. **They co-degrade** (§5.4) — the correlation gate should consider **one
-   RF-environment event** (Phoenix exterior-wall attenuation ± a duty-cycled
-   900 MHz interferer like the AMI meter on those same walls, §1.8) over two
+   RF-environment event** (exterior stucco-wall attenuation ± a duty-cycled
+   900 MHz interferer like an AMI meter on those same walls, §1.8) over two
    independent node faults.
-6. **`rebuild_node_routes` is the wrong first move** (§4.1) — it can regress #3's
+6. **`rebuild_node_routes` is the wrong first move** (§4.1) — it can regress B's
    working direct 100k route and won't conjure a repeater that isn't there.
    Correct order: rule out chatty-neighbor flooding → assess repeater coverage on
    the interior path → **recommend repeater placement** → only then, if a better
@@ -1030,7 +1049,8 @@ via n7 @ 9.6k, F+R flags, RSSI improving) and #3 South Patio Light (77, "DROP
    **dead** — consented + rate-limited, never a background poller; no active link
    tests on battery/FLiRS; `backup_nvm` before any disruptive action. *(§3.4, §5.5, §3.8)*
    *(v0.71.0: the background sweep that broke this rule from v0.37 on now reads
-   instead of pinging — §5.6.)*
+   instead of pinging wherever the node has a switch or light value to read; a
+   node without one still gets the NoOp — §5.6.)*
 9. **Closed, tiered allowlist** (read / benign-active / disruptive / destructive)
    in the engine core — the same channel that rebuilds can factory-reset. *(§3.8)*
 10. **Advisory-first, honest nulls, shareable defaults** — the whole program
@@ -1072,11 +1092,11 @@ FBAR; LinkedIn Nurse; Bronson et al. metastable failures (HotOS '21).
 
 **Live probes (this installation, HA Core 2026.7.2, 2026-07-16):** command-existence
 sweep of `zwave_js/*` (validation-only, nothing executed) —
-`scratchpad/zwave-research/live-api-probe.md`. Empirical driver behavior:
+recorded in a working file kept outside this repository. Empirical driver behavior:
 zwave-js@15.25.3 + @zwave-js/testing (NoAck→DEAD without incrementing
 `commandsDroppedTX`; ack-but-no-report→`timeoutResponse=1`, Alive;
 `attempts.sendData===3`).
 
-*Full 114-finding structured corpus (with per-claim confidence, sources, and the
-40 adversarial verification verdicts) archived at
-`scratchpad/zwave-research/research-result.json`.*
+*The full 114-finding structured corpus (with per-claim confidence, sources, and
+the 40 adversarial verification verdicts) is kept outside this repository and is
+not published.*

@@ -1,8 +1,9 @@
 name: CI
 
-# Type-check + test the server and smoke-build the add-on container on every
-# push to and PR into main. Cheap insurance that no broken commit lands on main
-# and gets installed onto the Pi.
+# Type-check + test the server, smoke-build the add-on container for every
+# architecture, and build the printable manual on every push to and PR into
+# main. Cheap insurance that no broken commit lands on main and reaches a
+# release.
 #
 # These ARE required checks: `main` carries a branch-protection rule requiring
 # "Type-check & test (server)", both "Dockerfile smoke build" jobs, the docs
@@ -21,8 +22,9 @@ on:
   pull_request:
     branches: [main]
 
-# Least-privilege: both jobs only read the repo (checkout). Buildx GHA cache
-# uses the runtime token, not GITHUB_TOKEN, so no extra scopes are needed.
+# Least-privilege: every job here only reads the repo (checkout). The Buildx
+# GHA cache and upload-artifact use the runtime token, not GITHUB_TOKEN, so no
+# extra scopes are needed.
 permissions:
   contents: read
 
@@ -77,9 +79,10 @@ jobs:
   docker-smoke:
     # Build the Home Assistant add-on container on push/PR to main, for EVERY
     # architecture config.yaml declares. Previously this built amd64 only —
-    # which meant aarch64, the one architecture actually deployed (a Pi 5), was
-    # never compiled in CI, so an arch-specific Dockerfile or apk regression
-    # would have reached the Pi unseen. Buildx cache keeps repeat runs ~1-2 min.
+    # which meant aarch64, the architecture of the reference install, was never
+    # compiled in CI, so an arch-specific Dockerfile or apk regression would
+    # have reached aarch64 installs unseen. Buildx cache keeps repeat runs
+    # ~1-2 min.
     #
     # The build context is ./zwave_tui, matching what HA Supervisor uses: an
     # add-on is built from ITS OWN directory, not the repository root.
@@ -147,12 +150,13 @@ jobs:
           cache-to: type=gha,mode=max,scope=docker-smoke-${{ matrix.arch }},ignore-error=true
 
   docs:
-    # Assemble README + SECURITY + zwave_tui/DOCS.md into one printable manual on
-    # push/PR to main, as BOTH an editable .docx (pandoc) and a reader-friendly
-    # .pdf (LibreOffice converts the .docx — no LaTeX). Purpose: (1) fail the PR
-    # if DOCS.md no longer converts cleanly, and (2) upload a downloadable offline
-    # manual for the branch. publish-release.yml builds the same manual again and
-    # attaches it to the GitHub Release; this job is the per-branch check.
+    # Assemble README + SECURITY + PERFORMANCE + zwave_tui/DOCS.md into one
+    # printable manual on push/PR to main, as BOTH an editable .docx (pandoc)
+    # and a reader-friendly .pdf (LibreOffice converts the .docx — no LaTeX).
+    # Purpose: (1) fail the PR if DOCS.md no longer converts cleanly, and (2)
+    # upload a downloadable offline manual for the branch. publish-release.yml
+    # builds the same manual again and attaches it to the GitHub Release; this
+    # job is the per-branch check.
     name: Build documentation (.docx + .pdf)
     runs-on: ubuntu-latest
     steps:

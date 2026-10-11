@@ -31,8 +31,10 @@
  * Baseline lifecycle: windows inside an active symptom's dwell (including the
  * pre-emission arming window) are QUARANTINED from updates (the baseline must
  * not chase the pathology); aggregates DECAY slowly so genuine improvements are
- * eventually absorbed; and routeKey change / re-interview / home-id change force
- * a reset. A permanently-symptomatic node's baseline therefore FREEZES at its
+ * eventually absorbed; and a home-id change (everything) or a node leaving the
+ * mesh (that node) forces a reset. A route change or a re-interview does not:
+ * the decay absorbs a lasting shift. A permanently-symptomatic node's baseline
+ * therefore FREEZES at its
  * last-healthy normal — accepted (v0.14 review): that keeps a genuinely-broken
  * node flagged against its own healthy history rather than normalizing the
  * fault. DESIGN's bounded-quarantine/forced-re-baseline-after-K-weeks is a
@@ -152,12 +154,11 @@ export interface BaselineStore {
   rssiNormal(nodeId: number, at: number): ContNormal | null;
   /** The learned rtt normal for a node's current-time band. */
   rttNormal(nodeId: number, at: number): ContNormal | null;
-  /** Force-reset a node's baselines (re-interview / replace / home-id change). */
-  /** Drop everything (home-id change) and rewrite disk immediately. */
   /** Drop ONE node's learned normals. Correct after the node leaves the mesh:
    *  a later re-include on the same id is a DIFFERENT device, and comparing it
    *  against a stranger's baseline is how the engine invents symptoms. */
   resetNode(nodeId: number): void;
+  /** Drop everything (home-id change) and rewrite disk immediately. */
   reset(): void;
   load(): void;
   save(): void;

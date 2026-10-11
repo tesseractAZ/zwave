@@ -8,7 +8,8 @@ observation rather than a distribution, it says so. Where something is *not*
 measured, it is listed under *Not measured* rather than filled in with a plausible value — the
 same rule the screens themselves keep.
 
-Reproduce any of it with the commands given; each section names its own method.
+Reproduce any of it with the commands given, run from `zwave_tui/server/`; each
+section names its own method.
 
 - **Measured at:** each figure section states when it was measured — a
   version, a date or both; the newest is §3, v0.71.0 (2026-09-23), and §8
@@ -114,8 +115,10 @@ The tables and run figures below are from the v0.71.0 release run, 2026-09-23.
 | Source | 27 248 lines TypeScript · 23 332 lines of tests |
 | Test suite | **1 298 tests, 13.4 s** (`npm test`) |
 
-Latest full run: **867 killed · 0 survived · 12 equivalent · 0 missing ·
-0 ambiguous · 0 invalid · 0 relabel.**
+Full run at v0.71.0: **867 killed · 0 survived · 12 equivalent · 0 missing ·
+0 ambiguous · 0 invalid · 0 relabel.** §3 has not been re-profiled since; each
+later release's full-run tally is in the CHANGELOG (v0.72.0: 1017 killed,
+0 survived, 12 equivalent).
 
 ### Where the 2596 seconds actually go
 
@@ -193,12 +196,12 @@ marked `equivalent` that the suite now kills) are all failures. An anchor
 pre-flight checks every mutant's target text against its file before any
 *mutant's* tests run — it runs after the baseline, so a stale entry costs the
 baseline (~14 s) rather than a full run (~43 minutes; 2596 s in the v0.71.0
-run). It fired nine times during the v0.51–v0.64.3 work, each on an anchor one
-of my own edits had moved — most recently in v0.64.3, `MISSING` on both
-outage-clock mutants after the dating line they target was rewritten, and
-before that on an `AMBIGUOUS(2)`, where a copy-pasted path-splitting helper made
-one anchor match two sites. The duplication was the real defect; the harness
-found it as a testing problem.
+run). It fired nine times during the v0.51–v0.64.3 work, each on an anchor that
+a source edit in the same change had moved — most recently in v0.64.3,
+`MISSING` on both outage-clock mutants after the dating line they target was
+rewritten, and before that on an `AMBIGUOUS(2)`, where a copy-pasted
+path-splitting helper made one anchor match two sites. The duplication was the
+real defect; the harness found it as a testing problem.
 
 ---
 
@@ -367,7 +370,7 @@ reports `suppressed: boot-window` for some minutes by design — the roster read
 every node as Dead until the first poll lands, so the ladder stands down rather
 than probing the whole mesh on every restart.
 
-> **Two retractions, both my own measurement error.**
+> **Two retractions, both measurement errors.**
 >
 > An earlier revision reported a second milestone, "first Home Assistant state
 > write, +6.8 s". It is removed. The first attempt polled `last_changed`, which
@@ -453,7 +456,7 @@ As of v0.63.2, 2026-09-06:
 
 | | measured |
 | --- | --- |
-| HA state re-publish | every **30 s** (four entities at v0.63.2; five since v0.68.0) |
+| HA state re-publish | every **30 s** (four entities at v0.63.2; five since v0.68.0; six since v0.72.0 added `sensor.zwave_tui_recommendation`) |
 | Release image build (CI, multi-arch) | ~**90 s** after the tag |
 
 The 30 s cadence is also the self-heal window: the entities are unmanaged
@@ -500,11 +503,12 @@ at these magnitudes:
   sessions. That is a limit, not a measured capacity, and one operator will not
   approach it.
 
-**Not a gap at all:** the rtt baseline ceiling of 22/38 is *measured and
-understood* — route churn resets continuous baselines, and a repeater-routed node
-must hold one route for roughly two weeks to graduate a band. Five redesigns were
-evaluated and rejected, each with a concrete false-symptom scenario. It was
-previously listed here, which wrongly implied open work.
+**Not a gap at all:** the rtt baseline ceiling (21/38 in §4's reading, 22/38
+before it) is *measured and understood* — route churn resets continuous
+baselines, and a repeater-routed node must hold one route for roughly two
+weeks to graduate a band. Five redesigns were evaluated and rejected, each with
+a concrete false-symptom scenario. It was previously listed here, which wrongly
+implied open work.
 
 ---
 
@@ -512,9 +516,9 @@ previously listed here, which wrongly implied open work.
 
 | date | version | what changed |
 | --- | --- | --- |
-| 2026-09-22 | v0.69.0 tree | §3 re-measured: 715 mutants (706 killed · 9 equivalent), 1842 s wall · 796 s user · 97 s sys, 1 212 tests in 12.7 s; the harness now refuses a test name with no file; both stale test names fixed (only one had forced a full-suite fallback), so full-suite fallbacks fell from 10 to the 9 equivalents |
 | 2026-09-23 | v0.71.0 | §3 re-measured: 879 mutants (867 killed · 12 equivalent), 2596 s wall · 1002 s user · 127 s sys, 1 298 tests in 13.4 s; the measurement lanes' routed read, the post-kill hold, between-tick deaths and read-failover attribution added 141 mutants (one retired) and 65 tests; three of the new mutants are labelled equivalent, each with its edge case |
 | 2026-09-23 | v0.70.0 | §3 re-measured: 738 mutants (729 killed · 9 equivalent), 1910 s wall · 861 s user · 105 s sys, 1 233 tests in 12.9 s; the routed read and the Dead-refresh guard added 23 mutants and 21 tests |
+| 2026-09-22 | v0.69.0 tree | §3 re-measured: 715 mutants (706 killed · 9 equivalent), 1842 s wall · 796 s user · 97 s sys, 1 212 tests in 12.7 s; the harness now refuses a test name with no file; both stale test names fixed (only one had forced a full-suite fallback), so full-suite fallbacks fell from 10 to the 9 equivalents |
 | 2026-09-22 | v0.69.0 | §3 re-measured: 715 mutants (706 killed · 9 equivalent), 1840 s wall · 786 s user · 93 s sys, 1 212 tests in 13.0 s; weak-signal on an unmeasured window and the refusal reason added 7 mutants and 9 tests |
 | 2026-09-22 | v0.68.1 | §3 re-measured: 708 mutants (699 killed · 9 equivalent), 2266 s wall · 1299 s user · 151 s sys, 1 203 tests in 16.0 s; the route-failure boot guard added 2 mutants and 1 test |
 | 2026-09-21 | v0.68.0 | §3 re-measured: 706 mutants (697 killed · 9 equivalent), 1854 s wall · 824 s user · 102 s sys, 1 202 tests in 12.4 s; route failures published and the publish loop hardened: 8 mutants and 7 tests |

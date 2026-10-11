@@ -99,9 +99,12 @@ hard conditions:
   (`DRIVER_WS_ALLOWLIST`) the list is `set_api_schema`, `start_listening` and
   the log-stream pair `start_listening_logs`/`stop_listening_logs` (v0.26 — the
   S2 SPAN-resync watch; since v0.65.0 also the controller's
-  `Turning RF off`/`on` blackout reading); the lifeline and priority-route
-  reads were never added. **NO health checks, NO pings, NO route surgery,
-  nothing that transmits RF.**
+  `Turning RF off`/`on` blackout reading; since v0.74.0 also the S2
+  duplicate-frame drops behind `repeated-frames`). Since v0.73.0 the
+  `start_listening` state dump and its value events also supply each sleeping
+  node's declared report interval to `missed-report`, with no new command. The
+  lifeline and priority-route reads were never added. **NO health checks, NO
+  pings, NO route surgery, nothing that transmits RF.**
   Active health checks stay behind the consent/quiet-window machinery M4/M5
   build.
 - **All actions stay on HA WS** through M5 (and beyond, until a separate
@@ -262,6 +265,18 @@ their band graduates.
   rssi/rtt strata), re-interview, `replace_failed_node` (node-id reuse means a
   different physical device), controller home-id change.
 
+> **As built (v0.14; mesh identity since v0.64.0).** Quarantine is unbounded: a
+> node that stays symptomatic keeps its last-healthy normal, and the K-week
+> forced re-baseline is not built. Decay is per observation (α = 0.01, `DECAY`
+> in `baselines.ts`), not a time half-life. rssi/rtt are not stratified by
+> `routeKey`: all their bands are reset when one known route changes to
+> another, and since v0.47.0 a route that cannot be seen does not count as a
+> change. A node this add-on removes (`removeFailed`), or absent from the roster
+> for 5 minutes (which covers `replace_failed_node`), loses its baselines. A
+> home-id mismatch does not decide a re-baseline on its own: the learned stores
+> wipe memory, stop saving and ask the operator to start fresh, keep, or resume
+> an archive (`homeTag.ts`, DOCS §11.13).
+
 **Division of labor — written down** *(DR)*: the health score answers "how is
 this node NOW, in absolute terms"; relative detectors answer "did it CHANGE
 from its own normal"; the **chronic-absolute detector** (§3.3) bridges the gap
@@ -298,12 +313,14 @@ verbatim where one exists — §3.5):
 | `edge-cluster` | a **small correlated subset** with shared-signature evidence: shared repeater/`routeFailedBetween` hop, same-band co-movement, co-onset — the explicit tier between per-node and mesh-level | coincidence (two nodes breaching different metrics at unrelated hours) *(§6, DR)* |
 | `ghost-suspect` | requires **proven coverage**: store recording the node ≥N days with live subscriptions, zero successful comms AND zero non-dead status in that span; a young/empty store yields `insufficient history (n/N days)`, never a ghost verdict | rarely-woken battery node; store just wiped; subscription failure *(DR blocker)* |
 | `mesh-correlated` **(built as `mesh-interference`: ≥ 35 % of ≥ 8 active nodes with ≥ 3 degraded, a 5-min dwell, held until it dips below 20 %; the penalty hold and duty-cycle annotation below are not built)** | breadth over **nodes-with-observable-traffic-in-window** (≥30–40% of active nodes, never an absolute K), sustained ≥2–3 consecutive windows, or corroborating controller-stats degradation | pipeline artifacts: post-gap windows are invalid for correlation (queued deltas aren't time-attributable); single-window unanimity after silence is evidence about the pipeline, not the mesh *(DR)* |
+| `missed-report` | a **sleeping** node silent past the report interval it **declares**: its Wake Up interval, or else a Configuration parameter labelled as a heartbeat, read from the driver's value DB over the driver-WS (v0.73.0). `watch` past 1.5 intervals, `warn` past 2.5, and one more interval when the silence spans a controller radio-off or a stretch the log stream did not watch. Watched only while the node is not Dead, has been heard at least once, declares an interval above 0, and the driver-WS link is live. Nothing is learned from traffic | a device that declares no interval (never watched: a learned cadence cannot tell a device's timer from a household routine); a heartbeat lost during the nightly NVM-backup radio-off; a node Dead now (node-down owns it) *(DOCS §11.12)* |
 | `node-down` | the driver reports the node Dead, sustained through the 5-min dwell (v0.37.0) — the ordinary outage, whose one or two transitions never reach `dead-flap`'s ≥ K | silence alone: Dead is set only after a failed transmission, and silence past a cadence is `quiet-node` *(§0)* |
 | `quiet-node` | mains **listening** node whose last-activity age ≫ its own learned reporting cadence — emits honest "unreachability unknown, no traffic attempted" (state ≠ healthy) (operationally, v0.38, cadence-derived since v0.63.0: no learned cadence — a listening node not Dead now whose `lastSeen` is older than 3 × the configured liveness-sweep cadence, floored at 6 h; a node with no `lastSeen` at all is never accused) | battery/FLiRS within wake interval; nodes with no learned cadence yet; a node Dead now (node-down owns it) *(DR; §3.7)* |
 | `rate-fallback` | the **same routeKey** that previously sustained 100k now persistently below 100k (operationally, v0.64.6: at least 2 separate acknowledged transmissions on that routeKey since its newest 100k reading, the newest below 100k) — same-route regression needs no capability data *(fail-closed: cross-route comparison excluded until driver-WS capability data exists — DR)* | legacy/FLiRS capability cap; single-exchange retry *(§2.2)* |
+| `repeated-frames` | the driver drops a node's S2 frames as duplicates in bursts of ≥ 5 drops within a minute, matched in the driver-WS log stream (v0.74.0). `watch` after the dwell while the node has had two bursts in 24 h, or one of ≥ 15. The node is not hearing the controller's acknowledgements, so the link works one way | a single small burst; a node Dead now; a dark log lane (detection is off, and ENGINE says so); drop times are held in memory only, so a restart restarts the count *(DOCS §11.12)* |
 | `return-path-degraded` | windowed per-command timeout **rate** (ΣdTimeout/ΣdTx, min denominator) ≫ own baseline, dwell ≥ D | tiny samples; traffic-volume shifts (rate not count — DR); unsupervised-SET-only nodes that need no nonce exchange, and traffic-mix shifts between reply-expecting commands and unsupervised Sets — either direction moves the rate (toward reply-expecting commands can inflate it, toward unsupervised Sets can mask a breach) *(§0)* — supervised Sets DO accrue timeouts, and so does a secure send whose nonce Get is acknowledged but never answered (source-traced on zwave-js 15.27.1; empirical repro still open — RESEARCH §7 item 11) |
 | `route-churn` | routeKey churn ≫ baseline + rate/RTT corroboration (**routeSchemeState does not exist on either WS — dropped**; explorer detection only ever as a labelled best-effort log parse) (operationally, v0.30.0: an absolute ≥ 4 LWR route changes in 10 min, at least one within the last 5 min — no baseline and no rate/RTT corroboration; Long-Range nodes excluded) | one legit re-route after topology change *(§2.1, DR)* |
-| `rtt-degraded` | RTT median over **fresh** samples ≫ route-stratified baseline, dwell | route change (settle window); EMA lag; wake latency *(§1.11, DR)* |
+| `rtt-degraded` | RTT median over **fresh** samples ≫ route-stratified baseline, dwell (operationally, v0.14: the newest fresh reading, which is the driver's running average, above the band's median + 4 × its MAD-derived scale. The rtt baseline is reset on a route change rather than stratified by route (§3.2 above). The detector still reads the average; since v0.74.3 the ledger scores the episode on raw round trips, §3.6 below) | route change (settle window); EMA lag; wake latency *(§1.11, DR)* |
 | `s2-desync` | ≥ 12 S2 SPAN resyncs in 30 min from the `dS2Resync` accumulator, at least one within the last 5 min — an absolute threshold, not baseline-relative (v0.26; watch, warn at ≥ 3×) | an occasional resync after a missed frame is normal S2 behaviour; a stopped log lane, which reads null rather than zero *(DOCS.md §6.11)* |
 | `weak-signal` | low RSSI **on a direct (non-routed) node** + delivery corroboration: a ≥5 % timeout rate, or — when too few sends to rate — a failed delivery in the last 30 min (v0.69.0) | routed node (RSSI = last hop, not the device) *(§1.3)*; a node Dead now (node-down owns it) |
 
@@ -376,7 +393,7 @@ machine-readable and keyed to RESEARCH sections.
 | chatty-device / flooding | tune reporting / re-include S2 | any RF remedy | traffic floods the mesh; fix the cause *(§4.7)* |
 | controller-degraded | USB-2 extension, relocate stick | per-node action | serial-link symptom ⇒ controller side *(§4.5)* |
 | dead-flap | reachability runbook (ping→power-cycle→re-include) | rebuild | a dead node can't be repaired *(§4.4)* |
-| edge-cluster | shared-path diagnosis: repeater/placement for the cluster | treating as N independent faults, or as mesh-wide | the patio-pair case *(§6, DR)* |
+| edge-cluster | shared-path diagnosis: repeater/placement for the cluster | treating as N independent faults, or as mesh-wide | the exterior-wall pair *(RESEARCH §6, DR)* |
 | ghost-suspect (coverage-proven) | `remove_failed_node` — **advise-only, always type-CONFIRM** | rebuild a dead node; any auto path | destructive; the removal attempt is itself the only in-band verification *(§4.4, DR)* |
 | mesh-correlated (interference residual) | environment survey; driver-WS noise floor when available | per-node actions | inferred-by-exclusion until measured *(DR)* |
 | quiet-node | consented, rate-limited ping (never background) | marking unhealthy outright | absence of traffic ≠ absence of node *(§3.4, DR)* |
@@ -427,7 +444,7 @@ even when execution is fully disabled.
 >
 > `ping` and `routedRead` **predate the rule and fail it**. They keep running
 > only as auto-ping — the dead-node ladder, the sweep and the verification
-> bursts — under auto-ping's gates and the owner's pause (DOCS §11.12), and the
+> bursts — under auto-ping's gates and the autonomy pause (DOCS §11.12), and the
 > table says so (`alreadyAutonomousAs`) rather than pretending they pass.
 >
 > **Evidence qualifies efficacy, never safety.** `NEVER_AUTO` —
@@ -455,7 +472,7 @@ even when execution is fully disabled.
 > `ActionRunner` (for the refresh trial:
 > `{ refreshValues: (n) => actions.refreshValues(n, 'engine') }`); sit behind
 > its own default-off option, independent of `write_actions_enabled`; and be
-> re-consented to by the owner.
+> explicitly re-consented to.
 >
 > **The pre-registered protocol** — the only path by which any verb may later
 > be admitted:
@@ -500,9 +517,11 @@ even when execution is fully disabled.
 > ladder follows an unanswered ping with one routed read, and since v0.71.0 the
 > sweep and the verification bursts send that routed read
 > (`zwave_js.refresh_value` on the node's own switch/light value — a single Get,
-> read-only) instead of the ping, because an unanswered ping marks a working node
-> Dead and the add-on's own pings began 100 of 106 mains Dead episodes over 67
-> days on the reference mesh. The only background writes remain these probes and
+> read-only) instead of the ping to every node that has such a value (a node with
+> none, or one whose read failed to launch in the last 30 min, still gets the
+> ping), because an unanswered ping marks a working node Dead and the add-on's
+> own pings began 100 of 106 mains Dead episodes over 67 days on the reference
+> mesh. The only background writes remain these probes and
 > the dead ladder, under the same gates; neither can remove a node or change a
 > device's configuration.
 
@@ -514,8 +533,8 @@ even when execution is fully disabled.
 > populated by those operator actions and by the dead-node ladder's pings
 > (booked per actor since v0.72.0, with claims from the operator's arm only). `executor.ts` — the gate-stack
 > below — and the `auto_remediation` config knob only earn their existence when
-> an **auto** tier drives actions itself. **The owner explicitly chose to keep
-> the engine advisory-only, so this module and `auto_remediation` are NOT built**
+> an **auto** tier drives actions itself. **The engine is kept advisory-only
+> by decision, so this module and `auto_remediation` are NOT built**
 > and remain a future opt-in; if they are ever built, auto-execution's safety
 > must be surfaced and agreed first. The gate-stack below is the design of record
 > for that future tier.
@@ -563,12 +582,16 @@ after-window without fresh evidence (wedge, no traffic) yields
 
 ### 3.6 `outcomes.ts` (M5 — episodes, not just actions; DR)
 
-> **As-built (v0.16, advisory-only per the owner's decision).** The ledger is
+> **As-built (v0.16, advisory-only by decision).** The ledger is
 > `server/src/zwave/outcomes.ts` — a pure store wired into `runEngine`'s symptom
 > lifecycle: an episode OPENS when a non-subsumed symptom appears (a subsumed
 > one's fate belongs to the mesh event, so counting it would pollute the base
-> rate; since v0.37 `node-down`, which the ledger cannot score, opens none, and
-> since v0.38.1 neither does a node not known to be listening) and RESOLVES
+> rate; since v0.37 `node-down`, which the ledger cannot score, opens none;
+> since v0.38.1 neither does a node not known to be listening, which also keeps
+> out the sleeping nodes `missed-report` (v0.73.0) watches; and since v0.74.0
+> neither does `repeated-frames`, a 24-hour burst count that no per-sample
+> window can score, whose episode would queue verification reads to the node
+> whose link is failing) and RESOLVES
 > only after the symptom has stayed gone through a 10-min
 > confirmation window (a blink of improvement is not a recovery, and the dwell
 > lets the after-window settle past the transition). The "action arm" is
@@ -583,6 +606,16 @@ after-window without fresh evidence (wedge, no traffic) yields
 > bound decides every claim and used to be discarded at the ledger boundary.
 > `n≈` is written with a decimal because it is a decayed weight saturating near
 > 33, not a tally — the node count beside it IS a cumulative tally.
+>
+> Since v0.74.3 an `rtt-degraded` episode's before- and after-windows are
+> scored on raw round trips, not on the driver's running average. Each fresh
+> sample contributes the mean raw round trip of its new transmissions,
+> recovered from the average and the transmit count as
+> `(rtt − 0.75^k·rtt_prev)/(1 − 0.75^k)` with k = dTx (`rawRttOf`), and the
+> window takes the median of those. The average forgets a slow command faster
+> the more commands follow it, so scoring it credited traffic. A sample with no
+> new transmission adds nothing, and tallies learned before v0.74.3 decay out
+> with use. The detector (§3.3) still reads the average.
 
 The ledger records **every symptom episode**, action taken or not — the
 no-action episodes are the control arm the learned layer cannot be honest
@@ -625,7 +658,8 @@ without:
 - **Spontaneous-recovery base rate** per symptom kind, measured from episodes
   that resolved with no action — the control arm. *(As-built:)* it is collected
   by **this ledger once it runs (M5+), advisory-only**, from live operator
-  behaviour; the patio-lights-healing-unaided case is exactly this datum. (The
+  behaviour; the two exterior-wall switches that healed unaided (RESEARCH §6)
+  are exactly this datum. (The
   design originally slated collection for M3's advisory weeks, but the ledger
   itself is M5, so that is where the base rate accrues.)
 - **Success** = the symptom's own *per-command rate* (never a count) improved
@@ -710,7 +744,7 @@ options only for knobs a stranger genuinely needs.
 | M4 (v0.15) | planner (pure, always-on) + advisory REMEDY surface — severity-sorted, cost/basis-tagged candidates, honest overflow; `advise` runs via the existing type-CONFIRM Actions Menu (no new execution path) | recommendations grounded + auditable, with `basis` labels; rebuild never offered as a runnable candidate |
 | M5 (v0.16) | episode ledger (`outcomes.ts`) + learned efficacy on the Remedy screen — **advisory-only**: the action arm is populated by operator type-CONFIRM actions and (since v0.30) the dead-node ladder's pings, booked per actor since v0.72.0 with claims from the operator arm only; the spontaneous-recovery control arm accrues from untouched recoveries | the loop learns honestly against a no-action control arm; an action is credited only when it beats self-healing by a real margin with comparable traffic |
 | M6 (v0.17) | interference-watch screen (key `8`/`f`): measured noise floor + trend, controller serial-link health, diurnal raw-timeout-rate heatmap, correlated-degradation state | correlated/diurnal interference visible; measured (driver-WS noise floor), not inferred; heatmap raw not baseline-relative |
-| M7 (v0.18) | complete `DOCS.md` system & engine reference (12 chapters) + `SECURITY.md` + a printable `.docx`/`.pdf` manual built in CI (`scripts/build-docs-docx.py`). The no-dB-numbers guard already ships as a planner test (`no candidate fabricates a numeric dB claim`); defaults are safe-defaulted for strangers' meshes (read-only, driver-WS empty=disabled) | the whole system is documented from source; the offline manual stays current; safe for other users' meshes |
+| M7 (v0.18) | complete `DOCS.md` system & engine reference (12 chapters) + `SECURITY.md` + a printable `.docx`/`.pdf` manual built in CI (`scripts/build-docs-docx.py`). The no-dB-numbers guard already ships as a planner test (`no candidate fabricates a numeric dB / dBm claim`, `planner.test.ts`); defaults are safe-defaulted for strangers' meshes (read-only, driver-WS empty=disabled) | the whole system is documented from source; the offline manual stays current; safe for other users' meshes |
 | v0.13 | read-only driver-WS evidence client (§2.1) | noise floor + last_seen + capability flags feed the reserved schema before baselines learn |
 
 Each lands as its own `vX.Y`, typecheck+tests+adversarial review, same
@@ -738,7 +772,7 @@ what each run proved, rather than listed per release.
 | the log can be read (v0.50, v0.53) | severity written to the sink; `LogSink` for silent subsystems; `fatal` for the bootstrap catch; descriptor reclaim; session teardown on both transports | an operator grepping the container log can find the one line that matters |
 | the machine-readable boundary (v0.57, v0.65–v0.68) | engine conclusions as HA entities + enriched `/api/health`, from one shared builder; a blind statistics feed raises `degraded` (v0.65); a `published_at` heartbeat so a stopped publisher can be told apart from a healthy mesh (v0.66); `detectors_unmeasured` beside `detectors_ready` (v0.67); route failures as a fifth entity (v0.68) | what the engine concludes is reachable by something other than a person at a terminal |
 
-The verification gate grew with them: **mutation coverage** (`scripts/mutation-check.mjs`)
+The verification gate grew with them: **mutation coverage** (`zwave_tui/server/scripts/mutation-check.mjs`)
 is now the release gate, with `MISSING`, `AMBIGUOUS`, `INVALID` and `RELABEL`
 (a mutant still marked equivalent that the suite now kills) all counted as
 failures and a pre-flight that refuses to run over a stale anchor or over a

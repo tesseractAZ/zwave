@@ -33,12 +33,12 @@
  *
  * Six dead episodes on the live 39-node mesh over three days:
  *
- *     West Closet Motion      0.8 min  -> self-recovered
- *     Hallway Closet Motion   1.5 min  -> self-recovered
- *     Dining Room Lamp        5.0 min  -> self-recovered
- *     Garage Workroom         5.1 min  -> self-recovered
- *     Garage Workroom       361.4 min  -> cleared by hand
- *     Hallway Closet Motion 531.4 min  -> cleared by hand
+ *     motion sensor A         0.8 min  -> self-recovered
+ *     motion sensor B         1.5 min  -> self-recovered
+ *     plug-in lamp module     5.0 min  -> self-recovered
+ *     wall switch C           5.1 min  -> self-recovered
+ *     wall switch C         361.4 min  -> cleared by hand
+ *     motion sensor B       531.4 min  -> cleared by hand
  *
  * The distribution has a clean gap: everything that heals itself does so inside
  * ~5 minutes, and everything that gets stuck runs to SIX TO NINE HOURS. A dwell
@@ -763,7 +763,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
     // is heard from — for any reason, including a command an operator ran — is
     // demonstrably reachable at that instant, whatever the flag still says.
     //
-    // Learned the hard way on node 49 ("Garage Workroom"): it ignored SIX
+    // Learned the hard way on one wall switch of the reference mesh: it ignored SIX
     // consecutive pings over ~12 hours (the ladder's three, a manual one, and
     // two more after a restart re-armed the ladder) and was declared
     // node-down — then answered an ordinary on/off command immediately, and
