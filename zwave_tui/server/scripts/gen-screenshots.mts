@@ -275,6 +275,45 @@ const DATA: DataProvider = {
     actorArms: () => [], pooledArm: () => null, liveSpan: () => null, routeSymptomsAfter: () => 0,
 };
 
+// v0.75.1 — the ENGINE screen, never shot before. Its own provider, because its
+// auto-ping snapshot, ledger arms and trial would change what the other frames
+// show. The interesting case again: auto-ping running with a node owed a
+// probe, a self-heal base rate beside the engine's own pings, a live-span count
+// that names the nodes it came from, and the refresh trial mid-run.
+const DAY = 86_400_000;
+const trialTally = (n: number, ok: number, worse: number, deaths: number, unscoreable: number, lost: number) =>
+  ({ n, ok, worse, deaths, unscoreable, lost, over: 0 });
+const ENGINE_DATA: DataProvider = {
+  ...DATA,
+  autoPingState: () => ({
+    lastTickMs: NOW - 25_000, suppressed: 'none', listening: 9, deadListening: 0, capabilityUnknown: 0,
+    staleDue: 2, stalestMs: 95 * 60_000, verifyOwed: 0,
+    config: { enabled: true, writeActions: true, afterMs: 600_000, maxAttempts: 3, staleMs: 7_200_000 },
+    nodes: [],
+  }),
+  // The shared provider answers efficacy for every kind (the Remedy frame shows
+  // one card at a time); on ENGINE, which lists every kind, that repeated one
+  // pair of rates eleven times — and granted them beside "self-heal not yet
+  // measured", which the ledger can never do (no control arm, no bar). The
+  // ENGINE frame shows the self-heal arm and the ladder instead.
+  efficacyFor: () => null,
+  controlArm: (k) => (k === 'rtt-degraded' ? { n: 9, ok: 4, bad: 1, nodes: 5, minN: 4 } : null),
+  actorArms: (k) => (k === 'rtt-degraded'
+    ? [{ action: 'ping', origin: 'engine', n: 6.4, ok: 2, bad: 0, nodes: 3, lastAt: NOW - 2 * DAY, killedAfter: 0 }]
+    : []),
+  liveSpan: (k) => (k === 'rtt-degraded' ? {
+    since: NOW - 40 * DAY, scored: [6, 14, 5, 2], unscored: [11, 4, 2, 1],
+    byNode: [{ nodeId: 12, n: 11 }, { nodeId: 70, n: 5 }, { nodeId: 61, n: 3 }, { nodeId: 44, n: 2 }],
+    byNodeN: 21, byNodeSince: NOW - 40 * DAY,
+  } : null),
+  refreshTrial: () => ({
+    enabled: true, phase: 'running', startedAt: NOW - 41 * DAY, deadlineAt: NOW + 79 * DAY, target: 30,
+    treated: trialTally(7, 4, 1, 0, 2, 1), held: trialTally(6, 1, 1, 0, 1, 0),
+    latch: null, exclusions: [], open: null, idle: 'no rtt-degraded episode', verdict: null, decided24h: 2,
+    profile: { mains: 9, differs: 3, unknown: 0 },
+  }),
+};
+
 const view = (screen: ScreenView, over: Partial<ViewState> = {}): ViewState => ({
   screen, cols: COLS, rows: ROWS, selected: 1, scroll: 0, filter: '', sortKey: 'health',
   signalDisplay: 'margin', errorsOnly: false, detailScroll: 0,
@@ -402,6 +441,7 @@ const shots: Array<[string, string[], string]> = [
   // sparkline with no room for the peak's reason, and would publish `peak -84
   // dBm +3` with the burst callout shed.
   ['interference', renderScreen(ctx(view('interference', { rows: 30 }))), 'Interference — noise floor, serial health, diurnal heatmap'],
+  ['engine', renderScreen({ ...ctx(view('engine', { rows: 48 })), data: ENGINE_DATA }), 'Engine — auto-ping, the refresh trial, and what the ledger has learned'],
 ];
 
 // The Actions Menu is a modal, not a screen — render it separately.

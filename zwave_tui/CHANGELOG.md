@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.75.1
+
+### Changed — the live-span count names its nodes
+
+ENGINE's `live ≥10m: a/b scored` bit — the revisit condition of DESIGN §3.5 —
+counts episodes, not nodes, and one chronic node whose episode re-arms every
+half hour can supply most of it: on the reference mesh one node made 8 of 12
+new closures, and the count read past its threshold on the strength of it.
+
+- The ledger's live-span ring now keeps the scored closures live ≥ 10 minutes
+  per node, per day, persisted with the ring and aged out with it.
+- The count moves to its own row (before the first attributed closure too) and
+  names them in the same breath:
+  `live ≥10m: 37/45 scored since 09-12 from 4 nodes (node 23: 22)` — how many
+  nodes, and the one with the most when it has more than one. Of four forms,
+  the longest that fits the width is shown, and every one keeps `from k nodes`,
+  so neither the count nor its nodes is ever dropped, down to the narrowest
+  session width of 60 columns.
+- Per-node counts begin with this release. Until they cover every closure in
+  the 30-day window, the bit says how many they cover and since when, to the
+  minute of the first closure it attributed
+  (`… · 5 since 10-12 14:03 from 2 nodes (node 23: 4)`); with no recorded
+  start none is guessed. A day from an older ledger file loads without them; a
+  malformed list is ignored, never fatal.
+
+### Fixed — background RSSI outside what a radio can report
+
+- `cleanDbm` had no lower bound. RSSI is a signed byte on the wire (zwave-js
+  `parseRSSI`), so a background-RSSI value below -128 dBm now reads as nothing
+  rather than as a noise floor.
+- An `average` of exactly 0 beside a `current` of NotAvailable is zwave-js's
+  "no value yet" seed (`averageRSSI`), not a 0 dBm floor. A trailing run of such
+  channels — a long-range channel the controller does not report — is now
+  absent and shows `—`, where Controller had drawn a red full-noise gauge. An
+  interior one keeps its 0, so the real channels after it survive, and every
+  floor already ignores it. A saturated receiver also averages as 0 dBm, but
+  its `current` says so (126), and that 0 still shows as a reading.
+- Known limitation, documented in DOCS: after a "not available" first poll the
+  driver's average decays from that 0 seed over about twenty polls, and those
+  negative readings still reach the floor.
+- Preventive: the reference controller's four channels read -105 to -94 dBm
+  throughout a 13.7-day history, with no value at or above -98 dBm in its
+  30-minute tier.
+
+### Docs — an ENGINE screenshot
+
+The Engine screen had no screenshot. The generator now renders one from the
+synthetic demo mesh — auto-ping, the refresh trial mid-run with its eligible
+nodes, the live ledger, and LEARNED with the live-span count naming its nodes —
+and the README gallery shows it. The other ten frames regenerate unchanged.
+
 ## 0.75.0
 
 ### Added — the pre-registered refresh trial (off by default)

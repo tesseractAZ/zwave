@@ -11,6 +11,7 @@
 import { test } from 'node:test';
 import { unscoreableReason } from '../src/telnet/ledgerText';
 import assert from 'node:assert/strict';
+import type { LiveSpanView } from '../src/zwave/outcomes';
 import { renderEngine } from '../src/telnet/screens/engine';
 import { visLen } from '../src/telnet/ansi';
 import { NodeStatus } from '../src/types';
@@ -585,7 +586,7 @@ test('LEARNED shows the ladder arm apart, the pooled legacy arm as unclaimed, de
       { action: 'healNode', origin: 'you', n: 1, ok: 0, bad: 0, nodes: 1, lastAt: NOW - day, killedAfter: 2 },
     ] : []),
     pooledArm: (k, a) => (k === 'rtt-degraded' && a === 'ping' ? { n: 17.8, lastAt: null, nodes: 9, legacyN: 14.6, legacyNodes: 5 } : null),
-    liveSpan: (k) => (k === 'rtt-degraded' ? { since: NOW - 5 * day, scored: [4, 2, 1, 0], unscored: [9, 3, 1, 1] } : null),
+    liveSpan: (k) => (k === 'rtt-degraded' ? { since: NOW - 5 * day, scored: [4, 2, 1, 0], unscored: [9, 3, 1, 1], byNode: [{ nodeId: 56, n: 2 }, { nodeId: 11, n: 1 }], byNodeN: 3, byNodeSince: NOW - 5 * day } : null),
     routeSymptomsAfter: (a, o) => (a === 'healNode' && o === 'you' ? 1 : 0),
   };
   for (const [cols, rows] of [[80, 60], [140, 60]] as const) {
@@ -596,10 +597,65 @@ test('LEARNED shows the ladder arm apart, the pooled legacy arm as unclaimed, de
     assert.match(j, /shown, never claimed/, `${cols}`);
     assert.match(j, /\(learned before v0\.72\.0, all origins: ping n≈14\.6, 5 nodes — not claimed\)/, `${cols}: the decayed pre-actor share, with the nodes that had taught it at the snapshot (not the pooled arm's growing 9)`);
     assert.match(j, /healNode: Dead ≤15m after ×2/, `${cols}: a death after the operator's heal is harm evidence`);
-    assert.match(j, /live ≥10m: 3\/8 scored since \d\d-\d\d/, `${cols}`);
+    assert.match(j, /live ≥10m: 3\/8 scored since \d\d-\d\d from 2 nodes \(node 56: 2\)/, `${cols}: the episode count names its nodes, in the same bit`);
     assert.match(j, /route symptoms opened ≤15m after: healNode \(you\) ×1/, `${cols}`);
     if (cols >= 140) assert.match(j, /last scored 72\.0h ago/, 'when the ladder arm last learned');
   }
+});
+
+test('the live-span count names its nodes: partial coverage says how many and since when; one node is named (v0.75.1)', () => {
+  const day = 86_400_000;
+  const render = (ls: Partial<LiveSpanView>): string => plain(renderEngine(ctx(140, 60, {
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6, ok: 3, bad: 0, nodes: 4, minN: 4 } : null),
+    liveSpan: (k) => (k === 'rtt-degraded' ? { since: NOW - 20 * day, scored: [0, 30, 6, 1], unscored: [0, 5, 2, 1], byNode: [], byNodeN: 0, byNodeSince: null, ...ls } : null),
+  })));
+  assert.match(render({}), /live ≥10m: 37\/45 scored since \d\d-\d\d(?! from| ·)/, 'no per-node counts yet: the count alone');
+  // …on its own row, so the tallies before it cannot crowd it out at 80 columns (v0.75.1 review).
+  const crowded = plain(renderEngine(ctx(80, 60, {
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6, ok: 3, bad: 0, nodes: 4, minN: 4 } : null),
+    unverifiableCount: (k) => (k === 'rtt-degraded' ? 3 : 0),
+    falsePositives: (k) => (k === 'rtt-degraded' ? 2 : 0),
+    liveSpan: (k) => (k === 'rtt-degraded' ? { since: NOW - 20 * day, scored: [0, 30, 6, 1], unscored: [0, 5, 2, 1], byNode: [], byNodeN: 0, byNodeSince: null } : null),
+  })));
+  assert.match(crowded, /live ≥10m: 37\/45 scored/, 'the count alone is never crowded out at 80 columns');
+  const partial = render({ byNode: [{ nodeId: 56, n: 4 }, { nodeId: 11, n: 1 }], byNodeN: 5, byNodeSince: NOW - day });
+  assert.match(partial, /live ≥10m: 37\/45 scored since \d\d-\d\d · 5 since \d\d-\d\d \d\d:\d\d from 2 nodes \(node 56: 4\)/, 'partial: how many are covered, and since when, to the minute');
+  assert.match(render({ byNode: [{ nodeId: 56, n: 4 }, { nodeId: 11, n: 1 }], byNodeN: 5, byNodeSince: null }),
+    /live ≥10m: 37\/45 scored since \d\d-\d\d · 5 of them from 2 nodes \(node 56: 4\)/, 'no recorded start: none is printed');
+  const one = render({ scored: [0, 3, 0, 0], unscored: [0, 0, 0, 0], byNode: [{ nodeId: 56, n: 3 }], byNodeN: 3, byNodeSince: NOW - 20 * day });
+  assert.match(one, /live ≥10m: 3\/3 scored since \d\d-\d\d from 1 node \(node 56\)/);
+  const spread = render({ scored: [0, 3, 0, 0], unscored: [0, 0, 0, 0], byNode: [{ nodeId: 8, n: 1 }, { nodeId: 11, n: 1 }, { nodeId: 56, n: 1 }], byNodeN: 3, byNodeSince: NOW - 20 * day });
+  assert.match(spread, /live ≥10m: 3\/3 scored since \d\d-\d\d from 3 nodes(?! \()/, 'no node is named when none has more than one');
+});
+
+test('the live-span row keeps the count AND its nodes at every width, with two-digit counts (v0.75.1 review)', () => {
+  const day = 86_400_000;
+  const ls: LiveSpanView = { since: NOW - 20 * day, scored: [0, 30, 6, 1], unscored: [0, 5, 2, 1],
+    byNode: [{ nodeId: 156, n: 14 }, { nodeId: 111, n: 9 }], byNodeN: 23, byNodeSince: NOW - 2 * day };
+  // Three-digit counts at the narrowest session width (60): the shortest form still ends in "nodes".
+  const big: LiveSpanView = { since: NOW - 20 * day, scored: [0, 200, 30, 10], unscored: [0, 40, 5, 5],
+    byNode: [{ nodeId: 156, n: 80 }, { nodeId: 111, n: 25 }], byNodeN: 105, byNodeSince: NOW - 2 * day };
+  for (const cols of [60, 61, 62]) {
+    const j = plain(renderEngine(ctx(cols, 60, {
+      controlArm: (k) => (k === 'rtt-degraded' ? { n: 6, ok: 3, bad: 0, nodes: 4, minN: 4 } : null),
+      liveSpan: (k) => (k === 'rtt-degraded' ? big : null),
+    })));
+    assert.match(j, /live ≥10m: 240\/290 scored · 105 from 2 nodes/, `${cols}: count, how many attributed, and "nodes" whole`);
+  }
+  for (const cols of [60, 61, 62, 80, 100, 140]) {
+    const raw = renderEngine(ctx(cols, 60, {
+      controlArm: (k) => (k === 'rtt-degraded' ? { n: 6, ok: 3, bad: 0, nodes: 4, minN: 4 } : null),
+      unverifiableCount: (k) => (k === 'rtt-degraded' ? 3 : 0),
+      liveSpan: (k) => (k === 'rtt-degraded' ? ls : null),
+    }));
+    for (const l of raw) assert.ok(visLen(l) <= cols, `${cols} cols: ${visLen(l)} > ${cols}: ${l}`);
+    const j = plain(raw);
+    assert.match(j, /live ≥10m: 37\/45 scored/, `${cols}: the count is never dropped`);
+    assert.match(j, /from 2 nodes/, `${cols}: and never shown without its nodes`);
+    assert.match(j, /23 (since|attributed|from)/, `${cols}: nor without how many are attributed`);
+  }
+  assert.match(plain(renderEngine(ctx(140, 60, { controlArm: (k) => (k === 'rtt-degraded' ? { n: 6, ok: 3, bad: 0, nodes: 4, minN: 4 } : null), liveSpan: (k) => (k === 'rtt-degraded' ? ls : null) }))),
+    /live ≥10m: 37\/45 scored since \d\d-\d\d · 23 since \d\d-\d\d \d\d:\d\d from 2 nodes \(node 156: 14\)/, 'the longest form where it fits');
 });
 
 test('ENGINE shows the pause from its own state: before the next pass, beneath a higher suppression, and with auto-ping off (v0.72.0 review)', () => {
