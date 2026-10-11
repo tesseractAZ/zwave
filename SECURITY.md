@@ -165,6 +165,31 @@ seriously.
   never fire across a restart, which is the more likely way a stick gets
   swapped.
 
+- **Confined by its own AppArmor profile (v0.74.4).** The Supervisor loads
+  `zwave_tui/apparmor.txt` in enforce mode, and the server logs the label it
+  runs under at startup (`security: AppArmor local_zwave_tui (enforce)`, or a
+  WARNING when the profile is not in force). The profile keeps the blanket
+  file, signal and network grants s6-overlay needs, and narrows from there:
+  - **Capabilities** are an allow list (chown, dac_override, fowner, fsetid,
+    kill, setgid, setuid); every other one is refused, and `net_raw`,
+    `setfcap`, `sys_admin`, `sys_module`, `sys_rawio`, `sys_ptrace`,
+    `net_admin`, `dac_read_search`, `bpf` and the rest of the dangerous set are
+    refused with an audit record.
+  - **Shipped code is write-locked** for the container's lifetime: `/init`,
+    `/bin`, `/sbin`, `/lib`, `/usr` (Node itself) and `/app` (the add-on's
+    TypeScript and `node_modules`) refuse writes, creates, renames, chmod,
+    chown and hardlinks, even for root. Reading and executing them is
+    unchanged. The add-on's own stores in `/data` stay writable.
+  - **Reads refused:** `/etc/shadow` and `/etc/gshadow` (and their backups),
+    `/etc/ssh`, firmware and LSM state under `/sys`; `/root` and `/home` are
+    refused quietly. No execute is refused anywhere.
+  - **Kernel interfaces:** no writes to `/proc/sys`, `/sys` or the sysrq
+    trigger; no mount, remount, umount or pivot_root; no tracing of another
+    process.
+  Refusals are logged to the host's audit journal (`journalctl
+  _TRANSPORT=audit` on the host), not to dmesg. A CI job compiles the profile
+  on every change, and a test pins these rules.
+
 ## Scope
 
 In scope: the add-on server (`server/`), its HTTP/console/telnet surfaces, the

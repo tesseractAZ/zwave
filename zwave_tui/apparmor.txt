@@ -2,170 +2,168 @@
 
 # AppArmor profile for the Z-Wave TUI add-on.
 #
-# Home Assistant Supervisor loads this file as the LSM profile for the
-# container. Beyond bumping the security rating, it provides defense-in-depth:
-# even if an HTTP endpoint or the telnet transport is exploited, the attacker
-# is confined to the file/network/capability set granted here.
+# LOADING. The Supervisor copies this file, renames the single column-0
+# "profile zwave_tui" line to the add-on's slug (local_zwave_tui for a local
+# install, <repo-hash>_zwave_tui from a repository; flags kept) and loads it in
+# enforce mode. Its loader counts column-0 "profile" lines and refuses a file
+# with more than one, so any future child profile must be nested and indented.
+# A profile the parser rejects is not reported in the add-on log: the add-on
+# can come back under docker-default, or keep the previously loaded profile
+# until the next host boot, when it then fails to start. The server logs the
+# label it runs under at startup ("security: AppArmor <label>"). After every
+# change, also check inside the container, as root:
+#   cat /proc/1/attr/current      -> "<slug> (enforce)"
+#   d=/usr/.aa-probe-$$; mkdir "$d" 2>/dev/null && { rmdir "$d"; echo OLD; } \
+#     || echo NEW                 -> NEW means this version is loaded
+#   (a fresh name each run: "touch" on an existing file only sets times,
+#    which AppArmor does not check, so it cannot prove anything)
 #
-# The profile name MUST be `addon_<slug>` (addon_zwave_tui) or Supervisor
-# silently skips loading it.
+# SCOPE. One profile covers every process: s6-overlay as PID1, the bashio run
+# script and the Node server (all root). Rules cannot tell them apart, so this
+# profile removes only what no process uses.
 #
-# Permissive enough for our runtime:
-#   - Node 22 + npm + s6-overlay init system
-#   - Fastify HTTP + WebSocket console (8788) + telnet TUI (2324)
-#   - atomic JSON state writes under /data (temp file + rename)
-#   - Outbound to ws://supervisor/core/websocket (HA Core WS API)
+# LOGGING. A plain "deny" is silent; "audit deny" logs a DENIED record. On
+# HAOS those records go to the host's AUDIT journal, not to dmesg; read them
+# with `journalctl _TRANSPORT=audit` on the host. An empty dmesg proves
+# nothing. Every deny here except /root and /home is "audit deny" because none
+# should fire in normal operation: a record means a new writer to fix, or an
+# intrusion. A capability that is not listed below is refused AND logged.
 #
-# Restrictive enough to deny:
-#   - kernel module loading, mount, ptrace, raw IO, sysrq
-#   - reading /etc/shadow, /root/**, /etc/ssh/**
-#   - writing to /proc/sys/* or /sys/** (host kernel tunables)
+# PARSER. There is no "abi" line, so the host parser (AppArmor 3.1.7 on HAOS)
+# compiles against its default feature set: file, capability, mount, signal
+# and ptrace rules are enforced; network rules are not. Validate every edit
+# with a fresh, cache-free compile:
+#   apparmor_parser -Q -K --warn=abi --warn=rule-not-enforced <copy>
+# A cached compile can hide a rule the current parser rejects until the next
+# host reboot forces a fresh one.
 #
-# If the add-on misbehaves after this profile lands, the first thing to check
-# is /var/log/audit/audit.log on the host (Pi) — denied operations log there
-# with "type=AVC". Add corresponding rules below and rebuild.
+# TESTING. A compile proves only that the parser accepts the file. The CI job
+# "apparmor" compiles it with a newer parser on every push and pull request;
+# test/apparmorProfile.test.ts pins its invariants (the three blanket grants,
+# the capability list, the "wl" write-locks, the trees no deny may touch).
+# Before a release, boot-test against the host's parser: load a copy under a
+# TEST name (never the live one) and run an isolated copy of the add-on under
+# it, on the default bridge network with a throwaway /data and default
+# options:
+#   docker run --security-opt apparmor=<test-name> ...
+# Take it through boot, a restart and a full stop/start, then read the host's
+# audit journal: only deliberate probes may appear.
 
-profile addon_zwave_tui flags=(attach_disconnected,mediate_deleted) {
+profile zwave_tui flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/base>
 
-  # ─── Capabilities ──────────────────────────────────────────────────
-  # Allow binding to ports (8788 and 2324 are unprivileged but s6-overlay
-  # needs net_bind_service for some pre-start tasks), plus setuid/setgid
-  # for the s6 user-switching dance.
-  capability net_bind_service,
-  capability setuid,
-  capability setgid,
+  # --- Baseline grants -----------------------------------------------------
+
+  # "file," stays. It grants read, write, append, link, lock, mmap and
+  # inherit-exec on every path. s6-overlay re-opens /init for READING on
+  # shutdown and restart; a sibling add-on that replaced "file," with a
+  # per-path list holding "/init ix" (exec without read) crash-looped with
+  # "can't open '/init': Permission denied". Everything below narrows access
+  # with deny rules (a deny always wins over an allow), never by removing
+  # this grant.
+  file,
+
+  # s6 signals its own services; Node signals nothing outside the container.
+  signal,
+
+  # TCP: the HTTP + WebSocket console (8788), the telnet TUI (2324) and the
+  # outbound Home Assistant Core and Z-Wave JS WebSockets. Not enforced by the
+  # host parser (see PARSER); raw sockets are blocked through the capability
+  # list instead (net_raw below).
+  network,
+
+  # --- Capabilities --------------------------------------------------------
+  # Replaces the former list, which also held dac_read_search, sys_chroot and
+  # net_bind_service. Both listeners use unprivileged ports, nothing chroots,
+  # and root needs no directory-search override here. An unlisted capability
+  # is refused and logged.
   capability chown,
   capability dac_override,
-  capability dac_read_search,
   capability fowner,
   capability fsetid,
   capability kill,
-  capability sys_chroot,
+  capability setgid,
+  capability setuid,
 
-  # Explicitly DENY the dangerous capabilities. AppArmor's default is
-  # "allow if not denied" — but these are worth calling out so any future
-  # change to the profile doesn't silently enable them.
-  deny capability sys_admin,
-  deny capability sys_module,
-  deny capability sys_rawio,
-  deny capability sys_ptrace,
-  deny capability sys_boot,
-  deny capability sys_time,
-  deny capability mac_admin,
-  deny capability mac_override,
+  # Refused even if a blanket "capability," is ever re-added, and logged if
+  # attempted. net_raw: craft or sniff packets on the host LAN. setfcap: a
+  # "w" deny does not cover setxattr, so file capabilities could otherwise be
+  # set on the write-locked trees below.
+  audit deny capability net_raw,
+  audit deny capability setfcap,
+  audit deny capability sys_admin,
+  audit deny capability sys_module,
+  audit deny capability sys_rawio,
+  audit deny capability sys_ptrace,
+  audit deny capability sys_boot,
+  audit deny capability sys_time,
+  audit deny capability syslog,
+  audit deny capability mac_admin,
+  audit deny capability mac_override,
+  audit deny capability net_admin,
+  audit deny capability dac_read_search,
+  audit deny capability bpf,
+  audit deny capability perfmon,
 
-  # ─── File system ───────────────────────────────────────────────────
-  # General read access to the container rootfs (app code, libs,
-  # certificates, locale data). The Dockerfile is the source of truth
-  # for what files exist; this profile follows its layout.
-  file,
-  signal,
-  network,
+  # --- Write-locks on shipped code -----------------------------------------
+  # Nothing writes these at runtime: no apk, no npm install. They hold the
+  # binaries, the libraries, Node itself (/usr/bin/node) and the add-on's
+  # TypeScript and node_modules (/app). The server runs that TypeScript
+  # through tsx, whose transform cache lives in the OS temp directory
+  # (/tmp/tsx-0), not under /app. The server writes only its five stores in
+  # /data, each a temp file renamed into place. The Supervisor recreates the
+  # container on every add-on start, so these locks guard one container
+  # lifetime; persistence lives in /data, which stays writable.
+  #
+  # Mask is "wl", never "wal". "w" already includes append, and the parser
+  # rejects any mask holding both "a" and "w"; a "wal" mask kept a sibling
+  # add-on from starting after a host reboot.
+  #
+  # A "w" deny covers more than writes: the kernel also refuses chmod, chown,
+  # create, unlink, rename, mkdir, symlink, truncate and unix-socket bind on
+  # these paths, even for root. Only utimes and setxattr fall outside it
+  # (hence the setfcap deny above). "l" refuses hardlinks named inside these
+  # trees. r, m, k and x are untouched, so loading and executing still work.
+  audit deny /init wl,
+  audit deny /bin/{,**} wl,
+  audit deny /sbin/{,**} wl,
+  audit deny /lib/{,**} wl,
+  audit deny /usr/{,**} wl,
+  audit deny /app/{,**} wl,
 
-  # s6-overlay init system (HA base image uses s6).
-  /init ix,
-  /bin/** ix,
-  /usr/bin/** ix,
-  /usr/local/bin/** ix,
-  /usr/sbin/** ix,
-  /sbin/** ix,
-  /lib/** mr,
-  /lib/**.so* mr,
-  /usr/lib/** mr,
-  /etc/s6/** ix,
-  /etc/s6-overlay/** ix,
-  /etc/cont-init.d/** rwix,
-  /etc/cont-finish.d/** rwix,
-  /etc/services.d/** rwix,
-  /run/s6/** rwix,
-  /run/s6-rc** rwix,
-  /package/admin/s6/command/** ix,
-  /command/** rwix,
+  # Not locked: /command, /package and /etc/s6-overlay are PID1 trees, where a
+  # wrong deny is an init crash-loop the add-on log never shows; /etc holds
+  # bashio's and s6's runtime edits. Never lock /run, /tmp or /data: s6
+  # executes service scripts from /run, tsx caches in /tmp, and the stores
+  # live in /data.
 
-  # Add-on source + node_modules. Read + execute (node calls dlopen on
-  # native modules under node_modules/.../*.node, which need mix).
-  /app/** r,
-  /app/server/node_modules/**/*.node mix,
-  /app/server/node_modules/**/*.so* mix,
-
-  # Persistent storage (/data is volume-mounted by HA Supervisor).
-  # The state stores write atomic JSON: `<file>.tmp`, then rename() into place.
-  # Nothing takes a file lock, so `k` is not exercised; the broad `file,` rule
-  # above already grants this path too.
-  /data/** rwk,
-
-  # Temp + runtime files.
-  /tmp/** rwk,
-  /var/tmp/** rwk,
-  /run/** rwk,
-
-  # Standard config files (read-only system info).
-  /etc/passwd r,
-  /etc/group r,
-  /etc/hosts r,
-  /etc/host.conf r,
-  /etc/resolv.conf r,
-  /etc/nsswitch.conf r,
-  /etc/services r,
-  /etc/protocols r,
-  /etc/localtime r,
-  /etc/timezone r,
-  /etc/ssl/** r,
-  /etc/ca-certificates/** r,
-  /etc/os-release r,
-  /usr/share/ca-certificates/** r,
-
-  # /proc — Node + s6 need to read process info. Writes to /proc/sys are
-  # denied below.
-  /proc/[0-9]*/** r,
-  /proc/sys/kernel/random/uuid r,
-  /proc/sys/kernel/ngroups_max r,
-  /proc/cpuinfo r,
-  /proc/meminfo r,
-  /proc/loadavg r,
-  /proc/uptime r,
-  /proc/stat r,
-  /proc/version r,
-  /proc/self/** rw,
-  /proc/[0-9]*/comm rw,
-
-  # /sys — read-only access to network info (for diagnostic endpoints that
-  # report interface state).
-  /sys/class/net/** r,
-  /sys/devices/** r,
-
-  # /dev — Node + crypto need urandom; tty for logging.
-  /dev/null rw,
-  /dev/zero r,
-  /dev/random r,
-  /dev/urandom r,
-  /dev/tty rw,
-  /dev/pts/** rw,
-  /dev/stdin r,
-  /dev/stdout w,
-  /dev/stderr w,
-
-  # ─── Deny: dangerous file ops ──────────────────────────────────────
-  # Never read secrets, never write to kernel tunables, never touch the
-  # audit subsystem.
-  deny /etc/shadow r,
-  deny /etc/gshadow r,
+  # --- Secrets and kernel interfaces ---------------------------------------
+  # No process authenticates local users or keeps files under /root or /home.
+  # "r" also denies stat(), so a find sweep over /etc logs a denial for
+  # shadow. /root and /home are denied quietly: npm and interactive
+  # docker-exec shells (HOME=/root) try to keep caches and history there.
+  audit deny /etc/{shadow,gshadow}{,-} r,
+  audit deny /etc/ssh/** r,
   deny /root/** rw,
   deny /home/** rw,
-  deny /etc/ssh/** r,
-  deny /proc/sys/** w,
-  deny /sys/** w,
-  deny /proc/sysrq-trigger w,
-  deny /sys/kernel/** w,
-  deny /sys/firmware/** rw,
+  # Nothing writes kernel tunables or reads firmware and LSM state. The runtime
+  # mounts /proc/sys and /sys read-only today; these keep it so if that changes,
+  # and replace the docker-default denies this profile takes the place of.
+  audit deny /proc/sys/** w,
+  audit deny /proc/sysrq-trigger w,
+  audit deny /proc/{irq,bus,fs,driver,acpi,scsi,tty}/** w,
+  audit deny /sys/** w,
+  audit deny /sys/firmware/** r,
+  audit deny /sys/kernel/security/** r,
 
-  # Deny mount / umount / pivot_root (no container escape attempts).
-  deny mount,
-  deny umount,
-  deny pivot_root,
-  deny remount,
-
-  # Deny ptrace (no peeking at other processes).
-  deny ptrace,
+  # --- Mount and ptrace ----------------------------------------------------
+  # Nothing mounts and nothing traces another process. Only "trace" is denied:
+  # the base abstraction's same-profile ptrace "read" stays, so /proc/<pid>
+  # of other root processes stays readable for docker-exec diagnostics. A bare
+  # "deny ptrace," would also take away that read, silently.
+  audit deny mount,
+  audit deny remount,
+  audit deny umount,
+  audit deny pivot_root,
+  audit deny ptrace (trace),
 }

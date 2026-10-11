@@ -6,7 +6,8 @@ name: CI
 #
 # These ARE required checks: `main` carries a branch-protection rule requiring
 # "Type-check & test (server)", both "Dockerfile smoke build" jobs, the docs
-# build and "Analyze (javascript-typescript)". Force-pushes and deletions of
+# build and "Analyze (javascript-typescript)". "AppArmor profile compiles" is
+# not in that set yet: add it to the rule once it has run green on main. Force-pushes and deletions of
 # `main` are blocked. Admin bypass is deliberately left ON (`enforce_admins:
 # false`) so a solo maintainer can still land an urgent fix with
 # `--squash --admin` — the rule is a guard rail, not a lock.
@@ -49,6 +50,29 @@ jobs:
       - name: Test
         working-directory: zwave_tui/server
         run: npm test
+
+  apparmor:
+    name: AppArmor profile compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # A fresh, cache-free compile with the runner's (newer) parser. It proves
+      # only that the file parses and declares one profile named zwave_tui; the
+      # invariants live in test/apparmorProfile.test.ts, and the release still
+      # needs the boot test against the host's parser (apparmor.txt, TESTING).
+      - name: Ensure apparmor_parser
+        run: |
+          command -v apparmor_parser >/dev/null \
+            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends apparmor; }
+          apparmor_parser --version | head -1
+
+      - name: Compile zwave_tui/apparmor.txt
+        run: |
+          sudo apparmor_parser -Q -K zwave_tui/apparmor.txt
+          names="$(sudo apparmor_parser -N -K zwave_tui/apparmor.txt)"
+          echo "profiles: ${names}"
+          test "${names}" = "zwave_tui"
 
   docker-smoke:
     # Build the Home Assistant add-on container on push/PR to main, for EVERY
