@@ -501,6 +501,60 @@ even when execution is fully disabled.
 > 30 days (DOCS §9.3 — counted from the dwell start, the clock an executor's
 > eligibility would use), **and** the candidate verb differs from what the
 > verification lane already sends to both arms.
+>
+> **As built (v0.75.0, 2026-10).** `server/src/zwave/refreshTrial.ts`, behind
+> `refresh_trial_enabled` (default off; DOCS §11.14). Where the build sharpens
+> the protocol above:
+>
+> - **Origin `trial`, not `engine`.** The narrowed handle is
+>   `trialHandle((n) => actions.refreshValues(n, 'trial'), refuse)` — frozen,
+>   one call — and `refuse` declines at send time when the owner has paused,
+>   the node is not Alive, or the Home Assistant socket is not authenticated
+>   (a send queued behind the reconnect could outlive a pause set meanwhile). The ledger credits a trial send to no arm, confounds
+>   every other episode open on that node, and leaves deaths and route episodes
+>   after it to the trial.
+> - **Every limit is pre-coin eligibility.** The gates (switch, phase, latch,
+>   write actions, the pause read directly, a stable home id, auto-ping fresh
+>   and unsuppressed, local hours, an operator action running or within 10 min,
+>   one in flight, hourly and daily caps) and the episode filter (live,
+>   unconfounded, nothing yet acted on it, ≥ 10 min from its dwell start, mains,
+>   Alive, the refresh profile below, a scoreable before-window, no kill
+>   exclusion, no decision on the node in 24 h) are all checked before the coin,
+>   so both arms face one filter.
+> - **Scored at a fixed horizon, not at closure.** When the detector closes an
+>   episode depends on traffic, and the treatment supplies traffic, so closure
+>   time is itself an effect. Both arms get a verification burst at +20 min and
+>   are scored on the round trips of +20–30 min against the before-window frozen
+>   at the decision, by the ledger's own `scoreRecovery`; filed at +30. A pause,
+>   a route rebuild, or an operator action on the node or the whole mesh inside
+>   the window makes the decision unscoreable, and so does a gap of more than
+>   2 min between engine ticks inside it (the pause and a rebuild are sampled,
+>   so either could have come and gone unseen; operator actions are stamped and
+>   caught at any tick); a restart, the node leaving or a mesh change makes it
+>   lost.
+> - **"One in flight" lasts until filed** (+30 min), not until sent.
+> - **The verdict reads the first 30 scoreable decisions per arm**; later ones
+>   are counted and shown as "past 30", never analysed.
+> - **A direct kill needs a send that may have left** — succeeded, pending, or
+>   failed without proof nothing was sent; a refused send kills nothing. It is
+>   a safety rule apart from scoring, so it holds for a decision a restart
+>   already filed as lost, and a kill that cannot be saved latches the run
+>   until the save succeeds. The latch stops the trial only (auto-ping's lanes keep their own gates), and
+>   "until the owner acts" is concrete: it clears only when the add-on starts
+>   with the option off. An unreadable or malformed trial file, a missing path
+>   or an unwritable `/data` latch too, each naming its own remedy, and the file
+>   is never overwritten.
+> - **The revisit condition's second half is checked per node.** zwave-js's
+>   `Node.refreshValues` queries every actuator and sensor CC instance on every
+>   endpoint (not every CC); the verification lane sends one Get on the node's
+>   switch/light value, or a ping where it has none. A node is eligible only
+>   when its refresh sends at least two Gets where the probe reads a value, or
+>   at least one where it pings (`refreshQueriesOf`, from the driver's state
+>   dump, Notification excluded). On the reference mesh every mains node has one
+>   actuator CC and no sensor CC — none is eligible — so the trial, run as
+>   pre-registered, sends nothing there and retires at 120 days.
+> - **The post-pass ⅓ holdout belongs to admission**, not to the trial: a pass
+>   ends the trial and admits nothing.
 
 > **Since written (v0.30, 2026-08):** one narrow autonomous write ships OUTSIDE
 > this design — **auto-ping** (`autoPing.ts`, DOCS.md §11.12): opt-in, off by

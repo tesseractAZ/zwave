@@ -684,3 +684,27 @@ test('ENGINE names missed-report and repeated-frames as not scored, each with it
   assert.match(wide, /sleeping device cannot be probed/);
   assert.match(wide, /duplicate bursts/);
 });
+
+
+test('REFRESH TRIAL: off, latched, in flight and the counts, each in words (v0.75.0)', () => {
+  const tally = (n: number, ok: number, deaths: number) => ({ n, ok, worse: 0, deaths, unscoreable: 1, lost: 0, over: 0 });
+  const view = (over: Record<string, unknown> = {}) => ({
+    enabled: true, phase: 'running', startedAt: NOW - 86_400_000, deadlineAt: NOW + 86_400_000 * 100, target: 30,
+    treated: tally(4, 2, 1), held: tally(5, 1, 0), latch: null, exclusions: [], open: null, idle: 'outside 09:00–20:00', verdict: null, decided24h: 1,
+    profile: { mains: 35, differs: 3, unknown: 0 }, ...over,
+  });
+  const at = (v: unknown): string => plain(renderEngine(ctx(140, 60, { refreshTrial: () => v as never })));
+  assert.match(at(view({ enabled: false, startedAt: null })), /REFRESH TRIAL[\s\S]*off — refresh_trial_enabled is off\. Nothing is randomized or sent\./);
+  const running = at(view());
+  assert.match(running, /running +· waiting: outside 09:00–20:00/);
+  assert.match(running, /treated 4\/30 \(2 improved, 1 died\) · held 5\/30 \(1 improved\)/);
+  assert.match(at(view({ latch: { at: NOW - 60_000, reason: 'a second direct kill within 7 days', clear: 'restart-with-option-off' } })), /LATCHED: a second direct kill within 7 days .* clear: start the add-on with refresh_trial_enabled off/);
+  assert.match(at(view({ latch: { at: NOW - 60_000, reason: 'trial file unreadable (x)', clear: 'move-file-aside' } })), /LATCHED: trial file unreadable .* clear: move \/data\/refresh_trial\.json aside/);
+  assert.match(at(view({ enabled: false, startedAt: null, latch: { at: NOW, reason: 'trial file unreadable (x)', clear: 'move-file-aside' } })), /off — refresh_trial_enabled is off[\s\S]*latched while off: trial file unreadable/, 'off with an unreadable file: off, and how to clear it');
+  // The revisit condition's second half, per node: why a plain-switch mesh never decides.
+  assert.match(at(view({ profile: { mains: 35, differs: 0, unknown: 0 } })), /eligible nodes: 0 of 35 mains — a refresh must send more than the probe's one Get \(P5\)/);
+  assert.match(at(view({ treated: { ...tally(30, 20, 1), over: 2 } })), /past 30: 2\+0/);
+  assert.match(at(view({ open: { nodeId: 56, arm: 'treated', decidedAt: NOW - 120_000, send: 'ok' } })), /#56 treated .* send ok .* in flight/);
+  assert.match(at(view({ exclusions: [{ nodeId: 12, until: NOW + 86_400_000 }] })), /#12 excluded to/);
+  assert.doesNotMatch(plain(renderEngine(ctx(140, 60))), /REFRESH TRIAL/, 'no trial attached, no block');
+});

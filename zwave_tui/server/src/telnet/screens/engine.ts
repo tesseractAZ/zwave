@@ -161,9 +161,9 @@ export function renderEngine(ctx: ScreenCtx): string[] {
   // remediation is decided, not pending, and the operator should not have to
   // read DESIGN.md to learn that nothing else runs on its own.
   push(c.label('AUTO-PING') + c.grey(pick(view.cols - 'AUTO-PING'.length, [
-    `  — the engine's one autonomous write · automatic remediation: ${ADMISSION_SUMMARY}`,
-    "  — the engine's one autonomous write · auto-remediation: none admitted",
-    "  — the engine's one autonomous write",
+    `  — the engine's autonomous probes · automatic remediation: ${ADMISSION_SUMMARY}`,
+    "  — the engine's autonomous probes · auto-remediation: none admitted",
+    "  — the engine's autonomous probes",
   ])));
   const ap = data.autoPingState() ?? null;
   // The pause is read DIRECTLY (v0.72.0 review), not from the last pass's
@@ -226,7 +226,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     if (pause != null) {
       const how = pauseHow(pause);
       push('  ' + c.grey(pick(view.cols - 2, showsPause ? [
-        `nothing autonomous is sent — sweep, verification and dead-node ladder · resume: ${how}`,
+        `nothing autonomous is sent — sweep, verification, dead-node ladder, refresh trial · resume: ${how}`,
         `nothing autonomous is sent · resume: ${how}`,
         `nothing autonomous is sent · resume: ${pauseHow(pause, true)}`,
         `resume: ${pauseHow(pause, true)}`,
@@ -287,6 +287,81 @@ export function renderEngine(ctx: ScreenCtx): string[] {
         push(fitBits('  ' + c.cyan(`#${n.nodeId} ${wide ? name : name.slice(0, 16)}`) + '  ', bits, view.cols));
       }
       if (tracked.length > 8) push('  ' + c.grey(`○ ${tracked.length - 8} more tracked node(s)`));
+    }
+  }
+
+  /* ── REFRESH TRIAL ─────────────────────────────────────────────────────── */
+  // The pre-registered experiment (v0.75.0, DESIGN §3.5). Counts, never rates
+  // before the verdict: a rate on n = 4 is a guess with decimals.
+  const tv = data.refreshTrial?.(now) ?? null;
+  if (tv) {
+    push(c.label('REFRESH TRIAL') + c.grey(pick(view.cols - 'REFRESH TRIAL'.length, [
+      '  — pre-registered experiment (DESIGN §3.5) · running it admits nothing',
+      '  — pre-registered experiment · admits nothing',
+      '  — admits nothing',
+    ])));
+    // Each latch names its own way out (v0.75.0 review): an unreadable file is
+    // not cleared by a restart, and must not be shown as if it were.
+    const clearHow = (k: NonNullable<typeof tv.latch>['clear'], short: boolean): string =>
+      k === 'restart-with-option-off' ? (short ? 'restart with the option off' : 'start the add-on with refresh_trial_enabled off')
+        : k === 'move-file-aside' ? (short ? 'move the trial file aside' : 'move /data/refresh_trial.json aside (it is left untouched) and restart')
+          : k === 'set-trial-path' ? (short ? 'TRIAL_PATH unset' : 'the run script must export TRIAL_PATH')
+            : (short ? 'make /data writable' : 'make /data writable and restart');
+    if (tv.latch && tv.enabled) {
+      push('  ' + c.red(pick(view.cols - 2, [
+        `LATCHED: ${tv.latch.reason} (${hhmm(tv.latch.at)}, ${age(now - tv.latch.at)}) · clear: ${clearHow(tv.latch.clear, false)}`,
+        `LATCHED: ${tv.latch.reason} · clear: ${clearHow(tv.latch.clear, true)}`,
+        `LATCHED · clear: ${clearHow(tv.latch.clear, true)}`,
+      ])));
+    } else if (!tv.enabled) {
+      push('  ' + c.grey(tv.startedAt == null
+        ? '◷ off — refresh_trial_enabled is off. Nothing is randomized or sent.'
+        : '◷ off — refresh_trial_enabled is off; the record below is kept.'));
+      if (tv.latch) push('  ' + c.grey(pick(view.cols - 2, [`latched while off: ${tv.latch.reason} · clear: ${clearHow(tv.latch.clear, false)}`, `latched: ${clearHow(tv.latch.clear, true)}`])));
+    } else if (tv.phase !== 'running') {
+      const v = tv.verdict;
+      push('  ' + (tv.phase === 'passed' ? c.green('PASSED') : tv.phase === 'failed' ? c.yellow('FAILED') : c.grey('RETIRED — not measurable here')) +
+        (v ? c.grey(pick(view.cols - 10, [`  · ${v.why} · nothing more is sent`, `  · ${v.why}`, ''])) : c.grey('  · nothing more is sent')));
+    } else if (tv.open) {
+      const o = tv.open;
+      push('  ' + c.cyan(`#${o.nodeId}`) + ' ' + (o.arm === 'treated' ? c.yellow('treated') : c.white('held')) +
+        c.grey(`  · decided ${age(now - o.decidedAt)} ago`) +
+        (o.arm === 'treated' ? c.grey(`  · send ${o.send ?? '—'}`) : c.grey('  · nothing sent')) +
+        c.grey('  · in flight'));
+    } else {
+      push('  ' + c.green('running') + c.grey(pick(view.cols - 9, [
+        `  · waiting: ${tv.idle ?? 'decided this tick'}`,
+        `  · ${tv.idle ?? 'decided'}`,
+        '',
+      ])));
+    }
+    // The revisit condition's second half, per node: a refresh that sends only
+    // the probe's own Get is not a treatment (P5). On a mesh of plain switches
+    // this line is why nothing is ever decided.
+    if (tv.enabled && tv.profile && tv.profile.mains > 0) {
+      const p = tv.profile;
+      push('  ' + (p.differs === 0 ? c.yellow : c.grey)(pick(view.cols - 2, [
+        `eligible nodes: ${p.differs} of ${p.mains} mains — a refresh must send more than the probe's one Get (P5)${p.unknown > 0 ? `, ${p.unknown} not known yet` : ''}`,
+        `eligible nodes: ${p.differs} of ${p.mains} mains (refresh ≠ probe)`,
+        `eligible ${p.differs}/${p.mains}`,
+      ])));
+    }
+    if (tv.startedAt != null) {
+      const arm = (name: string, t: typeof tv.treated): string =>
+        `${name} ${t.n}/${tv.target} (${t.ok} improved${t.deaths > 0 ? ', ' + t.deaths + ' died' : ''})`;
+      // Priority order: the arms, then any node a kill excluded (a safety
+      // fact), then housekeeping that may drop with a disclosed count.
+      const bits = [
+        arm('treated', tv.treated),
+        arm('held', tv.held),
+        ...tv.exclusions.map((x) => c.yellow(`#${x.nodeId} excluded to ${mmdd(x.until)}`)),
+        ...(tv.treated.over + tv.held.over > 0 ? [`past 30: ${tv.treated.over}+${tv.held.over}`] : []),
+        `unscoreable ${tv.treated.unscoreable}+${tv.held.unscoreable}`,
+        `lost ${tv.treated.lost}+${tv.held.lost}`,
+        `${tv.decided24h} in 24h`,
+        ...(tv.deadlineAt != null && tv.phase === 'running' ? [`deadline ${mmdd(tv.deadlineAt)}`] : []),
+      ];
+      push(fitBits('  ', bits, view.cols));
     }
   }
 
