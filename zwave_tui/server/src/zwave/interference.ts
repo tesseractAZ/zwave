@@ -25,18 +25,7 @@
 import type { InterferenceView } from '../types';
 import type { ControllerSample, CoarseBucket, CtrlCoarseBucket } from './evidenceStore';
 import type { Symptom } from './symptoms';
-
-/** Leading contiguous run of non-null channels (a null ends the run) — the
- *  driver's channel convention. Inlined (not imported from zwaveData) to avoid a
- *  module cycle; identical to zwaveData.leadingRun. */
-function leadingRun(channels: (number | null)[]): number[] {
-  const out: number[] = [];
-  for (const ch of channels) {
-    if (ch == null) break;
-    out.push(ch);
-  }
-  return out;
-}
+import { medianNoiseFloor } from './health';
 
 export interface InterferenceInput {
   now: number;
@@ -72,19 +61,13 @@ function noiseBand(floor: number | null, real: boolean): InterferenceView['noise
   return 'noisy';
 }
 
-/** MEDIAN of the representative channels, IDENTICAL to the masthead's
- *  computeNoiseFloor: take the leading contiguous run of channels (the driver's
- *  own convention — a null ends the run), then median the finite, non-sentinel,
- *  negative values. Matching exactly avoids showing two different "noise floor"
- *  numbers on two screens. */
+/** MEDIAN of the representative channels — `medianNoiseFloor`, the one rule
+ *  (health.ts, v0.75.2) the masthead, the health score and the detectors also
+ *  use: the leading contiguous run of channels (a null ends it), the values
+ *  that are readings (finite, negative, above -120 dBm). One function, so no two
+ *  screens can show two different "noise floor" numbers. */
 function medianFloor(channels: (number | null)[] | null | undefined): number | null {
-  if (!channels) return null;
-  const vals = leadingRun(channels)
-    .filter((v) => Number.isFinite(v) && v < 0)
-    .sort((a, b) => a - b);
-  if (!vals.length) return null;
-  const mid = vals.length >> 1;
-  return vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
+  return channels ? medianNoiseFloor(channels) : null;
 }
 
 export function computeInterference(input: InterferenceInput): InterferenceView {

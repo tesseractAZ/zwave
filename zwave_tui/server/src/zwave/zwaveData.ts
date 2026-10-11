@@ -1415,8 +1415,6 @@ class ZwaveDataImpl implements ZwaveData {
         recordingSince: () => ev.recordingSince(),
         sleeperWatch: (n) => this.sleeperWatchFor(n, now),
         duplicateBursts: (id) => this.duplicateBursts(id, now),
-        hasRealNoise: () =>
-          this.driverBgRssi != null && now - this.driverBgRssi.at <= 90_000 && this.driverHomeOk(),
       },
       this.symptomState,
     );
