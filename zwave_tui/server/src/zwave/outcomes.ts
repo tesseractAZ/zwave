@@ -207,7 +207,19 @@ export interface LiveSpanView {
   since: number;
   scored: [number, number, number, number];
   unscored: [number, number, number, number];
+  /** Scored closures live ≥ 10 min, per node, most first (v0.75.1): the count
+   *  is of episodes, and one chronic node that re-arms every half hour can
+   *  supply most of it. Kept only since v0.75.1, so it may cover fewer closures
+   *  than the buckets do — `byNodeN` says how many: every one since
+   *  `byNodeSince`, the first closure it attributed (null when unrecorded). */
+  byNode: { nodeId: number; n: number }[];
+  byNodeN: number;
+  byNodeSince: number | null;
 }
+
+/** One day of the live-span ring: closures per live bucket, scored apart from
+ *  unscored, and (v0.75.1) the scored ≥ 10 min ones per node. */
+interface LiveSpanDay { s: number[]; u: number[]; n?: Map<number, number> }
 
 export interface OutcomeStoreOptions {
   /** Per-command timeout rate at/under which a node is considered recovered.
@@ -905,7 +917,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   // (v0.72.0 second review): the pooled arm's own node set keeps growing.
   const legacyNodes = new Map<string, number>();
   // How long closed episodes were live: kind → first count + a day-keyed ring.
-  const liveSpans = new Map<SymptomKind, { since: number; days: Map<number, { s: number[]; u: number[] }> }>();
+  const liveSpans = new Map<SymptomKind, { since: number; days: Map<number, LiveSpanDay>; nodesSince?: number }>();
 
   const key = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
   const aKey = (kind: SymptomKind, act: ActionKind): string => `${kind}|${act}`;
@@ -1073,11 +1085,19 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const scored: [number, number, number, number] = [0, 0, 0, 0];
       const unscored: [number, number, number, number] = [0, 0, 0, 0];
       const from = Math.floor(now / DAY_MS) - (LIVE_SPAN_DAYS - 1);
+      const perNode = new Map<number, number>();
       for (const [day, d] of ls.days) {
         if (day < from) continue;
         for (let i = 0; i < 4; i++) { scored[i] += d.s[i] ?? 0; unscored[i] += d.u[i] ?? 0; }
+        if (d.n) for (const [id, k] of d.n) perNode.set(id, (perNode.get(id) ?? 0) + k);
       }
-      return { since: ls.since, scored, unscored };
+      // The exact first attributed closure: from then on every counted closure
+      // is attributed, so "N since <it>" is exact. Without it there is no honest
+      // start to name — a day boundary is a UTC midnight that also counts the
+      // unattributed closures earlier that day (v0.75.1 review) — so none is.
+      const byNodeSince = perNode.size === 0 ? null : ls.nodesSince ?? null;
+      const byNode = [...perNode].map(([nodeId, n]) => ({ nodeId, n })).sort((a, b) => b.n - a.n || a.nodeId - b.nodeId);
+      return { since: ls.since, scored, unscored, byNode, byNodeN: byNode.reduce((a, x) => a + x.n, 0), byNodeSince };
     },
 
     routeSymptomsAfter(act, origin): number {
@@ -1129,10 +1149,16 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         const liveMin = ((resolveOpts?.absentSinceMs ?? resolvedMs) - start) / 60_000;
         const b = liveMin >= LIVE_SPAN_EDGES_MIN[2] ? 3 : liveMin >= LIVE_SPAN_EDGES_MIN[1] ? 2 : liveMin >= LIVE_SPAN_EDGES_MIN[0] ? 1 : 0;
         const scoredClose = (ep.verdict === 'improved' || ep.verdict === 'no-change' || ep.verdict === 'worse') && !ep.confounded;
-        const ls = liveSpans.get(kind) ?? { since: resolvedMs, days: new Map() };
+        const ls: { since: number; days: Map<number, LiveSpanDay>; nodesSince?: number } = liveSpans.get(kind) ?? { since: resolvedMs, days: new Map() };
         const day = Math.floor(resolvedMs / DAY_MS);
-        const d = ls.days.get(day) ?? { s: [0, 0, 0, 0], u: [0, 0, 0, 0] };
+        const d: LiveSpanDay = ls.days.get(day) ?? { s: [0, 0, 0, 0], u: [0, 0, 0, 0] };
         (scoredClose ? d.s : d.u)[b] += 1;
+        // …and which node it came from, for the closures that count toward the
+        // revisit condition (scored, live ≥ 10 min) (v0.75.1).
+        if (scoredClose && b >= 1 && nodeId != null) {
+          (d.n ??= new Map()).set(nodeId, (d.n.get(nodeId) ?? 0) + 1);
+          ls.nodesSince ??= resolvedMs;
+        }
         ls.days.set(day, d);
         for (const k of [...ls.days.keys()]) if (k <= day - LIVE_SPAN_DAYS) ls.days.delete(k);
         liveSpans.set(kind, ls);
@@ -1560,7 +1586,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         actorNodes: [...actorNodes.entries()].map(([k, v]) => [k, [...v]] as [string, number[]]),
         killedAfter: [...killedAfter.entries()],
         routeAfter: [...routeAfter.entries()],
-        liveSpan: [...liveSpans.entries()].map(([k, v]) => [k, { since: v.since, days: [...v.days.entries()].map(([d, x]) => [d, x.s, x.u]) }]),
+        liveSpan: [...liveSpans.entries()].map(([k, v]) => [k, { since: v.since, ...(v.nodesSince != null ? { nodesSince: v.nodesSince } : {}), days: [...v.days.entries()].map(([d, x]) => (x.n ? [d, x.s, x.u, [...x.n]] : [d, x.s, x.u])) }]),
         legacyArms: [...legacy.entries()],
         legacyNodes: [...legacyNodes.entries()],
         // Open episodes are intentionally NOT persisted — an episode spanning a
@@ -1621,15 +1647,21 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       for (const [k, v] of pairs(o.routeAfter)) if (count(v)) routeAfter.set(k, v);
       const ok4 = (a: unknown): a is number[] => Array.isArray(a) && a.length === 4 && a.every((x) => Number.isFinite(x) && x >= 0);
       for (const [k, raw] of pairs(o.liveSpan)) {
-        const v = raw as { since?: unknown; days?: unknown } | null;
+        const v = raw as { since?: unknown; days?: unknown; nodesSince?: unknown } | null;
         if (!v || typeof v !== 'object' || typeof v.since !== 'number' || !Number.isFinite(v.since) || !Array.isArray(v.days)) continue;
-        const days = new Map<number, { s: number[]; u: number[] }>();
+        const days = new Map<number, LiveSpanDay>();
         for (const e of v.days) {
           if (!Array.isArray(e)) continue;
-          const [d, sc, un] = e as unknown[];
-          if (typeof d === 'number' && Number.isFinite(d) && ok4(sc) && ok4(un)) days.set(d, { s: [...sc], u: [...un] });
+          const [d, sc, un, nn] = e as unknown[];
+          if (typeof d !== 'number' || !Number.isFinite(d) || !ok4(sc) || !ok4(un)) continue;
+          // The per-node counts (v0.75.1) are optional: a day from an older
+          // file, or a malformed list, loads without them.
+          const pairsOk = Array.isArray(nn) && nn.every((p) => Array.isArray(p) && p.length === 2 &&
+            Number.isInteger(p[0]) && p[0] >= 0 && Number.isFinite(p[1]) && p[1] > 0);
+          days.set(d, { s: [...sc], u: [...un], ...(pairsOk ? { n: new Map(nn as [number, number][]) } : {}) });
         }
-        liveSpans.set(k as SymptomKind, { since: v.since, days });
+        const ns = typeof v.nodesSince === 'number' && Number.isFinite(v.nodesSince) ? v.nodesSince : undefined;
+        liveSpans.set(k as SymptomKind, { since: v.since, days, ...(ns != null ? { nodesSince: ns } : {}) });
       }
       // The pre-actor share of each pooled arm, and the nodes that taught it:
       // carried in a v0.72.0 file, and SNAPSHOT from the pooled arm when an

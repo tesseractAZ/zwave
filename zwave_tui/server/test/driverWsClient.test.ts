@@ -334,6 +334,25 @@ test('parseBgRssi: averages preferred, current fallback, sentinels rejected, all
   assert.equal(parseBgRssi({}), null);
 });
 
+test('parseBgRssi: the int8 range bounds a reading; the "no value yet" seed is absent when trailing, kept when interior; saturation stays 0 dBm (v0.75.1)', () => {
+  // zwave-js parseRSSI reads an int8: nothing below -128 dBm is a reading.
+  assert.deepEqual(parseBgRssi({ channel0: { average: -128, current: -95 } }), [-128, null, null, null], '-128 is the floor of the range, still a reading');
+  assert.deepEqual(parseBgRssi({ channel0: { average: -128.5, current: -95 } }), [-95, null, null, null], 'below the range falls back to current');
+  assert.equal(parseBgRssi({ channel0: { average: -400, current: -300 } }), null);
+  // averageRSSI returns 0 for a first reading that is "not available".
+  const seed = { average: 0, current: 127 };
+  const real = (v: number) => ({ average: v, current: v });
+  assert.deepEqual(parseBgRssi({ channel0: real(-103), channel1: real(-104), channel2: seed, channel3: seed }), [-103, -104, null, null],
+    'trailing long-range channels the controller reports as not available are absent, not 0 dBm');
+  assert.deepEqual(parseBgRssi({ channel0: seed, channel1: real(-104) }), [0, -104, null, null],
+    'an interior one keeps its 0, so channel 1 survives the leading run');
+  assert.deepEqual(parseBgRssi({ channel0: real(-103), channel1: { average: 0, current: 126 } }), [-103, 0, null, null],
+    'a saturated receiver (current 126) averages as 0 dBm, and that is a reading');
+  assert.equal(parseBgRssi({ channel0: seed, channel1: seed }), null, 'nothing yet on any channel: no reading at all');
+  assert.deepEqual(parseBgRssi({ channel0: real(-103), channel1: { average: -40, current: 127 } }), [-103, -40, null, null],
+    'a real average beside a momentary "not available" is still a reading');
+});
+
 /* ── Pure guard helpers (extracted for regression coverage) ──────────────── */
 
 test('driverHomeGuard: optimistic until both ids known, then strict, then latched', () => {

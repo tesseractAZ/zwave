@@ -598,12 +598,47 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     if (fp > 0) tallies.push(`${fp} refused as misdiagnosis`);
     // HOW MANY EPISODES LIVE LONG ENOUGH TO ACT ON (v0.72.0), and how many of
     // those could be scored — over the last 30 days. Only these could ever be
-    // evidence for an automatic action.
+    // evidence for an automatic action. They are episodes, not nodes: one
+    // chronic node re-arming every half hour once made 8 of 12 new closures,
+    // so the count names how many nodes it came from and the one with the most
+    // (v0.75.1) — in the same bit, so it is never shown without them. Per-node
+    // counts start with v0.75.1; until they cover every closure, the bit says
+    // how many they do cover, and since when — to the minute, because every
+    // closure after the first attributed one is attributed.
+    let liveRow: string | null = null;
     if (live) {
       const a = live.scored[1] + live.scored[2] + live.scored[3];
       const b = a + live.unscored[1] + live.unscored[2] + live.unscored[3];
       const since = now - live.since < 30 * 86_400_000 ? `since ${mmdd(live.since)}` : 'in 30 d';
-      if (b > 0) tallies.push(`live ≥10m: ${a}/${b} scored ${since}`);
+      if (b > 0) {
+        const count = `live ≥10m: ${a}/${b} scored`;
+        const top = live.byNode[0];
+        if (top && live.byNodeN > 0) {
+          // Its own row, longest form that fits (v0.75.1 review): one bit on
+          // the tallies row was dropped whole at 80 columns, hiding the count.
+          // Every form keeps "from k nodes" — the count is never unattributed —
+          // and, when coverage is partial, how many of it the nodes account for.
+          const k = live.byNode.length;
+          const nodes = `from ${k} node${k === 1 ? '' : 's'}`;
+          const named = nodes + (k === 1 ? ` (node ${top.nodeId})` : top.n >= 2 ? ` (node ${top.nodeId}: ${top.n})` : '');
+          const full = live.byNodeN >= a;
+          const at = live.byNodeSince == null ? null : `${mmdd(live.byNodeSince)} ${hhmm(live.byNodeSince)}`;
+          const part = full ? '' : at ? `${live.byNodeN} since ${at} ` : `${live.byNodeN} of them `;
+          const partShort = full ? '' : `${live.byNodeN} attributed, `;
+          const partMin = full ? '' : `${live.byNodeN} `;
+          const sep = full ? ' ' : ' · ';
+          liveRow = pick(view.cols - 6, [
+            `${count} ${since}${sep}${part}${named}`,
+            `${count} ${since}${sep}${part}${nodes}`,
+            `${count} ${since}${sep}${partShort}${nodes}`,
+            `${count}${sep}${partMin}${nodes}`,
+          ]);
+        } else {
+          // Before the first attributed closure: the count alone, still on its
+          // own row, so the tallies before it cannot crowd it out.
+          liveRow = pick(view.cols - 6, [`${count} ${since}`, count]);
+        }
+      }
     }
     // fitBits, NOT a raw join (v0.51.0). `push` blind-truncates, so at 80 cols
     // this row read "...· 2 undersampled (node r" and three tallies — including
@@ -613,6 +648,7 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     // `push` stays: at cols 1-5 fitBits emits prefix + `+N` wider than the
     // frame, and only truncate enforces renderContract's `visLen <= cols`.
     if (tallies.length) push(fitBits('    ' + c.grey('○ '), tallies.map((t) => c.grey(t)), view.cols));
+    if (liveRow) push('    ' + c.grey('○ ' + liveRow));
   }
   // POSSIBLE HARM, per action (v0.72.0): a route-kind symptom that opened soon
   // after an action on the same node. Not per kind — the new symptom is rarely

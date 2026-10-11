@@ -126,7 +126,7 @@ device doing right now?"* and *"how is it configured?"*:
 ![The Detail screen scrolled to the end of the dossier: the live link with signal and latency sparklines, LIVE ENTITIES (a motion sensor reading detected, a light on at 70 percent, a power sensor at 38.4 W), five CONFIG PARAMETERS (two with decoded enum meanings, one read-only), the route, traffic counters, and EVIDENCE](docs/screenshots/detail.svg)
 
 <details>
-<summary><b>Six more screens</b> — Controller, Topology, Heatmap, Log, Remedy, Interference (Engine, screen 9, has no screenshot yet)</summary>
+<summary><b>Seven more screens</b> — Controller, Topology, Heatmap, Log, Remedy, Interference, Engine</summary>
 
 #### Controller — radio health, noise floor, counters
 ![Controller screen](docs/screenshots/controller.svg)
@@ -145,6 +145,9 @@ device doing right now?"* and *"how is it configured?"*:
 
 #### Interference — noise floor, serial health, diurnal heatmap
 ![Interference screen](docs/screenshots/interference.svg)
+
+#### Engine — auto-ping, the refresh trial, and what the ledger has learned
+![The Engine screen: AUTO-PING running with its last pass, candidates and the nodes owed a sweep; REFRESH TRIAL running and waiting, with the eligible-node count and both arms' counts; the live ledger; and LEARNED, every rate with the n behind it, including the live-span count naming the nodes it came from](docs/screenshots/engine.svg)
 
 </details>
 

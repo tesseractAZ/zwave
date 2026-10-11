@@ -1586,6 +1586,53 @@ test('live span is bucketed at 10, 30 and 60 minutes, scored apart from unscored
   assert.equal(o.liveSpan('rtt-degraded', day + 40 * 86_400_000)?.scored.reduce((a, b) => a + b, 0), 0, 'a 30-day window');
 });
 
+test('live span counts the scored ≥10m closures per node, most first, and round-trips them (v0.75.1)', () => {
+  const o = store();
+  const day = 20_000 * 86_400_000;
+  const M = 60_000;
+  let t = day;
+  const close = (id: number, liveMin: number, after: WindowMetrics | null) => {
+    o.open(id, 'rtt-degraded', t + 1_000, WT(400), { dwellStartMs: t });
+    o.resolve(id, 'rtt-degraded', t + liveMin * M + 10 * M, after, { absentSinceMs: t + liveMin * M });
+    t += 90 * M;
+  };
+  close(9, 30, null);    // unverifiable: unscored, not counted — and not the start of coverage
+  close(8, 5, WT(30));   // live < 10 min: not counted toward the revisit condition
+  for (let i = 0; i < 5; i++) close(56, 20, WT(30)); // a chronic node, re-arming
+  close(11, 45, WT(400));
+  close(8, 15, WT(30));
+  const ls = o.liveSpan('rtt-degraded', day + 86_400_000)!;
+  assert.equal(ls.scored[1] + ls.scored[2] + ls.scored[3], 7);
+  assert.deepEqual(ls.byNode, [{ nodeId: 56, n: 5 }, { nodeId: 8, n: 1 }, { nodeId: 11, n: 1 }], 'most first, then by node id');
+  assert.equal(ls.byNodeN, 7, 'every counted closure is attributed');
+  assert.equal(ls.byNodeSince, day + 180 * M + 30 * M, 'from the first ATTRIBUTED closure, to the millisecond — not the day it fell on');
+  const p = store();
+  p.loadJSON(JSON.parse(JSON.stringify(o.toJSON())));
+  assert.deepEqual(p.liveSpan('rtt-degraded', day + 86_400_000), ls, 'per-node counts survive a restart');
+  assert.deepEqual(o.liveSpan('rtt-degraded', day + 40 * 86_400_000)?.byNode, [], 'and age out with the 30-day window');
+});
+
+test('a pre-v0.75.1 live-span day loads without per-node counts; a malformed list is ignored, not fatal (v0.75.1)', () => {
+  const day = 20_000;
+  const o = store();
+  o.loadJSON({ v: 1, liveSpan: [['rtt-degraded', { since: day * 86_400_000, days: [
+    [day, [0, 4, 0, 0], [0, 0, 0, 0]],
+    [day + 1, [0, 2, 1, 0], [0, 0, 0, 0], [[56, 2], [11, 1]]],
+    [day + 2, [0, 1, 0, 0], [0, 0, 0, 0], [[56, 'x']]],
+  ] }]] });
+  const ls = o.liveSpan('rtt-degraded', (day + 3) * 86_400_000)!;
+  assert.deepEqual(ls.scored, [0, 7, 1, 0], 'the buckets load in full');
+  assert.deepEqual(ls.byNode, [{ nodeId: 56, n: 2 }, { nodeId: 11, n: 1 }]);
+  assert.equal(ls.byNodeN, 3, 'three of the eight are attributed');
+  assert.equal(ls.byNodeSince, null, 'no recorded start: none is guessed — a day boundary is a UTC midnight that also holds unattributed closures');
+  const at = (day + 1) * 86_400_000 + 5 * 3_600_000;
+  const q = store();
+  q.loadJSON({ v: 1, liveSpan: [['rtt-degraded', { since: day * 86_400_000, nodesSince: at, days: [[day + 1, [0, 1, 0, 0], [0, 0, 0, 0], [[56, 1]]]] }]] });
+  assert.equal(q.liveSpan('rtt-degraded', (day + 3) * 86_400_000)!.byNodeSince, at, 'the recorded start loads');
+  q.loadJSON({ v: 1, liveSpan: [['rtt-degraded', { since: day * 86_400_000, nodesSince: 'x', days: [[day + 1, [0, 1, 0, 0], [0, 0, 0, 0], [[56, 1]]]] }]] });
+  assert.equal(q.liveSpan('rtt-degraded', (day + 3) * 86_400_000)!.byNodeSince, null, 'a malformed start is ignored');
+});
+
 test('the confounded tag prints on an ATTRIBUTED closure too, with who acted and how long it was live (v0.72.0)', () => {
   const logged: string[] = [];
   const o = createOutcomeStore({ minEpisodes: 4, decay: 0, log: (m: string) => logged.push(m) });

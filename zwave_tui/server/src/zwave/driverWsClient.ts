@@ -175,7 +175,10 @@ interface VersionMsg {
   maxSchemaVersion?: number;
 }
 
+/** RSSI is a signed byte on the wire (zwave-js `parseRSSI` reads an int8):
+ *  -128..124 dBm, with 125-127 its error sentinels (`RssiError`). */
 const RSSI_SENTINEL_MIN = 125;
+const RSSI_MIN_DBM = -128;
 
 /** Redact userinfo (ws://user:pass@host) before logging a configured URL. */
 export function redactUrl(url: string): string {
@@ -332,10 +335,11 @@ export function controllerRfEvent(ev: Record<string, unknown>): 'off' | 'on' | n
   return null;
 }
 
-/** A finite, non-sentinel dBm value or null. */
+/** A finite dBm value inside the int8 range and not a sentinel, or null
+ *  (v0.75.1: below -128 is not a reading a radio can report). */
 function cleanDbm(v: unknown): number | null {
   if (typeof v !== 'number' || !Number.isFinite(v)) return null;
-  if (v >= RSSI_SENTINEL_MIN) return null;
+  if (v >= RSSI_SENTINEL_MIN || v < RSSI_MIN_DBM) return null;
   return v;
 }
 
@@ -365,19 +369,34 @@ export function parseLastSeen(v: unknown): number | null {
   return null;
 }
 
+/** zwave-js `RssiError.NotAvailable`. */
+const RSSI_NOT_AVAILABLE = 127;
+
 /** Extract channels 0..3 (driver-EMA `average`) from a backgroundRSSI blob. */
 export function parseBgRssi(bg: unknown): BgRssiChannels | null {
   if (!bg || typeof bg !== 'object') return null;
   const o = bg as Record<string, unknown>;
-  const chan = (k: string): number | null => {
+  const fields = (k: string): Record<string, unknown> | null => {
     const c = o[k];
-    if (!c || typeof c !== 'object') return null;
-    const cc = c as Record<string, unknown>;
-    // Prefer the driver's own EMA (`average`) — the canonical floor estimate;
-    // fall back to `current` when average is absent.
-    return cleanDbm(cc.average) ?? cleanDbm(cc.current);
+    return c && typeof c === 'object' ? (c as Record<string, unknown>) : null;
   };
-  const channels: BgRssiChannels = [chan('channel0'), chan('channel1'), chan('channel2'), chan('channel3')];
+  // Prefer the driver's own EMA (`average`) — the canonical floor estimate;
+  // fall back to `current` when average is absent.
+  const chan = (cc: Record<string, unknown> | null): number | null =>
+    cc ? cleanDbm(cc.average) ?? cleanDbm(cc.current) : null;
+  // zwave-js's averageRSSI returns 0 for a first reading that is "not
+  // available", so average 0 beside a current of NotAvailable is "no value
+  // yet", not a 0 dBm floor (v0.75.1). A saturated receiver also averages as
+  // 0 dBm, but its current is ReceiverSaturated (126): that 0 is a reading.
+  const noValueYet = (cc: Record<string, unknown> | null): boolean =>
+    cc != null && cc.average === 0 && cc.current === RSSI_NOT_AVAILABLE;
+  const raw = ['channel0', 'channel1', 'channel2', 'channel3'].map(fields);
+  const channels: BgRssiChannels = raw.map(chan);
+  // A TRAILING run of such channels is absent, like a long-range channel the
+  // controller does not report. An interior one keeps its 0: a null would end
+  // the leading run and drop the real channels after it (v0.75.1 review), and
+  // every floor already ignores non-negative values.
+  for (let i = channels.length - 1; i >= 0 && (channels[i] == null || noValueYet(raw[i])); i--) channels[i] = null;
   return channels.some((c) => c != null) ? channels : null;
 }
 
