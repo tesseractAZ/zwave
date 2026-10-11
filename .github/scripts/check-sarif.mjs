@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Gate CI on CodeQL findings WITHOUT GitHub Advanced Security.
+// Gate CI on CodeQL findings, not just record them.
 //
 // The CodeQL workflow DOES upload to the Security tab (code scanning is free on
 // public repositories). This script is the second, self-contained gate: it reads

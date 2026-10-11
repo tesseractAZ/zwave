@@ -1,6 +1,6 @@
 name: Tag released version
 
-# Post-merge half of the release pipeline (mirrors the power add-on's chain).
+# Post-merge half of the release pipeline.
 #
 # Until v0.29.2 this link did not exist, and the consequence was not theoretical:
 # v0.29.0 and v0.29.1 were both merged to main and sat UNTAGGED and unreleased,

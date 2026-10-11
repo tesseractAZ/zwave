@@ -53,8 +53,8 @@ measured.
   0.75^k × rtt_prev) / (1 − 0.75^k)` with `k = dTx`.
 - A sample with no new transmission adds nothing; before, it counted the same
   average again. An estimate the counters contradict is dropped.
-- rtt-degraded tallies learned before this release were scored on the average
-  and decay out of the control arm with use.
+- rtt-degraded tallies learned before this release, in the control arm and in
+  each action's arm, were scored on the average and decay out with use.
 
 Two tests and five mutants pin the estimator, its seed and the carry-forward.
 
@@ -140,8 +140,7 @@ zwaveData, the episode skip, and the Long-Range card.
 At the schema this add-on negotiates, zwave-js-server sends a node's FLiRS
 flag as its wake-up period (`false`, `"250ms"` or `"1000ms"`), not as a
 boolean. The client mapped the string forms to "unknown", so no FLiRS device
-was ever recognised as one. Among other effects, a configuration write to a
-FLiRS device was not reported as queued. The string forms now read as FLiRS.
+was ever recognised as one. The string forms now read as FLiRS.
 
 ### Fixed — the missed-report watch no longer clears a symptom with no report
 
@@ -163,9 +162,10 @@ DOCS §1.2 lists the events the driver-WS client now reads. §7.2.3 counts 16
 kinds and lists `missed-report`. The SLEEPERS row is described as naming the
 unwatched sleepers that fit the width.
 
-3 new tests and 4 new mutants pin these, with one test that passed for the
-wrong reason tightened, and the production-hop test now carrying the
-radio-off evidence and a dropped link.
+2 new tests and 4 new mutants pin these, with one assertion inverted (unknown
+flags are not a sleeper), one test that passed for the wrong reason tightened,
+and the production-hop test now carrying the radio-off evidence and a dropped
+link.
 
 ## 0.73.3
 

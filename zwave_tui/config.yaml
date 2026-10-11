@@ -39,7 +39,7 @@ host_network: false
 ports:
   "2324/tcp": 2324
 ports_description:
-  "2324/tcp": "Telnet TUI (NO AUTH — keep on a trusted LAN). Change the LAN port here, in Network."
+  "2324/tcp": "Telnet TUI (login optional — turn on auth_enabled, or keep it on a trusted LAN). Change the LAN port here, in Network."
 # HA Ingress: makes the browser terminal appear as a sidebar item inside Home
 # Assistant (visible in the HA mobile app), authenticated through HA's normal
 # session. Same server, same port — HA's hassio_ingress reverse-proxies in.

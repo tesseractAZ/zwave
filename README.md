@@ -9,8 +9,9 @@ is the opt-in, off-by-default **auto-ping** (see *Write actions & safety*).
 It talks to the **Home Assistant Core WebSocket** (the node roster, live
 statistics, and — behind a typed confirmation — maintenance, device-control, and
 config-write actions) and, strictly read-only, to the **Z-Wave JS driver WebSocket**
-for the real background-noise
-floor and capability flags that HA does not expose. It persists a per-node
+for what HA does not expose: the real background-noise floor, capability flags,
+each sleeping device's declared report interval, and the driver log lines behind
+the S2-resync and repeated-frame watches. It persists a per-node
 evidence time-series, scores every node worst-health-first, detects mesh symptoms,
 and recommends fixes — across **nine screens**, over a telnet server and a
 browser console, and publishes what it concludes as Home Assistant entities.
@@ -57,7 +58,12 @@ measured evidence:**
    path — usually one marginal repeater), a chatty flooder, a suspected ghost,
    controller serial-link strain, **S2 nonce-resync storms** (a marginal *secure*
    link, which no statistics counter can see — it is read from the driver's own
-   log stream),
+   log stream), **repeated frames** (a node that keeps re-sending one frame because
+   it does not hear the controller's acknowledgement: 5 or more duplicate drops in
+   a minute, twice in 24 h or once with 15 or more, read from the same log stream;
+   it holds while those bursts stay inside the 24 h lookback), a **missed report**
+   (a sleeping device silent past 1.5× — 2.5× for a warning — the Wake Up or
+   heartbeat interval it declares; a device that declares none is not watched),
    and correlation across nodes: an **edge-cluster** (a small group sharing one
    repeater) and a mesh-wide interference event, which *subsume* the per-node
    symptoms beneath them so you see one cause, not N faults.
@@ -98,14 +104,14 @@ dismisses with `q` / `Esc`.
 | # | Screen | What it shows |
 | --- | --- | --- |
 | 1 | **Overview** | Live node table, worst-health-first, summary bar + per-node flags. |
-| 2 | **Detail** | Scrollable per-node dossier: identity, live link, **live entity state** (is the light on? sensor values, lock state, climate mode…), the device's **Z-Wave configuration parameters**, LWR/NLWR routes, TX/RX reliability, battery, firmware. |
+| 2 | **Detail** | Scrollable per-node dossier: identity, live link, **live entity state** (is the light on? sensor values, lock state, climate mode…), the device's **Z-Wave configuration parameters**, LWR/NLWR routes, TX/RX reliability, battery, firmware, and **EVIDENCE** — what the engine can see of this node (feeds, samples, probe answers split into routed reads and pings, its learned normal). |
 | 3 | **Controller** | Node-1 radio health, background-RSSI noise floor, controller counters, rebuild progress. |
-| 4 | **Topology** | Hop-grouped route tree + repeater load + Long-Range star. |
+| 4 | **Topology** | Hop-grouped route tree, route failures by link, measured route stability, repeater load, Long-Range star. |
 | 5 | **Heatmap** | Nodes by HA area, cells graded by SNR-margin bucket. |
 | 6 | **Log** | Driver/value/notification events + command outcomes; scroll, filter; error events latch **bold-red until acknowledged** (`M` releases the latch, for every session). |
 | 7 | **Remedy** | The engine's diagnoses + ranked recommendations, with learned "helped X%" efficacy. |
 | 8 | **Interference** | Noise floor + recent/multi-day trend, serial-link health, diurnal timeout heatmap. |
-| 9 | **Engine** | The engine's own runtime: auto-ping state and per-node ladder, the episodes it is measuring right now, and every learned rate with the `n` behind it. |
+| 9 | **Engine** | The engine's own runtime: auto-ping state and per-node ladder, the driver link (and whether the log lane behind the S2 and repeated-frame watches is live), **SLEEPERS** — how many sleeping devices the missed-report watch covers and why each other one is not watched — the episodes it is measuring right now, and every learned rate with the `n` behind it. `Z` pauses every automatic write. |
 
 **Keys.** `1`–`9` jump to a screen (`c` Controller, `e` Log, `y` Remedy, `f`
 Interference are shortcuts too). On Overview: `j`/`k` move, `Enter` detail, `/`
@@ -116,7 +122,7 @@ node (on the Controller screen it opens the **mesh-wide** actions instead);
 **Detail** is the per-node dossier — it scrolls, and answers both *"what is this
 device doing right now?"* and *"how is it configured?"*:
 
-![The Detail screen scrolled to its LIVE ENTITIES and CONFIG PARAMETERS sections: a motion sensor reading detected, a light on at 70 percent, a power sensor at 38.4 W, and five Z-Wave configuration parameters with their decoded enum meanings](docs/screenshots/detail.svg)
+![The Detail screen scrolled to the end of the dossier: the live link with signal and latency sparklines, LIVE ENTITIES (a motion sensor reading detected, a light on at 70 percent, a power sensor at 38.4 W), five CONFIG PARAMETERS (two with decoded enum meanings, one read-only), the route, traffic counters, and EVIDENCE](docs/screenshots/detail.svg)
 
 <details>
 <summary><b>Six more screens</b> — Controller, Topology, Heatmap, Log, Remedy, Interference (Engine, screen 9, has no screenshot yet)</summary>
@@ -182,24 +188,29 @@ claims about a device.
 nothing to the mesh or its devices; it still publishes its own conclusions as
 Home Assistant states (see [The machine-readable boundary](#the-machine-readable-boundary)).
 Turn the switch on to unlock actions on the selected node. Press **`a`** to open
-the **Actions Menu**. It is **scoped to what you are looking at** — on the Overview or
-Detail it offers only actions bounded by the selected node, and groups:
+the **Actions Menu**. It is **scoped to what you are looking at** — on the Overview,
+Detail, Log or Remedy it offers only actions bounded by the node under the cursor
+(on Log and Remedy, the highlighted event's or symptom's node), and groups:
 
 - **Maintenance** — ping, refresh values, re-interview, rebuild *this node's*
   routes, remove-failed.
-- **Device controls** — turn a light / switch / fan **on · off · toggle**, **open
-  / close** a cover or garage door, **lock / unlock** a lock.
+- **Device controls** — turn a light / switch / fan / siren **on · off · toggle**,
+  **open / close / toggle** a cover or garage door, **lock / unlock** a lock.
 - **Configuration** — edit a writeable Z-Wave parameter through a bounded value
   picker (enum options or a min/max-checked number).
+
+Topology, Heatmap, Interference and Engine have no actions menu.
 
 ![The DEVICE ACTIONS menu, headed with the target node, showing three groups: MAINTENANCE with ping, refresh values, re-interview, rebuild node routes and remove failed node; DEVICE CONTROLS with on/off/toggle rows each showing the device's current state; and CONFIGURATION rows for editing writeable Z-Wave parameters. Unlocking a lock and opening a garage door are badged DESTRUCTIVE](docs/screenshots/actions-menu.svg)
 
 **Mesh-wide actions live on the Controller screen**, not in a device's menu.
-Press `a` there for **NETWORK ACTIONS** — rebuild all routes, or stop a rebuild
-in progress. Keeping them apart means a menu headed *"target #8 Kitchen Lamp"*
-can never offer you an action that touches all 39 nodes.
+Press `a` there for **NETWORK ACTIONS**: rebuild all routes (or stop a rebuild in
+progress), pause or resume automatic writes, and, while a controller swap awaits
+an answer, the keep / resume / start-fresh identity decision. Keeping them apart
+means a menu headed *"target #8 Kitchen Lamp"* can never offer you an action that
+touches all 39 nodes.
 
-![The NETWORK ACTIONS menu, headed "whole mesh" with no device target, listing the mesh-wide operations under a MESH-WIDE group heading: Rebuild ALL routes, badged DESTRUCTIVE](docs/screenshots/network-actions.svg)
+![The NETWORK ACTIONS menu, headed "whole mesh" with no device target, listing the mesh-wide operations under a MESH-WIDE group heading: Rebuild ALL routes, badged DESTRUCTIVE, and Pause automatic writes, badged SAFE](docs/screenshots/network-actions.svg)
 
 Every row is badged **SAFE / CAUTION / DESTRUCTIVE** (unlocking a lock or opening a
 garage is DESTRUCTIVE), and selecting any of them opens a modal that requires you
@@ -265,11 +276,13 @@ identity, *resume* this controller's own learning if it has been here before, or
 `<name>.home-<id>.json`, so they can always be inspected or put back by hand. The
 decision is answerable even in read-only mode, since it touches nothing on the
 mesh, and it raises `binary_sensor.zwave_tui_degraded` so you hear about it
-without having the console open. If you expose the LAN telnet port on an
-untrusted network, enable the optional **login gate** (plaintext or `scrypt:`
-passwords, with a per-peer backoff). The sidebar console is **restricted to Home
-Assistant administrators** — the same position the official Z-Wave JS add-on
-takes, and appropriate for a panel that can remove a failed node or unlock a lock.
+without having the console open.
+
+**Access.** If you expose the LAN telnet port on an untrusted network, enable the
+optional **login gate** (plaintext or `scrypt:` passwords, with a per-peer
+backoff). The sidebar console is **restricted to Home Assistant administrators** —
+the same position the official Z-Wave JS add-on takes, and appropriate for a panel
+that can remove a failed node or unlock a lock.
 
 ## Performance
 
@@ -288,7 +301,7 @@ rate but one whole-frame redraw per second.
 That document also carries what is *not* measured, and why most of it does not
 need to be — and, for the two items that did earn measuring, what the numbers
 overturned. The mutation harness is **not** startup-bound, as had been guessed:
-sys is 5 % and the measured spawn floor 5 %, against 85 % spent in the 715
+sys is 5 % and the measured spawn floor 5 %, against 86 % spent in the 879
 targeted test runs themselves — a phase the harness times whole, so how it splits
 between transpiling, module loading and running the tests is not measured.
 
@@ -401,18 +414,28 @@ already set up.
 3. Start it. **No configuration is required:** the add-on auto-discovers your
    `zwave_js` config entry and builds the node roster from the device/entity
    registries.
-4. Open **Z-Wave TUI** in the HA sidebar, or connect over LAN telnet:
+4. Turn on **Show in sidebar** on the add-on's Info page and open **Z-Wave TUI**
+   there (or use **Open Web UI**), or connect over LAN telnet:
    ```bash
-   nc <homeassistant-ip> 2324
+   telnet <homeassistant-ip> 2324
    ```
+   Use a real telnet client. The server negotiates character-at-a-time input and
+   the window size, and a raw `nc` does neither, so each key waits for Enter and
+   the Enter is read as a keypress of its own (on the Overview it opens Detail).
+   Without a telnet client, `stty raw -echo; nc <homeassistant-ip> 2324; stty sane`
+   works at 80×24.
 
 Optional: turn on **Enable Write Actions** to unlock the gated actions (see
 [Write actions & safety](#write-actions--safety)), and the **login gate** if you
 expose the telnet port on a network you don't fully trust.
 
 > **Developing against a clone?** You can also run it as a *local* add-on: copy the
-> add-on files to `/addons/zwave_tui` on the HA host, reload the store, and install
-> `local_zwave_tui`. That's the workflow the maintainer uses for fast iteration.
+> add-on files to `/addons/zwave_tui` on the HA host, delete the `image:` line from
+> the copied `config.yaml`, reload the store, and install `local_zwave_tui`. With
+> `image:` present, Supervisor pulls the published GHCR image for `version:` instead
+> of building the copied source, so local changes never run and an unpublished
+> version fails to install. Without it, Supervisor builds the `Dockerfile` on the
+> device, which takes minutes rather than seconds.
 
 ## Releasing a new version
 

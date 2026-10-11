@@ -60,11 +60,12 @@ configuration:
     name: Safety · Auto-ping a node that goes offline
     description: >-
       OFF by default. When a MAINS-POWERED node has been Dead for the dwell
-      below, the engine pings it once to try to wake it. Sleeping and battery
+      below, the engine pings it, up to the attempts set below, to try to wake
+      it. Sleeping and battery
       devices are never touched — asleep is not dead, and a ping cannot reach
       one before its own wakeup. Requires "Enable write actions". Suppressed
-      during a route rebuild, in the restart window (for a Dead node, only until
-      the roster is ready), while the controller's radio is off (as during
+      during a route rebuild or a failed-node removal, in the restart window
+      (for a Dead node, only until the roster is ready), while the controller's radio is off (as during
       its nightly NVM backup), and whenever a quarter of
       the mesh is down at once (that is a controller problem, not a device one).
       Every attempt is logged. Whether it ends an outage is not scored (an
@@ -76,18 +77,19 @@ configuration:
     name: Safety · Auto-ping after (minutes offline)
     description: >-
       How long a node must be continuously Dead before the first auto-ping.
-      Not applied when a node goes Dead while our own sweep or verification
-      probe to it is unanswered: nothing heals that, so it is probed at once —
-      and once it revives it gets no sweep or verification probe for 15 minutes.
+      Not applied when a node goes Dead while the add-on's own sweep or
+      verification probe to it is unanswered: nothing heals that, so it is
+      probed at once — and once it revives it gets no sweep or verification probe for 15 minutes.
   auto_ping_max_attempts:
     name: Safety · Auto-ping attempts per outage
     description: >-
       Attempts per dead episode, spaced 10/30/60 minutes apart (at the default 3, only the 10m and 30m waits are reached — about 50 minutes from death to the notice, about 40 after a probe kill). After this the
       engine stops and leaves the node to you. A recovery resets the count.
-      Each unanswered ping is followed by one routed read — a single Get on the
-      device's own switch/light value, which changes nothing on the device —
-      because a ping can use only stored routes and a real command can find a
-      new one.
+      Each unanswered ping is followed by one routed read when the device has a
+      switch/light value to read: a single Get, which changes nothing on the
+      device, and which is withheld after two such revivals of the node in 24
+      hours. It is sent because a ping can use only stored routes and a real
+      command can find a new one.
   auto_ping_stale_min:
     name: Safety · Liveness sweep interval (minutes)
     description: >-
@@ -125,15 +127,17 @@ configuration:
     name: Login gate · Also require login in the HA sidebar
     description: >-
       Also show the login gate when opening the console from the Home Assistant
-      sidebar. Off by default (HA already authenticated you there); turn on only
+      sidebar. Has no effect unless "Require login (direct access)" is also on.
+      Off by default (HA already authenticated you there); turn on only
       if you want a second prompt in front of the mesh controls.
   users:
     name: Login gate · Login users
     description: >-
       Allowed logins for the TUI — add one row per user. The password may be
       plaintext (masked here, stored in the add-on options) or a
-      scrypt:<salt>:<hash> string so no plaintext is stored. See the
-      Documentation tab to generate a hash.
+      scrypt:<salt>:<hash> string so no plaintext is stored. A hash is scrypt:,
+      a random 16-byte salt in hex, a colon, and the 32-byte scrypt key in hex
+      (N=16384, r=8, p=1, as Node's crypto.scryptSync produces by default).
   auth_max_attempts:
     name: Login gate · Max login attempts
     description: >-
@@ -143,8 +147,9 @@ configuration:
     name: Login gate · Idle re-lock (minutes)
     description: >-
       Re-require login after this many minutes with no keystrokes on a signed-in
-      session. 0 disables it. Applies only to sessions that passed the login gate
-      — not HA-sidebar sessions.
+      session. 0 disables it. Applies only to sessions that passed the login gate,
+      which includes HA-sidebar sessions only when "Also require login in the HA
+      sidebar" is on.
   # ── Advanced ───────────────────────────────────────────────────────────────
   refresh_interval:
     name: Advanced · refresh interval (seconds)
@@ -185,5 +190,9 @@ configuration:
       signal margins + interference detection), true last-seen times, and
       device capability flags. Default ws://core-zwave-js:3000 matches the
       official Z-Wave JS add-on; Z-Wave JS UI users should point it at their
-      server's WS port. Leave EMPTY to disable — everything else keeps working,
-      and this connection is never used to control the mesh.
+      server's WS port. Leave EMPTY to disable. The add-on still monitors
+      through Home Assistant, but without the device capability flags and the
+      log stream this connection supplies, auto-ping and the liveness sweep
+      cannot run, and the quiet-node, missed-report, s2-desync and
+      repeated-frames detectors stay silent. This connection is never used to
+      control the mesh.

@@ -16,9 +16,10 @@
  *       parsed `InputEvent`s; ANSI frames → ws text frames. A JSON control
  *       message `{type:'resize',cols,rows}` maps to the session size.
  *
- * Auth posture: the telnet TUI is already unauthenticated on the LAN, so this
- * read-only browser view is the SAME exposure. The /console/ws upgrade is not
- * unbounded: a cross-origin Origin is rejected (same-origin / LAN / missing
+ * Auth posture: the same as the telnet TUI. It runs the same session behind
+ * the same login gate (`auth_enabled`; an arrival over Home Assistant ingress
+ * is already authenticated by HA), so it offers the same actions behind the
+ * same typed CONFIRM. The /console/ws upgrade is not unbounded: a cross-origin Origin is rejected (same-origin / LAN / missing
  * Origin still pass, so the HA Ingress iframe is unaffected), concurrent
  * sessions are capped, idle sessions time out, and inbound frames are
  * size-bounded by the @fastify/websocket `maxPayload`.
@@ -36,7 +37,7 @@ import { TuiSession } from './session';
 import type { InputEvent } from './input';
 
 /**
- * Guard rails for the (unauthenticated) /console/ws transport:
+ * Guard rails for the /console/ws transport, beyond the login gate:
  *   • MAX_WS_SESSIONS    — concurrent-session cap; beyond it the upgrade is
  *     accepted then immediately closed 1013 (Try Again Later) so a runaway
  *     client (or open-tab storm) can't pin unbounded 1 Hz render loops.

@@ -88,11 +88,11 @@ export TELNET_HOST=::
 export TELNET_PORT=2324
 # v0.5 persistent RSSI/RTT sparkline history — atomic JSON ring on the /data
 # volume so the graphs survive a restart / reconnect / power blip. Flush cadence
-# is fixed in code (30s + on shutdown); no user knob.
+# is fixed in code (120 s + on shutdown); no user knob.
 export HISTORY_PATH=/data/history.json
 # M2 per-node evidence store — the symptom engine's persistent time series
 # (atomic JSON, fine ring + 14-day coarse tier, on /data). Sampled on the
-# route-poll cadence; flush is dirty-flagged in code (5 min + on shutdown).
+# route-poll cadence; flush is dirty-flagged in code (15 min + on shutdown).
 # No user knob.
 export EVIDENCE_PATH=/data/evidence.json
 # M3 learned baselines (the symptom engine's per-node normals; boot-grace keeps

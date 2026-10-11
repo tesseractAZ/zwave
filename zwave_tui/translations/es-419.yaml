@@ -58,10 +58,12 @@ configuration:
     description: >-
       DESACTIVADO de forma predeterminada. Cuando un nodo ALIMENTADO POR RED
       lleva caído (Dead) el tiempo de espera indicado abajo, el motor le envía
-      un ping para intentar despertarlo. Los dispositivos a batería o dormidos
+      pings, hasta el número de intentos indicado abajo, para intentar
+      despertarlo. Los dispositivos a batería o dormidos
       nunca se tocan: dormido no es lo mismo que caído, y un ping no puede
       alcanzarlos antes de su propio despertar. Requiere "Habilitar acciones de
-      escritura". Se suspende durante una reconstrucción de rutas, en la ventana
+      escritura". Se suspende durante una reconstrucción de rutas o la
+      eliminación de un nodo fallido, en la ventana
       de reinicio (para un nodo caído, solo hasta que el listado de nodos esté
       listo), mientras la radio del controlador está apagada (como durante su
       respaldo nocturno de NVM) y cuando una cuarta parte de la malla está caída
@@ -76,8 +78,9 @@ configuration:
     name: Seguridad · Ping automático después de (minutos caído)
     description: >-
       Cuánto tiempo debe llevar un nodo caído (Dead) de forma continua antes del
-      primer ping automático. No se aplica cuando un nodo cae mientras nuestro
-      propio sondeo de vida o de verificación hacia él sigue sin respuesta: nada
+      primer ping automático. No se aplica cuando un nodo cae mientras el
+      propio sondeo de vida o de verificación del complemento hacia él sigue
+      sin respuesta: nada
       lo recupera, así que se sondea de inmediato y, cuando se recupera, no
       recibe sondeos de vida ni de verificación durante 15 minutos.
   auto_ping_max_attempts:
@@ -86,12 +89,14 @@ configuration:
       Intentos por episodio de caída, espaciados 10/30/60 minutos (con el valor
       predeterminado de 3 solo se alcanzan las esperas de 10 y 30 minutos: unos
       50 minutos desde la caída hasta el aviso, unos 40 si el nodo cayó durante
-      uno de nuestros propios sondeos). Después de eso el motor se detiene y le
-      deja el nodo a usted. Una recuperación reinicia la cuenta.
-      Cada ping sin respuesta va seguido de una lectura con enrutamiento: un solo
-      Get sobre el valor de interruptor/luz del propio dispositivo, que no cambia
-      nada en el dispositivo, porque un ping solo puede usar las rutas guardadas
-      y un comando real puede encontrar una nueva.
+      uno de los propios sondeos del complemento). Después de eso el motor se
+      detiene y le deja el nodo a usted. Una recuperación reinicia la cuenta.
+      Cada ping sin respuesta va seguido de una lectura con enrutamiento cuando
+      el dispositivo tiene un valor de interruptor/luz que leer: un solo Get,
+      que no cambia nada en el dispositivo y que se omite después de dos
+      recuperaciones de ese nodo por esta vía en 24 horas. Se envía porque un
+      ping solo puede usar las rutas guardadas y un comando real puede
+      encontrar una nueva.
   auto_ping_stale_min:
     name: Seguridad · Intervalo del sondeo de vida (minutos)
     description: >-
@@ -133,7 +138,9 @@ configuration:
     name: Inicio de sesión · Exigirlo también en la barra lateral de HA
     description: >-
       Muestra también la puerta de inicio de sesión al abrir la consola desde la
-      barra lateral de Home Assistant. Desactivado de forma predeterminada (HA
+      barra lateral de Home Assistant. No tiene efecto si "Exigir inicio de
+      sesión (acceso directo)" no está activado también. Desactivado de forma
+      predeterminada (HA
       ya lo autenticó allí); actívelo solo si quiere un segundo aviso delante de
       los controles de la malla.
   users:
@@ -142,8 +149,10 @@ configuration:
       Cuentas permitidas para la TUI: agregue una fila por usuario. La
       contraseña puede ir en texto plano (se oculta aquí, pero se guarda en las
       opciones del complemento) o como una cadena scrypt:<salt>:<hash> para no
-      almacenar texto plano. Consulte la pestaña Documentación para generar un
-      hash.
+      almacenar texto plano. Un hash es scrypt:, una sal aleatoria de 16 bytes
+      en hexadecimal, dos puntos y la clave scrypt de 32 bytes en hexadecimal
+      (N=16384, r=8, p=1, los valores predeterminados de crypto.scryptSync de
+      Node).
   auth_max_attempts:
     name: Inicio de sesión · Intentos máximos
     description: >-
@@ -154,8 +163,9 @@ configuration:
     description: >-
       Vuelve a exigir el inicio de sesión tras estos minutos sin pulsaciones de
       teclas en una sesión ya iniciada. 0 lo desactiva. Se aplica solo a las
-      sesiones que pasaron por la puerta de inicio de sesión, no a las de la
-      barra lateral de HA.
+      sesiones que pasaron por la puerta de inicio de sesión; a las de la barra
+      lateral de HA, solo si "Exigirlo también en la barra lateral de HA" está
+      activado.
   # ── Avanzado ────────────────────────────────────────────────────────────────
   refresh_interval:
     name: Avanzado · Intervalo de actualización (segundos)
@@ -199,6 +209,10 @@ configuration:
       verdaderas de último contacto y los indicadores de capacidad de los
       dispositivos. El valor predeterminado ws://core-zwave-js:3000 corresponde
       al complemento oficial de Z-Wave JS; quienes usen Z-Wave JS UI deben
-      apuntarlo al puerto WS de su servidor. Déjelo VACÍO para desactivarlo:
-      todo lo demás sigue funcionando, y esta conexión nunca se usa para
+      apuntarlo al puerto WS de su servidor. Déjelo VACÍO para desactivarlo. El
+      complemento sigue supervisando a través de Home Assistant, pero sin los
+      indicadores de capacidad de los dispositivos y el flujo de registro que
+      aporta esta conexión, el ping automático y el sondeo de vida no pueden
+      ejecutarse, y los detectores quiet-node, missed-report, s2-desync y
+      repeated-frames quedan en silencio. Esta conexión nunca se usa para
       controlar la malla.
