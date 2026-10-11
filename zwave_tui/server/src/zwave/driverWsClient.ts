@@ -387,7 +387,10 @@ export function parseBgRssi(bg: unknown): BgRssiChannels | null {
   // zwave-js's averageRSSI returns 0 for a first reading that is "not
   // available", so average 0 beside a current of NotAvailable is "no value
   // yet", not a 0 dBm floor (v0.75.1). A saturated receiver also averages as
-  // 0 dBm, but its current is ReceiverSaturated (126): that 0 is a reading.
+  // 0 dBm, but its current is ReceiverSaturated (126): that channel keeps its
+  // 0 for display. No floor takes a 0 as a reading (health.ts noiseReading); a
+  // receiver saturating after real readings decays toward 0 without reaching
+  // it, and reads as a very noisy floor.
   const noValueYet = (cc: Record<string, unknown> | null): boolean =>
     cc != null && cc.average === 0 && cc.current === RSSI_NOT_AVAILABLE;
   const raw = ['channel0', 'channel1', 'channel2', 'channel3'].map(fields);

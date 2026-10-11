@@ -251,9 +251,9 @@ never inside a screen's `draw()`.
 
 `recompute()` (the fast path) runs `zwaveData.snapshot()` / `.controller()` /
 `.events()`, computes the representative noise floor once via
-`computeNoiseFloor()` (the **median** of the controller's per-channel background
-RSSI, filtering the driver sentinels `{127, 126, 125}` and any non-negative
-value; falls back to `DEFAULT_NOISE_FLOOR` when empty), then scores every node
+`computeNoiseFloor()` — `medianNoiseFloor` (`health.ts`), the **median** of the
+channels that are readings (finite, negative, above −120 dBm; v0.75.2), falling
+back to `DEFAULT_NOISE_FLOOR` when none is — then scores every node
 once with `scoreNode(n, noise)`. A read that throws keeps the last-good caches
 rather than clobbering them with garbage. `recompute()` is called once
 immediately to prime the first frame, then on `setInterval(recompute, refreshMs)`.
@@ -1095,7 +1095,7 @@ else {
 }
 ```
 
-The margin window `[0, 14]` dB maps onto `[0, 1]`; the `W` (weak) threshold of 7 dB lands exactly at the midpoint (`signalFrac = 0.5`). The noise floor is validated to a plausible dBm range (`< 0` and `> -120`); anything else falls back to `DEFAULT_NOISE_FLOOR = -95` (a tunable, exported so `dataProvider` and the scorer agree on one value). See §4.5 for the routed-node neutrality rule and §4.11 for sentinel handling.
+The margin window `[0, 14]` dB maps onto `[0, 1]`; the `W` (weak) threshold of 7 dB lands exactly at the midpoint (`signalFrac = 0.5`). The noise floor is validated by `noiseReading` (`< 0` and `> NOISE_FLOOR_MIN_DBM = -120`) — the same rule every floor in the add-on is computed by (v0.75.2, below); anything else falls back to `DEFAULT_NOISE_FLOOR = -95` (a tunable, exported so `dataProvider`, the scorer and the detectors agree on one value). See §4.5 for the routed-node neutrality rule and §4.11 for sentinel handling.
 
 #### Lane 3 — Route (20%, folded to 0% for LR)
 
@@ -1774,7 +1774,7 @@ interface DriverWsCallbacks {
 }
 ```
 
-**Background RSSI — the real noise floor.** `parseBgRssi(bg)` extracts channels 0–3 from the controller's `statistics.backgroundRSSI` blob. Per channel it prefers the driver's own EMA (`average`) — the canonical floor estimate — and falls back to `current` when `average` is absent; both pass through `cleanDbm`, which keeps the int8 range a radio can report (`-128 ≤ v < 125`) and maps the sentinels `≥125` and anything below `-128` to `null` (v0.75.1). An `average` of **exactly 0** beside a `current` of NotAvailable (127) is zwave-js's "no value yet" seed — `averageRSSI` returns 0 when its first reading is "not available" — not a 0 dBm floor (v0.75.1). A **trailing** run of such channels is absent, like a long-range channel the controller does not report, so it shows `—` instead of a red 0 dBm; an **interior** one keeps its 0, because a `null` would end the leading run of channels and drop the real readings after it, and every floor already ignores non-negative values (`rssiReading`). A saturated receiver also averages as 0 dBm, but its `current` is ReceiverSaturated (126): that 0 is a reading, and it still shows as 0 dBm. **Known limitation:** when the first poll after a driver start is "not available", the driver's EMA (α = 0.9) decays from that 0 seed — about −10, −19, −27 dBm … toward a true −100 — and after twenty polls the seed still carries 12 % of the weight (−88 dBm); those readings are negative and reach the floor. It has not been seen on the reference controller (its 30-minute tier never rose above −98 dBm in 13.7 days). It returns `null` unless at least one channel has a finite value, so an all-empty blob never fires the callback. It is seeded once from the state dump (`onStateDump` reads `controller.statistics.backgroundRSSI`) and thereafter refreshed from `controller` `"statistics updated"` events (`onEvent`). The result type `BgRssiChannels = (number | null)[]` deliberately preserves channel *position* — channels 0/1 are mandatory and 2/3 optional-and-trailing (RESEARCH §1.5), so a null gap must not be compacted.
+**Background RSSI — the real noise floor.** `parseBgRssi(bg)` extracts channels 0–3 from the controller's `statistics.backgroundRSSI` blob. Per channel it prefers the driver's own EMA (`average`) — the canonical floor estimate — and falls back to `current` when `average` is absent; both pass through `cleanDbm`, which keeps the int8 range a radio can report (`-128 ≤ v < 125`) and maps the sentinels `≥125` and anything below `-128` to `null` (v0.75.1). An `average` of **exactly 0** beside a `current` of NotAvailable (127) is zwave-js's "no value yet" seed — `averageRSSI` returns 0 when its first reading is "not available" — not a 0 dBm floor (v0.75.1). A **trailing** run of such channels is absent, like a long-range channel the controller does not report, so it shows `—` instead of a red 0 dBm; an **interior** one keeps its 0, because a `null` would end the leading run of channels and drop the real readings after it, and no floor takes a non-negative value as a reading (`noiseReading`). A saturated receiver also averages as 0 dBm, but its `current` is ReceiverSaturated (126): that channel keeps its 0 and shows it. No floor takes a 0 as a reading (`noiseReading`, v0.75.2); a receiver that saturates after real readings decays toward 0 without reaching it, and reads as a very noisy floor. **Known limitation:** when the first poll after a driver start is "not available", the driver's EMA (α = 0.9) decays from that 0 seed — about −10, −19, −27 dBm … toward a true −100 — and after twenty polls the seed still carries 12 % of the weight (−88 dBm); those readings are negative and reach the floor. It has not been seen on the reference controller (its 30-minute tier never rose above −98 dBm in 13.7 days). It returns `null` unless at least one channel has a finite value, so an all-empty blob never fires the callback. It is seeded once from the state dump (`onStateDump` reads `controller.statistics.backgroundRSSI`) and thereafter refreshed from `controller` `"statistics updated"` events (`onEvent`). The result type `BgRssiChannels = (number | null)[]` deliberately preserves channel *position* — channels 0/1 are mandatory and 2/3 optional-and-trailing (RESEARCH §1.5), so a null gap must not be compacted.
 
 **Node `lastSeen`.** `parseLastSeen(node.statistics.lastSeen)` yields the *real* last-communication epoch — a datum HA's `network_status` does not forward (RESEARCH §3.7 notes `last_seen` "is not forwarded by api.py"). Seeded from each node in the state dump, then advanced by node `"statistics updated"` events. This is what the quiet-node detector needs to distinguish "silent because sleeping" from "silent because gone."
 
@@ -1817,7 +1817,7 @@ The consumer never trusts a driver reading indefinitely. Wherever the noise floo
 
 - The evidence sampler records the controller's per-channel `bgRssi` only when `now - driverBgRssi.at <= 90_000 && driverHomeOk()`; otherwise it records `null` — an honest unknown, never a re-used stale floor (`recordController(..., bg)`).
 - The controller snapshot's `backgroundRSSI` field applies the same 90 s gate and passes the channels through `leadingRun()` (the leading contiguous run of present channels, preserving true channel indices) — a stale or absent reading reverts to `[]`, which the UI renders as "noise —".
-- The engine's `hasRealNoise()` predicate uses the identical gate, so the mesh-interference detector knows whether a *measured* floor exists or whether it must fall back to `basis: 'inferred'` (interference-by-exclusion, severity-capped at `warn` — DESIGN §3.3).
+- **One rule for what a reading is (v0.75.2).** `health.ts` `noiseReading` — finite, negative, and above `NOISE_FLOOR_MIN_DBM = -120` — and `medianNoiseFloor`, the median of the readings in the leading run, compute every floor: the screens' (`computeNoiseFloor`, and their "measured" tag `hasRealNoise()`, which now means the floor came from a reading), the health score's, the detectors' (`symptoms.ts` `representativeFloor`, which also says whether it was measured), Interference's and the persisted trend's. 0 is the driver's "no value yet" seed and its stand-in for saturation; −128 is its stand-in for "no signal detected", which its EMA mixes into neighbouring readings, while a real floor sits far above −120 (the reference controller reads −105 to −94). Before v0.75.2 the screens, Interference and the trend kept −128 while the detectors dropped it per channel; the health score took the screens' floor and fell back to −95 only when that floor itself was at or below −120; and the detectors' "measured" flag only asked whether a driver sample existed. So with every channel at "no signal detected" the screens read `-128 dBm (measured)`, the health score used −95, and weak-signal labelled its −95 fallback `measured`; with channels `[-128, -104, -101, -93]` the screens used −102.5 and the detectors −101. Coarse trend buckets folded under the old rule with a stand-in in them are dropped on load.
 
 The M6 INTERFERENCE screen (`8`/`f`) is the human-facing terminus. `computeInterference` medians the present channels (`medianFloor`, matching the masthead) and classifies the floor with fixed absolute thresholds in `interference.ts`:
 
@@ -1830,7 +1830,7 @@ function noiseBand(floor, real) {
 }
 ```
 
-When the client is absent or dormant, the screen states the gap plainly rather than guessing: *"◷ unavailable — the read-only driver-WS client is not connected. (HA strips backgroundRSSI; set driver_ws_url to enable this.)"* This closes the loop back to §6.1 — the one signal HA structurally cannot provide is the one this screen is built around, and its absence is rendered as an honest null.
+When the client is absent or dormant, the screen states the gap plainly rather than guessing: *"◷ unavailable — the read-only driver-WS client is not connected. (HA strips backgroundRSSI; set driver_ws_url to enable this.)"* When it is connected but no channel is a reading (every value one of the driver's stand-ins), the channels are shown with `median — no reading` and *"◷ no floor yet — 0 is the driver's "no value yet" (or saturated), ≤ −120 its "no signal detected""* (v0.75.2) — never "not connected". This closes the loop back to §6.1 — the one signal HA structurally cannot provide is the one this screen is built around, and its absence is rendered as an honest null.
 
 ### 6.10 Configuration
 
@@ -2307,7 +2307,7 @@ timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE (0.05)          // a mea
 b = !routed && !isLongRange && margin < WEAK_MARGIN_DB (7) && timeoutCorrob
 ```
 
-Corroboration is required by design: a thin margin that isn't costing deliveries is not yet a problem. **Until v0.69.0 it could never be met on a quiet mesh.** It needed a timeout *rate*, which needs 20 sends to one node in ten minutes, and the reference mesh's whole traffic is about 6 sends per ten minutes combined — so every node was unmeasured, always, and this detector could not start its dwell. Unmeasured is not "not suffering": on an unmeasured window, one failed delivery in the last 30 minutes corroborates — a send that exhausted its retries (a Dead transition, `dFlaps`) or an acknowledged reply-expecting send that went unanswered (`dTimeout`). The RSSI and route inputs read the same lookback, so the breach does not clear ten minutes after the single fresh sample a sparse node produces. A node that is Dead *now* is excluded — `node-down` owns it. The margin bar is unchanged. **Basis is honest about its floor** — `measured` only when `input.hasRealNoise()` (the driver-WS noise reading, Chapter 6/M2.5) is available; against the −95 fallback the row is `inferred` and the evidence value reads `"… (vs assumed −95 floor)"`. `markDegrading(id, true)` fires only once the symptom matures.
+Corroboration is required by design: a thin margin that isn't costing deliveries is not yet a problem. **Until v0.69.0 it could never be met on a quiet mesh.** It needed a timeout *rate*, which needs 20 sends to one node in ten minutes, and the reference mesh's whole traffic is about 6 sends per ten minutes combined — so every node was unmeasured, always, and this detector could not start its dwell. Unmeasured is not "not suffering": on an unmeasured window, one failed delivery in the last 30 minutes corroborates — a send that exhausted its retries (a Dead transition, `dFlaps`) or an acknowledged reply-expecting send that went unanswered (`dTimeout`). The RSSI and route inputs read the same lookback, so the breach does not clear ten minutes after the single fresh sample a sparse node produces. A node that is Dead *now* is excluded — `node-down` owns it. The margin bar is unchanged. **Basis is honest about its floor** — `measured` only when the floor came from a reading (`representativeFloor` → `medianNoiseFloor`, the one rule, v0.75.2; until then it asked only whether a driver sample existed); against the −95 fallback the row is `inferred` and the evidence value reads `"… (vs assumed −95 floor)"`. `markDegrading(id, true)` fires only once the symptom matures.
 
 **`ghost-suspect` — coverage-proven, zero comms (warn, inferred).**
 Deliberately the most conservative detector, because its eventual remediation (`remove_failed_node`) is destructive. It keys on *cumulative* coverage:
@@ -3284,23 +3284,25 @@ const MIN_SERIAL_SAMPLES = 2;  // need ≥2 controller samples to form any per-h
 
 ### 10.3 The noise floor — masthead-identical median
 
-**The number.** The representative floor is a **median**, computed identically to the masthead's `computeNoiseFloor` so the two screens can never disagree. `medianFloor(channels)` in interference.ts takes the **leading contiguous run** of channels — the driver's own convention, where a `null` channel *ends* the run — then medians the finite, negative values:
+**The number.** The representative floor is a **median**, and it is the same function the masthead's `computeNoiseFloor`, the health score, the detectors and the persisted trend use (v0.75.2), so no two of them can disagree. `medianFloor(channels)` in interference.ts is `medianNoiseFloor` from `health.ts`: it walks the **leading contiguous run** of channels — the driver's own convention, where a `null` channel *ends* the run — and medians the values that are readings:
 
 ```ts
-function leadingRun(channels: (number|null)[]): number[] {   // inlined to avoid a module cycle
-  const out = []; for (const ch of channels) { if (ch == null) break; out.push(ch); } return out;
+export function noiseReading(v) {           // health.ts
+  return typeof v === 'number' && Number.isFinite(v) && v < 0 && v > NOISE_FLOOR_MIN_DBM /* -120 */ ? v : null;
 }
-function medianFloor(channels) {
-  const vals = leadingRun(channels).filter(v => Number.isFinite(v) && v < 0).sort((a,b) => a - b);
-  if (!vals.length) return null;
-  const mid = vals.length >> 1;
-  return vals.length % 2 ? vals[mid] : (vals[mid-1] + vals[mid]) / 2;   // even → mean of the two middles
+export function medianNoiseFloor(channels) {
+  const v = [];
+  for (const ch of channels) { if (ch == null) break; const r = noiseReading(ch); if (r != null) v.push(r); }
+  if (v.length === 0) return null;
+  v.sort((a, b) => a - b);
+  const m = v.length >> 1;
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;   // even → mean of the two middles
 }
 ```
 
-The `< 0` predicate is what rejects the RSSI sentinels (125 = no-signal, 126 = saturated, 127 = not-available) that the driver uses in place of a real dBm. If no channel survives, the floor is `null`.
+The channels that count are readings by `noiseReading` (`health.ts`, v0.75.2): finite, negative and above −120 dBm. The raw sentinels (125 no-signal, 126 saturated, 127 not-available) never reach here — `parseBgRssi` maps them to `null` — but the driver's average stands values in for them: 0 for "no value yet" or saturation, −128 for "no signal detected". The `< 0` predicate alone let −128 through as a measured floor. If no channel is a reading, the floor is `null`.
 
-**Inputs and freshness.** `channels` comes from `input.bgChannels`, which the data layer sets only when the driver-WS reading is **≤ 90 s old AND the driver's `homeId` matches HA's** (`driverHomeOk()`); otherwise it is `null`, and `computeInterference` substitutes `[null,null,null,null]`. So `real = floor != null` — a live, in-network reading — and when it is false the screen prints the honest unavailable message instead of a fabricated dBm:
+**Inputs and freshness.** `channels` comes from `input.bgChannels`, which the data layer sets only when the driver-WS reading is **≤ 90 s old AND the driver's `homeId` matches HA's** (`driverHomeOk()`); otherwise it is `null`, and `computeInterference` substitutes `[null,null,null,null]`. So `real = floor != null` — a live, in-network reading — and when it is false the screen prints the honest unavailable message instead of a fabricated dBm (or, when the client is connected but no channel is a reading, the channels with `median — no reading`):
 
 ```
 ◷ unavailable — the read-only driver-WS client is not connected.
