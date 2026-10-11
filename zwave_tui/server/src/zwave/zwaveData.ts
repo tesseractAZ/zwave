@@ -76,6 +76,7 @@ import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
 import type { DriverWsState } from './driverWsClient';
 import { KILLED_AFTER_MS, type OpenEpisodeView, type ActorArmView, type LiveSpanView } from './outcomes';
 import { createAutonomyPause, PAUSE_ENTITY, type AutonomyPause, type PauseState } from './autonomyPause';
+import { refreshDiffers, type RefreshTrial, type TrialCandidate, type TrialView } from './refreshTrial';
 import type { LogSink } from '../logger';
 
 /** An open episode plus the confirmation-window flag only this layer knows. */
@@ -420,7 +421,7 @@ export interface ZwaveData {
   /** Append an operator-action outcome to the event ring. */
   logAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void;
   logEngineAction(severity: LogEvent['severity'], nodeId: number | null, text: string): void;
-  logByOrigin(severity: LogEvent['severity'], nodeId: number | null, text: string, origin?: 'you' | 'engine'): void;
+  logByOrigin(severity: LogEvent['severity'], nodeId: number | null, text: string, origin?: 'you' | 'engine' | 'trial'): void;
   /** Event + command log ring (newest first). */
   events(): LogEvent[];
   /** Release an error event's RED latch by seq (v0.33) — see the impl. */
@@ -505,6 +506,12 @@ export interface ZwaveData {
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   autoPingState(): AutoPingSnapshot | null;
   setAutoPingSnapshot(fn: (() => AutoPingSnapshot) | null): void;
+  /** The refresh trial's state (v0.75.0), or null when none is attached. */
+  refreshTrial(now?: number): TrialView | null;
+  /** index.ts hands the trial down after the runner exists (v0.75.0): the
+   *  engine tick decides its episodes, and the death feed and the ledger's
+   *  closures reach it. `writeActions` is the master gate it also needs. */
+  attachRefreshTrial(trial: RefreshTrial | null, opts: { writeActions: boolean; operatorBusy?: () => boolean }): void;
   /** Drain the nodes owed a verification probe this tick (v0.36). Each entry
    *  carries `first` — whether this is the first probe of that node's burst —
    *  straight from the queue's own bookkeeping (v0.38.2). The runner's label
@@ -812,6 +819,9 @@ class ZwaveDataImpl implements ZwaveData {
   /** Each sleeping node's declared report interval (v0.73.0), from the
    *  driver's value DB. Cleared with the capability flags it depends on. */
   private driverDeclared = new Map<number, Declared>();
+  /** CC instances a user refresh of each node queries (v0.75.0), from the
+   *  driver dump: the refresh trial's revisit-condition check. */
+  private driverRefreshQueries = new Map<number, number>();
   /** When the driver dropped each node's S2 frames as duplicates (v0.74.0). */
   private dupDrops = new Map<number, number[]>();
   /** The missed-report severity each sleeper last raised (v0.73.4). */
@@ -876,6 +886,10 @@ class ZwaveDataImpl implements ZwaveData {
   /** Controller home_id from the last poll — a change means a different Z-Wave
    *  network (stick swap / different NVM backup), so node-keyed caches alias. */
   private lastHomeId: number | null = null;
+  /** The refresh trial (v0.75.0), attached by index.ts; null = none. */
+  private trial: RefreshTrial | null = null;
+  private trialWriteActions = false;
+  private trialOperatorBusy: (() => boolean) | null = null;
   /** Latch so the pending-decision announcement is made once, not per poll. */
   private identityAsked = false;
   /** Epoch ms the current rebuild-routes began (null = idle) — set on the
@@ -1089,6 +1103,11 @@ class ZwaveDataImpl implements ZwaveData {
               if (!this.driverHomeOk()) return;
               this.driverDeclared.set(nodeId, declared);
             },
+            onNodeRefreshQueries: (nodeId, queries) => {
+              if (!this.driverHomeOk()) return;
+              if (queries == null) this.driverRefreshQueries.delete(nodeId);
+              else this.driverRefreshQueries.set(nodeId, queries);
+            },
             onS2Resync: (nodeId) => {
               // S2 SPAN-resync log event (v0.26). Same event-accumulator
               // discipline as flaps: count now, drain into the next evidence
@@ -1229,6 +1248,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.driverLastSeen.clear();
       this.driverListening.clear();
       this.driverDeclared.clear();
+      this.driverRefreshQueries.clear();
       this.sleeperLatch.clear();
       this.dupDrops.clear();
       this.driverWs?.stop();
@@ -1543,6 +1563,7 @@ class ZwaveDataImpl implements ZwaveData {
         if (this.measurementReroutes.has(ep.nodeId) && MEASUREMENT_REROUTE_KINDS.has(ep.kind)) oc.markConfounded(ep.nodeId, ep.kind);
       }
     }
+    this.trialTick(now, sinceOf);
     // Keep improving each LIVE episode's before-window as probe evidence lands
     // (v0.36). Refining on the ping's own resolution would be too early — the
     // service call returns when HA accepts it, while the node's statistics push
@@ -1910,6 +1931,77 @@ class ZwaveDataImpl implements ZwaveData {
     this.autoPingSnapshotFn = fn;
   }
 
+  refreshTrial(now?: number): TrialView | null {
+    return this.trial ? this.trial.view(now) : null;
+  }
+
+  attachRefreshTrial(trial: RefreshTrial | null, opts: { writeActions: boolean; operatorBusy?: () => boolean }): void {
+    this.trial = trial;
+    this.trialWriteActions = opts.writeActions;
+    this.trialOperatorBusy = opts.operatorBusy ?? null;
+  }
+
+  /** The refresh trial's decision tick (v0.75.0), between the confound loop
+   *  and the before-window refinement: this tick's deaths and confounds are
+   *  known, and a decided episode's before-window is frozen before the
+   *  refinement below could move it. */
+  private trialTick(now: number, sinceOf: ReadonlyMap<string, number>): void {
+    const oc = this.outcomes;
+    if (!this.trial || !oc) return;
+    const snap = this.snapshot();
+    const candidates: TrialCandidate[] = [];
+    for (const ep of oc.openEpisodeDetails()) {
+      if (ep.kind !== 'rtt-degraded' || ep.nodeId == null || ep.trial != null) continue;
+      const since = sinceOf.get(ep.key);
+      if (since == null) continue; // not live this tick
+      const n = snap.find((x) => x.nodeId === ep.nodeId);
+      candidates.push({
+        nodeId: ep.nodeId, kind: ep.kind, dwellStartMs: since, confounded: ep.confounded,
+        pending: this.pendingResolve.has(ep.key), acted: ep.actionKind != null, alive: n?.status === NodeStatus.Alive,
+        mains: n != null && isPingCandidate(n), beforeRttN: ep.beforeRttN ?? 0,
+        refreshQueries: this.driverRefreshQueries.get(ep.nodeId) ?? null,
+        probeReadable: this.readEntityOf(ep.nodeId) != null,
+      });
+    }
+    // Which mains nodes a refresh would send more to than the verification
+    // lane does — the revisit condition's second half, shown on ENGINE.
+    let mains = 0;
+    let differs = 0;
+    let unknown = 0;
+    for (const n of snap) {
+      if (!isPingCandidate(n)) continue;
+      mains += 1;
+      const d = refreshDiffers(this.driverRefreshQueries.get(n.nodeId) ?? null, this.readEntityOf(n.nodeId) != null);
+      if (d == null) unknown += 1;
+      else if (d) differs += 1;
+    }
+    const ap = this.autoPingState();
+    this.trial.tick({
+      now, homeId: this.lastHomeId, writeActions: this.trialWriteActions,
+      // The owner's pause, read directly: auto-ping's snapshot lags by its tick.
+      paused: this.autonomy.state() != null,
+      operatorBusy: this.trialOperatorBusy?.() ?? false,
+      autoPing: ap ? { suppressed: ap.suppressed, lastTickMs: ap.lastTickMs } : null,
+      candidates,
+      profile: { mains, differs, unknown },
+      freeze: (nodeId, arm) => oc.markTrial(nodeId, 'rtt-degraded', arm),
+      measure: (nodeId) => this.requestVerification(nodeId),
+      window: (nodeId, from, to) => this.spanWindow(nodeId, from, to),
+      score: (before, after) => oc.score('rtt-degraded', before, after),
+    });
+  }
+
+  /** A node's evidence window over [from, to] (v0.75.0): the refresh trial's
+   *  fixed-horizon after-window. Raw round trips are seeded from the reading
+   *  before the window, as every other window is. */
+  private spanWindow(nodeId: number, from: number, to: number): ReturnType<typeof windowMetrics> | null {
+    if (!this.evidenceStore) return null;
+    const all = this.evidenceStore.forNode(nodeId);
+    const ring = all.filter((s) => s.t >= from && s.t <= to);
+    return ring.length ? windowMetrics(ring, undefined, rttSeedBefore(all, ring[0]?.t)) : null;
+  }
+
+
   autonomyPause(): PauseState | null {
     return this.autonomy.state();
   }
@@ -2093,6 +2185,9 @@ class ZwaveDataImpl implements ZwaveData {
    */
   resolveIdentityDecision(choice: IdentityChoice): boolean {
     if (!this.pendingIdentity()) return false;
+    // Every answer replaces the ledger's open episodes: the refresh trial's
+    // open decision cannot be scored across it (v0.75.0 review).
+    this.trial?.dropOpen(null, 'mesh identity decision', Date.now());
     let ok = true;
     if (this.outcomes && !this.outcomes.resolveIdentity(choice)) ok = false;
     if (this.baselines && !this.baselines.resolveIdentity(choice)) ok = false;
@@ -2208,8 +2303,9 @@ class ZwaveDataImpl implements ZwaveData {
    *  pre-release review caught exactly that seam wired wrong, with autonomous
    *  probes still logging as the operator. A decision guarded only by review is
    *  a decision that ships broken; this one is now a function with a test. */
-  logByOrigin(severity: LogEvent['severity'], nodeId: number | null, text: string, origin?: 'you' | 'engine'): void {
-    if (origin === 'engine') this.logEngineAction(severity, nodeId, text);
+  logByOrigin(severity: LogEvent['severity'], nodeId: number | null, text: string, origin?: 'you' | 'engine' | 'trial'): void {
+    // The refresh trial's send is the engine's, not the operator's (v0.75.0).
+    if (origin === 'engine' || origin === 'trial') this.logEngineAction(severity, nodeId, text);
     else this.logAction(severity, nodeId, text);
   }
 
@@ -2488,6 +2584,10 @@ class ZwaveDataImpl implements ZwaveData {
           this.driverLastSeen.delete(id);
           this.driverListening.delete(id);
           this.driverDeclared.delete(id);
+          this.driverRefreshQueries.delete(id);
+          // The refresh trial's open decision on a departed node cannot be
+          // scored: lost (v0.75.0).
+          this.trial?.dropOpen(id, 'node left the mesh', Date.now());
           this.sleeperLatch.delete(id);
           this.dupDrops.delete(id);
           // M5: abandon any open episodes for the departed node — their after-
@@ -2548,6 +2648,10 @@ class ZwaveDataImpl implements ZwaveData {
       // with nothing saying they existed. The bind moved the wipe earlier; the
       // count has to move with it.
       const lostOpen = this.outcomes?.openEpisodes().length ?? 0;
+      // A different mesh: the refresh trial's open decision refers to a node
+      // id that now means another device (v0.75.0 review) — lost, before the
+      // binds below reset the ledger under it.
+      if (this.lastHomeId != null && homeId !== this.lastHomeId) this.trial?.dropOpen(null, 'mesh identity changed', Date.now());
       this.evidenceStore?.bindHomeId(homeId);
       this.baselines?.bindHomeId(homeId);
       this.outcomes?.bindHomeId(homeId);
@@ -2602,6 +2706,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.driverLastSeen.clear();
         this.driverListening.clear();
         this.driverDeclared.clear();
+        this.driverRefreshQueries.clear();
         this.sleeperLatch.clear();
         this.dupDrops.clear();
         // M3 engine state is node-id-keyed — a different network invalidates it.
@@ -3188,8 +3293,12 @@ class ZwaveDataImpl implements ZwaveData {
     // `seen` comes from the statistics feed, the same connection as this status
     // feed, so it is the node's lastSeen AT the death; a node whose statistics
     // feed is not live has no such reading, and says so (`feedLive`).
-    this.deadEvents.push({ nodeId, at: Date.now(), seen: this.statsByNode.get(nodeId)?.lastSeen ?? null,
+    const diedAt = Date.now();
+    this.deadEvents.push({ nodeId, at: diedAt, seen: this.statsByNode.get(nodeId)?.lastSeen ?? null,
       feedLive: this.statsSubbedNodes.has(nodeId), cleared: false, clearedAt: null });
+    // The refresh trial's harm and kill windows (v0.75.0) read the exact
+    // crossing, in both arms; not a second drain of deadEvents.
+    this.trial?.onDead(nodeId, diedAt);
     if (this.deadEvents.length > DEAD_EVENTS_MAX) this.deadEvents.splice(0, this.deadEvents.length - DEAD_EVENTS_MAX);
     const sent = this.measurementSent.get(nodeId);
     this.lastDeathOwnProbe.set(nodeId, sent != null && Date.now() - sent.at <= ANSWER_GRACE_MS);

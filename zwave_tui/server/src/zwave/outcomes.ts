@@ -89,6 +89,11 @@ export interface OpenEpisodeView {
   confounded: boolean;
   /** freshN of the degraded window as it currently stands, or null. */
   beforeFreshN: number | null;
+  /** rtt readings in that window (v0.75.0): the refresh trial decides only
+   *  episodes whose before-window can be scored. */
+  beforeRttN?: number;
+  /** The refresh trial's arm for this episode, if it was decided (v0.75.0). */
+  trial?: 'treated' | 'held' | null;
 }
 
 /** One symptom episode: opens on symptom onset, closes on resolution. */
@@ -134,6 +139,10 @@ export interface Episode {
    *  because a dead-remediation ping revived the node mid-episode. Credited
    *  to NEITHER arm. */
   confounded?: boolean;
+  /** Decided by the refresh trial (v0.75.0): its before-window is frozen at
+   *  the decision, and at resolve it files into NO arm — the trial scores it
+   *  with undecayed counts of its own (refreshTrial.ts). */
+  trial?: 'treated' | 'held';
 }
 
 /** A decayed tally of episodes, their successes, and their REGRESSIONS. */
@@ -157,8 +166,9 @@ interface Tally {
   lastAt?: number;
 }
 
-/** Who ran an action (v0.72.0). */
-export type ActionActor = 'you' | 'engine';
+/** Who ran an action (v0.72.0). `trial` (v0.75.0) is the refresh trial's
+ *  send: kept out of every arm here, scored by refreshTrial.ts alone. */
+export type ActionActor = 'you' | 'engine' | 'trial';
 
 /**
  * How soon after an action a death is counted against it (v0.72.0). Long
@@ -342,6 +352,14 @@ export interface OutcomeStore {
    *  was open (v0.40). The data layer owns node status; the ledger cannot see
    *  it. The unattributed-action path marks itself inside recordAction. */
   markConfounded(nodeId: number | null, kind: SymptomKind): void;
+  /** Hand an open episode to the refresh trial (v0.75.0): freezes its
+   *  before-window and keeps it out of every arm. Returns that window, or
+   *  null when no such episode is open (or it is already a trial episode). */
+  markTrial(nodeId: number, kind: SymptomKind, arm: 'treated' | 'held'): WindowMetrics | null;
+  /** The ledger's own verdict rule for a pair of windows (v0.75.0): the refresh
+   *  trial scores its fixed-horizon windows with exactly what an episode
+   *  closure would use. */
+  score(kind: SymptomKind, before: WindowMetrics | null, after: WindowMetrics | null): Verdict;
   /**
    * Replace an OPEN episode's before-window with a better-evidenced one (v0.36).
    *
@@ -633,7 +651,7 @@ export function metricOf(kind: SymptomKind): RecoveryMetric {
  */
 const UNDERSAMPLED_AFTER_MS = 5 * 60_000;
 
-const MIN_OBS = 3; // minimum non-null rssi/rtt readings behind a trustworthy median
+export const MIN_OBS = 3; // minimum non-null rssi/rtt readings behind a trustworthy median
 const MIN_LIVE = 3; // minimum FRESH samples proving the node is alive & communicating (flap after-window)
 const RSSI_MIN_GAIN = 4; // dB — a meaningful signal-strength improvement
 const RTT_DROP_FRAC = 0.25; // ≥25% faster …
@@ -925,7 +943,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // action is not its side effect, however late it matured.
       const start = openOpts?.dwellStartMs ?? onsetMs;
       const r = nodeId == null ? null : coveringAction(nodeId, start);
-      if (r && ROUTE_EFFECT_KINDS.has(kind)) {
+      // The refresh trial counts its own harm (v0.75.0), never here.
+      if (r && r.origin !== 'trial' && ROUTE_EFFECT_KINDS.has(kind)) {
         const rk = `${r.kind}|${r.origin}`;
         routeAfter.set(rk, (routeAfter.get(rk) ?? 0) + 1);
         dirty = true;
@@ -950,6 +969,19 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const prefix = `${nodeId ?? 'mesh'}:`;
       for (const [k, ep] of open) {
         if (!k.startsWith(prefix)) continue;
+        // The refresh trial (v0.75.0). Its send is that episode's treatment
+        // and nobody else's: credited to no other episode on the node, whose
+        // spontaneous-recovery claim it spoils. Any other action on a trial
+        // episode spoils the trial's comparison instead. A send that never
+        // happened (refused) changes nothing; the trial keeps its own record.
+        if (meta?.origin === 'trial') {
+          if (refused) continue;
+          if (ep.trial === 'treated' && ep.action == null) {
+            ep.action = { kind: actionKind, atMs, refused: false, origin: 'trial', ...(meta.aliveAtAction != null ? { aliveAtAction: meta.aliveAtAction } : {}) };
+          } else ep.confounded = true;
+          continue;
+        }
+        if (ep.trial != null) { ep.confounded = true; continue; }
         // A refusal indicts only the detectors that ASKED for this action
         // (v0.43.1) — see `onlyKinds` on the interface. Success attribution is
         // deliberately unscoped and keeps the node-wide behaviour above.
@@ -1004,7 +1036,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // death two minutes after a heal belongs to the heal, not to the ping
       // that preceded it by ten.
       const a = coveringAction(nodeId, atMs);
-      if (!a) return;
+      // The refresh trial counts deaths after its own send itself (v0.75.0). A
+      // death after anyone else's action on a trial episode is still that
+      // actor's, as on any confounded episode (v0.75.0 review).
+      if (!a || a.origin === 'trial') return;
       ep.killedAfter = true;
       // Counted NOW, not at resolve: an episode abandoned or lost to a restart
       // must not take the death with it.
@@ -1057,6 +1092,22 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       if (ep) ep.confounded = true;
     },
 
+    markTrial(nodeId, kind, arm): WindowMetrics | null {
+      const ep = open.get(key(nodeId, kind));
+      // An episode something already acted on is not a clean decision in
+      // either arm (v0.75.0 review): held, it would score that action as a
+      // control; treated, the comparison is spoiled. The trial filters these
+      // before its coin; this refuses them too.
+      if (!ep || ep.trial != null || ep.action != null || !ep.before) return null;
+      ep.trial = arm;
+      return ep.before;
+    },
+
+    score(kind, before, after): Verdict {
+      if (!before || !after) return 'unverifiable';
+      return scoreRecovery(metricOf(kind), before, after, cfg.releaseRate, cfg.minEffect);
+    },
+
     resolve(nodeId, kind, resolvedMs, after, resolveOpts): Episode | null {
       const k = key(nodeId, kind);
       const ep = open.get(k);
@@ -1088,7 +1139,11 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         dirty = true;
       }
 
-      if (ep.verdict === 'refused-misdiagnosis') {
+      if (ep.trial != null) {
+        // A refresh-trial episode (v0.75.0) files into NO arm and no tally
+        // here: the trial scores it, undecayed and apart (refreshTrial.ts).
+        // Its live span above still counts — that bit describes the kind.
+      } else if (ep.verdict === 'refused-misdiagnosis') {
         fp.set(kind, (fp.get(kind) ?? 0) + 1);
         dirty = true;
       } else if (ep.verdict === 'unverifiable' && ep.unprobeable) {
@@ -1239,7 +1294,9 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
           ? ' (confounded — the node died, was remediated, was re-routed by our own probe, or the checks were paused mid-episode; credited to neither arm)'
           : '';
       const liveM = Math.round(((resolveOpts?.absentSinceMs ?? resolvedMs) - (ep.dwellStartMs ?? ep.onsetMs - DWELL_MS)) / 60_000);
-      const who = ep.action ? ` after ${ep.action.kind} (${ep.action.origin ?? 'you'})` : ' (no action)';
+      const who = ep.trial != null
+        ? ` (refresh trial: ${ep.trial}${ep.action ? ', refresh sent' : ''} — filed by the trial, in no arm here)`
+        : ep.action ? ` after ${ep.action.kind} (${ep.action.origin ?? 'you'})` : ' (no action)';
       const killed = ep.killedAfter ? ` (node went Dead ≤${KILLED_AFTER_MS / 60_000}m after the action)` : '';
       log(`episode ${k} ${ep.verdict}${who} live=${liveM}m [before ${win(ep.before)} | after ${win(ep.after)}]${tag}${killed}`);
       return ep;
@@ -1262,6 +1319,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         actionKind: ep.action?.kind ?? null,
         confounded: ep.confounded === true,
         beforeFreshN: ep.before?.freshN ?? null,
+        beforeRttN: ep.before?.rttN ?? 0,
+        trial: ep.trial ?? null,
       }));
     },
 
@@ -1360,6 +1419,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // Only an OPEN, unresolved episode: once a verdict is computed the
       // evidence behind it is history and must not be rewritten.
       if (!ep || ep.resolvedMs != null || ep.verdict != null) return false;
+      // Frozen at the refresh trial's decision (v0.75.0), in both arms: a
+      // treated episode must not be compared against readings taken after its
+      // own refresh, and the held arm must be measured the same way.
+      if (ep.trial != null) return false;
       // Strictly-better only. `freshN` is the count of samples that actually
       // carried new information, which is what every evidence floor gates on.
       const had = ep.before?.freshN ?? -1;

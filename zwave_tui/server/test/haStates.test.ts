@@ -385,13 +385,16 @@ test('a pause never hides no-capability-data from the degraded alarm (v0.72.0)',
   assert.equal(by(s, ENTITY_DEGRADED).state, 'on');
 });
 
-test('the recommendation is the sixth entity; the other five keep their ids and keys, the engine gaining exactly three (v0.72.0) and two more (v0.73.0)', () => {
+test('the recommendation is the sixth entity; the other five keep their ids and keys, the engine gaining exactly three (v0.72.0), two more (v0.73.0) and the trial\'s seven (v0.75.0)', () => {
   const s = buildStates(data(), 1_800_000_000_000, { writeActions: true, startedAt: 1_799_999_000_000 });
   assert.deepEqual(s.map((x) => x.entity), [ENTITY_DEGRADED, ENTITY_SUMMONS, 'sensor.zwave_tui_symptoms', ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ENTITY_RECOMMENDATION]);
   assert.deepEqual(Object.keys(by(s, ENTITY_ENGINE).attrs),
     ['friendly_name', 'detectors_ready', 'detectors_unmeasured', 'detectors_total', 'rtt_ready', 'paused_by', 'paused_since', 'auto_remediation',
       // v0.73.0: the missed-report watch's two counts.
-      'sleepers_watched', 'sleepers_total']);
+      'sleepers_watched', 'sleepers_total',
+      // v0.75.0: the refresh trial's phase and counts.
+      'refresh_trial', 'refresh_trial_treated', 'refresh_trial_treated_improved', 'refresh_trial_treated_deaths',
+      'refresh_trial_held', 'refresh_trial_held_improved', 'refresh_trial_held_deaths']);
   const r = by(s, ENTITY_RECOMMENDATION);
   assert.equal(r.state, 'none');
   assert.equal(r.attrs.automatic, false);
@@ -460,4 +463,35 @@ test('the engine publishes how many sleepers the missed-report watch covers (v0.
   const a = by(s, ENTITY_ENGINE).attrs;
   assert.equal(a.sleepers_watched, 2);
   assert.equal(a.sleepers_total, 3);
+});
+
+
+test('the refresh trial: a phase word and plain counts on the engine; a latch is degraded only while the trial is on (v0.75.0)', () => {
+  const tally = (n: number, ok: number, deaths: number) => ({ n, ok, worse: 0, deaths, unscoreable: 0, lost: 0, over: 0 });
+  const view = (over: Record<string, unknown> = {}) => ({
+    enabled: true, phase: 'running', startedAt: 1, deadlineAt: 2, target: 30,
+    treated: tally(4, 2, 1), held: tally(5, 1, 0), latch: null, exclusions: [], open: null, idle: null, verdict: null, decided24h: 1,
+    profile: { mains: 35, differs: 3, unknown: 0 }, ...over,
+  });
+  const s = buildStates(data({ refreshTrial: () => view() as never }), 1_800_000_000_000);
+  const a = by(s, ENTITY_ENGINE).attrs;
+  assert.deepEqual([a.refresh_trial, a.refresh_trial_treated, a.refresh_trial_treated_improved, a.refresh_trial_treated_deaths, a.refresh_trial_held, a.refresh_trial_held_improved, a.refresh_trial_held_deaths],
+    ['running', 4, 2, 1, 5, 1, 0]);
+  assert.equal(by(s, ENTITY_DEGRADED).state, 'off');
+  const latched = buildStates(data({ refreshTrial: () => view({ latch: { at: 1, reason: 'a second direct kill within 7 days', clear: 'restart-with-option-off' } }) as never }), 1_800_000_000_000);
+  assert.equal(by(latched, ENTITY_ENGINE).attrs.refresh_trial, 'latched');
+  assert.equal(by(latched, ENTITY_DEGRADED).state, 'on', 'a latch needs the owner');
+  assert.match(String(by(latched, ENTITY_DEGRADED).attrs.reason), /refresh trial latched: a second direct kill .* start the add-on with refresh_trial_enabled off/);
+  const unreadable = buildStates(data({ refreshTrial: () => view({ latch: { at: 1, reason: 'trial file unreadable (x)', clear: 'move-file-aside' } }) as never }), 1_800_000_000_000);
+  assert.match(String(by(unreadable, ENTITY_DEGRADED).attrs.reason), /move \/data\/refresh_trial\.json aside/, 'each latch names its own way out');
+  const off = buildStates(data({ refreshTrial: () => view({ enabled: false, latch: { at: 1, reason: 'x', clear: 'move-file-aside' } }) as never }), 1_800_000_000_000);
+  assert.equal(by(off, ENTITY_ENGINE).attrs.refresh_trial, 'off');
+  assert.equal(by(off, ENTITY_DEGRADED).state, 'off', 'a trial the owner switched off raises nothing');
+  assert.equal(by(buildStates(data(), 1_800_000_000_000), ENTITY_ENGINE).attrs.refresh_trial, 'off', 'no trial attached reads off');
+  // A latch can sit for days; a storm or a blind add-on must still name itself (v0.75.0 review).
+  for (const why of ['storm', 'no-capability-data'] as const) {
+    const both = buildStates(data({ autoPingState: () => AP({ suppressed: why }) as never, refreshTrial: () => view({ latch: { at: 1, reason: 'a second direct kill within 7 days', clear: 'restart-with-option-off' } }) as never }), 1_800_000_000_000);
+    assert.equal(by(both, ENTITY_DEGRADED).state, 'on');
+    assert.match(String(by(both, ENTITY_DEGRADED).attrs.reason), new RegExp(`suppressed:${why}`), `${why} is not hidden by the trial latch`);
+  }
 });

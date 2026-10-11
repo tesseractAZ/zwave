@@ -87,6 +87,9 @@ export interface DriverWsCallbacks {
   /** A sleeping node's declared report interval, from the state dump and then
    *  from the value events for that one value (v0.73.0). */
   onNodeDeclared?: (nodeId: number, declared: Declared) => void;
+  /** How many Gets a user value refresh of this node sends (v0.75.0), from the
+   *  state dump; null while the node has no values yet. See refreshQueriesOf. */
+  onNodeRefreshQueries?: (nodeId: number, queries: number | null) => void;
 }
 
 export interface DriverWsClientOptions {
@@ -236,6 +239,33 @@ export function s2ResyncNodeId(ev: Record<string, unknown>): number | null {
  *  Duplicate command (sequence number N))`). A node repeats a frame when it
  *  does not hear the controller's acknowledgement, so a burst of these is a
  *  link that works one way. Only the node id leaves this function. */
+/** The actuator and sensor CCs zwave-js's USER value refresh queries
+ *  (zwave-js core CommandClasses.ts actuatorCCs / sensorCCs; Node.ts
+ *  refreshValues). Notification is left out: its refresh queries only a
+ *  pull-mode node, so counting it would claim a refresh sends a Get it may not. */
+export const REFRESH_QUERY_CCS: ReadonlySet<number> = new Set([
+  0x66, 0x25, 0x33, 0x62, 0x26, 0x94, 0x79, 0x43, 0x40, 0x6a, // actuators
+  0x9c, 0x80, 0x30, 0x90, 0x32, 0x31, 0x35, // sensors, Notification (0x71) excluded
+]);
+
+/** How many CC instances a user value refresh of this node queries (v0.75.0):
+ *  the distinct (endpoint, CC) pairs among its values whose CC is in
+ *  REFRESH_QUERY_CCS. The refresh trial needs a refresh that differs from the
+ *  verification lane's one routed-read Get (DESIGN §3.5 revisit condition), so a
+ *  node with one switch value and nothing else — the same single Get — is not
+ *  eligible. null when the dump carries no values (not interviewed yet). */
+export function refreshQueriesOf(values: readonly DumpValue[]): number | null {
+  if (values.length === 0) return null;
+  const seen = new Set<string>();
+  for (const v of values) {
+    if (v == null || typeof v !== 'object') continue;
+    const cc = v.commandClass;
+    if (typeof cc !== 'number' || !REFRESH_QUERY_CCS.has(cc)) continue;
+    seen.add(`${typeof v.endpoint === 'number' ? v.endpoint : 0}:${cc}`);
+  }
+  return seen.size;
+}
+
 export function duplicateDropNodeId(ev: Record<string, unknown>): number | null {
   if (ev.event !== 'logging') return null;
   const ctx = ev.context as Record<string, unknown> | undefined;
@@ -640,6 +670,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
         cb.onNodeDeclared?.(nodeId, { reason: found.reason });
       }
     } else declaredRefs.delete(nodeId);
+    cb.onNodeRefreshQueries?.(nodeId, refreshQueriesOf(Array.isArray(node.values) ? (node.values as DumpValue[]) : []));
     return true;
   }
 

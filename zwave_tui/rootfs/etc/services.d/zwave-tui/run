@@ -46,6 +46,15 @@ export AUTO_PING_AFTER_MS="$(( $(bashio::config 'auto_ping_after_min') * 60000 )
 export AUTO_PING_MAX_ATTEMPTS="$(bashio::config 'auto_ping_max_attempts')"
 export AUTO_PING_STALE_MS="$(( $(bashio::config 'auto_ping_stale_min') * 60000 ))"
 
+# ── Refresh trial (v0.75.0, DESIGN §3.5) ─────────────────────────────────────
+# Same bool dance. Also requires write actions and a running auto-ping, which
+# the server checks itself; this only carries the owner's switch.
+if bashio::config.true 'refresh_trial_enabled'; then
+  export REFRESH_TRIAL_ENABLED=1
+else
+  export REFRESH_TRIAL_ENABLED=0
+fi
+
 # ── Write-action safety gates ────────────────────────────────────────────────
 if bashio::config.true 'write_actions_enabled'; then
   export WRITE_ACTIONS_ENABLED=1
@@ -105,6 +114,10 @@ export OUTCOMES_PATH=/data/outcomes.json
 # ENGINE) and kept across restarts. Absent means never paused; unreadable or
 # malformed reads as PAUSED.
 export AUTONOMY_PATH=/data/autonomy.json
+# The refresh trial's assignments, tallies, exclusions and latch (v0.75.0).
+# Written through on every change, BEFORE any send; unreadable means latched
+# off, and the file is then left untouched.
+export TRIAL_PATH=/data/refresh_trial.json
 
 # SUPERVISOR_TOKEN is injected automatically by the HA Supervisor (unlocked by
 # homeassistant_api: true) — the Node process inherits it. Do NOT export it.

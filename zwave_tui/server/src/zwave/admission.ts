@@ -84,7 +84,10 @@ export const VERB_ADMISSION: Readonly<Record<ActionKind, AdmissionRow>> = {
       { p: 'P2', why: 'Home Assistant sends the refresh with wait_for_result=False, so the call returns before anything is on the air.', source: 'zwave-js-server-python model/node/__init__.py:622-626' },
       { p: 'P5', why: "On 35 of the 38 nodes it is the routed read's single Get, which the verification lane already sends to both arms.", source: 'zwave-js Node.ts:2514-2521; live CC inventory' },
     ],
-    alreadyAutonomousAs: null,
+    // v0.75.0: still failing, and run on its own only as the pre-registered
+    // trial (refreshTrial.ts) — randomized, owner-switched, and admitting
+    // nothing. P5 is the question the trial exists to answer.
+    alreadyAutonomousAs: 'the refresh trial, when refresh_trial_enabled is on (randomized, DESIGN §3.5)',
     manualBecause: 'HA returns no result; same Get the checks already send',
   },
   reInterview: {

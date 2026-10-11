@@ -36,6 +36,7 @@ import type {
   OpenEpisodeSummary,
   EngineStatus,
 } from '../types';
+import type { TrialView } from '../zwave/refreshTrial';
 import type { CoarseBucket } from '../zwave/evidenceStore';
 import type { DriverWsState } from '../zwave/driverWsClient';
 import type { SleeperWatch } from '../zwave/missedReport';
@@ -105,6 +106,8 @@ export interface ZwaveDataSource {
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   /** Auto-ping runtime state (v0.41), null when off. REQUIRED — see ackEvent. */
   autoPingState(): AutoPingSnapshot | null;
+  /** The refresh trial's state (v0.75.0). REQUIRED, like autoPingState. */
+  refreshTrial(now?: number): TrialView | null;
   /** The mesh-identity decision awaiting an operator answer, or null (v0.64.0). */
   pendingIdentity(): IdentityDecision | null;
   /** Every actor's arm for a kind (v0.72.0). */
@@ -262,6 +265,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     openEpisodes: () => zd.openEpisodes(),
     controlArm: (k) => zd.controlArm(k),
     autoPingState: () => zd.autoPingState(),
+    refreshTrial: (now) => zd.refreshTrial(now),
     pendingIdentity: () => zd.pendingIdentity(),
     actorArms: (k) => zd.actorArms(k),
     pooledArm: (k, a) => zd.pooledArm(k, a),
@@ -394,6 +398,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     openEpisodes: () => zwaveData.openEpisodes(),
     controlArm: (kind) => zwaveData.controlArm(kind),
     autoPingState: () => zwaveData.autoPingState(),
+    refreshTrial: (now) => zwaveData.refreshTrial(now),
     pendingIdentity: () => zwaveData.pendingIdentity(),
     actorArms: (kind) => zwaveData.actorArms(kind),
     pooledArm: (kind, a) => zwaveData.pooledArm(kind, a),

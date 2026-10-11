@@ -26,8 +26,9 @@ import { sanitizeEventText } from './zwaveData';
 import { NodeStatus, type ActionRunner, type ActionResult, type ActionKind, type ConfigParam, type EntityVerb } from '../types';
 import { resolveService, verbLabel } from './entityControl';
 
-/** Who asked for an action: a human at the keyboard, or the engine itself. */
-export type ActionOrigin = 'you' | 'engine';
+/** Who asked for an action: a human at the keyboard, the engine itself, or
+ *  the refresh trial (v0.75.0), whose send the ledger keeps out of every arm. */
+export type ActionOrigin = 'you' | 'engine' | 'trial';
 
 /** Why an action failed (v0.43.1). `refused` means the DRIVER rejected the
  *  premise — the diagnosis was wrong — and is the only failure the ledger may
@@ -43,7 +44,7 @@ export type ActionEffect = 'ok' | 'none' | 'maybe';
 /** Failures that mean nothing was sent. */
 // ("HA WS client stopped" is not here: stop() also rejects requests already
 // dispatched, so it cannot say nothing left.)
-const NOT_SENT = /^HA WS not ready|^HA WS not open|^HA WS client not configured|has no (device|ping button|switch\/light value)|^no zwave_js entry|^write actions are disabled/;
+export const NOT_SENT = /^HA WS not ready|^HA WS not open|^HA WS client not configured|has no (device|ping button|switch\/light value)|^no zwave_js entry|^write actions are disabled/;
 
 export interface ActionRunnerOptions {
   client: HaWsClient;

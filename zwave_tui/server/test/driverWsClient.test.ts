@@ -13,6 +13,7 @@ import {
   RF_OFF_MAX_MS,
   type DriverWsCallbacks,
   s2Fault,
+  refreshQueriesOf,
 } from '../src/zwave/driverWsClient';
 import { driverHomeGuard, leadingRun } from '../src/zwave/zwaveData';
 import { WebSocketServer } from 'ws';
@@ -712,6 +713,31 @@ test('the client tracks the controller taking its radio down, and forgets it on 
     srv.dropClient();
     await waitFor(() => srv.connectionCount() === 2 && c.state() === 'live');
     assert.equal(c.controllerRfOffSince(), null, 'the hold does not survive a reconnect');
+  } finally {
+    c.stop();
+    await srv.close();
+  }
+});
+
+
+test('refreshQueriesOf counts the CC instances a user refresh queries — one switch value is the probe\'s own Get (v0.75.0)', () => {
+  const v = (commandClass: number, endpoint = 0, property: string | number = 'currentValue') => ({ commandClass, endpoint, property });
+  assert.equal(refreshQueriesOf([]), null, 'no values yet: unknown');
+  assert.equal(refreshQueriesOf([v(0x26), v(0x26, 0, 'targetValue'), v(0x70, 0, 3), v(0x86, 0, 'firmwareVersions')]), 1, 'a dimmer: one Multilevel Switch instance, whatever else it has');
+  assert.equal(refreshQueriesOf([v(0x25), v(0x32, 0, 'value-65537')]), 2, 'a metering plug: switch + meter');
+  assert.equal(refreshQueriesOf([v(0x25, 1), v(0x25, 2)]), 2, 'two endpoints, two Gets');
+  assert.equal(refreshQueriesOf([v(0x71, 0, 'Home Security')]), 0, 'Notification is not counted: its refresh queries only pull-mode nodes');
+});
+
+
+test('the state dump reports each node\'s refresh profile: unknown without values, zero for configuration alone (v0.75.0)', async () => {
+  const srv = await mockServer();
+  const got: [number, number | null][] = [];
+  const c = createDriverWsClient({ url: srv.url, callbacks: { onNodeRefreshQueries: (id, q) => got.push([id, q]) } });
+  c.start();
+  try {
+    await waitFor(() => got.length >= 2);
+    assert.deepEqual(got.sort((a, b) => a[0] - b[0]), [[6, null], [44, 0]]);
   } finally {
     c.stop();
     await srv.close();
