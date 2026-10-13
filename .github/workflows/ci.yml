@@ -31,7 +31,7 @@ permissions:
 jobs:
   typecheck:
     name: Type-check & test (server)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -55,7 +55,7 @@ jobs:
 
   apparmor:
     name: AppArmor profile compiles
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -90,14 +90,18 @@ jobs:
     # ★ Each architecture builds on a NATIVE runner. Building aarch64 on an x86
     #   runner meant every instruction of `apk add` and `npm ci` went through
     #   QEMU user-mode emulation — the first such run took over 35 minutes and
-    #   was still going. `ubuntu-24.04-arm` is free for public repositories, so
+    #   was still going. `ubuntu-26.04-arm` is free for public repositories, so
     #   the emulation layer buys nothing here.
     name: Dockerfile smoke build (${{ matrix.arch }})
-    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, aarch64]
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: aarch64
+            runner: ubuntu-26.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -158,7 +162,7 @@ jobs:
     # builds the same manual again and attaches it to the GitHub Release; this
     # job is the per-branch check.
     name: Build documentation (.docx + .pdf)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

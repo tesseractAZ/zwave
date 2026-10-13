@@ -491,7 +491,9 @@ releasing anything — docs and tooling changes ride along until the next releas
 `ci.yml` (typecheck + tests + docs build + `amd64`/`aarch64` docker smoke builds)
 and `codeql.yml` (CodeQL `security-extended`; results are uploaded to the
 Security tab, and `check-sarif.mjs` fails the job on actionable findings) are
-both required status checks on every PR to `main`.
+both required status checks on every PR to `main`. Every job runs on a pinned
+`ubuntu-26.04` image (native `ubuntu-26.04-arm` for aarch64 builds) except CodeQL,
+which stays on `ubuntu-24.04`, the newest release CodeQL lists as supported.
 
 ## Local development
 

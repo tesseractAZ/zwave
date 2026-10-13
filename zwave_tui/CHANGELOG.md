@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.75.3
+
+### Changed — every build and check on a pinned Ubuntu 26.04 image
+
+`ubuntu-latest` moves to Ubuntu 26.04 in a rollout from 2026-10-19 to
+2026-11-19. That would change python3, Docker, the docs job's pandoc and
+LibreOffice and the AppArmor job's `apparmor_parser` under every job at once,
+and could mix images within one run. The move is made deliberately instead:
+
+- Every job in CI, Release, Tag release and Publish release runs on
+  `ubuntu-26.04`; both image builds (the CI smoke build and the release images)
+  run natively, aarch64 on `ubuntu-26.04-arm`.
+- CodeQL stays on `ubuntu-24.04`: its system requirements list Ubuntu 22.04
+  and 24.04 only.
+- `test/workflowRunners.test.ts` holds the rule: every runner a pinned
+  `ubuntu-YY.MM[-arm]` label, CodeQL on a listed image, everything else on
+  26.04, the ARM builds native.
+- A trial run passed every check on image 20260927.149.1, including the
+  AppArmor profile under `apparmor_parser` 5.0.2 and the manual under pandoc
+  3.7.0.2.
+
+### Fixed — from the log review of 10-11 07:46Z to 10-13 02:04Z
+
+- **One entry discovery and one registry join per connect.** The boot tick and
+  the on-ready callback both asked the moment the socket authenticated, and
+  each check set its flag only after its own reply, so every connect fetched
+  the config entries and both registries twice. They now share the request in
+  flight. Redundant only; present since v0.25.0.
+- **An episode is not scored before its last probe settles.** A confirmation
+  burst's fifth read can go out a second before the window ends; its missing
+  reply reaches the evidence seconds later, so a timed-out read was scored as
+  0 of 5 (node 57: `tmo=0.0%`, the read timing out 0.58 s after the verdict).
+  An episode now closes only once its node's latest probe has had 30 s to land,
+  waiting at most two minutes past the window, and a close that waited keeps the
+  after-window's start where it was, so the burst's first read is not aged out
+  at slow evidence cadences. On a timeout-scored kind the old cut could turn a
+  failed recovery into `improved`.
+
+The review found no regression from v0.75.0–v0.75.2: four clean restarts, no
+add-on warning or error in 42 h, 819 probes answered but one, and the only
+AppArmor denials the four deliberate probes of the v0.74.4 check.
+
 ## 0.75.2
 
 ### Fixed — every noise floor uses one rule for what a reading is
