@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, statSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EPISODE_SETTLE_CAP_MS } from '../src/zwave/outcomes';
 import { wilsonLower, createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
 import type { EvidenceSample } from '../src/zwave/evidenceStore';
 import type { SymptomKind } from '../src/zwave/symptoms';
@@ -373,6 +374,32 @@ test('lifecycle: a new non-subsumed symptom is opened; a subsumed one opens NO e
   assert.deepEqual(toOpen, [{ nodeId: 7, kind: 'rtt-degraded' }], 'only the independent symptom opens');
 });
 
+test('lifecycle: the window is not cut while a probe sent just before its end can still time out; never more than the cap (v0.75.3 log review)', () => {
+  const open = [openEp(57, 'return-path-degraded')];
+  const confirm = 600_000;
+  const pending = new Map<string, number>([['57:return-path-degraded', 0]]);
+  const probe = confirm - 1_200;               // the 5th confirmation read, 1.2 s before the window ends
+  const settle = (n: number | null) => (n === 57 ? probe + 30_000 : null);
+  let r = planEpisodeLifecycle([], open, pending, confirm, confirm, undefined, settle);
+  assert.equal(r.toResolve.length, 0, 'its reply — or its timeout — has not reached the evidence yet');
+  r = planEpisodeLifecycle([], open, pending, probe + 29_999, confirm, undefined, settle);
+  assert.equal(r.toResolve.length, 0);
+  r = planEpisodeLifecycle([], open, pending, probe + 30_000, confirm, undefined, settle);
+  assert.equal(r.toResolve.length, 1, 'closed once the probe has settled');
+  assert.equal(r.toResolve[0].closeAt, confirm, 'the nominal close, for the after-window to keep its start (v0.75.3 review)');
+  assert.equal(r.toResolve[0].heldForProbe, true, 'and it says the close waited');
+  // A probe that settled before the nominal close holds nothing: the old trailing window.
+  const p3 = new Map<string, number>([['57:return-path-degraded', 0]]);
+  const early = planEpisodeLifecycle([], open, p3, confirm + 5_000, confirm, undefined, (n) => (n === 57 ? confirm - 60_000 : null));
+  assert.deepEqual([early.toResolve.length, early.toResolve[0]?.heldForProbe], [1, false]);
+  // A node probed without pause: the close waits at most the cap.
+  const p2 = new Map<string, number>([['57:return-path-degraded', 0]]);
+  const always = (now: number) => (n: number | null) => (n === 57 ? now + 30_000 : null);
+  const t = confirm + EPISODE_SETTLE_CAP_MS;
+  assert.equal(planEpisodeLifecycle([], open, p2, t - 1, confirm, undefined, always(t - 1)).toResolve.length, 0);
+  assert.equal(planEpisodeLifecycle([], open, p2, t, confirm, undefined, always(t)).toResolve.length, 1, 'the cap closes it');
+});
+
 test('lifecycle: an absent symptom is NOT resolved until it stays gone through the confirm window', () => {
   const open = [openEp(7, 'dead-flap')];
   const pending = new Map<string, number>();
@@ -386,7 +413,7 @@ test('lifecycle: an absent symptom is NOT resolved until it stays gone through t
   assert.equal(r.toResolve.length, 0);
   // Tick 3: absent past the window → resolve, pending cleared.
   r = planEpisodeLifecycle([], open, pending, 1_000 + confirm, confirm);
-  assert.deepEqual(r.toResolve, [{ nodeId: 7, kind: 'dead-flap', key: '7:dead-flap', absentSinceMs: 1_000 }],
+  assert.deepEqual(r.toResolve, [{ nodeId: 7, kind: 'dead-flap', key: '7:dead-flap', absentSinceMs: 1_000, closeAt: 1_000 + confirm, heldForProbe: false }],
     'it carries the FIRST absent tick, not the resolve tick (v0.64.6)');
   assert.equal(pending.has('7:dead-flap'), false, 'pending cleared on resolve');
 });

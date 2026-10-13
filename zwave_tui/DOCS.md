@@ -188,7 +188,13 @@ both WS surfaces and the substrate for the entire engine. Its startup sequence
    `Number(identifier.split('-')[1])`; the controller is node 1. This builds the
    `node_id ↔ device_id ↔ entities` maps that `network_status` (numeric ids only)
    cannot provide, plus the ping-button, battery, and firmware-update entity
-   indexes.
+   indexes. Once per connect, really (v0.75.3): the boot tick and the on-ready
+   callback both ask the moment the socket authenticates, so `ensureEntryId()`
+   and `ensureRegistries()` share the request already in flight — a request
+   parked before authentication goes out on the new connection, and one on a
+   socket that closes is rejected, so the next call fetches again. Before
+   v0.75.3 every connect discovered the entry and downloaded both registries
+   twice.
 3. **Poll `network_status`.** Every `refreshMs` (default 2000 ms), `refresh()`
    sends `zwave_js/network_status { entry_id }` — the cheapest complete mesh
    snapshot (roster + the 0..4 status enum, `is_routing`, `is_secure`, `ready`,
@@ -3154,6 +3160,8 @@ A detector is allowed to fire on evidence the verifier is forbidden to accept. O
 
 > **A burst must SPAN less than the window it fills.** 5 probes at the original 120 s effective spacing (70 s requested, rounding up to the next 60 s tick) span 480 s against a 300 s window, so probes 1–2 age out before 4–5 arrive and the window never holds more than two or three readings — adding probes lengthened the stream without ever filling the window. At 60 s the same burst spans 240 s and fits, with two readings spare over the floor of 3. The count was checked against `MIN_OBS` twice; the span against `WINDOW_MS` neither time.
 
+> **The window is not cut before its last probe settles (v0.75.3).** A confirmation burst's fifth read can go out about a second before the window ends: its TX is ACKed into the evidence at once, but a missing reply — a timeout — reaches the counters seconds later and the evidence only at the next sample. Resolving on time alone scored that timed-out read as 0 of 5 (node 57, 10-11: `tmo=0.0%` while the read timed out 0.58 s after the verdict). `planEpisodeLifecycle` takes a `settleAt` per node — the latest measurement probe's send plus `PROBE_SETTLE_MS` (30 s, or two evidence samples if slower) — and closes an episode only once it has passed, waiting at most `EPISODE_SETTLE_CAP_MS` (2 min) beyond the window so a node probed without pause cannot hold its episode open. A close that waited keeps the after-window's **start** at five minutes before the nominal close and extends only its end (`heldAfterWindow`); a trailing five minutes from the later close dropped the burst's first read at slow evidence cadences (a 60 s `route_poll_interval` holds the close about two minutes), leaving four sends under the five-send floor. A close that did not wait is scored on the trailing window as before.
+
 > **A burst must also START promptly.** Releasing one node per tick is FIFO, so each burst stays contiguous — but node B's burst does not begin until node A's five probes finish, five minutes later. A confirmation burst is timed to land in one specific window; starting it late puts every probe past the edge. Tight but late is exactly as useless as spread out.
 
 The verifier's floor of 3 **plus margin** (v0.37.2; it was exactly 3, and production showed that choosing exactly the floor leaves no room for the ordinary: three readings must all land, be sampled, and carry a non-null RTT inside one 300 s window, from a burst already spanning ~240 s at the tick-rounded spacing, so one lost probe — ~2 % of NoOp probes in that sample — fails the verdict closed) — spaced at the 60 s effective spacing stated above so each is a separate observation rather than three packets carrying one reading's worth of information. Requests **top up**, never stack: a symptom that flaps ten times still owes one burst. They are drained through `drainVerifyRequests` — which returns `{ id, first }`, `first` read off the queue's own budget bookkeeping so the log's `burst start` label is ground truth rather than a clock heuristic (v0.38.2; two generations of time threshold each mislabeled a boundary in an audit: a per-node gap conflated inter-burst pauses with stretched bursts, then a 4-minute cutoff stamped `+180s` on a genuine boundary whenever a symptom cleared mid-burst and shortened the open→confirm pause below it) — and cleared by `decideAutoPings`, so they pass the **same** gate ladder as every other autonomous write — master switch, boot window, rebuild, controller RF off (v0.65.0), missing capability data, storm, an operator's one-node rebuild or removal (`operator-action`, v0.72.0) and the autonomy pause (`paused`, v0.72.0; `requestVerification` refuses new requests while paused); a node inside its post-kill hold has its burst left owed (v0.71.0) — and a Dead node is never verification-probed, because the remediation path owns it with its own dwell, backoff and attempt budget.
@@ -4593,6 +4601,8 @@ Five workflows guard and publish the project. Two gate every change:
    uploaded to the
    Security tab, and `.github/scripts/check-sarif.mjs` fails the job on
    actionable findings, because an upload alone does not fail a build.
+
+**Runners (v0.75.3).** Every job runs on a pinned image, never `ubuntu-latest`: `ubuntu-26.04`, with both image builds on native runners (`ubuntu-26.04-arm` for aarch64), except CodeQL, which stays on `ubuntu-24.04` because CodeQL's system requirements list Ubuntu 22.04 and 24.04 only. `ubuntu-latest` itself moves to 26.04 in a rollout from 2026-10-19 that would have changed python3, Docker, the docs job's pandoc and LibreOffice and the AppArmor job's `apparmor_parser` (5.0.2 on 26.04) under every job at once, and could mix images within one run. `test/workflowRunners.test.ts` holds the rule.
 
 Three form the release relay:
 

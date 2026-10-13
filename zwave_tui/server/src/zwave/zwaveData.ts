@@ -762,6 +762,10 @@ class ZwaveDataImpl implements ZwaveData {
    *  moment, so the ONE statistics event that carries its TX report can be told
    *  from every other frame's. Consumed by that event. */
   private readonly measurementSent = new Map<number, { at: number; lane: 'sweep' | 'verify'; frame: ProbeFrameLite; tx0: number | null }>();
+  /** Send time of the latest measurement probe per node (v0.75.3) — unlike
+   *  measurementSent, kept after the probe's report is matched, so an episode's
+   *  close can wait for that probe's outcome. */
+  private readonly lastProbeAt = new Map<number, number>();
   /** nodeId → our measurement frame's TX report once its counters have arrived
    *  (`txAt`), held open for the trailing statistics emit that carries its route,
    *  until the counters move again or `until` passes (v0.71.0). */
@@ -1470,7 +1474,7 @@ class ZwaveDataImpl implements ZwaveData {
     else if (this.meshRebuildUntil === Infinity) this.meshRebuildUntil = now;
     else if (this.meshRebuildUntil != null && now - this.meshRebuildUntil > OPS_KEEP_MS) this.meshRebuildUntil = null;
     const { toOpen, toResolve } = planEpisodeLifecycle(symptoms, oc.openEpisodes(), this.pendingResolve, now, CONFIRM_MS,
-      (nodeId) => this.holdRelease(nodeId, now));
+      (nodeId) => this.holdRelease(nodeId, now), (nodeId) => this.probeSettleAt(nodeId));
     // Capture the degraded before-window at onset and the settled after-window
     // at resolution (well past the transition, thanks to the confirm window).
     //
@@ -1592,7 +1596,8 @@ class ZwaveDataImpl implements ZwaveData {
       // that first absence to tell a blink from a sampling limit (v0.64.6).
       // Through v0.64.5 it saw only open-to-resolve, at least 10 minutes by
       // construction, so every blink closed "undersampled".
-      const ep = oc.resolve(r.nodeId, r.kind, now, this.nodeWindow(r.nodeId, now), { unprobeable, absentSinceMs: r.absentSinceMs });
+      const ep = oc.resolve(r.nodeId, r.kind, now, r.heldForProbe ? this.heldAfterWindow(r.nodeId, r.closeAt) : this.nodeWindow(r.nodeId, now),
+        { unprobeable, absentSinceMs: r.absentSinceMs });
       if (ep) {
         // `worse` lifts to warn. A regression logged at info is a regression
         // nobody sees. Deliberately NOT 'error': the errorsOnly filter is for
@@ -1647,6 +1652,20 @@ class ZwaveDataImpl implements ZwaveData {
    *  very mechanism an audit was reading it to understand (v0.36). What remains
    *  true: a kind whose recovery shows up in no collected signal still reads
    *  `unverifiable`, which is honest, and is now COUNTED rather than silent. */
+  /** The after-window of an episode whose close waited for a probe to settle
+   *  (v0.75.3 review): from 5 minutes before its NOMINAL close through to now.
+   *  A trailing 5 minutes from the later close dropped the burst's first read
+   *  at slow evidence cadences (a 60 s cadence holds the close ~2 min), leaving
+   *  4 sends under the 5-send floor. A close that did not wait keeps the
+   *  trailing nodeWindow, as before. */
+  private heldAfterWindow(nodeId: number | null, closeAt: number): ReturnType<typeof windowMetrics> | null {
+    if (nodeId == null || !this.evidenceStore) return null;
+    const start = closeAt - 5 * 60_000;
+    const all = this.evidenceStore.forNode(nodeId);
+    const ring = all.filter((s) => s.t >= start);
+    return ring.length ? windowMetrics(ring, undefined, rttSeedBefore(all, ring[0]?.t)) : null;
+  }
+
   private nodeWindow(nodeId: number | null, now: number): ReturnType<typeof windowMetrics> | null {
     if (nodeId == null || !this.evidenceStore) return null;
     const WINDOW_MS = 5 * 60_000;
@@ -2570,6 +2589,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.routeChangeAccum.delete(id);
           this.s2Accum.delete(id);
           this.measurementSent.delete(id);
+          this.lastProbeAt.delete(id);
           this.ourTxReport.delete(id);
           this.measurementReroutes.delete(id);
           this.subStatus.delete(id);
@@ -2688,6 +2708,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.routeChangeAccum.clear();
         this.s2Accum.clear();
         this.measurementSent.clear();
+        this.lastProbeAt.clear();
         this.ourTxReport.clear();
         this.measurementReroutes.clear();
         this.deadEvents = [];
@@ -2756,8 +2777,23 @@ class ZwaveDataImpl implements ZwaveData {
     return true;
   }
 
-  private async ensureEntryId(): Promise<string | null> {
-    if (this.entryId) return this.entryId;
+  /**
+   * The discovery and the registry join in flight, shared (v0.75.3 log review).
+   * The boot tick and the on-ready callback both ask the moment the socket
+   * authenticates, and each check sets its flag only after its own reply — so
+   * every connect fetched twice. A request parked before authentication goes
+   * out on the new connection, as fresh as one made after it; a request on a
+   * socket that closes is rejected (haWsClient), so the next call fetches again.
+   */
+  private entryIdInFlight: Promise<string | null> | null = null;
+  private registriesInFlight: Promise<void> | null = null;
+
+  private ensureEntryId(): Promise<string | null> {
+    if (this.entryId) return Promise.resolve(this.entryId);
+    return (this.entryIdInFlight ??= this.fetchEntryId().finally(() => { this.entryIdInFlight = null; }));
+  }
+
+  private async fetchEntryId(): Promise<string | null> {
     const entries = await this.client.send<RawConfigEntry[]>({ type: 'config_entries/get' });
     const zwave = (entries ?? []).filter((e) => e.domain === 'zwave_js');
     const chosen = zwave.find((e) => e.state === 'loaded') ?? zwave[0];
@@ -2766,8 +2802,12 @@ class ZwaveDataImpl implements ZwaveData {
     return this.entryId;
   }
 
-  private async ensureRegistries(): Promise<void> {
-    if (this.registriesLoaded) return;
+  private ensureRegistries(): Promise<void> {
+    if (this.registriesLoaded) return Promise.resolve();
+    return (this.registriesInFlight ??= this.fetchRegistries().finally(() => { this.registriesInFlight = null; }));
+  }
+
+  private async fetchRegistries(): Promise<void> {
     const [devices, entities] = await Promise.all([
       this.client.send<RawDevice[]>({ type: 'config/device_registry/list' }),
       this.client.send<RawEntity[]>({ type: 'config/entity_registry/list' }),
@@ -3325,12 +3365,23 @@ class ZwaveDataImpl implements ZwaveData {
   noteMeasurementProbe(nodeId: number, at: number, lane: 'sweep' | 'verify', frame: ProbeFrameLite): void {
     const s = this.statsByNode.get(nodeId);
     this.measurementSent.set(nodeId, { at, lane, frame, tx0: s == null ? null : s.commandsTX + s.commandsDroppedTX });
+    this.lastProbeAt.set(nodeId, at);
+  }
+
+  /** When the latest probe to a node can have reached the evidence (v0.75.3):
+   *  the driver reports a missing reply within seconds, and the next evidence
+   *  sample carries it. An episode on the node is not scored before then. */
+  private probeSettleAt(nodeId: number | null): number | null {
+    if (nodeId == null) return null;
+    const at = this.lastProbeAt.get(nodeId);
+    return at == null ? null : at + Math.max(PROBE_SETTLE_MS, 2 * this.evidenceSampleMs);
   }
 
   /** The probe stamped at `at` never left — HA refused it (v0.71.0). Its stamp
    *  is withdrawn, or the next frame to reach the node would inherit it. */
   clearMeasurementProbe(nodeId: number, at: number): void {
     if (this.measurementSent.get(nodeId)?.at === at) this.measurementSent.delete(nodeId);
+    if (this.lastProbeAt.get(nodeId) === at) this.lastProbeAt.delete(nodeId);
     // …and if another frame's counters already arrived and were taken for ours,
     // that held report goes too: a read that never left owns no TX report.
     if (this.ourTxReport.get(nodeId)?.at === at) this.ourTxReport.delete(nodeId);
@@ -4164,6 +4215,11 @@ export interface RawEntityState {
 /** How long a settled action is remembered, to tell a later reply it
  *  overlapped (v0.72.0 review): longer than the longest reply bound. */
 const OPS_KEEP_MS = 60 * 60_000;
+/** How long after a probe is sent its outcome can be counted (v0.75.3): the
+ *  driver's reply timeout (the observed ZW0201 came 1.8 s after the send) plus
+ *  the evidence sample that carries it (10 s by default; doubled when the
+ *  sample cadence is slower). */
+const PROBE_SETTLE_MS = 30_000;
 
 /** An HA `last_changed` as epoch ms, or now when absent or unparseable. */
 function stampOf(v: unknown): number {

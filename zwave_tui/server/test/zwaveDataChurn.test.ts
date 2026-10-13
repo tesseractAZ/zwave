@@ -186,6 +186,37 @@ async function bootedZwaveData(ha: FakeHa, extra: Record<string, unknown> = {}):
   return zd;
 }
 
+test('a connect discovers the entry and joins the registries ONCE, though the boot tick and onReady both ask (v0.75.3 log review)', async () => {
+  const ha = fakeHa();
+  // Every send parks until "authentication", as haWsClient.send does on waitReady.
+  let authed!: () => void;
+  const auth = new Promise<void>((r) => { authed = r; });
+  const calls = new Map<string, number>();
+  ha.send = (async (cmd: Record<string, unknown>) => {
+    await auth;
+    calls.set(String(cmd.type), (calls.get(String(cmd.type)) ?? 0) + 1);
+    return cannedResult(cmd);
+  }) as typeof ha.send;
+  const zd = createZwaveData({
+    client: ha, entryId: null, refreshMs: 60_000, routePollMs: 60_000,
+    historyPath: null, evidencePath: null, driverWsUrl: null, log: () => {},
+  } as never);
+  try {
+    zd.start();          // the boot tick asks, and parks
+    ha.fireReady();      // authentication: onReady asks too
+    authed();
+    await waitFor(() => (ha.subCount.get('zwave_js/subscribe_node_statistics') ?? 0) >= 1);
+    await sleep(50);
+    assert.equal(calls.get('config_entries/get'), 1, 'one entry discovery per connect');
+    assert.equal(calls.get('config/device_registry/list'), 1, 'one device-registry fetch');
+    assert.equal(calls.get('config/entity_registry/list'), 1, 'one entity-registry fetch');
+    // A real reconnect still reloads the registry join (an HA restart can rename devices).
+    ha.fireReady();
+    await waitFor(() => (calls.get('config/device_registry/list') ?? 0) >= 2);
+    assert.equal(calls.get('config_entries/get'), 1, 'the entry id is kept across a reconnect');
+  } finally { zd.stop(); }
+});
+
 test('displayed lastSeen: a subscribe REPLAY (no counter movement) does not fabricate freshness', async () => {
   const ha = fakeHa();
   // Fast poll: snapshot() serves the roster built at the LAST refresh tick, so
@@ -2715,6 +2746,54 @@ test('the detector reads the drop record: repeated-frames fires from zwaveData, 
   } finally { zd.stop(); }
 });
 
+
+test('an episode is not scored while its last confirmation probe can still time out (v0.75.3 log review)', async () => {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-settle-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+    const MIN = 60_000;
+    const listening = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true, status: NodeStatus.Alive } : n));
+    const shadow = zd as unknown as {
+      snapshot: () => NodeSnapshot[]; updateEpisodes: (s: unknown[], now: number) => void;
+      requestVerification: (n: number) => boolean; outcomes: { openEpisodes: () => { key: string }[] };
+      heldAfterWindow: (id: number | null, closeAt: number) => unknown;
+      evidenceStore: { forNode: (id: number) => { t: number }[] };
+    };
+    shadow.snapshot = () => listening;
+    shadow.requestVerification = () => true;
+    // The held window starts 5 min before the NOMINAL close and runs to now (v0.75.3 review).
+    const real = shadow.heldAfterWindow.bind(zd);
+    const forNode = shadow.evidenceStore.forNode;
+    const held: number[] = [];
+    shadow.heldAfterWindow = (id, closeAt) => { held.push(closeAt); return real(id, closeAt); };
+    const t0 = Date.now() - 30 * MIN;
+    const sym = { kind: 'rate-fallback', nodeId: 7, severity: 'watch', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+    shadow.updateEpisodes([sym], t0);
+    assert.equal(shadow.outcomes.openEpisodes().length, 1, 'fixture: the episode opened');
+    const since = t0 + MIN;
+    shadow.updateEpisodes([], since);                         // absent: the confirmation window starts
+    const end = since + 10 * MIN;
+    zd.noteMeasurementProbe(7, end - 1_200, 'verify', 'read'); // the burst's last read, 1.2 s before the end
+    shadow.updateEpisodes([], end);
+    assert.equal(shadow.outcomes.openEpisodes().length, 1, 'not cut before that read can time out');
+    shadow.updateEpisodes([], end - 1_200 + 30_000);
+    assert.equal(shadow.outcomes.openEpisodes().length, 0, 'scored once it has settled');
+    assert.deepEqual(held, [end], 'on the window anchored at the nominal close, not a trailing one from the late close');
+    // Its bounds: from 5 min before the nominal close, through every later sample.
+    const sample = (t: number) => ({ t, dTx: 1, dTimeout: 0, dDropTx: 0, dRx: 1, dFlaps: 0, dRouteChanges: 0, dS2Resync: 0, fresh: true,
+      rtt: 30, rssi: -70, rateKbps: 100, routeKey: 'direct', status: NodeStatus.Alive, lastSeen: null, isListening: true, isFrequentListening: null });
+    shadow.evidenceStore.forNode = () => [sample(end - 5 * MIN - 1), sample(end - 5 * MIN), sample(end - 1_200), sample(end + 25_000)] as never;
+    const w = real(7, end) as { tx: number } | null;
+    assert.equal(w?.tx, 3, 'the first burst read at the window start is in; the sample before it is out; the late outcome is in');
+    shadow.evidenceStore.forNode = forNode;
+  } finally { zd.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
 
 test('the refresh trial rides the engine tick: decided at 10 minutes live, frozen, sent, measured at +20 in its arm, its death tapped and filed at +30 (v0.75.0)', async () => {
   const ha = fakeHa();

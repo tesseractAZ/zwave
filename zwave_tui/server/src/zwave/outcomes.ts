@@ -1689,6 +1689,11 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
  *     carrying `absentSinceMs` (the FIRST tick it was seen absent) so the ledger
  *     can tell how long the symptom was live; the window itself is not live
  *     time (v0.64.6). */
+/** The longest an episode's close waits past its confirmation window for a
+ *  probe's outcome to land (v0.75.3): a node probed without pause cannot hold
+ *  its episode open for ever. */
+export const EPISODE_SETTLE_CAP_MS = 2 * 60_000;
+
 export function planEpisodeLifecycle(
   symptoms: { nodeId: number | null; kind: SymptomKind; subsumedBy?: string | null }[],
   openEpisodes: { key: string; nodeId: number | null; kind: SymptomKind }[],
@@ -1703,7 +1708,13 @@ export function planEpisodeLifecycle(
    *  the episode is a settled one, not the heal's own last minutes. The
    *  first-absence time is kept for the live-span measure. */
   holdUntil?: (nodeId: number | null) => number | null,
-): { toOpen: { nodeId: number | null; kind: SymptomKind }[]; toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number }[] } {
+  /** The earliest time the after-window may be cut, or null (v0.75.3 log
+   *  review): a probe sent just before the window's end is ACKed into the
+   *  evidence at once, but its missing reply — a timeout — reaches it seconds
+   *  later, so cutting first scored one timed-out read as 0 of 5. Waits at
+   *  most EPISODE_SETTLE_CAP_MS past the window. */
+  settleAt?: (nodeId: number | null) => number | null,
+): { toOpen: { nodeId: number | null; kind: SymptomKind }[]; toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number; closeAt: number; heldForProbe: boolean }[] } {
   const epKey = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
   // A symptom is "live" (must NOT resolve) whenever it is present — INCLUDING
   // when it is merely subsumed under a mesh event. Subsumption demotes the
@@ -1721,15 +1732,21 @@ export function planEpisodeLifecycle(
     if (s.subsumedBy != null) continue;
     if (!openSet.has(epKey(s.nodeId, s.kind))) toOpen.push({ nodeId: s.nodeId, kind: s.kind });
   }
-  const toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number }[] = [];
+  const toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number; closeAt: number; heldForProbe: boolean }[] = [];
   for (const ep of openEpisodes) {
     if (live.has(ep.key)) continue;
     const since = pending.get(ep.key) ?? now;
     pending.set(ep.key, since);
     const held = holdUntil?.(ep.nodeId) ?? null;
     const start = held == null ? since : Math.max(since, held);
-    if (now - start >= confirmMs) {
-      toResolve.push({ nodeId: ep.nodeId, kind: ep.kind, key: ep.key, absentSinceMs: since });
+    const settle = settleAt?.(ep.nodeId) ?? null;
+    const settled = settle == null || now >= settle || now - start >= confirmMs + EPISODE_SETTLE_CAP_MS;
+    if (now - start >= confirmMs && settled) {
+      // closeAt is the NOMINAL close (v0.75.3 review). When the close waited
+      // for a probe to settle (heldForProbe), the after-window keeps its start
+      // there, so the burst's first read is never aged out of it.
+      const closeAt = start + confirmMs;
+      toResolve.push({ nodeId: ep.nodeId, kind: ep.kind, key: ep.key, absentSinceMs: since, closeAt, heldForProbe: settle != null && settle > closeAt });
       pending.delete(ep.key);
     }
   }
