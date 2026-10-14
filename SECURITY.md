@@ -118,7 +118,17 @@ seriously.
   (`ws://core-zwave-js:3000`) is used **strictly read-only**, behind a closed
   four-command allowlist — `set_api_schema`, `start_listening`, and the
   log-stream pair `start_listening_logs` / `stop_listening_logs` — and is
-  **never proxied or re-exposed** to the TUI, ingress, or logs. None of the four
+  **never proxied or re-exposed** to the TUI, ingress, or the add-on's log. The
+  one place its log lines are kept is the durable log archive (v0.75.4): local
+  daily files in the add-on's own config folder, readable by whoever can read
+  that folder (the SSH add-on, for instance), excluded from backups, and
+  **redacted before they are written**. zwave-js already masks lock user
+  codes, admin codes, credentials and PINs in its own lines; the archive cuts
+  them again, along with Entry Control keypad event data (which zwave-js masks
+  only for Enter), DSKs, key-shaped hex strings and tokens, including where
+  zwave-js's 80-column wrap splits one across two lines.
+  `log_archive_driver: false` keeps only the add-on's own log; `log_archive_days:
+  0` turns the archive off. None of the four
   transmits over RF: the log pair toggles this client's own receive flag and
   nothing more. One cross-client property is worth naming rather than leaving
   implicit — zwave-js-server's log forwarder is a *single global transport*
@@ -136,7 +146,8 @@ seriously.
   to a node (v0.26), the controller turning its radio off and on around the
   nightly NVM backup (v0.65.0), and, since v0.74.0, a duplicate S2 frame dropped
   from a node. A match keeps only the node id (or the radio's off/on) and the
-  time. The line text is never logged or stored, and nothing new is sent.
+  time. The matcher logs and stores none of the line text, and nothing new is
+  sent; the archive above is the only place the text is kept.
 - **Trust model.** Access over the Home Assistant sidebar (ingress) is already
   HA-authenticated, and the panel is **admin-only** (`panel_admin: true`) — with
   write actions on, the console can remove a failed node, rebuild every route and

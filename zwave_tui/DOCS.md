@@ -138,7 +138,9 @@ DRIVER_SCHEMA_MIN = 32   DRIVER_SCHEMA_MAX = 41
   `statistics updated` events for `backgroundRSSI` and `lastSeen`, plus driver
   `logging` events matched client-side for S2 resyncs (v0.26) and the
   controller's `Turning RF off` / `Turning RF on` (v0.65.0) and duplicate S2
-  frames dropped from a node (v0.74.0), their payloads never stored. Node flags come from the dump and from a node's `ready` event
+  frames dropped from a node (v0.74.0) — and, with the durable log archive on
+  (v0.75.4, §12.9), every logging event written, redacted, to the add-on's own
+  config folder. Node flags come from the dump and from a node's `ready` event
   (v0.73.1). For sleeping nodes only, the one value that declares a node's
   report interval is read from the dump, the `ready` event and that value's
   `value added` / `value updated` events (v0.73.0). Every other event type is
@@ -148,8 +150,10 @@ DRIVER_SCHEMA_MIN = 32   DRIVER_SCHEMA_MAX = 41
   need it dormant — the add-on never fails to start because of this client
   (tenet 5: *collapse method, never measurement*).
 - **Never proxied or re-exposed**: not to the TUI, not to ingress, not verbatim
-  to logs (log types/counts, never payloads; `redactUrl`/`safeTag`/`saneNodeId`
-  sanitize everything).
+  to the add-on's own log (log types/counts, never payloads; `redactUrl`/`safeTag`/`saneNodeId`
+  sanitize everything). The one place driver log lines are kept is the durable
+  log archive (v0.75.4, §12.9): a local file in the add-on's config folder,
+  redacted before it is written, off with `log_archive_driver: false`.
 
 | | HA Core WS (Surface A) | Driver WS (Surface B) |
 | --- | --- | --- |
@@ -1963,8 +1967,10 @@ are optional on disk: from a pre-v0.26 snapshot the fine `dS2Resync` revives as
 `null` (unknown) and the coarse `s2` as `0`, so the schema version does not
 change and an upgrade loses no history.
 
-The message text itself is **never stored or logged** — only matched. It is
-server-sent data, and §6.6's payload-safety rule applies unchanged.
+The matcher **never stores or logs** the message text — it only matches it. It
+is server-sent data, and §6.6's payload-safety rule applies unchanged. The one
+place driver log lines are kept is the durable log archive (§12.9), redacted
+before they are written.
 
 ---
 
@@ -3793,6 +3799,8 @@ authRequired = !!auth?.enabled && (!trusted || !!auth?.requireOnIngress)
 - The final return is `byName.has(username) && ok`, so the dummy path can never authenticate even on an astronomically unlikely scrypt collision.
 - It uses async `crypto.scrypt` (via `scryptAsync`), never `scryptSync`, so credential checking **never blocks the single Node event loop**. The comparison is `timingSafeEqual`.
 
+A failed login is logged as `auth: login FAILED for "<user>" from <peer> (n/max)` only when `knows(user)` says the name is configured; any other text in the username field is logged as `an unknown username` (v0.75.4). A password typed into the wrong field must not reach the log, which the durable archive (§12.9) keeps for days. `knows()` is called after `verify()` and decides nothing, so it changes no response timing.
+
 `parseUsers(json)` tolerates malformed input: non-JSON or non-array → `[]`; each entry needs a non-empty trimmed `username` **and a non-empty `password`**. Before v0.24.3 only the username was checked, so a row with a blank password became a real account whose password was `""` — and because `hasUsers()` then returned true, the fail-closed "no users configured" branch never ran.
 
 #### Shared per-peer backoff
@@ -4324,13 +4332,16 @@ auth.enabled:            process.env.AUTH_ENABLED          === '1',     // absen
 auth.requireOnIngress:   process.env.AUTH_REQUIRE_ON_INGRESS === '1',   // absent ⇒ OFF
 autoPing.enabled:        process.env.AUTO_PING_ENABLED     === '1',     // absent ⇒ OFF (fail-closed, v0.30)
 refreshTrial.enabled:    process.env.REFRESH_TRIAL_ENABLED === '1',     // absent ⇒ OFF (fail-closed, v0.75.0)
+logArchive.driver:       process.env.LOG_ARCHIVE_DRIVER    !== '0',     // absent ⇒ ON  (v0.75.4; moot: absent LOG_ARCHIVE_DAYS ⇒ archive off)
 ```
 
 Write-actions, the login gate, auto-ping and the refresh trial default **off** when their env var
-is missing; telnet defaults **on**. That asymmetry is intentional: a forgotten
+is missing; telnet and the archive's driver stream default **on** (the archive
+itself is off without `LOG_ARCHIVE_DAYS`, so a missing driver flag archives
+nothing). That asymmetry is intentional: a forgotten
 `WRITE_ACTIONS_ENABLED` leaves the add-on a read-only monitor, while a forgotten
 `TELNET_ENABLED` still serves the TUI. Because the run script *always* exports
-`1`/`0` for all six, the code-side default only ever binds in bare-metal dev; in
+`1`/`0` for all seven, the code-side default only ever binds in bare-metal dev; in
 the add-on the exported value wins. The comment "OMITTING the export entirely
 makes the option DEAD (server only ever sees its code default)" is the invariant
 that keeps the two ends in lock-step.
@@ -4359,6 +4370,9 @@ experiment, not an admission.
 | `auto_ping_stale_min` | `120` | `int(0,1440)` | `AUTO_PING_STALE_MS` (run script ×60000) | `config.autoPing.staleMs` | Liveness sweep cadence: each listening non-Dead node is probed once per this interval, chatty or not — by one routed read since v0.71.0, a NoOp ping where it has no switch/light value; `0` disables the liveness lane. One probe per tick, stalest first. |
 | `driver_ws_url` | `ws://core-zwave-js:3000` | `str?` | `DRIVER_WS_URL` | `config.driverWsUrl` (`\|\| null`) | **Empty ⇒ disabled.** Strictly read-only telemetry. |
 | `ha_ws_url` | `ws://supervisor/core/websocket` | `str?` | `HA_WS_URL` | `config.haWsUrl` | Override to point at a different HA Core WS. Never the driver socket (that is `driver_ws_url`): the data layer speaks HA's `zwave_js/*` commands, which zwave-js-server does not serve. |
+| `log_archive_days` | `14` | `int(0,60)` | `LOG_ARCHIVE_DAYS` | `config.logArchive.days` | Days the durable log archive keeps, today included (§12.9); `0` turns it off. Absent env ⇒ `0` (off). |
+| `log_archive_driver` | `true` | `bool` | `LOG_ARCHIVE_DRIVER` (numeric-bool) | `config.logArchive.driver` | Also archive the Z-Wave JS driver's log stream, redacted (§12.9). Off keeps only the add-on's own log. |
+| `log_archive_max_mb` | `200` | `int(10,2000)` | `LOG_ARCHIVE_MAX_MB` | `config.logArchive.maxBytes` | The archive's size cap; the oldest whole files go first, today's never. Clamped to the schema range. |
 | `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. Since v0.50.0 lines at `warn` and above are prefixed with their level (see §12.9); `info` stays bare. |
 | `refresh_interval` | `2` | `int(1,30)` | `REFRESH_INTERVAL_MS` | `config.refreshMs` | **seconds → ms**: run script does `* 1000`. Cheap render/roster cadence. |
 | `refresh_trial_enabled` | `false` | `bool` | `REFRESH_TRIAL_ENABLED` (numeric-bool) | `config.refreshTrial.enabled` | The pre-registered refresh trial (§11.14). Also requires `write_actions_enabled` and auto-ping running unsuppressed; sends nothing otherwise. A start with it off clears a kill latch. |
@@ -4418,7 +4432,14 @@ export BASELINES_PATH=/data/baselines.json# M3 learned per-node normals
 export OUTCOMES_PATH=/data/outcomes.json  # M5 action-efficacy ledger
 export AUTONOMY_PATH=/data/autonomy.json  # v0.72.0 the autonomy pause (§11.12)
 export TRIAL_PATH=/data/refresh_trial.json # v0.75.0 the refresh trial (§11.14)
+export LOG_ARCHIVE_DIR=/config/logs       # v0.75.4 the durable log archive (§12.9)
 ```
+
+`/config` is the add-on's `addon_config` folder (mapped since v0.75.4;
+`/addon_configs/<slug>` on the host, which the SSH add-on can read). Only the
+log archive lives there, and `backup_exclude: ["logs/*"]` keeps it out of every
+backup — the Supervisor applies an app's exclude patterns to both its `/data`
+and its config folder.
 
 `/data/autonomy.json` differs from the stores above in one respect: it is
 written only when the pause changes (TUI pause/resume, or a new reading of the
@@ -4602,7 +4623,7 @@ Five workflows guard and publish the project. Two gate every change:
    Security tab, and `.github/scripts/check-sarif.mjs` fails the job on
    actionable findings, because an upload alone does not fail a build.
 
-**Runners (v0.75.3).** Every job runs on a pinned image, never `ubuntu-latest`: `ubuntu-26.04`, with both image builds on native runners (`ubuntu-26.04-arm` for aarch64), except CodeQL, which stays on `ubuntu-24.04` because CodeQL's system requirements list Ubuntu 22.04 and 24.04 only. `ubuntu-latest` itself moves to 26.04 in a rollout from 2026-10-19 that would have changed python3, Docker, the docs job's pandoc and LibreOffice and the AppArmor job's `apparmor_parser` (5.0.2 on 26.04) under every job at once, and could mix images within one run. `test/workflowRunners.test.ts` holds the rule.
+**Runners (v0.75.3; CodeQL v0.75.4).** Every job runs on a pinned image, never `ubuntu-latest`: `ubuntu-26.04`, with both image builds on native runners (`ubuntu-26.04-arm` for aarch64). CodeQL followed in v0.75.4: its published system requirements still list Ubuntu 22.04 and 24.04 only, but its analysis runs on 26.04 — the move's own run passed with no platform warning — and the required check fails closed if a later release stops working. `ubuntu-latest` itself moves to 26.04 in a rollout from 2026-10-19 that would have changed python3, Docker, the docs job's pandoc and LibreOffice and the AppArmor job's `apparmor_parser` (5.0.2 on 26.04) under every job at once, and could mix images within one run. `test/workflowRunners.test.ts` holds the rule.
 
 Three form the release relay:
 
@@ -4737,6 +4758,59 @@ HA Core, the Z-Wave JS integration and driver, the Supervisor, and the physical
 radio.
 
 ### 12.9 The container-log contract
+
+> **The durable log archive (v0.75.4, `logArchive.ts`).** HAOS fixes the host
+> journal at 500 MB (`SystemMaxUse=500M` in its read-only
+> `/etc/systemd/journald.conf`, with no persisted drop-in), and the busiest
+> writer on the host decides how far back it reaches — about 41 h on the
+> reference host. So the add-on also keeps its own logs:
+>
+> - **What:** every line this add-on logs (`zwave-tui-YYYY-MM-DD.log`) and, with
+>   `log_archive_driver` on, every driver `logging` event from the driver
+>   WebSocket at the driver's own log level (`zwave-js-YYYY-MM-DD.log`), each
+>   line prefixed with its UTC ISO time. The logger is created after the
+>   archive, so the boot sequence is in it; shutdown flushes it, and the fatal
+>   path writes it synchronously so the line that explains a crash is kept.
+> - **Where:** `/config/logs` in the container, `/addon_configs/<slug>/logs` on
+>   the host — readable over SSH without docker or protection-mode changes.
+>   `ls /addon_configs/*zwave_tui/logs`, `zcat`/`zgrep` for finished days.
+> - **How long:** `log_archive_days` (default 14, today included; `0` = off).
+>   Finished days are gzipped hourly; files older than the window are deleted;
+>   past `log_archive_max_mb` (default 200) the oldest whole files go first, and
+>   today's never. Lines are buffered and appended every 2 s.
+> - **Secrets:** zwave-js masks lock user codes, admin codes, credentials and
+>   PINs in its CC log entries (`****`) and does not log a change of any value
+>   it marks `secret`. The archive redacts again as a second layer, for
+>   whatever a driver version, a CC or a line shape lets through: everything
+>   after `userCode[n]`, `adminCode`, `credential[n]` or `adminPinCode` is cut
+>   (in both the driver's and zwave-js-server's line shapes); a
+>   `[User Code]`/`[User Credential]` line with any other property keeps only
+>   its tags; an `EntryControlCCNotification` loses everything after
+>   `event data:` (zwave-js masks it only for Enter and cached keys, and a
+>   keypad can send the typed PIN with arm and disarm); and SmartStart DSKs,
+>   128-bit key-shaped hex strings, JWTs and bearer tokens are replaced.
+>   zwave-js cuts its text at 80 columns wherever the column falls, mid-token
+>   included, so every pattern is matched both in the text as written and with
+>   the wraps joined. The storm guard (§6.11) still stops the stream above 3000
+>   lines a minute, and a stopped stream archives nothing.
+> - **Failure:** writes count their bytes, so one that fails part-way resumes
+>   at the byte where it stopped and nothing is written twice. Unwritten lines
+>   are held one by one (up to 1 MiB per stream, oldest dropped and counted),
+>   the failure is reported once per 10 minutes on stdout, and the next flush
+>   retries; the first write that succeeds records exactly how many lines were
+>   dropped. A folder removed under a running add-on is made again. An uncaught
+>   throw or rejection files its stack and writes the buffer
+>   (`uncaughtExceptionMonitor`, which leaves Node's own exit unchanged); the
+>   shutdown backstop and the fatal path also write what a flush had taken and
+>   not yet written, ahead of the line that explains the exit.
+> - **Late lines and odd clocks:** a line held through a failing write past
+>   midnight joins the day already compressed as one more gzip member (`zcat`
+>   reads members in order), and a `.gz.tmp` a crash left behind is deleted. A
+>   file dated after today, from a clock that ran ahead, cannot age out, so the
+>   size cap reaches it after the past days instead of never.
+> - **Backups:** excluded (`backup_exclude: ["logs/*"]`). A restore of this
+>   add-on replaces its whole config folder with the backup's copy, so the
+>   archive starts empty again; uninstalling with its data removed deletes it.
 
 `logger.ts` writes to stdout, which is what `ha apps logs` and
 `journalctl` surface. Every line is `[zwave-tui] ` followed, for severities

@@ -33,13 +33,29 @@ import { buildStates, startHaStates, ENTITY_DEGRADED, HA_STATE_PUBLISH_MS } from
 import { NodeStatus, type LogEvent } from './types';
 import { appArmorLabel } from './securityLabel';
 import { createRefreshTrial, trialHandle, type RefreshTrial } from './zwave/refreshTrial';
+import { createLogArchive } from './logArchive';
 
 /* ── logging ─────────────────────────────────────────────────────────────
  * One sink for the data layer, provider and transports — now honouring the
  * `log_level` option, which until v0.25.0 was parsed and then read by nobody
  * (see logger.ts). Still callable as `log(msg)` for the informational stream;
  * `log.warn` / `log.error` survive a raised threshold. */
-const log = createLogger(config.logLevel);
+/* ── durable log archive (v0.75.4, logArchive.ts) ─────────────────────────
+ * Created BEFORE the logger, so the boot sequence is archived too. Every line
+ * the logger writes goes to stdout (the journal) and to the archive; its own
+ * warnings go straight to stdout, so they can never loop back into it. */
+const archive = createLogArchive({ ...config.logArchive });
+const log = createLogger(config.logLevel, (line) => {
+  process.stdout.write(line);
+  archive.tui(line);
+});
+// An uncaught throw or rejection: Node prints it to stderr and exits, which the
+// archive never sees. The monitor changes nothing about that exit; it only
+// files the stack and writes what is buffered first.
+process.on('uncaughtExceptionMonitor', (e, origin) => {
+  archive.tui(`[zwave-tui] FATAL: ${origin}: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+  archive.flushSync();
+});
 
 async function main(): Promise<void> {
   /** When this run began (v0.72.0): symptom dwell state is in memory, so the
@@ -65,6 +81,7 @@ async function main(): Promise<void> {
   // 2) Z-Wave data layer — entry-id auto-discovery + network_status roster poll.
   const zwaveData = createZwaveData({
     client,
+    onDriverLog: (ev) => archive.driver(ev),
     entryId: config.entryId,
     refreshMs: config.refreshMs,
     routePollMs: config.routePollMs,
@@ -264,6 +281,13 @@ async function main(): Promise<void> {
   });
   trialRef = trial;
   zwaveData.attachRefreshTrial(trial, { writeActions: config.writeActions, operatorBusy: () => actions.operatorActionInFlight() != null });
+  {
+    const la = archive.status();
+    log(la.enabled
+      ? `log archive: ${la.days} days, ≤${Math.round(la.maxBytes / 1_048_576)} MB, in ${la.dir} (/addon_configs/<slug>/logs on the host) — ` +
+        (la.driver ? 'the add-on log and the Z-Wave JS driver log stream, secrets redacted' : 'the add-on log only (log_archive_driver off)')
+      : 'log archive: off (log_archive_days 0)');
+  }
   if (!config.refreshTrial.enabled) log('refresh trial: off (refresh_trial_enabled)');
   else if (!config.writeActions || !autoPing) log.warn('refresh trial: enabled, but it also needs write_actions_enabled and auto-ping running — it will not decide anything');
   else log('refresh trial: ENABLED — rtt-degraded episodes live ≥10m on mains nodes whose refresh adds to the probe are randomized 50/50 between one refresh values and nothing, 09:00–20:00, ≤1/node/day, ≤2/h, ≤6/day; pause with Z on ENGINE');
@@ -419,9 +443,10 @@ async function main(): Promise<void> {
     try { stopProvider(); } catch { /* ignore */ }
     try { zwaveData.stop(); } catch { /* ignore */ }
     try { client.stop(); } catch { /* ignore */ }
-    app.close().finally(() => process.exit(0));
-    // Hard backstop if Fastify hangs on close.
-    setTimeout(() => process.exit(0), 3000).unref();
+    // The archive is flushed before exit, so a restart's last lines are kept.
+    Promise.allSettled([app.close(), archive.close()]).finally(() => process.exit(0));
+    // Hard backstop if Fastify hangs on close: what is buffered is written synchronously.
+    setTimeout(() => { archive.flushSync(); process.exit(0); }, 3000).unref();
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
@@ -436,5 +461,6 @@ main().catch((e: unknown) => {
   // recommends — leaving only the s6 restart banner repeating. The rendered
   // bytes are unchanged: `emit` writes the `FATAL: ` tag itself.
   log.fatal(msg);
+  archive.flushSync(); // the line that explains a crash loop is the one to keep
   process.exit(1);
 });

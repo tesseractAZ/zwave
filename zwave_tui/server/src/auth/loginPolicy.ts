@@ -51,6 +51,9 @@ export interface AuthPolicy {
   idleLockMs: number;
   /** At least one usable user configured? */
   hasUsers(): boolean;
+  /** Is this a configured username? For the log line only — never for a
+   *  decision, and only after `verify()`, so it changes no response timing. */
+  knows(username: string): boolean;
   /** Constant-cost async credential check (always runs exactly one scrypt). */
   verify(username: string, password: string): Promise<boolean>;
   /** Remaining backoff (ms) before `peer` may attempt a login again (0 = now). */
@@ -157,6 +160,7 @@ export function createAuthPolicy(cfg: AuthPolicyConfig): AuthPolicy {
     maxAttempts,
     idleLockMs: idleLockMin * 60_000,
     hasUsers: () => byName.size > 0,
+    knows: (username) => byName.has(username),
 
     verify: async (username, password) => {
       const stored = byName.get(username) ?? dummyHash;

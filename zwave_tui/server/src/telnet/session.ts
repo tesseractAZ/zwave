@@ -382,7 +382,10 @@ export class TuiSession {
     // NOT registerFailure() again — the attempt was already charged before the
     // await. Counting it twice here would halve the real attempt budget.
     this.loginAttempts += 1;
-    this.log(`auth: login FAILED for "${user}" from ${this.peer} (${this.loginAttempts}/${this.auth.maxAttempts})`);
+    // The account is named only when it is one: a password typed into the
+    // username field must not reach the log, which the archive keeps for days.
+    const who = this.auth.knows(user) ? `"${user}"` : 'an unknown username';
+    this.log(`auth: login FAILED for ${who} from ${this.peer} (${this.loginAttempts}/${this.auth.maxAttempts})`);
     this.resetLogin();
     if (this.loginAttempts >= this.auth.maxAttempts) {
       this.loginError = 'Too many failed attempts.';

@@ -41,9 +41,9 @@ test('write-locks use "wl" on the shipped trees, never "wal" (v0.74.4)', () => {
   assert.ok(!rules.some((r) => /\bdeny\b.*\s[rwlkmix]*a[rwlkmix]*w|\bdeny\b.*\s[rwlkmix]*w[rwlkmix]*a/.test(r.replace(/[{}*,/]/g, ' '))), 'a mask holding both a and w is rejected by the parser');
 });
 
-test('no deny touches the PID1 trees, /run, /tmp or /data (v0.74.4)', () => {
+test('no deny touches the PID1 trees, /run, /tmp, /data or /config (v0.74.4; /config since v0.75.4, the log archive)', () => {
   const denies = rules.filter((r) => /\bdeny\b/.test(r));
-  for (const tree of ['/command', '/package', '/etc/s6-overlay', '/run', '/tmp', '/data']) {
+  for (const tree of ['/command', '/package', '/etc/s6-overlay', '/run', '/tmp', '/data', '/config']) {
     assert.ok(!denies.some((r) => r.includes(` ${tree}`)), `a deny on ${tree} risks an invisible init crash-loop or breaks the stores`);
   }
 });

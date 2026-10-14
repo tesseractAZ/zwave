@@ -149,7 +149,7 @@ test('concurrent sessions all contend for ONE backoff counter', async () => {
     maxAttempts: 3,
     requireOnIngress: false,
     idleLockMs: 0,
-    hasUsers: () => true,
+    hasUsers: () => true, knows: () => true,
     blockedMsFor: () => 0,
     registerFailure: (p: string) => { charged.push(p); },
     registerSuccess: () => { charged.length = 0; },
@@ -197,6 +197,35 @@ test('concurrent sessions all contend for ONE backoff counter', async () => {
   );
   assert.deepEqual(charged, ['10.0.0.1', '10.0.0.2', '10.0.0.3', '10.0.0.4'],
     'each peer must be charged exactly once');
+});
+
+test('a failed login names the account only when it is one — never the text typed into the username field', async () => {
+  const { TuiSession } = await import('../src/telnet/session');
+  const lines: string[] = [];
+  const policy = {
+    enabled: true, maxAttempts: 5, requireOnIngress: false, idleLockMs: 0,
+    hasUsers: () => true, knows: (u: string) => u === 'admin',
+    blockedMsFor: () => 0, registerFailure: () => {}, registerSuccess: () => {},
+    verify: async () => false,
+  };
+  const s = new TuiSession({
+    write: () => {}, data: mockData({ nodes: [mkNode()] }), auth: policy as never,
+    peer: '10.0.0.9', log: (m: string) => lines.push(m), width: 100, height: 30,
+  } as never);
+  const attempt = async (user: string) => {
+    for (const ch of user) s.feed([{ type: 'char', ch }]);
+    s.feed([{ type: 'enter' }]);
+    for (const ch of 'x') s.feed([{ type: 'char', ch }]);
+    s.feed([{ type: 'enter' }]);
+    for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+  };
+  await attempt('hunter2-my-password');
+  await attempt('admin');
+  const failed = lines.filter((l) => l.includes('login FAILED'));
+  assert.equal(failed.length, 2);
+  assert.match(failed[0], /login FAILED for an unknown username from 10\.0\.0\.9/);
+  assert.ok(!lines.some((l) => l.includes('hunter2')), 'the typed text is never logged');
+  assert.match(failed[1], /login FAILED for "admin" from/);
 });
 
 test('the write-token gate is GONE, not merely unused', () => {

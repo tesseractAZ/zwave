@@ -145,7 +145,7 @@ test('log_level actually reaches a consumer', () => {
   const index = read('server/src/index.ts');
   assert.match(
     index,
-    /createLogger\(config\.logLevel\)/,
+    /createLogger\(config\.logLevel[,)]/,
     'config.logLevel is parsed but never handed to a logger — dead config again',
   );
 });
@@ -490,4 +490,26 @@ test('the HA publisher is told the master gate and the boot time (v0.72.0)', () 
   const idx = read('server/src/index.ts');
   assert.match(idx, /writeActions: config\.writeActions,\n\s+startedAt: bootedAt,/, 'startHaStates gets both');
   assert.match(idx, /\+ 5 sensors every/);
+});
+
+test('the log archive is wired end to end: options → run script → config → the logger, the driver stream, shutdown, the fatal path and an uncaught throw (v0.75.4)', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const read = (p: string) => readFileSync(resolve(here, p), 'utf8');
+  const yamlTxt = read('../../config.yaml');
+  assert.match(yamlTxt, /^map:\n  - data:rw\n(?:  #.*\n)*  - addon_config:rw$/m, 'the add-on config folder is mapped (at /config)');
+  assert.match(yamlTxt, /^backup_exclude:\n  - "logs\/\*"$/m, 'and the archive kept out of backups');
+  const run = read('../../rootfs/etc/services.d/zwave-tui/run');
+  assert.match(run, /^export LOG_ARCHIVE_DIR=\/config\/logs$/m);
+  assert.match(run, /^export LOG_ARCHIVE_DAYS="\$\(bashio::config 'log_archive_days'\)"$/m);
+  assert.match(run, /^export LOG_ARCHIVE_MAX_MB="\$\(bashio::config 'log_archive_max_mb'\)"$/m);
+  assert.match(run, /bashio::config\.true 'log_archive_driver'; then\n  export LOG_ARCHIVE_DRIVER=1\nelse\n  export LOG_ARCHIVE_DRIVER=0/);
+  const idx = read('../src/index.ts');
+  assert.match(idx, /const archive = createLogArchive\(\{ \.\.\.config\.logArchive \}\);\nconst log = createLogger\(config\.logLevel, \(line\) => \{\n  process\.stdout\.write\(line\);\n  archive\.tui\(line\);/,
+    'created before the logger, and every logged line reaches it');
+  assert.match(idx, /onDriverLog: \(ev\) => archive\.driver\(ev\),/, 'the driver stream reaches it');
+  assert.match(idx, /Promise\.allSettled\(\[app\.close\(\), archive\.close\(\)\]\)/, 'flushed on shutdown');
+  assert.match(idx, /log\.fatal\(msg\);\n  archive\.flushSync\(\);/, 'and on the fatal path');
+  assert.match(idx, /process\.on\('uncaughtExceptionMonitor', \(e, origin\) => \{\n  archive\.tui\([^\n]*\);\n  archive\.flushSync\(\);\n\}\);/, 'and on an uncaught throw or rejection, without changing how it exits');
+  const zd = read('../src/zwave/zwaveData.ts');
+  assert.match(zd, /callbacks: \{\n            onDriverLog: opts\.onDriverLog,/, 'the data layer hands the stream to the driver client');
 });

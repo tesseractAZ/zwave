@@ -445,6 +445,29 @@ test('log stream: subscribed after live, S2 events attributed, non-S2 dropped, r
   }
 });
 
+test('every driver logging event reaches the archive callback — but not once the storm guard has stopped the stream (v0.75.4)', async () => {
+  const srv = await mockServer();
+  const seen: Record<string, unknown>[] = [];
+  const client = createDriverWsClient({ url: srv.url, callbacks: { onDriverLog: (ev) => seen.push(ev) }, reconnectBaseMs: 60 });
+  client.start();
+  try {
+    await waitFor(() => srv.commands.includes('start_listening_logs'));
+    srv.push(logEvent(60, 'Value updated: 112-0-8 0 => 3'));
+    await waitFor(() => seen.length === 1);
+    assert.equal(seen[0].event, 'logging', 'the event itself, for the archive to format and redact');
+    for (let i = 0; i < 3005; i++) srv.push(logEvent(6, 'SERIAL » 0x01…'));
+    await waitFor(() => srv.commands.includes('stop_listening_logs'));
+    const atStop = seen.length;
+    srv.push(logEvent(60, 'after the stop'));
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(seen.length, atStop, 'a stopped stream archives nothing more');
+    assert.ok(atStop <= 3001, `at most the metered allowance reached the archive (${atStop})`);
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
 test('log-stream storm guard: a hot stream stops OUR subscription and stays quiet until reconnect', async () => {
   const srv = await mockServer();
   const { got, callbacks } = collect();

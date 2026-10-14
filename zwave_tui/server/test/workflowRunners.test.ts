@@ -1,7 +1,8 @@
 /**
  * Every job runs on a PINNED runner image, never a moving `-latest` label (v0.75.3).
  *
- * Every job moved to Ubuntu 26.04 in one commit; CodeQL stays on 24.04 (below).
+ * Every job moved to Ubuntu 26.04 in one commit (v0.75.3); CodeQL followed in
+ * v0.75.4 (below).
  *
  * `ubuntu-latest` moves to Ubuntu 26.04 in a rollout from 2026-10-19 to 2026-11-19
  * (actions/runner-images#14748). That one move changes python3 and Docker under every
@@ -58,20 +59,18 @@ test('every runner is a pinned image (ubuntu-YY.MM[-arm]), never a moving -lates
   assert.deepEqual(bad.map((l) => `${l.file}:${l.line} ${l.key}: ${l.value}`), []);
 });
 
-// CodeQL's system requirements (codeql.github.com/docs/codeql-overview/system-requirements)
-// list Ubuntu 22.04 and 24.04 on 2026-10-12. codeql.yml is the repository's only CodeQL
-// analysis and a required check, so it stays on a listed image while the other workflows
-// move on; extend this set in the same commit that moves it, once CodeQL lists 26.04.
-const CODEQL_SUPPORTED = new Set(['ubuntu-22.04', 'ubuntu-24.04']);
-
-test('CodeQL runs on an image CodeQL supports; every other job is on Ubuntu 26.04 (native ARM on -arm)', () => {
+// Every job, CodeQL included, on 26.04 (v0.75.4). CodeQL's published system
+// requirements (codeql.github.com/docs/codeql-overview/system-requirements)
+// still list Ubuntu 22.04 and 24.04 only on 2026-10-13, but it runs on 26.04:
+// the move's trial analysis passed there with no platform warning, and the
+// required CodeQL check fails closed if a later release stops working.
+test('every job, CodeQL included, is on Ubuntu 26.04 (native ARM on -arm)', () => {
   const all = labels();
   const codeql = all.filter((l) => l.file === 'codeql.yml' && l.key === 'runs-on');
   assert.ok(codeql.length > 0, 'codeql.yml has a runs-on line');
-  assert.deepEqual(codeql.filter((l) => !CODEQL_SUPPORTED.has(l.value)).map((l) => `${l.line} ${l.value}`), []);
-  const rest = all.filter((l) => l.file !== 'codeql.yml' && PINNED.test(l.value));
-  assert.ok(rest.length >= 11, `${rest.length} pinned labels outside codeql.yml`);
-  assert.deepEqual(rest.filter((l) => !/^ubuntu-26\.04(?:-arm)?$/.test(l.value)).map((l) => `${l.file}:${l.line} ${l.value}`), []);
+  const pinned = all.filter((l) => PINNED.test(l.value));
+  assert.ok(pinned.length >= 12, `${pinned.length} pinned labels`);
+  assert.deepEqual(pinned.filter((l) => !/^ubuntu-26\.04(?:-arm)?$/.test(l.value)).map((l) => `${l.file}:${l.line} ${l.value}`), []);
   // Both image builds run natively: each arch's runner matches its platform.
   for (const file of ['ci.yml', 'publish-release.yml']) {
     const txt = readFileSync(resolve(DIR, file), 'utf8');

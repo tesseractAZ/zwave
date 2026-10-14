@@ -128,6 +128,27 @@ configuration:
       days stops the trial until the add-on is started with this off. Press Z on
       the ENGINE screen to pause it with everything else. Running the trial
       admits nothing: a pass only makes an automatic refresh reviewable.
+  log_archive_days:
+    name: Logs · Archive days
+    description: >-
+      Days of logs kept in the add-on's own archive, today included (0 turns it
+      off). The host's journal holds only about a day and a half of every app's
+      log; this archive keeps the add-on's log and the Z-Wave JS driver's log
+      stream for longer, in daily files in the add-on's config folder
+      (/addon_configs/<this add-on's slug>/logs, readable over SSH). Finished
+      days are gzipped, and the folder is excluded from backups.
+  log_archive_max_mb:
+    name: Logs · Archive size cap (MB)
+    description: >-
+      The most disk the archive may use. Past it, the oldest whole files are
+      deleted first; today's files never are.
+  log_archive_driver:
+    name: Logs · Archive the Z-Wave JS driver log
+    description: >-
+      Also keep the Z-Wave JS driver's log stream (at the driver's own log
+      level), not just this add-on's log. Lock user codes, admin codes and PINs,
+      SmartStart DSKs, key-shaped hex strings and tokens are redacted before
+      anything is written. Off keeps only the add-on's own log.
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled:
     name: Access · Enable telnet TUI
