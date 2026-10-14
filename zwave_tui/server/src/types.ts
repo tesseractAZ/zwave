@@ -200,6 +200,7 @@ export type LogKind =
 import type { IdentityChoice, IdentityDecision } from './zwave/homeTag';
 import type { Symptom, SymptomKind } from './zwave/symptoms';
 import type { AutoPingSnapshot } from './zwave/autoPing';
+import type { TrialView } from './zwave/refreshTrial';
 import type { SleeperWatch } from './zwave/missedReport';
 import type { PauseState } from './zwave/autonomyPause';
 import type { ActorArmView, LiveSpanView } from './zwave/outcomes';
@@ -553,6 +554,9 @@ export interface DataProvider {
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   /** Auto-ping's live runtime state (v0.41), or null when the feature is off. */
   autoPingState(): AutoPingSnapshot | null;
+  /** The refresh trial's state (v0.75.0), null when none is attached.
+   *  Optional so the screen fixtures need not grow it. */
+  refreshTrial?(now?: number): TrialView | null;
   /** Driver-WS lifecycle, one line (v0.43.0). The accessor existed since the
    *  client shipped and NOTHING read it, so a dormant, wedged or
    *  schema-mismatched driver socket — the source of bgRSSI, S2 resync
@@ -819,7 +823,8 @@ export interface ActionRunner {
   routedRead(nodeId: number, purpose?: 'revive' | 'probe'): Promise<ActionResult>;
   /** `origin` on every learned verb (v0.72.0): the ledger keeps an arm per
    *  actor, and a verb with no origin could only ever be booked to the operator. */
-  refreshValues(nodeId: number, origin?: 'you' | 'engine'): Promise<ActionResult>;
+  /** `trial` (v0.75.0): the refresh trial's narrowed handle — see refreshTrial.ts. */
+  refreshValues(nodeId: number, origin?: 'you' | 'engine' | 'trial'): Promise<ActionResult>;
   reInterview(nodeId: number, origin?: 'you' | 'engine'): Promise<ActionResult>;
   healNode(nodeId: number, origin?: 'you' | 'engine'): Promise<ActionResult>;
   rebuildAll(origin?: 'you' | 'engine'): Promise<ActionResult>;

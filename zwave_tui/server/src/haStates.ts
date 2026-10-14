@@ -204,11 +204,18 @@ export function buildStates(data: DataProvider, now: number = Date.now(), bo: Bu
   // the alarm would flap; storm and no-capability raise degraded themselves.
   const pauseOverdue = pause != null && ap != null && ap.suppressed !== 'disabled' &&
     ap.suppressed !== 'write-actions-off' && data.autonomyPauseOverdue(now);
+  // The refresh trial (v0.75.0): one phase word and plain counts. A latch is
+  // degraded while the trial is switched on — it needs the owner, and nothing
+  // clears it on its own.
+  const tv = data.refreshTrial?.(now) ?? null;
+  const trialState = tv == null || !tv.enabled ? 'off' : tv.latch != null ? 'latched' : tv.phase;
+  const trialLatched = tv != null && tv.enabled && tv.latch != null;
   const degraded = summonsNodes.length > 0
     || crit > 0
     || ident != null
     || statsBlind
     || pauseOverdue
+    || trialLatched
     || (ap != null && (ap.suppressed === 'storm' || ap.suppressed === 'no-capability-data'));
 
   return [
@@ -259,7 +266,12 @@ export function buildStates(data: DataProvider, now: number = Date.now(), bo: Bu
               // overdue pause must not hide what the mesh is doing.
               : pauseOverdue && ap?.suppressed !== 'storm' && ap?.suppressed !== 'no-capability-data'
                 ? `automatic writes paused ${Math.round((now - pause!.since) / 3_600_000)}h (by ${pause!.by.join(' + ')}) — nothing checks the mesh`
-                : `auto-ping ${engineState}`,
+                // …and neither may a trial latch, which can sit for days (v0.75.0 review).
+                : trialLatched && ap?.suppressed !== 'storm' && ap?.suppressed !== 'no-capability-data'
+                  ? `refresh trial latched: ${tv!.latch!.reason} — ${tv!.latch!.clear === 'restart-with-option-off' ? 'start the add-on with refresh_trial_enabled off to clear'
+                    : tv!.latch!.clear === 'move-file-aside' ? 'move /data/refresh_trial.json aside to clear'
+                      : tv!.latch!.clear === 'set-trial-path' ? 'TRIAL_PATH is unset' : 'make /data writable'}`
+                  : `auto-ping ${engineState}`,
       },
     },
     {
@@ -304,6 +316,15 @@ export function buildStates(data: DataProvider, now: number = Date.now(), bo: Bu
         // with the clock.
         sleepers_watched: sleepers.filter((w) => w.watched).length,
         sleepers_total: sleepers.length,
+        // v0.75.0: the refresh trial — they move on a decision, a closure or
+        // the verdict, never with the clock.
+        refresh_trial: trialState,
+        refresh_trial_treated: tv?.treated.n ?? 0,
+        refresh_trial_treated_improved: tv?.treated.ok ?? 0,
+        refresh_trial_treated_deaths: tv?.treated.deaths ?? 0,
+        refresh_trial_held: tv?.held.n ?? 0,
+        refresh_trial_held_improved: tv?.held.ok ?? 0,
+        refresh_trial_held_deaths: tv?.held.deaths ?? 0,
       },
     },
     // ROUTE FAILURES (v0.68.0). Recorded per node since v0.3x and shown on the

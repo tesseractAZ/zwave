@@ -56,7 +56,6 @@ interface Fixture {
   baselines?: BaselineStore;
   controller?: ControllerSnapshot | null;
   now?: number;
-  hasRealNoise?: boolean;
   sleeperWatch?: (n: NodeSnapshot) => SleeperWatch | null;
   duplicateBursts?: (id: number) => { at: number; n: number }[];
 }
@@ -75,7 +74,6 @@ function input(f: Fixture): DetectInput {
     recordingSince: () => T - 30 * 86_400_000,
     sleeperWatch: (n) => f.sleeperWatch?.(n) ?? null,
     duplicateBursts: (id) => f.duplicateBursts?.(id) ?? [],
-    hasRealNoise: () => f.hasRealNoise ?? true,
   };
 }
 

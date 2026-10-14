@@ -87,6 +87,9 @@ export interface DriverWsCallbacks {
   /** A sleeping node's declared report interval, from the state dump and then
    *  from the value events for that one value (v0.73.0). */
   onNodeDeclared?: (nodeId: number, declared: Declared) => void;
+  /** How many Gets a user value refresh of this node sends (v0.75.0), from the
+   *  state dump; null while the node has no values yet. See refreshQueriesOf. */
+  onNodeRefreshQueries?: (nodeId: number, queries: number | null) => void;
 }
 
 export interface DriverWsClientOptions {
@@ -172,7 +175,10 @@ interface VersionMsg {
   maxSchemaVersion?: number;
 }
 
+/** RSSI is a signed byte on the wire (zwave-js `parseRSSI` reads an int8):
+ *  -128..124 dBm, with 125-127 its error sentinels (`RssiError`). */
 const RSSI_SENTINEL_MIN = 125;
+const RSSI_MIN_DBM = -128;
 
 /** Redact userinfo (ws://user:pass@host) before logging a configured URL. */
 export function redactUrl(url: string): string {
@@ -236,6 +242,33 @@ export function s2ResyncNodeId(ev: Record<string, unknown>): number | null {
  *  Duplicate command (sequence number N))`). A node repeats a frame when it
  *  does not hear the controller's acknowledgement, so a burst of these is a
  *  link that works one way. Only the node id leaves this function. */
+/** The actuator and sensor CCs zwave-js's USER value refresh queries
+ *  (zwave-js core CommandClasses.ts actuatorCCs / sensorCCs; Node.ts
+ *  refreshValues). Notification is left out: its refresh queries only a
+ *  pull-mode node, so counting it would claim a refresh sends a Get it may not. */
+export const REFRESH_QUERY_CCS: ReadonlySet<number> = new Set([
+  0x66, 0x25, 0x33, 0x62, 0x26, 0x94, 0x79, 0x43, 0x40, 0x6a, // actuators
+  0x9c, 0x80, 0x30, 0x90, 0x32, 0x31, 0x35, // sensors, Notification (0x71) excluded
+]);
+
+/** How many CC instances a user value refresh of this node queries (v0.75.0):
+ *  the distinct (endpoint, CC) pairs among its values whose CC is in
+ *  REFRESH_QUERY_CCS. The refresh trial needs a refresh that differs from the
+ *  verification lane's one routed-read Get (DESIGN §3.5 revisit condition), so a
+ *  node with one switch value and nothing else — the same single Get — is not
+ *  eligible. null when the dump carries no values (not interviewed yet). */
+export function refreshQueriesOf(values: readonly DumpValue[]): number | null {
+  if (values.length === 0) return null;
+  const seen = new Set<string>();
+  for (const v of values) {
+    if (v == null || typeof v !== 'object') continue;
+    const cc = v.commandClass;
+    if (typeof cc !== 'number' || !REFRESH_QUERY_CCS.has(cc)) continue;
+    seen.add(`${typeof v.endpoint === 'number' ? v.endpoint : 0}:${cc}`);
+  }
+  return seen.size;
+}
+
 export function duplicateDropNodeId(ev: Record<string, unknown>): number | null {
   if (ev.event !== 'logging') return null;
   const ctx = ev.context as Record<string, unknown> | undefined;
@@ -302,10 +335,11 @@ export function controllerRfEvent(ev: Record<string, unknown>): 'off' | 'on' | n
   return null;
 }
 
-/** A finite, non-sentinel dBm value or null. */
+/** A finite dBm value inside the int8 range and not a sentinel, or null
+ *  (v0.75.1: below -128 is not a reading a radio can report). */
 function cleanDbm(v: unknown): number | null {
   if (typeof v !== 'number' || !Number.isFinite(v)) return null;
-  if (v >= RSSI_SENTINEL_MIN) return null;
+  if (v >= RSSI_SENTINEL_MIN || v < RSSI_MIN_DBM) return null;
   return v;
 }
 
@@ -335,19 +369,37 @@ export function parseLastSeen(v: unknown): number | null {
   return null;
 }
 
+/** zwave-js `RssiError.NotAvailable`. */
+const RSSI_NOT_AVAILABLE = 127;
+
 /** Extract channels 0..3 (driver-EMA `average`) from a backgroundRSSI blob. */
 export function parseBgRssi(bg: unknown): BgRssiChannels | null {
   if (!bg || typeof bg !== 'object') return null;
   const o = bg as Record<string, unknown>;
-  const chan = (k: string): number | null => {
+  const fields = (k: string): Record<string, unknown> | null => {
     const c = o[k];
-    if (!c || typeof c !== 'object') return null;
-    const cc = c as Record<string, unknown>;
-    // Prefer the driver's own EMA (`average`) — the canonical floor estimate;
-    // fall back to `current` when average is absent.
-    return cleanDbm(cc.average) ?? cleanDbm(cc.current);
+    return c && typeof c === 'object' ? (c as Record<string, unknown>) : null;
   };
-  const channels: BgRssiChannels = [chan('channel0'), chan('channel1'), chan('channel2'), chan('channel3')];
+  // Prefer the driver's own EMA (`average`) — the canonical floor estimate;
+  // fall back to `current` when average is absent.
+  const chan = (cc: Record<string, unknown> | null): number | null =>
+    cc ? cleanDbm(cc.average) ?? cleanDbm(cc.current) : null;
+  // zwave-js's averageRSSI returns 0 for a first reading that is "not
+  // available", so average 0 beside a current of NotAvailable is "no value
+  // yet", not a 0 dBm floor (v0.75.1). A saturated receiver also averages as
+  // 0 dBm, but its current is ReceiverSaturated (126): that channel keeps its
+  // 0 for display. No floor takes a 0 as a reading (health.ts noiseReading); a
+  // receiver saturating after real readings decays toward 0 without reaching
+  // it, and reads as a very noisy floor.
+  const noValueYet = (cc: Record<string, unknown> | null): boolean =>
+    cc != null && cc.average === 0 && cc.current === RSSI_NOT_AVAILABLE;
+  const raw = ['channel0', 'channel1', 'channel2', 'channel3'].map(fields);
+  const channels: BgRssiChannels = raw.map(chan);
+  // A TRAILING run of such channels is absent, like a long-range channel the
+  // controller does not report. An interior one keeps its 0: a null would end
+  // the leading run and drop the real channels after it (v0.75.1 review), and
+  // every floor already ignores non-negative values.
+  for (let i = channels.length - 1; i >= 0 && (channels[i] == null || noValueYet(raw[i])); i--) channels[i] = null;
   return channels.some((c) => c != null) ? channels : null;
 }
 
@@ -640,6 +692,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
         cb.onNodeDeclared?.(nodeId, { reason: found.reason });
       }
     } else declaredRefs.delete(nodeId);
+    cb.onNodeRefreshQueries?.(nodeId, refreshQueriesOf(Array.isArray(node.values) ? (node.values as DumpValue[]) : []));
     return true;
   }
 

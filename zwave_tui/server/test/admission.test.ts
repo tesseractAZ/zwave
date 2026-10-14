@@ -33,9 +33,11 @@ test('the never-automatic set is the seven state-changing verbs, and each fails 
   }
 });
 
-test('the two verbs that already run on their own are named as such, and fail the rule honestly (v0.72.0)', () => {
+test('the verbs that already run on their own are named as such, and fail the rule honestly (v0.72.0; the trial v0.75.0)', () => {
   const auto = ALL_VERBS.filter((v) => VERB_ADMISSION[v].alreadyAutonomousAs != null).sort();
-  assert.deepEqual(auto, ['ping', 'routedRead']);
+  assert.deepEqual(auto, ['ping', 'refreshValues', 'routedRead']);
+  // Running the trial admits nothing: refresh still fails all three rows.
+  assert.deepEqual(VERB_ADMISSION.refreshValues.fails.map((f) => f.p), ['P1', 'P2', 'P5']);
   assert.deepEqual(VERB_ADMISSION.ping.fails.map((f) => f.p), ['P2', 'P3', 'P5']);
   assert.deepEqual(VERB_ADMISSION.routedRead.fails.map((f) => f.p), ['P1', 'P2', 'P5']);
   for (const v of ALL_VERBS) for (const f of VERB_ADMISSION[v].fails) {

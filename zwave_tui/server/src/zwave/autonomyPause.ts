@@ -1,8 +1,10 @@
 /**
  * One pause for every autonomous write (v0.72.0).
  *
- * The add-on sends frames on its own in exactly one place — auto-ping's sweep,
- * verification lane and dead-node ladder — and no automatic remediation is
+ * The add-on sends frames on its own in two places — auto-ping's sweep,
+ * verification lane and dead-node ladder, and the pre-registered refresh trial
+ * when its owner switch is on (v0.75.0; it runs only while auto-ping is
+ * unsuppressed, so this pause stops it too) — and no automatic remediation is
  * admitted (admission.ts). This is the one switch that stops all of it, from
  * either side:
  *
@@ -143,7 +145,7 @@ export function createAutonomyPause(opts: {
     const prev = last;
     last = next;
     if (next && !prev) {
-      warn(`autonomy: PAUSED by ${next.by.join(' + ')} — auto-ping's sweep, verification and dead-node ladder send nothing until resumed (${next.reason})`);
+      warn(`autonomy: PAUSED by ${next.by.join(' + ')} — auto-ping's sweep, verification and dead-node ladder, and the refresh trial, send nothing until resumed (${next.reason})`);
     } else if (!next) {
       warn(`autonomy: RESUMED — auto-ping sends again at its next tick`);
     } else {

@@ -106,6 +106,28 @@ configuration:
       cadence, chatty or not, so its answered/asked ratio measures reachability
       rather than how talkative it is. One probe per tick, stalest first, under
       the same suppressors as auto-ping.
+  refresh_trial_enabled:
+    name: Safety · Refresh trial (pre-registered experiment)
+    description: >-
+      OFF by default. Runs the pre-registered randomized trial of DESIGN §3.5:
+      when a MAINS node's rtt-degraded episode has been live for 10 minutes and
+      nothing has acted on it, the engine flips a fair coin; on heads it sends
+      that node one "refresh values" (zwave_js/refresh_node_values — Gets for
+      every switch, light and sensor value, which can correct stale Home
+      Assistant states and so trigger automations), on tails it sends nothing.
+      Only a node whose refresh asks more than the probe's one Get takes part;
+      on a mesh of plain switches and dimmers none does, and the trial sends
+      nothing (ENGINE shows the eligible count). Both halves are scored the
+      same way 20–30 minutes after the decision, apart from everything else the
+      engine learns, until 30 decisions in each give the one verdict (or 120
+      days pass). At most one decision per node per day, two per hour and six
+      per day, only 09:00–20:00, one at a time, never within 10 minutes of your
+      own action, and only while auto-ping runs unpaused — so this also requires
+      "Enable write actions" and auto-ping. A node that goes Dead within 5
+      minutes of a refresh is excluded for 7 days; a second such death within 7
+      days stops the trial until the add-on is started with this off. Press Z on
+      the ENGINE screen to pause it with everything else. Running the trial
+      admits nothing: a pass only makes an automatic refresh reviewable.
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled:
     name: Access · Enable telnet TUI

@@ -23,6 +23,7 @@ import type { NodeSnapshot, ControllerSnapshot, NodeStatus } from '../types';
 import { NodeStatus as NS } from '../types';
 import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage, RateRun } from './evidenceStore';
 import type { BaselineStore } from './baselines';
+import { medianNoiseFloor, DEFAULT_NOISE_FLOOR } from './health';
 
 export type SymptomKind =
   | 'return-path-degraded'
@@ -152,8 +153,8 @@ export interface DetectInput {
   sleeperWatch: (node: NodeSnapshot) => SleeperWatch | null;
   /** The node's duplicate-frame bursts in the last 24 h (v0.74.0). */
   duplicateBursts: (nodeId: number) => Burst[];
-  /** Is the noise floor a real measurement (driver-WS) vs the −95 fallback? */
-  hasRealNoise: () => boolean;
+  // No `hasRealNoise` (removed v0.75.2): whether the floor is measured is read
+  // from `controller.backgroundRSSI` by the same rule that computes it.
 }
 
 // ── Tunables (documented; ship as constants — shareability rule) ─────────────
@@ -694,7 +695,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       const routeKey = latestFresh(samples, now, (s) => s.routeKey, lookback);
       const routed = routeKey !== 'direct';
       const rssi = latestFresh(samples, now, (s) => s.rssi, lookback);
-      const floor = representativeFloor(input);
+      const { floor, measured: realFloor } = representativeFloor(input);
       const margin = rssi != null ? rssi - floor : null;
       let failures = 0;
       for (const s of samples) if (now - s.t <= WEAK_EVENT_LOOKBACK_MS) failures += s.dFlaps + (s.dTimeout ?? 0);
@@ -703,7 +704,6 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       const since = dwell(state, key(id, 'weak-signal'), b, now);
       if (since != null) {
         markDegrading(id, true);
-        const realFloor = input.hasRealNoise();
         out.push({
           kind: 'weak-signal', nodeId: id, severity: 'watch', sinceMs: since,
           basis: realFloor ? 'measured' : 'inferred',
@@ -902,14 +902,12 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
 }
 
 /** Representative noise floor for margin math — the controller's measured floor
- *  if present, else the −95 dBm fallback (matches health.ts). */
-function representativeFloor(input: DetectInput): number {
-  const bg = input.controller?.backgroundRSSI ?? [];
-  const vals = bg.filter((v) => Number.isFinite(v) && v < 0 && v > -120);
-  if (vals.length === 0) return -95;
-  const sorted = [...vals].sort((a, b) => a - b);
-  const m = sorted.length >> 1;
-  return sorted.length % 2 ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+ *  if present, else the −95 dBm fallback — and whether it was measured. ONE
+ *  source for both (v0.75.2): the "measured" basis had come from whether a
+ *  driver sample existed at all, so a −95 fallback was labelled measured. */
+function representativeFloor(input: DetectInput): { floor: number; measured: boolean } {
+  const m = medianNoiseFloor(input.controller?.backgroundRSSI ?? []);
+  return { floor: m ?? DEFAULT_NOISE_FLOOR, measured: m != null };
 }
 
 /** The set of node ids with an ACTIVE (non-subsumed) symptom — for quarantine

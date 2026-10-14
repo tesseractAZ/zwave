@@ -292,6 +292,30 @@ test('controller noise-floor coarse tier round-trips (mean/min/max), fresh-only 
   assert.equal(cc[0].floorMax, -101);
 });
 
+test('the persisted noise trend folds the same floor the screens show: driver stand-ins are not readings (v0.75.2)', () => {
+  const s = mkStore(freshPath());
+  const cstat = (tx: number) => ({ messagesTX: tx, messagesRX: 900, messagesDroppedTX: 0, messagesDroppedRX: 0, NAK: 0, CAN: 0, timeoutACK: 0, timeoutCallback: 0, timeoutResponse: 0 });
+  s.recordController(cstat(1000), true, FIXED, [-125, -104, -101, -93]);             // floor -101, not -102.5
+  s.recordController(cstat(1010), true, FIXED + TICK, [-128, -128, -128, -128]);     // "no signal detected": no floor
+  s.recordController(cstat(1020), true, FIXED + 2 * TICK, [0, 0, null, null]);       // "no value yet": no floor
+  const cc = s.controllerCoarse();
+  assert.equal(cc[0].floorN, 1, 'only the sample that carried a reading is folded');
+  assert.equal(cc[0].floorSum, -101);
+});
+
+test('a coarse bucket folded under the old rule with a driver stand-in in it is dropped on load; clean ones load (v0.75.2 review)', () => {
+  const path = freshPath();
+  writeFileSync(path, JSON.stringify({ v: 2, savedAt: FIXED, homeId: null, recordingSince: FIXED, nodes: {}, coarse: {}, controller: null, routeFails: {}, meta: {},
+    controllerCoarse: {
+      t0: [FIXED - 3_600_000, FIXED - 1_800_000, FIXED],
+      fN: [2, 1, 2], fS: [-203, -128, -204], fMin: [-102, -128, -103], fMax: [-101, -128, -101],
+    } }));
+  const s = mkStore(path);
+  s.load();
+  const cc = s.controllerCoarse();
+  assert.deepEqual(cc.map((b) => b.floorMin), [-102, -103], 'the -128 bucket is gone; the clean ones stay');
+});
+
 test('a pre-tier v2 file (no controllerCoarse key) loads with an empty controller-coarse tier (back-compat)', () => {
   const path = freshPath();
   writeFileSync(path, JSON.stringify({ v: 2, savedAt: FIXED, homeId: null, recordingSince: FIXED, nodes: {}, coarse: {}, controller: null, routeFails: {}, meta: {} }));

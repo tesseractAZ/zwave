@@ -52,7 +52,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 import type { LogSink } from '../logger';
 import { uptime as osUptime } from 'node:os';
-import { rssiReading } from './health';
+import { rssiReading, medianNoiseFloor, noiseReading } from './health';
 import { NodeStatus, type NodeStats, type RouteStat, type ControllerSnapshot } from '../types';
 
 /** The controller serial-link counters (nullable on the snapshot; non-null here). */
@@ -610,18 +610,12 @@ function numOrNull(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
-/** The per-sample noise floor: median of the finite negative values in the
- *  LEADING contiguous run of channels (a null ends the run — the driver's own
- *  convention). Byte-for-byte identical to interference.ts `medianFloor`, so the
- *  persisted coarse trend and the live fine trend never disagree on "the floor".
- *  Kept here (not imported) so the store stays free of the interference module. */
+/** The per-sample noise floor: `medianNoiseFloor`, the one rule (health.ts,
+ *  v0.75.2) — so the persisted coarse trend, the live fine trend and the
+ *  masthead never disagree on "the floor". Imported from health.ts, not the
+ *  interference module, so the store stays free of it. */
 function medFloor(chs: (number | null)[]): number | null {
-  const run: number[] = [];
-  for (const ch of chs) { if (ch == null) break; run.push(ch); }
-  const v = run.filter((x) => Number.isFinite(x) && x < 0).sort((a, b) => a - b);
-  if (v.length === 0) return null;
-  const m = v.length >> 1;
-  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+  return medianNoiseFloor(chs);
 }
 
 /** A zeroed coverage record. One constructor, so a new counter cannot be added
@@ -1197,12 +1191,18 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             const t0 = cc.t0[i];
             if (typeof t0 !== 'number' || !Number.isFinite(t0)) continue;
             if (!grace && t0 < cutoff) continue;
+            // A bucket folded under the pre-v0.75.2 rule may hold a driver
+            // stand-in (-128 "no signal detected") in its min, max and sum. A sum
+            // cannot be un-folded, so such a bucket is dropped rather than shown
+            // as a "quietest -128 dBm" beside a live floor that excludes it.
+            const fMin = numOrNull(cc.fMin?.[i]), fMax = numOrNull(cc.fMax?.[i]);
+            if ((cc.fN?.[i] ?? 0) > 0 && (noiseReading(fMin) == null || noiseReading(fMax) == null)) continue;
             ring.push({
               t0,
               floorN: cc.fN?.[i] ?? 0,
               floorSum: cc.fS?.[i] ?? 0,
-              floorMin: numOrNull(cc.fMin?.[i]),
-              floorMax: numOrNull(cc.fMax?.[i]),
+              floorMin: fMin,
+              floorMax: fMax,
             });
           }
           if (ring.length > 0) ctrlCoarse.push(...normalizeCtrlCoarse(ring));

@@ -125,14 +125,21 @@ export function renderInterference(ctx: ScreenCtx): string[] {
 
   // ── NOISE FLOOR ─────────────────────────────────────────────────────────
   push(c.label('NOISE FLOOR') + c.grey(' — 900 MHz background RSSI (driver-measured)'));
-  if (!iv.noise.real) {
+  const chans = iv.noise.channels
+    .map((v, i) => c.grey(`ch${i} `) + (v == null ? c.grey('—') : c.white(padStart(dbm(v), 4))))
+    .join('  ');
+  if (!iv.noise.real && iv.noise.channels.some((v) => v != null)) {
+    // Connected, but no channel is a reading (v0.75.2, health.ts noiseReading):
+    // every value is one of the driver's stand-ins. Not "not connected".
+    push('  ' + chans + c.grey('   median — no reading'));
+    // Whole tokens, the −128 explanation first (v0.75.2 review): a blind
+    // truncate cut it at 80 columns, and it is the case this state is for.
+    for (const l of shedLine('  ', c.grey('◷ no floor yet'), [c.grey('≤ −120 = "no signal detected"'), c.grey('0 = "no value yet" or saturated')], W)) push(l);
+  } else if (!iv.noise.real) {
     push('  ' + c.grey('◷ unavailable — the read-only driver-WS client is not connected.'));
     push('  ' + c.grey('    (HA strips backgroundRSSI; set driver_ws_url to enable this.)'));
   } else {
     const nc = NOISE_COLOR[iv.noise.band];
-    const chans = iv.noise.channels
-      .map((v, i) => c.grey(`ch${i} `) + (v == null ? c.grey('—') : c.white(padStart(dbm(v), 4))))
-      .join('  ');
     // The NUMBER is coloured by the shared dBm bands (bands.ts) so the same
     // reading looks the same here as on the Overview, Controller and Heatmap —
     // it previously took the engine's BAND colour, which made a quiet -95 dBm

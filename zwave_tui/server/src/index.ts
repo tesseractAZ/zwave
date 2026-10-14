@@ -24,14 +24,15 @@ import { createAuth, ingressRedirectTarget, isAllowedOrigin, isSupervisorSource,
 import { createAuthPolicy, describeTelnetAuth } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
-import { createActionRunner } from './zwave/zwaveActions';
+import { createActionRunner, NOT_SENT } from './zwave/zwaveActions';
 import { startAutoPing, PROBE_KILL_HOLD_MS, type AutoPingSnapshot } from './zwave/autoPing';
 import { buildZwaveDataSource, createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
 import { registerWsConsole } from './telnet/wsConsole';
 import { startTelnetServer } from './telnet/server';
 import { buildStates, startHaStates, ENTITY_DEGRADED, HA_STATE_PUBLISH_MS } from './haStates';
-import type { LogEvent } from './types';
+import { NodeStatus, type LogEvent } from './types';
 import { appArmorLabel } from './securityLabel';
+import { createRefreshTrial, trialHandle, type RefreshTrial } from './zwave/refreshTrial';
 
 /* ── logging ─────────────────────────────────────────────────────────────
  * One sink for the data layer, provider and transports — now honouring the
@@ -99,6 +100,10 @@ async function main(): Promise<void> {
   // 4b) Mutating-action runner (v0.3), gated by write_actions_enabled. Outcomes
   //     are logged into the event ring (Log screen). Passed to the transports
   //     only so the session can offer actions when enabled.
+  // The refresh trial (v0.75.0) is created after the runner, but the runner's
+  // log line is where an operator action is seen first: every verb, device
+  // control and config writes included, passes through it with its origin.
+  let trialRef: RefreshTrial | null = null;
   const actions = createActionRunner({
     client,
     entryId: () => zwaveData.getEntryId(),
@@ -109,7 +114,11 @@ async function main(): Promise<void> {
     // operator's typed CONFIRM and auto-ping's autonomous ladder, so a fixed
     // source here made the Log screen attribute engine probes to the human —
     // including the RED-latching "→ failed" line describing the write itself.
-    log: (sev, nodeId, text, origin) => zwaveData.logByOrigin(sev, nodeId, text, origin),
+    log: (sev, nodeId, text, origin) => {
+      // "Never within 10 min of an operator action" (DESIGN §3.5).
+      if (origin == null || origin === 'you') trialRef?.noteOperatorAction(Date.now(), nodeId);
+      zwaveData.logByOrigin(sev, nodeId, text, origin);
+    },
     // M5: feed operator-action outcomes into the learning ledger.
     // v0.64.5: with the launch stamp, so a manual ping is judged from its send.
     onOutcome: (kind, nodeId, ok, refusal, origin, sentAt, aliveAtLaunch) =>
@@ -146,8 +155,8 @@ async function main(): Promise<void> {
       : `automatic writes: PAUSED by ${p.by.join(' + ')} since ${new Date(p.since).toISOString()} (${p.reason})`);
   }
 
-  // 4c) Auto-ping — the ONE thing this engine does without a human pressing a
-  //     key. Off unless BOTH its own switch and write_actions_enabled are on;
+  // 4c) Auto-ping — with the refresh trial (4d), the only things this engine
+  //     does without a human pressing a key. Off unless BOTH its own switch and write_actions_enabled are on;
   //     see autoPing.ts for which frame each lane sends, and every suppressor.
   // The FULL return type (v0.47.0). A hand-maintained subset of a
   // single-implementation type buys nothing and is exactly how v0.33 shipped a
@@ -202,7 +211,7 @@ async function main(): Promise<void> {
         staleMs: config.autoPing.staleMs,
       },
     });
-    // The engine's one autonomous write now has a screen (v0.41): hand its
+    // Auto-ping's autonomous writes have a screen (v0.41): hand its
     // read-only snapshot to the data layer so ENGINE can render live
     // suppression, ladder position and probe debt instead of the operator
     // tailing the container log for them.
@@ -229,6 +238,35 @@ async function main(): Promise<void> {
     log.warn('auto-ping is enabled but write_actions_enabled is OFF — it will not act');
   }
   void autoPing;
+
+  // 4d) The pre-registered refresh trial (v0.75.0, DESIGN §3.5). Created even
+  //     when off, so its record shows on ENGINE and an owner restart with the
+  //     option off clears a latch. It is handed ONE function, never the runner:
+  //     refreshValues for a node that is Alive at send time, as origin 'trial',
+  //     which the ledger keeps out of every arm. A socket that is not
+  //     authenticated refuses rather than queueing: the send would wait for the
+  //     reconnect, after which a pause set meanwhile may not yet be re-read.
+  const trial = createRefreshTrial({
+    enabled: config.refreshTrial.enabled,
+    path: config.refreshTrial.path,
+    handle: config.refreshTrial.enabled
+      ? trialHandle((n) => actions.refreshValues(n, 'trial'), (n) =>
+        !client.ready() ? 'HA WS not ready'
+          : zwaveData.autonomyPause() != null ? 'automatic writes paused'
+          : provider.nodeById(n)?.status !== NodeStatus.Alive ? `node ${n} is not Alive` : null)
+      : null,
+    // A failure that proves nothing left the add-on (the runner's own list);
+    // anything else may have reached the driver and counts toward a kill.
+    notSent: (m) => NOT_SENT.test(m),
+    log,
+    warn: (m) => log.warn(m),
+    ring: (sev, nodeId, text) => zwaveData.logEngineAction(sev, nodeId, text),
+  });
+  trialRef = trial;
+  zwaveData.attachRefreshTrial(trial, { writeActions: config.writeActions, operatorBusy: () => actions.operatorActionInFlight() != null });
+  if (!config.refreshTrial.enabled) log('refresh trial: off (refresh_trial_enabled)');
+  else if (!config.writeActions || !autoPing) log.warn('refresh trial: enabled, but it also needs write_actions_enabled and auto-ping running — it will not decide anything');
+  else log('refresh trial: ENABLED — rtt-degraded episodes live ≥10m on mains nodes whose refresh adds to the probe are randomized 50/50 between one refresh values and nothing, 09:00–20:00, ≤1/node/day, ≤2/h, ≤6/day; pause with Z on ENGINE');
 
   // 5) Auth — the CORS allow-list + the /console/ws upgrade origin check.
   //    (The write-token gate this used to bootstrap was removed in v0.24.4:
