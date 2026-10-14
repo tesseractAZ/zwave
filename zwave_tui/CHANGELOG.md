@@ -1,5 +1,194 @@
 # Changelog
 
+## 0.75.3
+
+### Changed — every build and check on a pinned Ubuntu 26.04 image
+
+`ubuntu-latest` moves to Ubuntu 26.04 in a rollout from 2026-10-19 to
+2026-11-19. That would change python3, Docker, the docs job's pandoc and
+LibreOffice and the AppArmor job's `apparmor_parser` under every job at once,
+and could mix images within one run. The move is made deliberately instead:
+
+- Every job in CI, Release, Tag release and Publish release runs on
+  `ubuntu-26.04`; both image builds (the CI smoke build and the release images)
+  run natively, aarch64 on `ubuntu-26.04-arm`.
+- CodeQL stays on `ubuntu-24.04`: its system requirements list Ubuntu 22.04
+  and 24.04 only.
+- `test/workflowRunners.test.ts` holds the rule: every runner a pinned
+  `ubuntu-YY.MM[-arm]` label, CodeQL on a listed image, everything else on
+  26.04, the ARM builds native.
+- A trial run passed every check on image 20260927.149.1, including the
+  AppArmor profile under `apparmor_parser` 5.0.2 and the manual under pandoc
+  3.7.0.2.
+
+### Fixed — from the log review of 10-11 07:46Z to 10-13 02:04Z
+
+- **One entry discovery and one registry join per connect.** The boot tick and
+  the on-ready callback both asked the moment the socket authenticated, and
+  each check set its flag only after its own reply, so every connect fetched
+  the config entries and both registries twice. They now share the request in
+  flight. Redundant only; present since v0.25.0.
+- **An episode is not scored before its last probe settles.** A confirmation
+  burst's fifth read can go out a second before the window ends; its missing
+  reply reaches the evidence seconds later, so a timed-out read was scored as
+  0 of 5 (node 57: `tmo=0.0%`, the read timing out 0.58 s after the verdict).
+  An episode now closes only once its node's latest probe has had 30 s to land,
+  waiting at most two minutes past the window, and a close that waited keeps the
+  after-window's start where it was, so the burst's first read is not aged out
+  at slow evidence cadences. On a timeout-scored kind the old cut could turn a
+  failed recovery into `improved`.
+
+The review found no regression from v0.75.0–v0.75.2: four clean restarts, no
+add-on warning or error in 42 h, 819 probes answered but one, and the only
+AppArmor denials the four deliberate probes of the v0.74.4 check.
+
+## 0.75.2
+
+### Fixed — every noise floor uses one rule for what a reading is
+
+Five places decided whether a background-RSSI value counts toward the noise
+floor, and they disagreed. The screens' floor and its "measured" tag, the
+Interference floor and the persisted trend kept any negative value; the
+weak-signal detector dropped values at or below −120 dBm per channel; the health
+score took the screens' floor and fell back to −95 only when that floor itself
+was at or below −120; and the detector's "measured" flag only asked whether a
+driver sample existed at all. zwave-js stands −128 dBm in for "no signal
+detected", so with every channel at that value the screens read
+`-128 dBm (measured)`, the health score used −95, and weak-signal labelled its
+−95 fallback `measured`. With channels `[-128, -104, -101, -93]` the screens
+used −102.5 and the detectors −101.
+
+- `health.ts` now holds the rule: `noiseReading` — finite, negative (0 is the
+  driver's "no value yet" seed and its stand-in for saturation) and above
+  `NOISE_FLOOR_MIN_DBM = -120` — and `medianNoiseFloor`, the median of the
+  readings in the leading run of channels. The screens, the health score, the
+  detectors, Interference and the persisted trend all take their floor from it.
+- "Measured" now means the floor came from a reading, everywhere: the screens'
+  tag, and weak-signal's `basis` and its `(vs assumed −95 floor)` evidence. The
+  detectors no longer take a separate `hasRealNoise` from the data layer.
+- Interference distinguishes a connected driver with no reading
+  (`median — no reading`, naming the stand-ins, whole at 80 columns) from no
+  connection at all; it had said the client was not connected.
+- Coarse noise-trend buckets folded under the old rule with a stand-in in them
+  are dropped on load — a folded sum cannot be un-folded — rather than shown as
+  `quietest -128 dBm` beside a live floor that excludes it.
+- No change on the reference controller: its four channels read −105 to −94
+  dBm, all readings by both the old rules and the new one.
+
+## 0.75.1
+
+### Changed — the live-span count names its nodes
+
+ENGINE's `live ≥10m: a/b scored` bit — the revisit condition of DESIGN §3.5 —
+counts episodes, not nodes, and one chronic node whose episode re-arms every
+half hour can supply most of it: on the reference mesh one node made 8 of 12
+new closures, and the count read past its threshold on the strength of it.
+
+- The ledger's live-span ring now keeps the scored closures live ≥ 10 minutes
+  per node, per day, persisted with the ring and aged out with it.
+- The count moves to its own row (before the first attributed closure too) and
+  names them in the same breath:
+  `live ≥10m: 37/45 scored since 09-12 from 4 nodes (node 23: 22)` — how many
+  nodes, and the one with the most when it has more than one. Of four forms,
+  the longest that fits the width is shown, and every one keeps `from k nodes`,
+  so neither the count nor its nodes is ever dropped, down to the narrowest
+  session width of 60 columns.
+- Per-node counts begin with this release. Until they cover every closure in
+  the 30-day window, the bit says how many they cover and since when, to the
+  minute of the first closure it attributed
+  (`… · 5 since 10-12 14:03 from 2 nodes (node 23: 4)`); with no recorded
+  start none is guessed. A day from an older ledger file loads without them; a
+  malformed list is ignored, never fatal.
+
+### Fixed — background RSSI outside what a radio can report
+
+- `cleanDbm` had no lower bound. RSSI is a signed byte on the wire (zwave-js
+  `parseRSSI`), so a background-RSSI value below -128 dBm now reads as nothing
+  rather than as a noise floor.
+- An `average` of exactly 0 beside a `current` of NotAvailable is zwave-js's
+  "no value yet" seed (`averageRSSI`), not a 0 dBm floor. A trailing run of such
+  channels — a long-range channel the controller does not report — is now
+  absent and shows `—`, where Controller had drawn a red full-noise gauge. An
+  interior one keeps its 0, so the real channels after it survive, and every
+  floor already ignores it. A saturated receiver also averages as 0 dBm, but
+  its `current` says so (126), and that 0 still shows as a reading.
+- Known limitation, documented in DOCS: after a "not available" first poll the
+  driver's average decays from that 0 seed over about twenty polls, and those
+  negative readings still reach the floor.
+- Preventive: the reference controller's four channels read -105 to -94 dBm
+  throughout a 13.7-day history, with no value at or above -98 dBm in its
+  30-minute tier.
+
+### Docs — an ENGINE screenshot
+
+The Engine screen had no screenshot. The generator now renders one from the
+synthetic demo mesh — auto-ping, the refresh trial mid-run with its eligible
+nodes, the live ledger, and LEARNED with the live-span count naming its nodes —
+and the README gallery shows it. The other ten frames regenerate unchanged.
+
+## 0.75.0
+
+### Added — the pre-registered refresh trial (off by default)
+
+No verb passes the admission rule, and DESIGN §3.5 pre-registered the only
+path by which one ever could: a randomized trial with one verdict. This release
+builds it for the one candidate kind whose live span supports it,
+`refreshValues` on `rtt-degraded` episodes, behind a new option,
+`refresh_trial_enabled` (default off). It also needs write actions and auto-ping
+running unsuppressed, and the owner's pause stops it at once. Running it admits
+nothing: `AutoVerb` stays `never` and refresh keeps all three failure rows.
+
+- **Only nodes whose refresh adds something.** The revisit condition's second
+  half — the verb must differ from what the verification lane already sends —
+  is checked per node. zwave-js's refresh queries every actuator and sensor CC
+  instance; the verification probe sends one Get on the node's switch/light
+  value. A node is eligible only when its refresh sends at least two Gets (one,
+  if the probe can only ping it), counted from the driver's state dump. On a
+  mesh of plain switches and dimmers no node qualifies, ENGINE says
+  `eligible nodes: 0 of N mains`, and the trial sends nothing; after 120 days it
+  retires as not measurable here.
+- **One decision per eligible episode, every limit before the coin.** A live
+  `rtt-degraded` episode on a mains node that is Alive, unconfounded, with
+  nothing yet acted on it, live 10 minutes from its dwell start and with a
+  before-window that can be scored, is eligible — at most one decision per node
+  per 24 h, 2 per hour, 6 per day, 09:00–20:00 local, one in flight until filed,
+  never while an operator action runs or within 10 minutes of one. A fair coin
+  then decides between one `zwave_js/refresh_node_values` and nothing. The
+  assignment is written to `/data/refresh_trial.json` before anything is sent.
+- **Scored at a fixed horizon, the same in both arms.** The before-window is
+  the episode's, frozen at the decision; both arms get a verification burst at
+  +20 minutes; the round trips of +20–30 minutes are scored against it by the
+  ledger's own rule and the decision is filed at +30. The detector's closure is
+  not used, because when an episode closes depends on traffic and the treatment
+  supplies traffic. A pause, a route rebuild or an operator action on the node
+  (or the whole mesh) inside the window makes a decision unscoreable, as does a
+  stall of more than 2 minutes in the engine's tick inside it; one in flight
+  across a restart, or whose node leaves, files as lost.
+- **Apart from the ledger.** The send carries a new origin, `trial`, through a
+  handle holding that one call, refused at send time when paused, when the
+  node is not Alive, or while the Home Assistant socket is not authenticated. Trial episodes file into no ledger arm, the send confounds
+  every other episode open on the node, and the trial keeps its own undecayed
+  counts.
+- **Harm, kills and the latch.** A death within 30 minutes of the decision is
+  harm in either arm. A death within 5 minutes of a send that may have left
+  excludes the node for 7 days, even if a restart in between filed the decision
+  as lost; a second within 7 days latches the trial off and raises
+  `binary_sensor.zwave_tui_degraded` until the add-on starts with the option
+  off. An unreadable trial file latches too, and is never overwritten; a kill
+  that cannot be saved latches the run until it is.
+- **One verdict**, when both arms reach 30 scoreable decisions, on the first 30
+  of each: pass only if the treated success rate's Wilson lower bound is at
+  least the held rate + 5 points and treated deaths are at most held deaths + 1.
+  Nothing more is sent after it.
+- **Where it shows:** a REFRESH TRIAL block on ENGINE (state, why it is waiting,
+  the eligible-node count, counts per arm), `refresh_trial` and six counts on
+  `sensor.zwave_tui_engine`, and every decision, filing, death, kill, latch and
+  verdict in the Log screen and the container log. DOCS §11.14 describes it in
+  full; DESIGN §3.5 records where the build sharpens the protocol.
+
+35 tests and 64 mutants pin the protocol, its isolation from the ledger and its
+wiring.
+
 ## 0.74.4
 
 ### Changed — a narrower AppArmor profile, and the server says which one runs

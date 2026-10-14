@@ -31,6 +31,7 @@ test('INTERFERENCE holds EXACTLY view.rows lines within view.cols at every size 
   const views = [
     cleanView(),
     cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' } }), // no driver-WS
+    cleanView({ noise: { channels: [-128, -128, 0, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' } }), // connected, no reading (v0.75.2)
     cleanView({ coverageDays: 0.1, diurnal: Array.from({ length: 24 }, (_, h) => ({ hour: h, tx: 0, rate: null })) }), // building
     cleanView({ correlated: { active: true, degradedNodes: 4, narrative: 'Several nodes degraded together (4 of 11 active) — likely an RF-environment event.' } }),
   ];
@@ -53,6 +54,18 @@ test('a clean mesh shows the measured floor, healthy serial, and no correlated d
   assert.ok(/● healthy/.test(joined), 'healthy serial');
   assert.ok(/✓ No correlated mesh degradation/.test(joined), 'clean correlated state');
   assert.ok(/worst 18:00 3\.1%/.test(joined), 'worst diurnal hour surfaced');
+});
+
+test('connected, but every channel a driver stand-in: "no reading", never "not connected" (v0.75.2)', () => {
+  const iv = cleanView({ noise: { channels: [-128, -128, 0, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' } });
+  const joined = renderInterference(ctx(120, 30, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(joined, /ch0 -128 +ch1 -128 +ch2 +0 +ch3 — +median — no reading/, 'the channels are shown, with no floor');
+  assert.match(joined, /◷ no floor yet {2}≤ −120 = "no signal detected" · 0 = "no value yet" or saturated/);
+  assert.doesNotMatch(joined, /not connected/, 'the client IS connected');
+  // At the modal 80 columns the −128 explanation survives whole (v0.75.2 review).
+  const at80 = renderInterference(ctx(80, 24, iv)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+  assert.match(at80, /◷ no floor yet {2}≤ −120 = "no signal detected"/, '80 columns: the claim and the -128 explanation, whole');
+  assert.doesNotMatch(at80, /"no signal$/m, 'never cut mid-token');
 });
 
 test('without the driver-WS client the noise floor honestly reads unavailable, not fabricated', () => {

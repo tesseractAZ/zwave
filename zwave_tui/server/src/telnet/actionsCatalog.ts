@@ -186,7 +186,7 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
     label: 'Pause automatic writes',
     scope: 'system',
     impact: 'safe',
-    desc: 'Stop everything this add-on sends on its own: auto-ping\u2019s sweep, verification and dead-node ladder.',
+    desc: 'Stop everything this add-on sends on its own: auto-ping\u2019s sweep, verification and dead-node ladder, and the refresh trial.',
     impactNote: 'Sends nothing. Kept across restarts until resumed. While paused, a mains device that fails when nothing talks to it is not noticed; once the pause is older than 24 h it raises binary_sensor.zwave_tui_degraded while auto-ping is running for it to stop.',
     needsNode: false,
   },
@@ -196,7 +196,7 @@ export const ACTION_CATALOG: ActionDescriptor[] = [
     scope: 'system',
     impact: 'caution',
     desc: 'Lift the pause set from this TUI.',
-    impactNote: 'auto-ping\u2019s sweep, verification and dead-node ladder start sending again at the next tick. A pause set in Home Assistant (input_boolean.zwave_tui_pause_autonomy) stays until that toggle is off — unless the toggle has gone missing, which this forgets.',
+    impactNote: 'auto-ping\u2019s sweep, verification and dead-node ladder, and the refresh trial if it is on, start sending again at the next tick. A pause set in Home Assistant (input_boolean.zwave_tui_pause_autonomy) stays until that toggle is off — unless the toggle has gone missing, which this forgets.',
     needsNode: false,
   },
   {

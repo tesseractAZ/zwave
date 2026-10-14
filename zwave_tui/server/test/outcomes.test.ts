@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, statSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EPISODE_SETTLE_CAP_MS } from '../src/zwave/outcomes';
 import { wilsonLower, createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type WindowMetrics } from '../src/zwave/outcomes';
 import type { EvidenceSample } from '../src/zwave/evidenceStore';
 import type { SymptomKind } from '../src/zwave/symptoms';
@@ -373,6 +374,32 @@ test('lifecycle: a new non-subsumed symptom is opened; a subsumed one opens NO e
   assert.deepEqual(toOpen, [{ nodeId: 7, kind: 'rtt-degraded' }], 'only the independent symptom opens');
 });
 
+test('lifecycle: the window is not cut while a probe sent just before its end can still time out; never more than the cap (v0.75.3 log review)', () => {
+  const open = [openEp(57, 'return-path-degraded')];
+  const confirm = 600_000;
+  const pending = new Map<string, number>([['57:return-path-degraded', 0]]);
+  const probe = confirm - 1_200;               // the 5th confirmation read, 1.2 s before the window ends
+  const settle = (n: number | null) => (n === 57 ? probe + 30_000 : null);
+  let r = planEpisodeLifecycle([], open, pending, confirm, confirm, undefined, settle);
+  assert.equal(r.toResolve.length, 0, 'its reply — or its timeout — has not reached the evidence yet');
+  r = planEpisodeLifecycle([], open, pending, probe + 29_999, confirm, undefined, settle);
+  assert.equal(r.toResolve.length, 0);
+  r = planEpisodeLifecycle([], open, pending, probe + 30_000, confirm, undefined, settle);
+  assert.equal(r.toResolve.length, 1, 'closed once the probe has settled');
+  assert.equal(r.toResolve[0].closeAt, confirm, 'the nominal close, for the after-window to keep its start (v0.75.3 review)');
+  assert.equal(r.toResolve[0].heldForProbe, true, 'and it says the close waited');
+  // A probe that settled before the nominal close holds nothing: the old trailing window.
+  const p3 = new Map<string, number>([['57:return-path-degraded', 0]]);
+  const early = planEpisodeLifecycle([], open, p3, confirm + 5_000, confirm, undefined, (n) => (n === 57 ? confirm - 60_000 : null));
+  assert.deepEqual([early.toResolve.length, early.toResolve[0]?.heldForProbe], [1, false]);
+  // A node probed without pause: the close waits at most the cap.
+  const p2 = new Map<string, number>([['57:return-path-degraded', 0]]);
+  const always = (now: number) => (n: number | null) => (n === 57 ? now + 30_000 : null);
+  const t = confirm + EPISODE_SETTLE_CAP_MS;
+  assert.equal(planEpisodeLifecycle([], open, p2, t - 1, confirm, undefined, always(t - 1)).toResolve.length, 0);
+  assert.equal(planEpisodeLifecycle([], open, p2, t, confirm, undefined, always(t)).toResolve.length, 1, 'the cap closes it');
+});
+
 test('lifecycle: an absent symptom is NOT resolved until it stays gone through the confirm window', () => {
   const open = [openEp(7, 'dead-flap')];
   const pending = new Map<string, number>();
@@ -386,7 +413,7 @@ test('lifecycle: an absent symptom is NOT resolved until it stays gone through t
   assert.equal(r.toResolve.length, 0);
   // Tick 3: absent past the window → resolve, pending cleared.
   r = planEpisodeLifecycle([], open, pending, 1_000 + confirm, confirm);
-  assert.deepEqual(r.toResolve, [{ nodeId: 7, kind: 'dead-flap', key: '7:dead-flap', absentSinceMs: 1_000 }],
+  assert.deepEqual(r.toResolve, [{ nodeId: 7, kind: 'dead-flap', key: '7:dead-flap', absentSinceMs: 1_000, closeAt: 1_000 + confirm, heldForProbe: false }],
     'it carries the FIRST absent tick, not the resolve tick (v0.64.6)');
   assert.equal(pending.has('7:dead-flap'), false, 'pending cleared on resolve');
 });
@@ -1584,6 +1611,53 @@ test('live span is bucketed at 10, 30 and 60 minutes, scored apart from unscored
   assert.deepEqual(ls.scored, [1, 1, 1, 1]);
   assert.deepEqual(ls.unscored, [0, 0, 2, 0]);
   assert.equal(o.liveSpan('rtt-degraded', day + 40 * 86_400_000)?.scored.reduce((a, b) => a + b, 0), 0, 'a 30-day window');
+});
+
+test('live span counts the scored ≥10m closures per node, most first, and round-trips them (v0.75.1)', () => {
+  const o = store();
+  const day = 20_000 * 86_400_000;
+  const M = 60_000;
+  let t = day;
+  const close = (id: number, liveMin: number, after: WindowMetrics | null) => {
+    o.open(id, 'rtt-degraded', t + 1_000, WT(400), { dwellStartMs: t });
+    o.resolve(id, 'rtt-degraded', t + liveMin * M + 10 * M, after, { absentSinceMs: t + liveMin * M });
+    t += 90 * M;
+  };
+  close(9, 30, null);    // unverifiable: unscored, not counted — and not the start of coverage
+  close(8, 5, WT(30));   // live < 10 min: not counted toward the revisit condition
+  for (let i = 0; i < 5; i++) close(56, 20, WT(30)); // a chronic node, re-arming
+  close(11, 45, WT(400));
+  close(8, 15, WT(30));
+  const ls = o.liveSpan('rtt-degraded', day + 86_400_000)!;
+  assert.equal(ls.scored[1] + ls.scored[2] + ls.scored[3], 7);
+  assert.deepEqual(ls.byNode, [{ nodeId: 56, n: 5 }, { nodeId: 8, n: 1 }, { nodeId: 11, n: 1 }], 'most first, then by node id');
+  assert.equal(ls.byNodeN, 7, 'every counted closure is attributed');
+  assert.equal(ls.byNodeSince, day + 180 * M + 30 * M, 'from the first ATTRIBUTED closure, to the millisecond — not the day it fell on');
+  const p = store();
+  p.loadJSON(JSON.parse(JSON.stringify(o.toJSON())));
+  assert.deepEqual(p.liveSpan('rtt-degraded', day + 86_400_000), ls, 'per-node counts survive a restart');
+  assert.deepEqual(o.liveSpan('rtt-degraded', day + 40 * 86_400_000)?.byNode, [], 'and age out with the 30-day window');
+});
+
+test('a pre-v0.75.1 live-span day loads without per-node counts; a malformed list is ignored, not fatal (v0.75.1)', () => {
+  const day = 20_000;
+  const o = store();
+  o.loadJSON({ v: 1, liveSpan: [['rtt-degraded', { since: day * 86_400_000, days: [
+    [day, [0, 4, 0, 0], [0, 0, 0, 0]],
+    [day + 1, [0, 2, 1, 0], [0, 0, 0, 0], [[56, 2], [11, 1]]],
+    [day + 2, [0, 1, 0, 0], [0, 0, 0, 0], [[56, 'x']]],
+  ] }]] });
+  const ls = o.liveSpan('rtt-degraded', (day + 3) * 86_400_000)!;
+  assert.deepEqual(ls.scored, [0, 7, 1, 0], 'the buckets load in full');
+  assert.deepEqual(ls.byNode, [{ nodeId: 56, n: 2 }, { nodeId: 11, n: 1 }]);
+  assert.equal(ls.byNodeN, 3, 'three of the eight are attributed');
+  assert.equal(ls.byNodeSince, null, 'no recorded start: none is guessed — a day boundary is a UTC midnight that also holds unattributed closures');
+  const at = (day + 1) * 86_400_000 + 5 * 3_600_000;
+  const q = store();
+  q.loadJSON({ v: 1, liveSpan: [['rtt-degraded', { since: day * 86_400_000, nodesSince: at, days: [[day + 1, [0, 1, 0, 0], [0, 0, 0, 0], [[56, 1]]]] }]] });
+  assert.equal(q.liveSpan('rtt-degraded', (day + 3) * 86_400_000)!.byNodeSince, at, 'the recorded start loads');
+  q.loadJSON({ v: 1, liveSpan: [['rtt-degraded', { since: day * 86_400_000, nodesSince: 'x', days: [[day + 1, [0, 1, 0, 0], [0, 0, 0, 0], [[56, 1]]]] }]] });
+  assert.equal(q.liveSpan('rtt-degraded', (day + 3) * 86_400_000)!.byNodeSince, null, 'a malformed start is ignored');
 });
 
 test('the confounded tag prints on an ATTRIBUTED closure too, with who acted and how long it was live (v0.72.0)', () => {

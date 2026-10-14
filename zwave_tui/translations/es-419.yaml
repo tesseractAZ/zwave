@@ -117,6 +117,31 @@ configuration:
       proporción de respuestas mide si son alcanzables y no cuánto hablan. Un
       sondeo por ciclo, empezando por el más antiguo, con las mismas
       suspensiones que el ping automático.
+  refresh_trial_enabled:
+    name: Seguridad · Ensayo de refresco (experimento prerregistrado)
+    description: >-
+      DESACTIVADO por defecto. Ejecuta el ensayo aleatorizado prerregistrado de
+      DESIGN §3.5: cuando un episodio rtt-degraded de un nodo alimentado por red
+      lleva 10 minutos activo y nada ha actuado sobre él, el motor lanza una
+      moneda; si sale cara envía a ese nodo un "refresco de valores"
+      (zwave_js/refresh_node_values — lecturas de cada valor de interruptor,
+      luz y sensor, que pueden corregir estados obsoletos de Home Assistant y
+      así disparar automatizaciones); si sale cruz no envía nada. Solo participa
+      un nodo cuyo refresco pide más que la única lectura de la sonda; en una
+      malla de interruptores y atenuadores simples ninguno lo hace, y el ensayo
+      no envía nada (ENGINE muestra cuántos nodos son elegibles). Ambas mitades
+      se puntúan igual entre 20 y 30 minutos después de la decisión, aparte de
+      todo lo demás que aprende el motor, hasta que 30 decisiones en cada una
+      den el único veredicto (o pasen 120 días). Como máximo una decisión por
+      nodo al día, dos por hora y seis al día, solo de 09:00 a 20:00, una a la
+      vez, nunca dentro de los 10 minutos siguientes a una acción suya, y solo
+      mientras auto-ping funcione sin pausa — por eso también requiere
+      "Habilitar acciones de escritura" y auto-ping. Un nodo que queda caído
+      (Dead) dentro de los 5 minutos siguientes a un refresco queda excluido 7
+      días; una segunda muerte así dentro de 7 días detiene el ensayo hasta que
+      el complemento se inicie con esta opción desactivada. Pulse Z en la
+      pantalla ENGINE para pausarlo junto con todo lo demás. Ejecutar el ensayo
+      no admite nada: aprobarlo solo hace revisable un refresco automático.
   # ── Acceso por telnet ───────────────────────────────────────────────────────
   telnet_enabled:
     name: Acceso · Habilitar la TUI por telnet

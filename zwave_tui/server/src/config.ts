@@ -112,6 +112,13 @@ export const config = {
   /** The owner's pause on every autonomous write (v0.72.0). Exported as
    *  AUTONOMY_PATH=/data/autonomy.json; absent → a TUI pause lasts until restart. */
   autonomyPath: process.env.AUTONOMY_PATH || null,
+  /** The refresh trial (v0.75.0, DESIGN §3.5): the owner's switch, and its
+   *  store (TRIAL_PATH=/data/refresh_trial.json; absent → in-memory only, which
+   *  the trial treats as nothing to lose). Off unless the run script exports 1. */
+  refreshTrial: {
+    enabled: process.env.REFRESH_TRIAL_ENABLED === '1',
+    path: process.env.TRIAL_PATH || null,
+  },
   /** Build stamp promoted from the Docker ARG (reported by /api/version). */
   version: process.env.BUILD_VERSION ?? '0.1.0',
 
