@@ -138,8 +138,11 @@ seriously.
   receiver entropy, a SPAN extension's sender EI), which travel in clear and
   reveal nothing without the network key. The archive marks each gap in the
   driver stream with an `[archive]` line.
+  S0/S2 crypto a development build prints is cut to its length, and every
+  control character but tab and newline is written as U+FFFD.
   `log_archive_driver: false` keeps only the add-on's own log; `log_archive_days:
-  0` turns the archive off. None of the four
+  0` turns the archive off and deletes the files it wrote, hourly until none is
+  left, so they stop riding along in backups. None of the four
   transmits over RF: the log pair toggles this client's own receive flag and
   nothing more. One cross-client property is worth naming rather than leaving
   implicit — zwave-js-server's log forwarder is a *single global transport*

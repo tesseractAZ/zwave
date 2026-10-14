@@ -132,7 +132,7 @@ configuration:
     name: Logs · Archive days
     description: >-
       Days of logs kept in the add-on's own archive, today included (0 turns it
-      off). The host's journal holds only about a day and a half of every app's
+      off and deletes what it wrote). The host's journal holds only about a day and a half of every app's
       log; this archive keeps the add-on's log and the Z-Wave JS driver's log
       stream for longer, in daily files in the add-on's config folder
       (/addon_configs/<this add-on's slug>/logs, readable over SSH). Finished

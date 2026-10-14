@@ -404,6 +404,66 @@ test('a node the driver log\'s node filter leaves out records UNKNOWN S2, never 
   }
 });
 
+test('a node-filter change starts a new S2 window, and a stretch below info reads unknown — at the data layer (v0.76.0 review)', async () => {
+  const srv = await mockServer({ logLevel: 'info' });
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-s2c-'));
+  const gaps: string[] = [];
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), driverWsUrl: srv.url, onDriverLogGap: (g: { kind: string }) => gaps.push(g.kind),
+  });
+  // Node 7's S2 readings taken after `t` (samples come on their own cadence,
+  // so they are picked by time, not by index).
+  const after = (t: number, until = Infinity) => zd.evidence(7).filter((x) => x.t > t && x.t < until).map((x) => x.dS2Resync);
+  // A change that lands in the same millisecond as a sample starts the next
+  // window AT the change, and that window rightly counts; so each change is
+  // tried up to three times, and one must break the window: an unknown
+  // reading, then a count again.
+  const breaks = async (change: (i: number) => Promise<void>): Promise<boolean> => {
+    for (let i = 0; i < 3; i++) {
+      const t = Date.now();
+      await change(i);
+      await waitFor(() => after(t).length >= 3);
+      const r = after(t);
+      const k = r.indexOf(null);
+      if (k >= 0 && r.slice(k + 1).includes(0)) return true;
+    }
+    return false;
+  };
+  const cfg = (config: Record<string, unknown>) => srv.push({ source: 'driver', event: 'log config updated', config });
+  try {
+    await waitFor(() => gaps.includes('subscribed'));
+    pushStats(ha, statsEvent());
+    pushStats(ha, statsEvent({ commands_tx: 11 }));
+    await waitFor(() => after(0).includes(0));
+    // The filter changes: a window that spans it counted lines under the old one.
+    assert.ok(await breaks(async (i) => cfg({ level: 'info', nodeFilter: i % 2 ? [6, 7] : [7] })), 'a filter change breaks the S2 window');
+    // Below info the retry line is never written: every reading is unknown.
+    cfg({ level: 'warn', nodeFilter: [7] });
+    await waitFor(() => gaps.filter((g) => g === 'level').length === 1);
+    const t2 = Date.now();
+    await waitFor(() => after(t2).length >= 3);
+    const t3 = Date.now();
+    assert.ok(after(t2, t3).every((x) => x === null), `at warn every sample is unknown, never 0: ${after(t2, t3)}`);
+    // Back at info: the window that spans the stretch at warn is unknown.
+    let levels = 1;
+    const level = async (to: string) => {
+      const want = ++levels;
+      cfg({ level: to, nodeFilter: [7] });
+      await waitFor(() => gaps.filter((g) => g === 'level').length === want);
+    };
+    assert.ok(await breaks(async (i) => {
+      if (i > 0) await level('warn');
+      await level('info');
+    }), 'the return to info breaks the S2 window');
+  } finally {
+    zd.stop();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* ── v0.33: ackEvent — the RED-latch release at the data layer ──────────── */
 
 test('ackEvent releases exactly one error latch, refuses non-errors, repeats, and ghosts', async () => {
@@ -951,6 +1011,42 @@ test('a refused removeFailed reaches the ledger as refused-misdiagnosis; a trans
     shadow.updateEpisodes([], t0 + 33 * 60_000);
     assert.equal(zd.falsePositives('ghost-suspect'), 1,
       'a driver REFUSAL is the detector being wrong, and the ledger records it');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a symptom held through a dark lane keeps its episode open and is never logged cleared — through the real engine pass (v0.76.0 review)', async () => {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-held-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+    const asListening = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+    const shadow = zd as unknown as {
+      snapshot: () => NodeSnapshot[];
+      updateEpisodes: (s: unknown[], now: number) => void;
+      runEngine: (now: number) => void;
+      symptomState: Map<string, unknown>;
+      loggedSymptomKeys: Map<string, unknown>;
+    };
+    shadow.snapshot = () => asListening;
+    const t0 = 1_800_000_000_000;
+    shadow.updateEpisodes([{ kind: 's2-desync', nodeId: 7, severity: 'watch', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' }], t0);
+    const open = () => zd.openEpisodes()?.some((e) => e.nodeId === 7 && e.kind === 's2-desync') === true;
+    assert.ok(open(), 'precondition: the episode opened');
+    shadow.loggedSymptomKeys = new Map([['7:s2-desync', { severity: 'watch', nodeId: 7, kind: 's2-desync' }]]);
+    // Matured, then held: the lane went dark (every sample is far outside the
+    // engine's window here, so the window reads unknown).
+    shadow.symptomState.set('7:s2-desync', { since: t0 - 6 * 60_000, lastSeen: t0, hits: 6, held: true });
+    for (const m of [1, 6, 12, 20]) shadow.runEngine(t0 + m * 60_000);
+    assert.ok(open(), 'held for 20 min, past the 10-min confirmation window: still open');
+    assert.ok(!zd.events().some((e) => /s2-desync cleared/.test(e.text)), 'and not logged cleared');
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });

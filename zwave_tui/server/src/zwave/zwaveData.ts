@@ -69,7 +69,7 @@ import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './base
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -1372,11 +1372,12 @@ class ZwaveDataImpl implements ZwaveData {
       // null unless the S2 log lane was watched without a break since before
       // this sample's window began — "switched off" must not read as "no
       // resyncs" (v0.26 review), and a window dark for part of it is not a
-      // count (v0.76.0: a storm pause, a silence, a reconnect). Null too for a
-      // node the driver log's node filter leaves out: it logs nothing. Same
+      // count (v0.76.0: a storm pause, a silence, a reconnect, a stretch below
+      // info, a node-filter change). Null too for a node the driver log's node
+      // filter leaves out: it logs nothing. Same
       // honest-unknown rule the driver-WS noise floor uses two blocks below.
       const filter = this.driverWs?.logNodeFilter() ?? null;
-      const s2Resyncs = s2WindowKnown(this.driverWs?.rfWatchSince() ?? null, prev?.t ?? null) && (filter == null || filter.has(n.nodeId))
+      const s2Resyncs = s2WindowKnown(this.driverWs?.s2WatchSince() ?? null, prev?.t ?? null) && (filter == null || filter.has(n.nodeId))
         ? (this.s2Accum.get(n.nodeId) ?? 0) : null;
       this.flapAccum.delete(n.nodeId);
       this.routeChangeAccum.delete(n.nodeId);
@@ -1440,12 +1441,14 @@ class ZwaveDataImpl implements ZwaveData {
       this.symptomState,
     );
     this.lastSymptoms = symptoms;
+    // Held through a dark lane (v0.76.0): live for the log and the episodes.
+    const held = heldSymptoms(this.symptomState);
     // Log NEW symptoms once (source 'net', kind 'symptom'); prune resolved keys.
-    const { next, events } = diffSymptomLog(this.loggedSymptomKeys, symptoms);
+    const { next, events } = diffSymptomLog(this.loggedSymptomKeys, symptoms, new Set(held.map((h) => h.key)));
     this.loggedSymptomKeys = next;
     for (const e of events) this.pushEvent('net', e.severity, 'symptom', e.nodeId, e.text);
     // M5: advance the outcome ledger's episode lifecycle off the same signal.
-    this.updateEpisodes(symptoms, now);
+    this.updateEpisodes(symptoms, now, held);
     // Consumed by the confound guard inside updateEpisodes; one pass only.
     this.flapsThisTick.clear();
     this.measurementReroutes.clear();
@@ -1480,7 +1483,7 @@ class ZwaveDataImpl implements ZwaveData {
    *  after the symptom has stayed gone for a CONFIRMATION window — a blink of
    *  improvement is not a recovery, and the extra dwell also lets the
    *  after-window settle past the transition. */
-  private updateEpisodes(symptoms: Symptom[], now: number): void {
+  private updateEpisodes(symptoms: Symptom[], now: number, held: readonly { nodeId: number; kind: SymptomKind }[] = []): void {
     const oc = this.outcomes;
     if (!oc) return;
     const CONFIRM_MS = 10 * 60_000;
@@ -1490,7 +1493,7 @@ class ZwaveDataImpl implements ZwaveData {
     if (meshRebuilding) this.meshRebuildUntil = Infinity;
     else if (this.meshRebuildUntil === Infinity) this.meshRebuildUntil = now;
     else if (this.meshRebuildUntil != null && now - this.meshRebuildUntil > OPS_KEEP_MS) this.meshRebuildUntil = null;
-    const { toOpen, toResolve } = planEpisodeLifecycle(symptoms, oc.openEpisodes(), this.pendingResolve, now, CONFIRM_MS,
+    const { toOpen, toResolve } = planEpisodeLifecycle([...symptoms, ...held.map((h) => ({ nodeId: h.nodeId, kind: h.kind, held: true }))], oc.openEpisodes(), this.pendingResolve, now, CONFIRM_MS,
       (nodeId) => this.holdRelease(nodeId, now), (nodeId) => this.probeSettleAt(nodeId));
     // Capture the degraded before-window at onset and the settled after-window
     // at resolution (well past the transition, thanks to the confirm window).
@@ -4072,6 +4075,8 @@ const SEV_ORDER: Record<Severity, number> = { watch: 0, warn: 1, crit: 2 };
 export function diffSymptomLog(
   prev: ReadonlyMap<string, LoggedSymptom>,
   live: readonly Symptom[],
+  /** Keys held through a dark lane (v0.76.0): kept as logged, never "cleared". */
+  held: ReadonlySet<string> = new Set(),
 ): { next: Map<string, LoggedSymptom>; events: { severity: LogEvent['severity']; nodeId: number | null; text: string }[] } {
   const sevOf = (s: Severity): LogEvent['severity'] => (s === 'crit' ? 'error' : s === 'warn' ? 'warn' : 'info');
   const next = new Map<string, LoggedSymptom>();
@@ -4092,6 +4097,7 @@ export function diffSymptomLog(
   }
   for (const [k, was] of prev) {
     if (next.has(k)) continue;
+    if (held.has(k)) { next.set(k, was); continue; }
     events.push({ severity: 'info', nodeId: was.nodeId, text: `${was.kind} cleared` });
   }
   return { next, events };

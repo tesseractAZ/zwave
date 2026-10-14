@@ -70,6 +70,17 @@ export async function mockServer(over: { minSchema?: number; maxSchema?: number;
     connectionCount: () => connections,
     push: (event: unknown) => sock?.send(JSON.stringify({ type: 'event', event })),
     dropClient: () => sock?.terminate(),
+    /** Change what the next connection is told (v0.76.0): a server restarted
+     *  at another level, another network. */
+    configure: (o: typeof over) => Object.assign(over, o),
+    /** Leave the client CLOSING (v0.76.0): a close frame written past ws's
+     *  state machine, with our read side paused, so the client's close
+     *  handshake never completes and its 'close' waits on ws's 30 s timer. */
+    holdClose: () => {
+      const raw = (sock as unknown as { _socket: import('node:net').Socket } | null)?._socket;
+      raw?.pause();
+      raw?.write(Buffer.from([0x88, 0x00]));
+    },
     close: () => new Promise<void>((r) => wss.close(() => r())),
   };
 }

@@ -3,6 +3,67 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.73.4
+
+### Fixed — a FLiRS device read as "unknown"
+
+At the schema this add-on negotiates, zwave-js-server sends a node's FLiRS
+flag as its wake-up period (`false`, `"250ms"` or `"1000ms"`), not as a
+boolean. The client mapped the string forms to "unknown", so no FLiRS device
+was ever recognised as one. The string forms now read as FLiRS.
+
+### Fixed — the missed-report watch no longer clears a symptom with no report
+
+- The one-interval radio-off allowance widened a threshold even when the
+  radio-off, a log-stream storm stop or a driver-WS reconnect came after that
+  threshold had been crossed. A missed slot on a dead device could then be
+  logged `missed-report cleared`, or fall from `warn` to `watch`, with no report
+  from the device. A raised severity now holds until the node reports again or
+  its declared interval changes.
+- A node whose sleep flags are not known yet (before the first driver dump) is
+  no longer counted as a sleeper or listed on the SLEEPERS row.
+- The narrative names both reasons an extra interval may be allowed. The plan
+  card no longer says a sleeping device cannot be asked to report: a FLiRS
+  device can be reached at any time.
+
+### Corrected
+
+DOCS §1.2 lists the events the driver-WS client now reads. §7.2.3 counts 16
+kinds and lists `missed-report`. The SLEEPERS row is described as naming the
+unwatched sleepers that fit the width.
+
+2 new tests and 4 new mutants pin these, with one assertion inverted (unknown
+flags are not a sleeper), one test that passed for the wrong reason tightened,
+and the production-hop test now carrying the radio-off evidence and a dropped
+link.
+
+## 0.73.3
+
+### Security — dependency updates
+
+- `fastify` 5.12.3 → 5.12.5: a Denial of Service through an unhandled
+  exception on HTTP/2 trailer responses (the add-on serves HTTP/1).
+- `fast-uri` 3.1.7 → 3.1.8 and 4.1.4 → 4.2.1, both reached through the HTTP
+  server's schema compilers: inconsistent host case normalisation, and mailto
+  header injection, through percent-encoded input.
+
+No code change. `npm audit` reports no vulnerabilities in production
+dependencies.
+
+## 0.73.2
+
+### Fixed — a SmartStart provisioning entry was read as a node
+
+Home Assistant lists a device that is provisioned for SmartStart but not yet
+included as a `zwave_js` device identified `provision_<DSK>`. The registry join
+split every identifier on `-` and took the second block as the node id, so a
+provisioned thermostat became "node 40489": the join counted 40 nodes, and the
+node-status and statistics subscriptions for it failed as `not_found`. Only an
+identifier of the form `<home_id>-<node_id>` (optionally followed by `-…`),
+with a node id from 1 to 4000, now names a node.
+
+One new test pins it and two new mutants show both halves are load-bearing.
+
 ## 0.73.1
 
 ### Fixed — a sleeper still interviewing at connect time is watched once it is ready

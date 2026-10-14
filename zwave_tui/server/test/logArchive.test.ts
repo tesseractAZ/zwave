@@ -409,7 +409,8 @@ test('every other 32-hex value is still redacted: the MPAN state, a key, a publi
   ];
   for (const [what, f] of cases) {
     const out = archived(f);
-    assert.match(out, /\(redacted key\)/, `${what}: ${out}`);
+    // A dev-mode `key:` is cut to its length before REPLACE sees it (v0.76.0).
+    assert.match(out, what === 'key' ? /key: +\(16 bytes\)/ : /\(redacted key\)/, `${what}: ${out}`);
     assert.doesNotMatch(out, /8899aabb|8899AABB/, `${what}: no part of the value survives`);
   }
 });
@@ -481,6 +482,87 @@ test('an S2 public key is replaced — it carries the DSK — wrapped or not (v0
   }
 });
 
+
+// ── v0.76.0 review: raw values under the tree gutter, dev-mode crypto, control characters ──
+const G = (n: number) => C + ' '.repeat(n);
+
+test('a raw value that wraps under the tree gutter — a non-last child — is cut whole, with the right length (v0.76.0 review)', () => {
+  // zwave-js formatPayload prefixes every line of a non-last tagged child with
+  // '│ ', so a wrapped dict value continues under the gutter.
+  const pay = 'a5'.repeat(25) + 'c3'.repeat(15); // 40 bytes
+  const multi = `${TS} DRIVER « [Node 044] [REQ] [BridgeApplicationCommand]${C}└─[MultiCommandCCCommandEncapsulation]${G(2)}├─[CommandClass]${G(2)}│   payload: 0x${pay.slice(0, 50)}${G(2)}│            ${pay.slice(50)}${G(2)}└─[BinarySwitchCCReport]${G(6)}current value: true`;
+  const out = archived(multi);
+  assert.match(out, /│   payload: 0xa5a5a5a5… \(40 bytes\)\n {4} {33} {2}└─\[BinarySwitchCCReport\]/, out);
+  assert.doesNotMatch(out, /c3c3/, 'no part of the tail survives');
+  const ev31 = '63' + '03' + '01' + '01' + '31'.repeat(27); // 31 bytes
+  const notif = `${TS} DRIVER « [Node 044] [REQ] [BridgeApplicationCommand]${C}└─[MultiCommandCCCommandEncapsulation]${G(2)}├─[NotificationCCReport]${G(2)}│   event parameters: 0x${ev31.slice(0, 40)}${G(2)}│                     ${ev31.slice(40)}${G(2)}└─[BatteryCCReport]${G(6)}level: 90`;
+  const o2 = archived(notif);
+  assert.match(o2, /event parameters: 0x63030101… \(31 bytes\)/, o2);
+  assert.doesNotMatch(o2, /31313131/);
+  // Two continuation lines: each gutter is stripped before the bytes are counted.
+  const p60 = 'b4'.repeat(25) + 'd7'.repeat(20) + 'e9'.repeat(15); // 60 bytes
+  const twice = `${TS} DRIVER « [Node 044] [REQ] [BridgeApplicationCommand]${C}└─[MultiCommandCCCommandEncapsulation]${G(2)}├─[CommandClass]${G(2)}│   payload: 0x${p60.slice(0, 50)}${G(2)}│            ${p60.slice(50, 90)}${G(2)}│            ${p60.slice(90)}${G(2)}└─[BinarySwitchCCReport]${G(6)}current value: true`;
+  const o3 = archived(twice);
+  assert.match(o3, /payload: 0xb4b4b4b4… \(60 bytes\)/, o3);
+  assert.doesNotMatch(o3, /d7d7|e9e9/);
+});
+
+test('the controller\'s [Notification] line cuts raw `parameters:` the same way — logged at info (v0.76.0 review)', () => {
+  // Driver.ts onNodeNotification: an event with no parameter definition logs
+  // its parameters as raw bytes, at the controller's default info level.
+  for (const n of [6, 16, 20]) {
+    const hex = '31323334353637383930'.repeat(2).slice(0, 2 * n);
+    const line = `${TS} CNTRLR   [Node 044] [Notification] Access Control${C}  type:       Access Control${C}  event:      New program code entered${C}  parameters: 0x${hex}`;
+    const out = archived(line);
+    assert.match(out, new RegExp(`parameters: 0x31323334… \\(${n} bytes\\)$`), out);
+    assert.doesNotMatch(out, /3536/);
+  }
+  const small = `${TS} CNTRLR   [Node 044] [Notification] Power Management${C}  state parameters: 0x05`;
+  assert.equal(archived(small), small.replace(/\n/g, '\n    '), 'four bytes or fewer stay');
+});
+
+test('dev-mode S0/S2 crypto (NODE_ENV development or test) keeps a length only — not one byte (v0.76.0 review)', () => {
+  // An inbound S2 User Code Report: the code ('12345') is in the plaintext,
+  // while zwave-js masks it two lines below.
+  const s2 = `${TS} DRIVER « [Node 012] [REQ] [BridgeApplicationCommand]${C}└─[Security2CCMessageEncapsulation]${G(2)}│ sequence number: 9${G(2)}│ plaintext:       0x630301013132333435${G(2)}│ auth tag:        0x0011223344556677${G(2)}└─[UserCodeCCReport]${G(6)}user id:   1${G(6)}user code: *****`;
+  const o1 = archived(s2);
+  assert.match(o1, /│ plaintext: {7}\(9 bytes\)/, o1);
+  assert.match(o1, /│ auth tag: {8}\(8 bytes\)/);
+  assert.doesNotMatch(o1, /6303|3132|0011/);
+  // An inbound S0 NetworkKeySet: 98 06 and the 16-byte network key — 18 bytes,
+  // which the 32-hex rule would miss; its ciphertext wraps under the gutter.
+  const key = '0f1e2d3c4b5a69788796a5b4c3d2e1f0';
+  const ct = 'c7'.repeat(28) + 'd8'.repeat(12); // 40 bytes
+  const s0 = `${TS} DRIVER « [Node 013] [REQ] [BridgeApplicationCommand]${C}└─[SecurityCCCommandEncapsulation]${G(2)}│ IV:         0x0102030405060708${G(2)}│ ciphertext: 0x${ct.slice(0, 54)}${G(2)}│             ${ct.slice(54)}${G(2)}│ auth code:  0x1122334455667788${G(2)}│ plaintext:  0x9806${key}${G(2)}└─[SecurityCCNetworkKeySet]`;
+  const o2 = archived(s0);
+  for (const [k, n] of [['IV', 8], ['ciphertext', 40], ['auth code', 8], ['plaintext', 18]] as const) {
+    assert.match(o2, new RegExp(`│ ${k}: +\\(${n} bytes\\)`), `${k}: ${o2}`);
+  }
+  assert.doesNotMatch(o2, /9806|0f1e|c7c7|d8d8|0102|1122/, 'no byte of the key exchange survives');
+  // A public key keeps its own label: it carries the DSK.
+  assert.match(archived(`${TS} DRIVER « [Node 012] [REQ] [BridgeApplicationCommand]${C}└─[Security2CCPublicKeyReport]${C}    public key: 0x${'a1'.repeat(32)}`), /public key: \(redacted public key\)$/);
+});
+
+test('control characters reach the file as U+FFFD — a node-set name cannot drive the reader\'s terminal; tab and newline stay (v0.76.0 review)', async () => {
+  const h = mk();
+  try {
+    // NodeNamingCC decodes a reported name as raw bytes.
+    h.a.driver({ formattedMessage: `${TS} DRIVER « [Node 044] [NodeNamingAndLocationCCNameReport]${C}    name: x\x1b[2J\x1bc\rFAKE\x7f\x9b\x00` });
+    // An escape right before a key must not hide the key from REPLACE.
+    h.a.driver({ formattedMessage: `${TS} DRIVER   name\x1b00112233445566778899aabbccddeeff` });
+    h.a.tui('[zwave-tui] a\x1b[2Jb\tc');
+    h.a.note('zwave-js', 'gap \x1b]0;title\x07');
+    await h.a.flush();
+    const js = read(h.dir, 'zwave-js-2026-10-14.log');
+    const tui = read(h.dir, 'zwave-tui-2026-10-14.log');
+    for (const f of [js, tui]) assert.doesNotMatch(f, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/, `no control character: ${JSON.stringify(f)}`);
+    assert.match(js, /name: x�\[2J�c�FAKE���\n/);
+    assert.match(js, /name�\(redacted key\)/);
+    assert.match(js, /\[archive\] gap �\]0;title�\n/);
+    assert.match(tui, /a�\[2Jb\tc\n/, 'tab kept');
+    assert.match(js, /\n {4} {33} {4}name:/, 'a multi-line entry keeps its newline');
+  } finally { h.done(); }
+});
 
 // ── v0.76.0: the backup hold ──
 /** A hold file outside the archive folder, with its mtime `ago` ms before T. */
@@ -657,4 +739,59 @@ test('intEnv: an integer option clamped to its schema range; junk is the default
   assert.equal(intEnv('abc', 5, 0, 60), 5);
   assert.equal(intEnv('', 5, 0, 60), 5);
   assert.equal(intEnv(undefined, 5, 0, 60), 5);
+});
+
+// ── v0.76.0 review: an archive turned off removes what it left ──
+test('off with a folder (days 0): the files the archive wrote are removed — hourly until none is left — and nothing else (v0.76.0 review)', async () => {
+  const left = ['zwave-js-2026-01-01.log.gz', 'zwave-tui-2026-10-14.log', 'zwave-js-2026-10-12.log.gz.tmp', 'zwave-js-2026-10-13.log'];
+  const h = mk({ days: 0 });
+  try {
+    for (const n of [...left, 'notes.txt']) writeFileSync(join(h.dir, n), 'x');
+    await h.a.housekeep();
+    assert.deepEqual(readdirSync(h.dir), ['notes.txt'], 'not a file the archive did not write');
+    assert.deepEqual(h.noted, ['log archive: off — removed 4 archived file(s) left from when it was on']);
+    await h.a.housekeep();
+    assert.equal(h.noted.length, 1, 'nothing left: nothing said');
+    assert.equal(h.a.status().enabled, false);
+  } finally { h.done(); }
+  // A backup holds the folder: nothing goes, and the next pass finishes the job.
+  const { s, readHold } = scripted(['fresh']);
+  s.rest = 'none';
+  const h2 = mk({ days: 0, readHold });
+  try {
+    for (const n of left) writeFileSync(join(h2.dir, n), 'x');
+    await h2.a.housekeep();
+    assert.equal(readdirSync(h2.dir).length, 4, 'a fresh hold deletes nothing');
+    assert.match(h2.noted[0], /a backup is running/);
+    await h2.a.housekeep();
+    assert.deepEqual(readdirSync(h2.dir), []);
+  } finally { h2.done(); }
+  // One already gone between the listing and the unlink is not an error.
+  const h3 = mk({ days: 0, readHold: async () => { rmSync(join(h3.dir, left[0]), { force: true }); return { state: 'none', mtimeMs: 0 }; } });
+  try {
+    for (const n of left) writeFileSync(join(h3.dir, n), 'x');
+    await h3.a.housekeep();
+    assert.deepEqual(readdirSync(h3.dir), []);
+    assert.deepEqual(h3.warned, []);
+    assert.match(h3.noted[0], /removed 3 archived file\(s\)/, 'counted as removed only what this pass removed');
+  } finally { h3.done(); }
+});
+
+test('off with a folder: the purge runs at boot and on its hourly timer, never the flush timer (v0.76.0 review)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-archive-'));
+  writeFileSync(join(dir, 'zwave-js-2026-10-01.log.gz'), 'x');
+  const a = createLogArchive({ dir, days: 0, maxBytes: 200 * 1024 * 1024, driver: true, warn: () => undefined, note: () => undefined });
+  try {
+    const t0 = Date.now();
+    while (readdirSync(dir).length > 0) {
+      if (Date.now() - t0 > 3000) assert.fail('the boot pass never ran');
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    a.tui('[zwave-tui] x');
+    await a.flush();
+    assert.deepEqual(readdirSync(dir), [], 'off writes nothing');
+  } finally {
+    await a.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

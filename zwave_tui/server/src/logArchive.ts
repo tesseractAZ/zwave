@@ -197,9 +197,24 @@ const FRAME_DUMP = /(?<=\n +)0x[0-9a-fA-F]+(?:\n +[0-9a-fA-F]+)*$/;
 // A raw value in a CC dump at verbose: an unimplemented CC's `payload:`
 // (CommandClass.toLogEntry) and a Notification Report's `event parameters:`
 // when zwave-js logs it before parsing (Driver.ts, a report discarded for too
-// low a security class). Same cut, wraps included; four bytes or fewer stay.
-const RAW_VALUE = /(\b(?:payload|event parameters): +)0x([0-9a-fA-F]+(?:\n +[0-9a-fA-F]+(?=\n|$))*)/g;
+// low a security class), and the controller's `[Notification]` line at info,
+// whose `parameters:` are raw when the event has no definition for them
+// (Driver.ts onNodeNotification). Same cut; four bytes or fewer stay. A value
+// wraps under the tree's gutter in any child but the last (formatPayload
+// renderText), so a continuation line may carry `│`.
+const RAW_VALUE = /(\b(?:payload|(?:event )?parameters): +)0x([0-9a-fA-F]+(?:\n[ │]+[0-9a-fA-F]+(?=\n|$))*)/g;
+// Decrypted and cipher material zwave-js prints only when the server runs with
+// NODE_ENV development or test (Security2CC/SecurityCC toLogEntry): kept as a
+// length, not one byte — an S0 NetworkKeySet plaintext's third byte is the key's.
+// An S2 public key is REPLACE's: it carries the DSK, and the label says so.
+const CRYPTO_VALUE = /(\b(?:plaintext|ciphertext|auth data|auth tag|auth code|IV|(?<!public )key): +)0x([0-9a-fA-F]+(?:\n[ │]+[0-9a-fA-F]+(?=\n|$))*)/g;
 const cutHex = (hex: string): string => `0x${hex.slice(0, 8)}… (${hex.length >> 1} bytes)`;
+const hexOf = (wrapped: string): string => wrapped.replace(/[\s│]/g, '');
+// Every control character but tab and line feed (C0, DEL, C1): a node's name
+// is decoded as raw bytes (NodeNamingCC), and an escape sequence would act on
+// the terminal of whoever reads the file. U+FFFD, not a visible `\x1b`: that
+// ends in a hex digit, and would hide a key beside it from REPLACE.
+const CONTROL = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
 
 /**
  * The views a pattern is matched in: the text as written, and the text with
@@ -303,8 +318,8 @@ function isSerialEntry(ev: Record<string, unknown>, text: string): boolean {
  * entry keeps its first line (direction, header and `(N bytes)` when the event
  * carries its formatted text; the rest is payload), a frame dump that ends any
  * other entry (the driver's `Dropping message with invalid payload …:` at
- * `warn`) keeps the header and the length, and so does a raw `payload:` or
- * `event parameters:` value.
+ * `warn`) keeps the header and the length, and so does a raw `payload:`,
+ * `parameters:` or `event parameters:` value; dev-mode crypto keeps a length.
  */
 export function driverEventText(ev: Record<string, unknown>): string | null {
   const f = ev.formattedMessage;
@@ -322,8 +337,9 @@ export function driverEventText(ev: Record<string, unknown>): string | null {
   if (isSerialEntry(ev, text)) return text.split('\n', 1)[0].replace(FRAME_HEAD, '0x$1…');
   return text
     .replace(FRAME_DUMP, (m) => cutHex(m.replace(/\s/g, '').slice(2)))
+    .replace(CRYPTO_VALUE, (_m, label: string, hex: string) => `${label}(${hexOf(hex).length >> 1} bytes)`)
     .replace(RAW_VALUE, (m, label: string, hex: string) => {
-      const h = hex.replace(/\s/g, '');
+      const h = hexOf(hex);
       return h.length > 8 ? label + cutHex(h) : m;
     });
 }
@@ -341,6 +357,10 @@ export function createLogArchive(o: LogArchiveOptions): LogArchive {
   const readHold = o.readHold ?? (() => readBackupHold(o.holdPath ?? null, now()));
   const enabled = o.dir != null && o.days > 0;
   const dir = o.dir;
+  // Off with a folder (log_archive_days 0): what the archive wrote while it was
+  // on is removed, hourly until none is left. Finished days are backed up, and
+  // an archive turned off must not ride along in every later backup.
+  const purge = dir != null && !enabled;
   const buf: Record<ArchiveStream, Pending[]> = { 'zwave-tui': [], 'zwave-js': [] };
   const held: Record<ArchiveStream, number> = { 'zwave-tui': 0, 'zwave-js': 0 };
   const lost: Record<ArchiveStream, number> = { 'zwave-tui': 0, 'zwave-js': 0 };
@@ -395,7 +415,7 @@ export function createLogArchive(o: LogArchiveOptions): LogArchive {
   const push = (s: ArchiveStream, text: string): void => {
     if (!enabled) return;
     const t = now();
-    const data = Buffer.from(`${new Date(t).toISOString()} ${redactLine(text)}\n`);
+    const data = Buffer.from(`${new Date(t).toISOString()} ${redactLine(text.replace(CONTROL, '\uFFFD'))}\n`);
     buf[s].push({ day: dayOf(t), data });
     held[s] += data.length;
     trim(s);
@@ -508,7 +528,25 @@ export function createLogArchive(o: LogArchiveOptions): LogArchive {
     return false;
   };
 
+  const doPurge = async (): Promise<void> => {
+    let names: string[];
+    try { names = await fsp.readdir(dir!); } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') fail('cannot list the directory', e);
+      return;
+    }
+    let removed = 0;
+    for (const n of names) {
+      if (!FILE_RE.test(n) && !TMP_RE.test(n)) continue;
+      if (await backupHolds()) break;
+      try { await fsp.unlink(join(dir!, n)); removed += 1; } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') fail(`cannot delete ${n}`, e);
+      }
+    }
+    if (removed > 0) note(`log archive: off — removed ${removed} archived file(s) left from when it was on`);
+  };
+
   const doHousekeep = async (): Promise<void> => {
+    if (purge) return doPurge();
     if (!enabled) return;
     if (await backupHolds()) return;
     let names: string[];
@@ -563,11 +601,15 @@ export function createLogArchive(o: LogArchiveOptions): LogArchive {
 
   const housekeep = (): Promise<void> => (chain = chain.then(doHousekeep, doHousekeep));
 
-  if (enabled && o.timers !== false) {
-    const f = setInterval(() => { void flush(); }, ARCHIVE_FLUSH_MS);
+  if ((enabled || purge) && o.timers !== false) {
+    if (enabled) {
+      const f = setInterval(() => { void flush(); }, ARCHIVE_FLUSH_MS);
+      f.unref();
+      timers.push(f);
+    }
     const h = setInterval(() => { void housekeep(); }, ARCHIVE_HOUSEKEEP_MS);
-    f.unref(); h.unref();
-    timers.push(f, h);
+    h.unref();
+    timers.push(h);
     void housekeep();
   }
 

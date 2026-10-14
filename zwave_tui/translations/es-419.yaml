@@ -146,7 +146,7 @@ configuration:
     name: Registros · Días de archivo
     description: >-
       Días de registros que se guardan en el archivo propio del complemento,
-      incluido hoy (0 lo desactiva). El journal del host solo conserva alrededor
+      incluido hoy (0 lo desactiva y borra lo que escribió). El journal del host solo conserva alrededor
       de un día y medio del registro de cada aplicación; este archivo guarda por
       más tiempo el registro del complemento y el flujo de registro del
       controlador Z-Wave JS, en archivos diarios en la carpeta de configuración

@@ -504,15 +504,16 @@ test('ENGINE tells "auto-ping off" apart from "write actions off" (v0.59.0)', ()
 
 test('ENGINE says WHY the S2 lane is dark, not just that the socket is live (v0.62.0; v0.76.0)', () => {
   // The socket can be `live` while the log subscription feeding S2-desync
-  // detection is dark — refused, paused by the storm guard, or silent — and the
-  // detector is then blind on a screen still rendering DRIVER LINK `live`.
+  // detection is dark — refused, paused by the storm guard, silent, or below
+  // info — and the detector is then blind on a screen still rendering DRIVER LINK `live`.
   // `s2LaneLive` collapsed the causes into one boolean whose callers record
   // `null`, so "nothing to report" and "cannot report" were one value.
   const resumeAt = NOW + 5 * 60_000;
   for (const [fault, phrase] of [
     ['storm-paused', /paused; it resumes on its own at \d\d:\d\d/],
     ['refused', /refused the log subscription; it is asked for again on the next reconnect/],
-    ['silent', /no driver log line arrives after verbose ones/],
+    ['silent', /no driver log line after verbose ones; re-subscribed once, back with the next line\.\n.*The log forwarder may be detached \(a Z-Wave JS UI debug capture\), or the level was lowered with no event\./],
+    ['level', /the driver logs below info, which never writes the lines it counts; back at info\./],
   ] as const) {
     const joined = plain(renderEngine(ctx(140, 40, {
       driverWsStatus: () => 'live (schema 41)',
@@ -523,6 +524,8 @@ test('ENGINE says WHY the S2 lane is dark, not just that the socket is live (v0.
     assert.match(joined, new RegExp(`S2 lane ${fault}`), `${fault}: the lane's state must reach the row`);
     assert.match(joined, phrase, `${fault}: and the CAUSE must be named: ${joined.slice(0, 500)}`);
     assert.doesNotMatch(joined, /Raise its log level/, 'the subscription never depends on the level (zwave-js-server server.ts)');
+    // A reconnect does not re-attach a forwarder another client holds started.
+    if (fault === 'silent') assert.doesNotMatch(joined, /or a reconnect/, 'silent: a reconnect is not promised to bring it back');
   }
   const noTime = plain(renderEngine(ctx(140, 40, {
     driverWsStatus: () => 'live (schema 41)', driverWsState: () => 'live', s2LaneFault: () => 'storm-paused',

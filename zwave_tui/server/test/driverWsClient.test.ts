@@ -626,9 +626,14 @@ test('the driver log level comes from the state dump and log config updated even
     assert.ok(lines.some((l) => /driver log level info → verbose/.test(l)));
     srv.push({ source: 'driver', event: 'log config updated', config: { level: 'LOUD' } });
     srv.push({ source: 'driver', event: 'log config updated', config: null });
-    await sleep(150);
-    assert.equal(client.driverLogLevel(), 'verbose');
-    assert.equal(got.gaps.filter((x) => x.kind === 'level').length, 1);
+    // A valid sentinel behind them: frames arrive in order, so once it lands
+    // the two before it were processed — and ignored.
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'debug' } });
+    await waitFor(() => client.driverLogLevel() === 'debug');
+    assert.deepEqual(got.gaps.filter((x) => x.kind === 'level').map((x) => {
+      const l = x as Extract<LogGap, { kind: 'level' }>;
+      return [l.from, l.to];
+    }), [['info', 'verbose'], ['verbose', 'debug']]);
   } finally {
     client.stop();
     await srv.close();
@@ -712,6 +717,315 @@ test('gap notes: subscribed, refused with the code, ended when the link drops or
   }
 });
 
+/* ── v0.76.0 review: the watchdog across reconnects, levels, the node filter ── */
+
+const verboseLine = { source: 'driver', event: 'logging', level: 'verbose', message: '[REQ] [GetBackgroundRSSI]', context: { source: 'driver', direction: 'outbound' } };
+const starts = (srv: { commands: string[] }) => srv.commands.filter((c) => c === 'start_listening_logs').length;
+const stops = (srv: { commands: string[] }) => srv.commands.filter((c) => c === 'stop_listening_logs').length;
+
+test('a silence still unresolved when the link drops carries to the next subscription on the same network; its watch starts at the first line (v0.76.0 review)', async () => {
+  // HA keeps its log subscription after debug logging is turned off, so a
+  // forwarder a Z-Wave JS UI capture detached stays started — and detached —
+  // across our reconnect: a fresh subscription brings nothing back.
+  const srv = await mockServer({ logLevel: 'verbose' });
+  const { got, callbacks } = collect();
+  const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60, livenessMs: 1200, logGuard: { silenceMs: 400 } });
+  client.start();
+  try {
+    await waitFor(() => client.s2LaneLive());
+    srv.push(verboseLine);
+    await waitFor(() => starts(srv) === 2 && client.s2LaneFault() === 'silent' && got.gaps.filter((x) => x.kind === 'subscribed').length === 2);
+    srv.dropClient();
+    await waitFor(() => srv.connectionCount() === 2 && got.gaps.filter((x) => x.kind === 'subscribed').length === 3);
+    assert.equal(client.s2LaneFault(), 'silent', 'the verdict carried: no line has come back');
+    assert.equal(client.s2LaneLive(), false);
+    assert.equal(client.rfWatchSince(), null);
+    await sleep(1000);
+    assert.equal(stops(srv), 1, 'still one re-subscribe per silent stretch');
+    const before = Date.now();
+    srv.push(logEvent(6, 'line'));
+    await waitFor(() => client.s2LaneLive());
+    assert.ok(client.rfWatchSince()! >= before, 'watched from the first line, not from the re-subscribe');
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
+test('the first line after a silence re-subscribe starts the watch — the dark stretch between them is not watched (v0.76.0 review)', async () => {
+  const srv = await mockServer({ logLevel: 'verbose' });
+  const { callbacks } = collect();
+  const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60, livenessMs: 1200, logGuard: { silenceMs: 400 } });
+  client.start();
+  try {
+    await waitFor(() => client.s2LaneLive());
+    srv.push(verboseLine);
+    await waitFor(() => starts(srv) === 2 && client.s2LaneFault() === 'silent');
+    await sleep(300);
+    const before = Date.now();
+    srv.push(logEvent(6, 'line'));
+    await waitFor(() => client.s2LaneLive());
+    assert.ok(client.rfWatchSince()! >= before, `watch ${client.rfWatchSince()} began before the line at ${before}`);
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
+test('a carried silence is dropped by a server now reporting below verbose, or by another network (v0.76.0 review)', async () => {
+  for (const next of [{ logLevel: 'info' }, { homeId: 1234 }]) {
+    const srv = await mockServer({ logLevel: 'verbose' });
+    const { got, callbacks } = collect();
+    const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60, livenessMs: 1200, logGuard: { silenceMs: 400 } });
+    client.start();
+    try {
+      await waitFor(() => client.s2LaneLive());
+      srv.push(verboseLine);
+      await waitFor(() => starts(srv) === 2 && client.s2LaneFault() === 'silent');
+      srv.configure(next);
+      srv.dropClient();
+      await waitFor(() => srv.connectionCount() === 2 && got.gaps.filter((x) => x.kind === 'subscribed').length === 3);
+      assert.equal(client.s2LaneFault(), null, `${JSON.stringify(next)}: nothing carried`);
+      assert.equal(client.s2LaneLive(), true);
+    } finally {
+      client.stop();
+      await srv.close();
+    }
+  }
+});
+
+test('an armed watchdog arms the next subscription on the same network: a forwarder that detached just before a reconnect is still noticed (v0.76.0 review)', async () => {
+  const srv = await mockServer({ logLevel: 'verbose' });
+  const { got, callbacks } = collect();
+  let lines = 0;
+  const client = createDriverWsClient({ url: srv.url, callbacks: { ...callbacks, onDriverLog: () => { lines += 1; } }, reconnectBaseMs: 60, livenessMs: 1200, logGuard: { silenceMs: 600 } });
+  client.start();
+  try {
+    await waitFor(() => client.s2LaneLive());
+    srv.push(verboseLine);
+    await waitFor(() => lines === 1);
+    srv.dropClient(); // before the watchdog's ten minutes
+    await waitFor(() => srv.connectionCount() === 2 && client.s2LaneLive());
+    assert.equal(stops(srv), 0);
+    // The new subscription carries no line at all.
+    await waitFor(() => got.gaps.some((x) => x.kind === 'silent'), 4000);
+    assert.equal(client.s2LaneFault(), 'silent');
+    // The note is emitted before the stop is sent: wait for the server to see it.
+    await waitFor(() => stops(srv) === 1);
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
+test('a drop to info with no event disarms the watchdog on the first info line long after the last verbose one; one right behind it does not (v0.76.0 review)', async () => {
+  for (const [gapMs, fires] of [[350, false], [0, true]] as const) {
+    const srv = await mockServer({ logLevel: 'verbose' });
+    const { got, callbacks } = collect();
+    const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60, livenessMs: 1200, logGuard: { silenceMs: 500, verboseRecentMs: 200 } });
+    client.start();
+    try {
+      await waitFor(() => client.s2LaneLive());
+      srv.push(verboseLine);
+      if (gapMs) await sleep(gapMs);
+      srv.push(logEvent(6, 'an info line'));
+      await sleep(1500);
+      assert.equal(got.gaps.some((x) => x.kind === 'silent'), fires, `info line ${gapMs} ms after the verbose one`);
+      assert.equal(stops(srv), fires ? 1 : 0);
+    } finally {
+      client.stop();
+      await srv.close();
+    }
+  }
+});
+
+test('a reported level below verbose disarms the watchdog at once — before any line says so (v0.76.0 review)', async () => {
+  const srv = await mockServer({ logLevel: 'verbose' });
+  const { got, callbacks } = collect();
+  let lines = 0;
+  const client = createDriverWsClient({ url: srv.url, callbacks: { ...callbacks, onDriverLog: () => { lines += 1; } }, reconnectBaseMs: 60, livenessMs: 1200, logGuard: { silenceMs: 500 } });
+  client.start();
+  try {
+    await waitFor(() => client.s2LaneLive());
+    srv.push(verboseLine);
+    await waitFor(() => lines === 1);
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'info' } });
+    await waitFor(() => client.driverLogLevel() === 'info');
+    await sleep(1500);
+    assert.ok(!got.gaps.some((x) => x.kind === 'silent'), 'silence at info is normal');
+    assert.equal(stops(srv), 0);
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
+test('a stream resumed after a storm pause is not judged silent on the lines before the pause (v0.76.0 review)', async () => {
+  const srv = await mockServer({ logLevel: 'verbose' });
+  const { got, callbacks } = collect();
+  const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60, livenessMs: 1200, logGuard: { perMin: 20, pauseBaseMs: 700, silenceMs: 400 } });
+  client.start();
+  try {
+    await waitFor(() => client.s2LaneLive());
+    for (let i = 0; i < 25; i++) srv.push({ ...verboseLine });
+    await waitFor(() => got.gaps.some((x) => x.kind === 'resumed'));
+    await sleep(800); // no line after the resume, for longer than silenceMs
+    assert.ok(!got.gaps.some((x) => x.kind === 'silent'), 'disarmed until a verbose line arrives on the resumed stream');
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
+test('the storm pause is judged on the lines received: a reported debug level with verbose lines takes the first rung (v0.76.0 review)', async () => {
+  for (const [line, rung, level] of [[{ level: 'verbose' }, 300, 'verbose'], [{ level: undefined }, 60_000, 'debug']] as const) {
+    const srv = await mockServer({ logLevel: 'debug' });
+    const { got, callbacks } = collect();
+    const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60, logGuard: { perMin: 20, pauseBaseMs: 300, pauseMaxMs: 60_000 } });
+    client.start();
+    try {
+      await waitFor(() => client.s2LaneLive());
+      for (let i = 0; i < 25; i++) srv.push(logEvent(6, 'x', line));
+      await waitFor(() => got.gaps.some((x) => x.kind === 'paused'));
+      const p = got.gaps.find((x) => x.kind === 'paused') as Extract<LogGap, { kind: 'paused' }>;
+      assert.equal(p.resumeAt - p.at, rung, `lines ${JSON.stringify(line)}: the ladder`);
+      assert.equal(p.level, level, 'the reported level only when the lines carry none');
+    } finally {
+      client.stop();
+      await srv.close();
+    }
+  }
+});
+
+test('the node filter follows log config updated, before the level check; a change starts a new S2 window and leaves the RF watch alone (v0.76.0 review)', async () => {
+  const srv = await mockServer({ logLevel: 'info', nodeFilter: [6, 44] });
+  const { got, callbacks } = collect();
+  const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60 });
+  client.start();
+  try {
+    await waitFor(() => client.s2LaneLive());
+    const rf = client.rfWatchSince()!;
+    assert.equal(client.s2WatchSince(), rf, 'no change yet: the same watch');
+    await sleep(20);
+    const before = Date.now();
+    // Same level as the dump: the filter is still read.
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'info', nodeFilter: [6] } });
+    await waitFor(() => client.logNodeFilter()?.size === 1);
+    assert.equal(client.rfWatchSince(), rf, 'the RF watch is not a node line');
+    assert.ok(client.s2WatchSince()! >= before, 'S2 counts start a new window');
+    // The whole config is sent and JSON drops an unset filter: absent = every node.
+    // Same size, another node: still a change.
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'info', nodeFilter: [44] } });
+    await waitFor(() => client.logNodeFilter()?.has(44) === true);
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'info' } });
+    await waitFor(() => client.logNodeFilter() === null);
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'info' } });
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'verbose' } });
+    await waitFor(() => client.driverLogLevel() === 'verbose');
+    assert.deepEqual(got.gaps.filter((x) => x.kind === 'filter').map((x) => (x as Extract<LogGap, { kind: 'filter' }>).nodes), [1, 1, null], 'one note per change');
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
+test('the ended note reports the loudest level the connection received, whatever reset the watchdog since (v0.76.0 review)', async () => {
+  const srv = await mockServer({ logLevel: 'debug' });
+  const { got, callbacks } = collect();
+  let lines = 0;
+  const client = createDriverWsClient({ url: srv.url, callbacks: { ...callbacks, onDriverLog: () => { lines += 1; } }, reconnectBaseMs: 60 });
+  client.start();
+  try {
+    await waitFor(() => client.s2LaneLive());
+    srv.push(logEvent(6, 'x', { level: 'debug' }));
+    await waitFor(() => lines === 1);
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'info' } });
+    await waitFor(() => client.driverLogLevel() === 'info');
+    srv.dropClient();
+    await waitFor(() => got.gaps.some((x) => x.kind === 'ended'));
+    assert.equal((got.gaps.find((x) => x.kind === 'ended') as Extract<LogGap, { kind: 'ended' }>).level, 'debug');
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
+test('below info the lane is dark and says why; back at info its watch starts at the change (v0.76.0 review)', async () => {
+  const srv = await mockServer({ logLevel: 'info' });
+  const { callbacks } = collect();
+  const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60 });
+  client.start();
+  try {
+    await waitFor(() => client.s2LaneLive());
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'warn' } });
+    await waitFor(() => client.driverLogLevel() === 'warn');
+    assert.equal(client.s2LaneFault(), 'level');
+    assert.equal(client.s2LaneLive(), false);
+    assert.equal(client.rfWatchSince(), null);
+    assert.equal(client.s2WatchSince(), null);
+    await sleep(20);
+    const before = Date.now();
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'info' } });
+    await waitFor(() => client.s2LaneLive());
+    assert.ok(client.rfWatchSince()! >= before, 'what came before the change was not watched');
+    assert.equal(client.s2LaneFault(), null);
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+  const low = await mockServer({ logLevel: 'error' });
+  const c2 = createDriverWsClient({ url: low.url, callbacks: {}, reconnectBaseMs: 60 });
+  c2.start();
+  try {
+    await waitFor(() => c2.state() === 'live' && c2.s2LaneFault() === 'level');
+    assert.equal(c2.rfWatchSince(), null, 'a dump below info: dark from the start');
+  } finally {
+    c2.stop();
+    await low.close();
+  }
+});
+
+test('a socket already CLOSING: the storm resume and the watchdog wait for the close — no false refusal, no silence, and the lane ends with its note (v0.76.0 review)', async () => {
+  const srv = await mockServer({ logLevel: 'verbose' });
+  const { got, callbacks } = collect();
+  const client = createDriverWsClient({ url: srv.url, callbacks, reconnectBaseMs: 60_000, logGuard: { perMin: 20, pauseBaseMs: 300 } });
+  client.start();
+  try {
+    await waitFor(() => client.s2LaneLive());
+    for (let i = 0; i < 25; i++) srv.push(logEvent(6, 'x'));
+    await waitFor(() => client.s2LaneFault() === 'storm-paused');
+    srv.holdClose();
+    await sleep(700); // the 300 ms resume timer fires while the close hangs
+    assert.equal(client.state(), 'live', 'the close has not landed');
+    assert.equal(client.s2LaneFault(), 'storm-paused', 'not a refusal');
+    srv.dropClient();
+    await waitFor(() => got.gaps.some((x) => x.kind === 'ended'));
+    assert.ok(!got.gaps.some((x) => x.kind === 'refused'));
+  } finally {
+    srv.dropClient();
+    client.stop();
+    await srv.close();
+  }
+  const s2 = await mockServer({ logLevel: 'verbose' });
+  const r = collect();
+  const c2 = createDriverWsClient({ url: s2.url, callbacks: r.callbacks, reconnectBaseMs: 60_000, livenessMs: 1200, logGuard: { silenceMs: 400 } });
+  c2.start();
+  try {
+    await waitFor(() => c2.s2LaneLive());
+    s2.push(verboseLine);
+    await sleep(100);
+    s2.holdClose();
+    await sleep(1000);
+    assert.equal(c2.state(), 'live');
+    assert.ok(!r.got.gaps.some((x) => x.kind === 'silent'), 'no silence verdict on a socket that is closing');
+    assert.equal(c2.s2LaneFault(), null);
+  } finally {
+    s2.dropClient(); // the paused server side never reads the client's FIN
+    c2.stop();
+    await s2.close();
+  }
+});
+
 test('stormPauseMs: 5 → 10 → 20 → 40 → 60 min, capped; debug and silly take the full hour at once (v0.76.0)', () => {
   assert.equal(stormPauseMs(1, 'info'), 300_000);
   assert.equal(stormPauseMs(2, 'verbose'), 600_000);
@@ -736,7 +1050,12 @@ test('parseDriverLogLevel, levelAtLeast and parseNodeFilter: only the seven zwav
   assert.equal(levelAtLeast('debug', 'verbose'), true);
   assert.equal(levelAtLeast(null, 'verbose'), false);
   assert.equal(parseNodeFilter(undefined), null);
-  assert.equal(parseNodeFilter([]), null);
+  assert.equal(parseNodeFilter('5'), null, 'not an array: no filter');
+  // zwave-js: `if (!nodeFilter) return true; return nodeFilter.includes(id)` —
+  // a filter present but empty, or holding only junk ([NaN] serialises as
+  // [null]), logs NO node: an empty set, never "every node".
+  assert.deepEqual([...(parseNodeFilter([]) ?? ['every'])], [], 'empty: no node logged');
+  assert.deepEqual([...(parseNodeFilter([null, 'abc']) ?? ['every'])], [], 'all junk: no node logged');
   assert.deepEqual([...(parseNodeFilter([7, 'x', 4001, 12]) ?? [])], [7, 12]);
 });
 
@@ -750,6 +1069,9 @@ test('logGapNote: every kind reads as a sentence with its numbers (v0.76.0)', ()
   assert.match(logGapNote({ kind: 'silent', at: 0, silentMs: 600_000, level: 'verbose' }), /no driver log line for 10m00s after verbose lines — re-subscribing once/);
   assert.match(logGapNote({ kind: 'level', at: 0, from: 'info', to: 'verbose' }), /^driver log level info → verbose/);
   assert.match(logGapNote({ kind: 'refused', at: 0, code: 'unknown_command' }), /refused by the server \(unknown_command\)/);
+  assert.equal(logGapNote({ kind: 'filter', at: 0, nodes: 2 }), 'driver log node filter → 2 node(s) — S2 counts start a new window');
+  assert.match(logGapNote({ kind: 'filter', at: 0, nodes: null }), /^driver log node filter → every node/);
+  assert.match(logGapNote({ kind: 'silent', at: 0, silentMs: 600_000, level: 'verbose' }), /or the level lowered with no event/);
   assert.match(logGapNote({ kind: 'ended', at: 0, reason: 'stopped', level: 'verbose' }), /^driver log stream ended \(stopped\) — loudest level received verbose/);
 });
 
@@ -958,6 +1280,14 @@ test('the S2 lane names WHY it is dark — storm-paused, refused, silent — and
   // Silent after verbose lines: a detached forwarder (v0.76.0).
   assert.equal(F({ silent: true }), 'silent');
   assert.equal(F({ silent: true, live: false }), null);
+  // Below info the lines it counts are never written (v0.76.0) — the cause
+  // that explains a silence too, so it is named first; a pause or a refusal
+  // still outranks it.
+  assert.equal(F({ levelLow: true }), 'level');
+  assert.equal(F({ levelLow: true, silent: true }), 'level');
+  assert.equal(F({ levelLow: true, stormPaused: true }), 'storm-paused');
+  assert.equal(F({ levelLow: true, logsAcked: false, logsMsgId: null }), 'refused');
+  assert.equal(F({ levelLow: true, live: false }), null);
   // PENDING is not a fault: a normal connect is in flight, and a fault row on
   // every reconnect is the always-on chip this codebase keeps refusing to add.
   assert.equal(F({ logsAcked: false }), null);
