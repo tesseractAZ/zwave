@@ -36,6 +36,15 @@ jobs:
     # runs here: the trial PR's analysis passed on 26.04 with no platform
     # warning, and the required check fails closed if that ever changes.
     runs-on: ubuntu-26.04
+    # A pull request's analysis covers the whole codebase, not only the lines it
+    # changed (v0.76.0). codeql-action v4 makes PR runs "diff-informed" by
+    # default: a result is kept only when its source or sink sits on a changed
+    # line, so a PR could pass while main's full scan finds the same flaw.
+    # init reads this switch, and only the exact value "false" turns it off
+    # (codeql-action src/feature-flags.ts). check-sarif.mjs refuses a
+    # diff-informed SARIF, so the gate cannot quietly narrow again.
+    env:
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: 'false'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Initialize CodeQL

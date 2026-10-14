@@ -110,9 +110,11 @@ profile zwave_tui flags=(attach_disconnected,mediate_deleted) {
   # binaries, the libraries, Node itself (/usr/bin/node) and the add-on's
   # TypeScript and node_modules (/app). The server runs that TypeScript
   # through tsx, whose transform cache lives in the OS temp directory
-  # (/tmp/tsx-0), not under /app. The server writes only its five stores in
+  # (/tmp/tsx-0), not under /app. The server writes only its six stores in
   # /data, each a temp file renamed into place, and the log archive in
-  # /config/logs (v0.75.4). The Supervisor recreates the container on every
+  # /config/logs (v0.75.4); the backup hook (v0.76.0, exec'd by the
+  # Supervisor under this profile) creates and removes /tmp/zwave-tui-backup.hold
+  # and appends one line to /config/logs. The Supervisor recreates the container on every
   # add-on start, so these locks guard one container lifetime; persistence
   # lives in /data and /config, which stay writable.
   #

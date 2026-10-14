@@ -161,6 +161,12 @@ test('rotate moves the oldest sections first, newest first into the top of the h
     'every moved release keeps its body, newest first, above the older history');
 });
 
+test('rotate puts a blank line between a title-only history and the first release moved under it', () => {
+  const titleOnly = R.HISTORY_TITLE.replace(/\n+$/, '\n'); // as the CLI writes a history with no releases yet
+  const r = R.rotate(file(sec('1.0.1', 'x'.repeat(2000)), sec('1.0.0', 'a')), titleOnly, 1000);
+  assert.equal(r.history, R.HISTORY_TITLE + '## 1.0.0\n\na\n');
+});
+
 test('rotate refuses a pointer heading anywhere but last, rather than dropping its text', () => {
   const stray = R.TITLE + sec('1.0.1', 'a') + `${R.POINTER_HEADING}\n\nnotes someone wrote\n\n` + sec('1.0.0', 'b') + R.POINTER;
   assert.throws(() => R.rotate(stray, ''), /must appear once, last/);

@@ -153,7 +153,8 @@ DRIVER_SCHEMA_MIN = 32   DRIVER_SCHEMA_MAX = 41
   to the add-on's own log (log types/counts, never payloads; `redactUrl`/`safeTag`/`saneNodeId`
   sanitize everything). The one place driver log lines are kept is the durable
   log archive (v0.75.4, §12.9): a local file in the add-on's config folder,
-  redacted before it is written, off with `log_archive_driver: false`.
+  redacted before it is written, off with `log_archive_driver: false`; its
+  finished days are included in the add-on's backups (v0.76.0).
 
 | | HA Core WS (Surface A) | Driver WS (Surface B) |
 | --- | --- | --- |
@@ -1768,9 +1769,9 @@ The socket is privileged and unauthenticated, so a hostile or buggy server must 
 
 The connection's `message` handler wraps `JSON.parse` in a try/catch that logs only `'driver-ws: unparseable frame ignored'` — never the payload. Unknown frame types fall through the `onMessage` switch's `default` and are silently ignored, never logged verbatim. `driverVersion`/`serverVersion` reach the log only through `safeTag`. This is the "log types/counts, never payloads" rule made literal.
 
-### 6.7 What it feeds: the seven callbacks
+### 6.7 What it feeds: the callbacks
 
-`start_listening` returns a `result` frame carrying the full `state` dump (parsed by `onStateDump`), after which `event` frames stream in (parsed by `onEvent`). Both funnel into seven typed callbacks. `onS2Resync` (v0.26) and `onDuplicateDrop` (v0.74.0) are fed by the driver log stream of §6.11. `onNodeDeclared` (v0.73.0) is fed by the state dump, a node's `ready` event and that one value's `value added`/`value updated` events. The controller RF-off reading (v0.65.0), matched on that same log stream, is not a callback but a pull accessor, `controllerRfOffSince()`, read by auto-ping (§11.12). The callbacks:
+`start_listening` returns a `result` frame carrying the full `state` dump (parsed by `onStateDump`), after which `event` frames stream in (parsed by `onEvent`). Both funnel into typed callbacks. `onS2Resync` (v0.26) and `onDuplicateDrop` (v0.74.0) are fed by the driver log stream of §6.11, and so are `onDriverLog` (v0.75.4, every logging event, for the durable archive) and `onDriverLogGap` (v0.76.0, a typed note for each gap or change in that stream). `onNodeDeclared` (v0.73.0) is fed by the state dump, a node's `ready` event and that one value's `value added`/`value updated` events. The controller RF-off reading (v0.65.0), matched on that same log stream, is not a callback but a pull accessor, `controllerRfOffSince()`, read by auto-ping (§11.12); so are `s2LaneResumeAt()`, `driverLogLevel()` and `logNodeFilter()` (v0.76.0, §6.11). The callbacks:
 
 ```ts
 interface DriverWsCallbacks {
@@ -1781,6 +1782,9 @@ interface DriverWsCallbacks {
   onS2Resync?: (nodeId: number) => void;                                 // v0.26: an S2 SPAN-resync log event attributed to a node (§6.11)
   onDuplicateDrop?: (nodeId: number) => void;                            // v0.74.0: the driver dropped a node's S2 frame as a duplicate (repeated-frames)
   onNodeDeclared?: (nodeId: number, declared: Declared) => void;         // v0.73.0: a sleeping node's declared report interval (missed-report)
+  onNodeRefreshQueries?: (nodeId: number, queries: number | null) => void; // v0.75.0: the Gets a user refresh would send (refresh trial)
+  onDriverLog?: (ev: Record<string, unknown>) => void;                   // v0.75.4: every driver logging event, for the archive (§12.9)
+  onDriverLogGap?: (gap: LogGap) => void;                                // v0.76.0: a gap or change in that stream, for an archive note
 }
 ```
 
@@ -1894,16 +1898,21 @@ with no statistics anomaly of any kind and nothing on any screen.
 Verified against node-zwave-js v15.26.0 sources, the S2 desync family splits by
 direction, and — decisively — by **log level**:
 
-| Direction | Message | Level | Node-attributed |
-|---|---|---|---|
-| Incoming (we could not decrypt the device) | `Message authentication failed` / `No SPAN is established yet`, `…cannot decode command. Requesting a nonce...` | **`verbose`** | yes |
-| Outgoing (device could not decrypt us) | `failed to decode the message, retrying with SPAN extension...` | `info` | yes |
-| Outgoing, terminal | `failed to decode the message after re-transmission with SPAN extension, dropping the message.` | `warn` | yes |
+| Direction | Message | Level | Node-attributed | Counted as |
+|---|---|---|---|---|
+| Incoming (we could not decrypt the device) | `Message authentication failed` / `No SPAN is established yet`, `…cannot decode command. Requesting a nonce...` | **`verbose`** | yes | not counted (v0.76.0); kept in the archive |
+| Outgoing (device could not decrypt us) | `failed to decode the message, retrying with SPAN extension...` | `info` | yes | **`dS2Resync`** (`s2-desync`) |
+| Outgoing, terminal | `failed to decode the message after re-transmission with SPAN extension, dropping the message.` | `warn` | yes | not counted (always preceded by its retry) |
 
-**Only the outgoing pair is visible at the stock `info` level.** The incoming
-family requires the Z-Wave JS add-on's log level to be raised to `verbose`, so
-this detector sees roughly half the S2 desync picture on a default install —
-which is honest to say and is said again in §7 where the symptom is defined.
+**The detector counts the outgoing retry alone, at every log level (v0.76.0).**
+Before v0.76.0 it also counted the incoming family, which streams only when the
+Z-Wave JS add-on logs at `verbose` or finer — up to once per secure node that
+speaks first after every driver restart, and once for every inbound frame that
+arrives out of SPAN step. Counting it made the absolute `S2_ABS` threshold
+depend on a log setting changed for unrelated reasons: raising the level would
+have read as a new S2 fault. The incoming lines are kept in the durable archive
+(§12.9) for review; a detector on them would need its own threshold, calibrated
+on verbose data and gated on proven verbose coverage.
 The un-attributed driver-level line (`Dropping message with invalid payload`,
 logged via `driverLog` with no `nodeId`) is deliberately **not** matched: it
 carries no node attribution, and charging resyncs to nobody is worse than not
@@ -1922,8 +1931,25 @@ alter the mesh.
 Log events arrive as
 `{type:'event', event:{source:'driver', event:'logging', formattedMessage, message, level, context, …}}`,
 where a node-scoped controller line carries `context = {source:'controller',
-type:'node', nodeId, direction}`. The matcher (`s2ResyncNodeId`) requires
-`context.type === 'node'` and a sane `nodeId` before it looks at the text at all.
+type:'node', nodeId, direction}`, the controller's own lines carry
+`{source:'controller', type:'controller'}`, value lines (`debug`) carry type
+`'value'`, DRIVER dumps (`verbose`) carry `{source:'driver', direction}` with
+no type, and SERIAL lines (`debug`) carry `{source:'serial'}`. The S2 and
+duplicate matchers require `context.type === 'node'` and a sane `nodeId`
+before they look at the text at all. The RF-off watch (v0.65.0) accepts only
+the controller's own lines, and only when they START with `Turning RF off` /
+`Turning RF on` (v0.76.0): DRIVER dumps and value lines can carry a device- or
+user-set string, such as a node name, and the earlier rule (anything but a node
+line, the phrase anywhere) let either flip the write lane's gate. No miscount
+was possible at the stock `info` level, where neither kind of line streams.
+
+**Matching ignores the 80-column wrap (v0.76.0).** zwave-js-server formats
+every forwarded line with zwave-js's `formatLogMessage`, so `message` is
+hard-cut at 80 columns and joined with `\n` wherever the column falls — a
+production line read `Duplicate command (s` / `equence number 181))`. Every
+matcher compares whitespace-squashed text (`logText`), so a cut cannot split a
+phrase. Before v0.76.0 the S2 drop line was kept out by where the cut happened
+to fall, not by its guard.
 
 #### Three properties of the server the client must defend against
 
@@ -1940,21 +1966,76 @@ log listening unsafe, all handled here:
 2. **There is no throttling of any kind** — one WebSocket message per log line
    per subscribed client, synchronously in the driver's logging pipeline. At
    `debug`/`silly` levels that is every serial frame. The client therefore
-   carries its own **storm guard**: if inbound log events exceed
-   `LOG_STORM_PER_MIN` (3000) it sends `stop_listening_logs`, logs the reason
-   once, and continues without the S2 lane. A diagnostic that can drown the Pi
-   it is diagnosing is not a diagnostic.
-3. **The stream follows the driver's current log level**, which the user may
-   change at any time from the Z-Wave JS add-on. Volume is therefore not under
-   this add-on's control, which is the second reason the storm guard exists.
+   carries its own **storm guard** (`LOG_GUARD`): above 3000 logging events in
+   a fixed 60 s window it sends `stop_listening_logs` and **pauses** this
+   client's subscription (v0.76.0; before, it stopped until the next
+   reconnect, which could be days). The pause lasts 5 min, doubling per
+   consecutive pause to a 60 min cap; a stream that runs 60 min after a resume
+   without tripping starts the ladder again, and a reconnect starts afresh. A
+   window that carried `debug` or `silly` lines (judged on each event's own
+   `level`) takes the full hour at once. A `log config updated` event to a
+   QUIETER level than the burst's resumes at once; a louder one never does
+   (HA's debug logging raises the driver to `debug`). Resuming re-sends
+   `start_listening_logs` through the ordinary acknowledgement, so nothing new
+   is on the wire, and the resumed stream is metered from zero. Lines that
+   arrive after the stop are counted, never matched or archived. While paused,
+   S2 samples read `null`, ENGINE shows `S2 lane storm-paused` with the time it
+   resumes, and the archive marks the gap (§12.9). A diagnostic that can drown
+   the Pi it is diagnosing is not a diagnostic.
+3. **The stream runs at the level its forwarder started at**, not at whatever
+   the driver reports now. zwave-js-server creates the forwarder's transport at
+   the driver's level when the first client subscribes, and refreshes it only
+   when a change comes through `driver.update_log_config` (HA's Z-Wave JS Logs
+   panel, HA's debug logging) or the forwarder restarts (every subscriber
+   leaves, the server restarts, or this add-on reconnects as the only
+   subscriber). Z-Wave JS UI's own settings save and its debug-capture restore
+   change the driver's level with no event. Volume is therefore not under this
+   add-on's control, which is the second reason the storm guard exists.
+
+#### Knowing the driver's log level (v0.76.0)
+
+The level is read from the `start_listening` state dump
+(`state.driver.logConfig.level`) at every connect, and from zwave-js-server's
+`log config updated` event, which is sent only for changes made through
+`driver.update_log_config`. Only the seven zwave-js level names are kept. It is
+recorded on the `state dump processed` line, in the archive's `subscribed`
+note, and on each change. Because of property 3 the client also tracks the
+loudest `level` actually RECEIVED on each subscription, and judges a storm and
+arms the silence watchdog on that, never on the reported level alone. No new
+command is needed: `driver.get_log_config` was considered and rejected. The
+dump's `logConfig.nodeFilter` is kept too: a node outside a driver log node
+filter logs nothing, so its S2 samples read `null`, never 0.
+
+#### A detached forwarder (v0.76.0)
+
+A Z-Wave JS UI debug capture replaces the driver's log transports
+(`updateLogConfig({transports:[debug], level:'debug'})`, then
+`{transports: []}` and a level restore). That detaches zwave-js-server's
+forwarder while the server still counts it as started, and no event is sent.
+Once a line at `verbose` or finer has arrived on this subscription, the
+controller's ≤30 s background-RSSI poll guarantees more, so 10 min without one
+re-subscribes ONCE per silent stretch (`stop_listening_logs` then
+`start_listening_logs`). The lane reads `silent` (unknown) until a line
+arrives or the link reconnects. Limits: it is never armed at `info`, where a
+long silence is normal (34 lines in about 3 h on the reference mesh); the
+re-subscribe cannot re-attach while another client holds a log subscription
+(HA's Logs panel open, HA debug logging); a 500-series controller with no
+background-RSSI poll on a very quiet mesh could read silent spuriously; and
+after a capture the driver returns to Z-Wave JS UI's gateway log level (default
+`info`), not to the level it had before.
 
 Failure to start the log stream is, like everything else in §6, **degradation
 not fatality**: the S2 lane goes quiet, `dS2Resync` is recorded as `null`
 (unknown, never 0) for every sample, the `s2-desync` detector never fires, and
-the controller RF-off reading (v0.65.0) reads `null` too: a dark lane delivers
-neither `Turning RF off` nor its `Turning RF on`, and a reading already set is
-dropped rather than held, so the Controller RF off gate (§11.12) never holds
-auto-ping off through the nightly NVM backup. Every other signal is unaffected.
+the controller RF-off reading (v0.65.0) reads `null` too: a refused, never
+acknowledged or dropped lane delivers neither `Turning RF off` nor its
+`Turning RF on`, and a reading already set is dropped rather than held, so the
+Controller RF off gate (§11.12) never holds auto-ping off through the nightly
+NVM backup. A storm PAUSE (v0.76.0) is different: the subscription stays
+acknowledged, so a reading taken before the pause keeps its own 2-minute
+deadline, and a pause never creates a hold by itself. At `verbose` and finer
+the busiest minute is likeliest inside the NVM backup, the very blackout the
+gate exists for. Every other signal is unaffected.
 
 #### Into the evidence store
 
@@ -1962,7 +2043,12 @@ A matched event increments a per-node accumulator, `s2Accum`, which drains into
 the next evidence sample exactly as `flapAccum` does (§5) — the same
 event-accumulator discipline, for the same reason: level-sampling a rate this
 bursty would miss sub-window storms by construction. The sample field is
-`dS2Resync`, folded into the coarse tier as `s2` (a `null` adds nothing). Both
+`dS2Resync`, folded into the coarse tier as `s2` (a `null` adds nothing). It is
+`null` unless the lane was watched without a break since before the sample's
+window began (v0.76.0, `s2WindowKnown`): a node's first sample, and the first
+after any connect, storm resume or silence re-subscribe, read `null` rather
+than a partial count; so does every sample of a node outside the driver log's
+node filter. Both
 are optional on disk: from a pre-v0.26 snapshot the fine `dS2Resync` revives as
 `null` (unknown) and the coarse `s2` as `0`, so the schema version does not
 change and an upgrade loses no history.
@@ -2395,10 +2481,19 @@ half-interviewed — so it is offered only as a *blocked* candidate with that
 rationale. The actionable candidates are physical (improve the path; check
 whether the device is power-cycling, which loses nonce state on every boot).
 
-**Coverage caveat, restated from §6.11:** at the stock Z-Wave JS `info` log
-level only the *outgoing* desync pair is emitted. The incoming family is
-`verbose`, so on a default install this detector sees roughly half the S2
-picture. It under-reports; it does not over-report.
+**Counted identically at every log level (v0.76.0):** the detector counts the
+outgoing SPAN retry alone, so raising the driver to `verbose` neither raises
+the count nor changes what `S2_ABS` means. The incoming family (§6.11) streams
+only at `verbose` and finer and stays in the archive for review.
+
+**A window the lane could not see holds the symptom (v0.76.0).** When every
+sample in the 30-min window reads `null` (a storm pause, a silent or refused
+lane), an armed or matured `s2-desync` is held as it stands — neither cleared
+(a fresh dwell on resume, and episode churn) nor advanced, since there is
+nothing to emit — and lets go once its dwell has gone a whole window without a
+known sample: holds need deadlines, and a held key keeps the node out of
+baseline folding (`armingNodes`). The outcome floors already refuse to score a
+dark window as a recovery (§9, `s2Known`).
 
 **`missed-report`** (watch/warn, measured, v0.73.0) and **`repeated-frames`** (watch, measured, v0.74.0) are documented with their evidence in §11.12. In brief: a watched sleeping node silent past `MISSED_WATCH_MULT` (1.5×) or `MISSED_WARN_MULT` (2.5×) of the report interval it declares (`missedReport.ts`); and a non-Dead node with 2 bursts in `DUP_LOOKBACK_MS` (24 h), or one of `DUP_BIG_BURST` (15) or more, where a burst is `DUP_BURST_MIN` (5) duplicate-S2 drops within `DUP_BURST_WINDOW_MS` (1 min) (`repeatedFrames.ts`). Neither calls `markDegrading`, and neither opens a ledger episode: `repeated-frames` is skipped by kind, and a `missed-report` node is a sleeping device that fails `isPingCandidate` (§9.2).
 
@@ -3989,7 +4084,7 @@ A ping can use only the stored routes (the last working route, the next-to-last,
 |---|---|---|
 | Attempt budget `auto_ping_max_attempts` | 3 per dead episode (1–10) | Then stop and leave it to a human; recovery clears the episode so a later failure gets a fresh budget. Each unanswered ping is followed by one routed read, which spends none of this budget (v0.70.0) |
 | Backoff between attempts | 10 / 30 / 60 m; at the default 3 attempts only the first two waits are reached (10 m dwell + 10 m + 30 m ⇒ ~50 m to the give-up), and the 60 m rung governs the third wait onward | A node that did not answer seconds ago will not answer now; avoid avoidable RF |
-| Controller RF off | The controller reported `Turning RF off` on the driver log stream and has not reported it back on (v0.65.0). The reading expires 2 min (`RF_OFF_MAX_MS`) after the controller LAST reported RF off — each `off` line refreshes it — and also on a dark log lane and on any driver-WS reconnect | The nightly NVM backup takes the radio down for ~10 s and soft-resets the controller (observed 07:00 UTC, both nights of the 2026-09-15 audit). Seen firing live on 2026-09-21 at 07:00:08 UTC against zwave-js 15.29.0, whose log still emits both `Turning RF off` and `Turning RF on`; because the gate is read on the 60 s tick, a given night shows a `controller-rf-off` suppression line only when a tick lands inside the ~10 s window, so a night without one is not a failure. A frame sent across that window cannot be acknowledged, and ONE unacknowledged sweep frame is enough for the driver to mark a node Dead — a false death this engine would then report, remediate and count. Probes already in flight when the radio goes down are dropped **unjudged** rather than booked as misses: an unanswered frame there measures the radio, not the node. Two limits, stated so the guarantee is not read wider than it is: the drop can only act on a tick that sees the reading, so for a blackout shorter than the 60 s tick it covers the ticks that land inside the window and not the probe launched just before it; and a probe whose node was already seen to go Dead on it is settled first and stays booked — that death was observed with the radio on, and keeps its v0.64.4 dwell exemption |
+| Controller RF off | The controller reported `Turning RF off` on the driver log stream and has not reported it back on (v0.65.0). The reading expires 2 min (`RF_OFF_MAX_MS`) after the controller LAST reported RF off — each `off` line refreshes it — and also on a refused or dropped log lane and on any driver-WS reconnect. A storm pause (v0.76.0) keeps a reading already taken until those 2 min run out, and sees no new one while paused | The nightly NVM backup takes the radio down for ~10 s and soft-resets the controller (observed 07:00 UTC, both nights of the 2026-09-15 audit). Seen firing live on 2026-09-21 at 07:00:08 UTC against zwave-js 15.29.0, whose log still emits both `Turning RF off` and `Turning RF on`; because the gate is read on the 60 s tick, a given night shows a `controller-rf-off` suppression line only when a tick lands inside the ~10 s window, so a night without one is not a failure. A frame sent across that window cannot be acknowledged, and ONE unacknowledged sweep frame is enough for the driver to mark a node Dead — a false death this engine would then report, remediate and count. Probes already in flight when the radio goes down are dropped **unjudged** rather than booked as misses: an unanswered frame there measures the radio, not the node. Two limits, stated so the guarantee is not read wider than it is: the drop can only act on a tick that sees the reading, so for a blackout shorter than the 60 s tick it covers the ticks that land inside the window and not the probe launched just before it; and a probe whose node was already seen to go Dead on it is settled first and stays booked — that death was observed with the radio on, and keeps its v0.64.4 dwell exemption |
 | Boot window | 5 m after start (or roster not ready) for the sweep and verification lanes; the dead ladder waits only for a ready roster, and the gates it passes still report `boot-window` (v0.64.4) | Right after start every node can read Dead; without this the engine would ping the whole mesh on every restart. A ready roster is that hazard's own measure — holding the ladder to the wall clock kept a node's Home Assistant entities unavailable ~3 min longer after a host reboot. The trade: a restart loop no longer rate-limits the ladder, which can probe each quiet Dead node once per start, no sooner than the first tick |
 | Candidate rule | `!isController && isListening === true` | ASLEEP IS NOT DEAD: battery/FLiRS devices answer on their own wakeup interval; a ping spends their charge to fail. `isListening: null` (not interviewed) is left alone rather than probed on an assumption |
 | Dead dwell `auto_ping_after_min` | 10 m (2–120); not applied to a node that went Dead with a sweep (v0.64.4) or verification (v0.71.0) probe of ours to it unanswered | Measured on the reference mesh: self-healing episodes resolve inside ~5 m, stuck ones run 6–9 h — 10 m sits in the gap. A node our own probe knocked Dead is not healing, so the dwell would only hold it down |
@@ -4433,13 +4528,17 @@ export OUTCOMES_PATH=/data/outcomes.json  # M5 action-efficacy ledger
 export AUTONOMY_PATH=/data/autonomy.json  # v0.72.0 the autonomy pause (§11.12)
 export TRIAL_PATH=/data/refresh_trial.json # v0.75.0 the refresh trial (§11.14)
 export LOG_ARCHIVE_DIR=/config/logs       # v0.75.4 the durable log archive (§12.9)
+export LOG_ARCHIVE_HOLD=/tmp/zwave-tui-backup.hold # v0.76.0 the backup hold (§12.9)
 ```
 
 `/config` is the add-on's `addon_config` folder (mapped since v0.75.4;
 `/addon_configs/<slug>` on the host, which the SSH add-on can read). Only the
-log archive lives there, and `backup_exclude: ["logs/*"]` keeps it out of every
-backup — the Supervisor applies an app's exclude patterns to both its `/data`
-and its config folder.
+log archive lives there. Since v0.76.0 its finished days go into the add-on's
+backups; `backup_exclude: ["logs/*.log", "*.tmp"]` keeps today's file and every
+temp file out, here and in `/data` — the Supervisor applies an app's exclude
+patterns to both folders and matches each path before reading the file — and
+`backup_pre`/`backup_post` hold the archive's housekeeping while the copy runs
+(§12.9).
 
 `/data/autonomy.json` differs from the stores above in one respect: it is
 written only when the pause changes (TUI pause/resume, or a new reading of the
@@ -4623,7 +4722,7 @@ Five workflows guard and publish the project. Two gate every change:
    Security tab, and `.github/scripts/check-sarif.mjs` fails the job on
    actionable findings, because an upload alone does not fail a build.
 
-**Runners (v0.75.3; CodeQL v0.75.4).** Every job runs on a pinned image, never `ubuntu-latest`: `ubuntu-26.04`, with both image builds on native runners (`ubuntu-26.04-arm` for aarch64). CodeQL followed in v0.75.4: its published system requirements still list Ubuntu 22.04 and 24.04 only, but its analysis runs on 26.04 — the move's own run passed with no platform warning — and the required check fails closed if a later release stops working. `ubuntu-latest` itself moves to 26.04 in a rollout from 2026-10-19 that would have changed python3, Docker, the docs job's pandoc and LibreOffice and the AppArmor job's `apparmor_parser` (5.0.2 on 26.04) under every job at once, and could mix images within one run. `test/workflowRunners.test.ts` holds the rule.
+**Runners (v0.75.3; CodeQL v0.75.4).** Every job runs on a pinned image, never `ubuntu-latest`: `ubuntu-26.04`, with both image builds on native runners (`ubuntu-26.04-arm` for aarch64). CodeQL followed in v0.75.4: its published system requirements still list Ubuntu 22.04 and 24.04 only, but its analysis runs on 26.04 — the move's own run passed with no platform warning — and the required check fails closed if a later release stops working. Since v0.76.0 a pull request's CodeQL analysis covers the whole codebase: codeql-action v4 makes PR runs "diff-informed" by default, keeping a result only when its source or sink sits on a changed line, so `codeql.yml` sets `CODEQL_ACTION_DIFF_INFORMED_QUERIES: 'false'` on the job (only the exact value `false` turns it off) and `check-sarif.mjs` refuses a SARIF whose `runs[].properties.incrementalMode` includes `diff-informed`; `overlay` alone, an incremental database build, passes. `ubuntu-latest` itself moves to 26.04 in a rollout from 2026-10-19 that would have changed python3, Docker, the docs job's pandoc and LibreOffice and the AppArmor job's `apparmor_parser` (5.0.2 on 26.04) under every job at once, and could mix images within one run. `test/workflowRunners.test.ts` holds the rule.
 
 Three form the release relay:
 
@@ -4793,8 +4892,36 @@ radio.
 >   128-bit key-shaped hex strings, JWTs and bearer tokens are replaced.
 >   zwave-js cuts its text at 80 columns wherever the column falls, mid-token
 >   included, so every pattern is matched both in the text as written and with
->   the wraps joined. The storm guard (§6.11) still stops the stream above 3000
->   lines a minute, and a stopped stream archives nothing.
+>   the wraps joined. Two public S2 values `verbose` prints are kept (v0.76.0):
+>   a Nonce Report's receiver entropy and a SPAN extension's sender EI. Both go
+>   over the air in clear, and the SPAN is derived from them together with the
+>   network key, so neither reveals anything without it; each is kept only as
+>   the whole value of its own line, directly under the tag zwave-js prints it
+>   under, in the lower-case `0x` form it writes. Every other 128-bit hex string
+>   is still replaced (the MPAN state and keys a development build prints, a
+>   label out of place, a value a wrap has split), and so is a 32-byte S2
+>   public key, whose first 16 bytes are the DSK for an unauthenticated node.
+> - **Raw frames (v0.76.0):** at `debug` zwave-js logs every byte exchanged
+>   with the controller as a `SERIAL` entry, and at `warn` (so at the default
+>   `info` too) it dumps a frame it cannot parse. A non-secure frame's payload
+>   is plaintext (a lock's user code, for one), and during an S0 inclusion the
+>   network key travels under a fixed, published temporary key. A SERIAL entry
+>   keeps only its first line, with the frame cut to its first four bytes
+>   (start, length, type, function id) and its length when the event carries
+>   its formatted text: `SERIAL « 0x012a00a8… (54 bytes)`. An entry counts as
+>   SERIAL by its label, its context or the forwarder's exact text shape, any
+>   one being enough; ACK, NAK and CAN carry no payload and stay. A hex run that
+>   starts a line and runs to the end of an entry (zwave-js 15.31.1 writes one
+>   only in that dump) is cut the same way, and so is a raw `payload:` (an
+>   unimplemented CC) or `event parameters:` value of more than four bytes.
+> - **Gaps (v0.76.0):** every gap in the driver file is marked with an
+>   `[archive]` line, in order with the lines around it: the subscription and
+>   the driver's log level, each storm pause (lines, seconds, rate, level,
+>   resume time), each resume (duration, lines dropped), a silence
+>   re-subscribe, a level change, a refusal, and the end of the stream with the
+>   loudest level received. `zgrep '\[archive\]'` lists them. The dropped count
+>   covers only lines that reached the add-on after the stop; lines the driver
+>   logged while unsubscribed were never sent and are not estimated.
 > - **Failure:** writes count their bytes, so one that fails part-way resumes
 >   at the byte where it stopped and nothing is written twice. Unwritten lines
 >   are held one by one (up to 1 MiB per stream, oldest dropped and counted),
@@ -4810,9 +4937,37 @@ radio.
 >   reads members in order), and a `.gz.tmp` a crash left behind is deleted. A
 >   file dated after today, from a clock that ran ahead, cannot age out, so the
 >   size cap reaches it after the past days instead of never.
-> - **Backups:** excluded (`backup_exclude: ["logs/*"]`). A restore of this
->   add-on replaces its whole config folder with the backup's copy, so the
->   archive starts empty again; uninstalling with its data removed deletes it.
+> - **Backups (v0.76.0):** finished days (`*.log.gz`) go into the add-on's
+>   backups; today's file and every `*.tmp` do not (`backup_exclude:
+>   ["logs/*.log", "*.tmp"]`): today's file is still being written, so a copy
+>   would be cut off. The Supervisor lists a folder once, then lstats and opens
+>   each file in turn, and a file renamed or deleted in between fails the copy
+>   and leaves the WHOLE add-on, `/data` included, out of that backup —
+>   Home Assistant 2026.10's backup screen does not report it (it looks for the
+>   failure under old job names). So `backup_pre` runs
+>   `/usr/bin/zwave-tui-backup-hook pre`, creating `/tmp/zwave-tui-backup.hold`,
+>   and `backup_post` runs `… post`, removing it. While the hold is fresh,
+>   housekeeping commits no compression and deletes nothing, checking before
+>   each step; appends to today's file go on. A pass that meets a backup says so
+>   once on the add-on log (`log archive: a backup is running …`). A hold 60 min
+>   or more away from now, in either direction, is ignored and reported once,
+>   because a Supervisor restarted mid-backup never runs `backup_post`; a new
+>   container starts with an empty `/tmp`. Both hooks exit 0 on every path,
+>   since a non-zero exit, even from `post` after a good copy, drops the add-on;
+>   they run by docker exec, as root, under the add-on's AppArmor profile,
+>   without a shell, and the image build runs both once. Each also writes
+>   `… [backup] backup started: …` / `… [backup] backup finished: …` into the
+>   day's `zwave-tui-YYYY-MM-DD.log` while the archive is on (stamped to the
+>   second, written directly, so up to 2 s out of order), because a hook's own
+>   output reaches no log. Size: what the `.gz` days hold — an estimated 2 MB a
+>   backup for 14 days with the driver at `verbose` (from earlier Z-Wave JS UI
+>   verbose file logs, about 140 KB a day gzipped), a few hundred KB at `info`,
+>   bounded by `log_archive_max_mb`. A restore replaces the add-on's config
+>   folder with the backup's copy: finished days up to the day before the
+>   backup return, and every line written after it is lost — copy
+>   `/addon_configs/<slug>/logs` off first if those days matter; a backup made
+>   before v0.76.0 brings the archive back empty. Uninstalling with its data
+>   removed deletes it.
 
 `logger.ts` writes to stdout, which is what `ha apps logs` and
 `journalctl` surface. Every line is `[zwave-tui] ` followed, for severities

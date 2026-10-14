@@ -54,7 +54,15 @@ COPY --from=serverdeps /build/server/node_modules ./server/node_modules
 # The s6 service dir uses a HYPHEN (zwave-tui); the add-on slug uses an
 # underscore (zwave_tui). Do not conflate them.
 COPY rootfs/ /
-RUN chmod a+x /etc/services.d/zwave-tui/run
+# The backup hook (v0.76.0) is exec'd by the Supervisor only at BACKUP time, so
+# a missing x bit or a line busybox cannot run would surface only then, as the
+# add-on silently left out of a backup. Run both phases here, in the real base
+# image, against a throwaway hold.
+RUN chmod a+x /etc/services.d/zwave-tui/run /usr/bin/zwave-tui-backup-hook \
+ && LOG_ARCHIVE_HOLD=/tmp/hook-smoke.hold LOG_ARCHIVE_DIR=/tmp/hook-smoke-none /usr/bin/zwave-tui-backup-hook pre \
+ && test -f /tmp/hook-smoke.hold \
+ && LOG_ARCHIVE_HOLD=/tmp/hook-smoke.hold LOG_ARCHIVE_DIR=/tmp/hook-smoke-none /usr/bin/zwave-tui-backup-hook post \
+ && test ! -e /tmp/hook-smoke.hold
 
 # Web + API on 8788; telnet TUI on 2324.
 EXPOSE 8788 2324

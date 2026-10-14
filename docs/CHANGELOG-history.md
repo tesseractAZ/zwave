@@ -3,6 +3,91 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.73.1
+
+### Fixed — a sleeper still interviewing at connect time is watched once it is ready
+
+The driver-WS state dump carries no values for a node whose interview has not
+finished, so such a sleeper had no declared interval and stayed unwatched until
+the next reconnect re-sent the dump. The node's `ready` event carries its full
+state. It is now read the same way as the dump, so the declaration arrives as
+soon as the node is ready, and the value events for it are followed from then
+on.
+
+One new test pins it and one new mutant shows it is load-bearing.
+
+## 0.73.0
+
+### Added — `missed-report`: a sleeping device that stops reporting is no longer invisible
+
+A battery device that stopped reporting was covered by no layer. The driver
+rarely transmits to a sleeping node, so it seldom marks one Dead. The liveness
+sweep covers mains nodes only, and `quiet-node` is gated on
+`isListening === true`. The new symptom kind `missed-report` watches sleeping
+nodes against the report interval each device DECLARES:
+
+- The declaration is the node's Wake Up interval (Command Class 132), or else a
+  Configuration parameter whose label contains "heartbeat", in seconds, minutes
+  or hours. It is read from the driver's value DB through the driver-WS state
+  dump, then kept current from the value events for that one value.
+- Silence past 1.5 declared intervals raises a `watch`, and past 2.5 a `warn`.
+  A silence spanning a controller radio-off gets one more interval, because a
+  heartbeat sent during the nightly NVM backup is lost and not retried. So does
+  a silence the driver's log stream did not watch throughout.
+- A node is watched only while it sleeps, is not Dead (`node-down` owns that),
+  declares a readable interval above 0, has been heard, and the driver-WS link
+  is live. `sensor.zwave_tui_engine` gains `sleepers_watched` and
+  `sleepers_total`, and ENGINE's `SLEEPERS` row names each sleeper that is not
+  watched and why.
+- The first step offered is physical: a fresh battery, then a trigger that makes
+  the device transmit.
+
+Nothing is learned from traffic. A learned cadence could not tell a device's
+timer from a household routine, and two adversarial design rounds each found
+new false alarms in the rules added to separate them. A device that declares no
+interval is therefore not watched, and ENGINE says so. The driver-WS client
+sends nothing new; it reads one more value from what it already receives.
+
+### Corrected
+
+- DOCS: the driver does transmit to FLiRS devices (a NoOp at each driver start,
+  and Supervision replies) and can mark them Dead. Only Wake Up devices are
+  never marked Dead.
+
+13 new tests pin these. They cover each way a sleeper is not watched, both
+thresholds and their boundaries, the radio-off allowance and its limits, the
+declaration's source and units, a value event read only for the declaring
+value, the production hop from the dump to the watch, and the published counts.
+20 new mutants show each rule is load-bearing.
+
+## 0.72.1
+
+### Fixed — a summons no longer says a ping often revives the node
+
+`sensor.zwave_tui_recommendation` in state `summons` carried the planner's
+node-down headline, "a ping often revives it", after auto-ping had already
+spent its attempts on the node without an answer. The headline now states what
+the ladder did: "auto-ping gave up after N unanswered attempts". When the
+ladder gave up because its pings never left the add-on, it says the node itself
+was not tested. Before the ladder gives up, the planner's headline still leads.
+
+### Fixed — two auto-ping log lines said something other than what happened
+
+- After a node went Dead with the add-on's own sweep or verification probe to
+  it unanswered, every later ladder attempt was logged as "is still Dead after
+  the immediate retry". Only the second attempt follows that retry. The third
+  now reads "is still Dead after attempt 2".
+- Each verification probe line ended "N owed", where N is the number of NODES
+  the whole fleet's verification queue is serving. Printed beside one node, it
+  read as that node's own count of remaining probes, and it rose and fell as
+  other nodes' bursts overlapped. The line now reads "N nodes owed" ("1 node
+  owed").
+
+One new test pins the summons wording in all three cases and two tests are
+extended for the log lines. Five new mutants show each change is load-bearing,
+and the three existing mutants anchored on the verification line are
+re-pointed.
+
 ## 0.72.0
 
 ### Changed — automatic remediation is decided: no verb is admitted

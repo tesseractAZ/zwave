@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, statSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createZwaveData, type ZwaveData } from '../src/zwave/zwaveData';
+import { createZwaveData, s2WindowKnown, type ZwaveData } from '../src/zwave/zwaveData';
 import { bandOf, N_BANDS } from '../src/zwave/baselines';
 import type { OutcomeStore } from '../src/zwave/outcomes';
 import { NodeStatus, type NodeSnapshot } from '../src/types';
@@ -342,6 +342,64 @@ test('a DARK S2 log lane records UNKNOWN, not a fabricated zero (v0.26 review)',
     }
   } finally {
     zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('s2WindowKnown: S2 counts only when the lane was watched since before the window began (v0.76.0)', () => {
+  assert.equal(s2WindowKnown(null, 100), false, 'a dark lane');
+  assert.equal(s2WindowKnown(100, null), false, 'a first sample has no window start');
+  assert.equal(s2WindowKnown(100, 100), true);
+  assert.equal(s2WindowKnown(101, 100), false, 'the lane came up inside the window');
+  assert.equal(s2WindowKnown(50, 100), true);
+});
+
+const s2Line = (nodeId: number) => ({ source: 'driver', event: 'logging', level: 'info', message: 'failed to decode the message, retrying with SPAN extension...', context: { source: 'controller', type: 'node', nodeId, direction: 'none' } });
+
+test('a live S2 lane: a node\'s first sample is UNKNOWN, a watched window counts, and gaps reach the archive callback (v0.76.0)', async () => {
+  const srv = await mockServer();
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-s2w-'));
+  const gaps: string[] = [];
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), driverWsUrl: srv.url, onDriverLogGap: (g: { kind: string }) => gaps.push(g.kind),
+  });
+  try {
+    await waitFor(() => gaps.includes('subscribed'));
+    pushStats(ha, statsEvent());
+    pushStats(ha, statsEvent({ commands_tx: 11 }));
+    await waitFor(() => zd.evidence(7).length >= 2);
+    const e = zd.evidence(7);
+    assert.equal(e[0].dS2Resync, null, 'a node\'s first sample has no window start');
+    assert.equal(e[1].dS2Resync, 0, 'a window watched from its start counts, and nothing happened');
+    for (let i = 0; i < 3; i++) srv.push(s2Line(7));
+    await waitFor(() => zd.evidence(7).reduce((a, x) => a + (x.dS2Resync ?? 0), 0) === 3);
+  } finally {
+    zd.stop();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a node the driver log\'s node filter leaves out records UNKNOWN S2, never 0 (v0.76.0)', async () => {
+  const srv = await mockServer({ nodeFilter: [6] });
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-s2f-'));
+  const gaps: string[] = [];
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), driverWsUrl: srv.url, onDriverLogGap: (g: { kind: string }) => gaps.push(g.kind),
+  });
+  try {
+    await waitFor(() => gaps.includes('subscribed'));
+    pushStats(ha, statsEvent());
+    pushStats(ha, statsEvent({ commands_tx: 11 }));
+    await waitFor(() => zd.evidence(7).length >= 3);
+    for (const x of zd.evidence(7)) assert.equal(x.dS2Resync, null, 'node 7 logs nothing under a filter of [6]');
+  } finally {
+    zd.stop();
+    await srv.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

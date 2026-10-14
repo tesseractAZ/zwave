@@ -151,8 +151,8 @@ configuration:
       más tiempo el registro del complemento y el flujo de registro del
       controlador Z-Wave JS, en archivos diarios en la carpeta de configuración
       del complemento (/addon_configs/<slug del complemento>/logs, legible por
-      SSH). Los días terminados se comprimen con gzip y la carpeta queda fuera
-      de las copias de seguridad.
+      SSH). Los días terminados se comprimen con gzip y entran en las copias de
+      seguridad del complemento; el archivo de hoy no.
   log_archive_max_mb:
     name: Registros · Tamaño máximo del archivo (MB)
     description: >-

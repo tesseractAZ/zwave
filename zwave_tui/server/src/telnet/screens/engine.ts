@@ -381,17 +381,21 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     const tone = st === 'live' ? c.grey : st === 'connecting' || st === 'handshake' ? c.grey : c.yellow;
     // THE S2 LANE IS A SEPARATE LIVENESS (v0.62.0). The socket can be `live`
     // while the log subscription that feeds S2-desync detection is dark — the
-    // server refused it, or the storm backstop stopped it — and the detector is
-    // then permanently blind on a screen still rendering DRIVER LINK `live`.
+    // server refused it, the storm guard paused it (v0.76.0: it resumes on its
+    // own), or it went silent — and the detector is then blind on a screen
+    // still rendering DRIVER LINK `live`.
     // `s2LaneLive` collapsed four causes into one boolean whose callers record
     // `null`, so "nothing to report" and "cannot report" were the same value.
     const s2 = data.s2LaneFault?.() ?? null;
     push(fitBits(c.label('DRIVER LINK') + '  ',
       [tone(st), c.grey(ws), ...(s2 ? [c.yellowB(`S2 lane ${s2}`)] : [])], view.cols));
     if (s2) {
-      push('    ' + c.yellow(s2 === 'storm-stopped'
-        ? 's2-desync and repeated-frames detection is OFF — the log backstop stopped the lane after a burst; it returns on reconnect.'
-        : 's2-desync and repeated-frames detection is OFF — the driver refused the log subscription. Raise its log level to verbose.'));
+      const resumeAt = data.s2LaneResumeAt?.() ?? null;
+      push('    ' + c.yellow(s2 === 'storm-paused'
+        ? `s2-desync and repeated-frames detection is OFF — the driver log stream ran over its limit and is paused; it resumes on its own${resumeAt != null ? ` at ${hhmm(resumeAt)}` : ''}.`
+        : s2 === 'silent'
+          ? 's2-desync and repeated-frames detection is OFF — no driver log line arrives after verbose ones, and re-subscribing did not bring them back; it returns with the next line or a reconnect.'
+          : 's2-desync and repeated-frames detection is OFF — the driver refused the log subscription; it is asked for again on the next reconnect.'));
     }
     // THE CAUSE, ON ITS OWN ROW (v0.47.0). A homeId mismatch PURGES driver
     // telemetry, and the operator saw only the bare word `stopped` — the one

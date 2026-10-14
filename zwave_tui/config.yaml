@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.75.5"
+version: "0.76.0"
 slug: zwave_tui
 description: "Control-room TUI for Z-Wave mesh health — telnet + sidebar console, a learned advisory engine, and its conclusions as HA entities"
 url: https://github.com/tesseractAZ/zwave
@@ -60,10 +60,23 @@ map:
   # The durable log archive (v0.75.4) lives in the add-on's own config folder
   # (/config here; /addon_configs/<slug> on the host, readable over SSH).
   - addon_config:rw
-# The log archive is history, not state: kept out of every backup (the
-# Supervisor applies these patterns to both /data and /config).
+# Backups (v0.76.0). The log archive's finished days (logs/*.log.gz) are
+# backed up; today's file and every temp file are not. Today's file is still
+# being written, so a backup would hold a cut-off copy; only finished days are
+# complete. The Supervisor matches these patterns against every path in /data
+# and in /config before reading it, then copies each file in turn: a file
+# renamed or deleted mid-copy fails it and leaves the WHOLE add-on, /data
+# included, out of that backup. The temp-file pattern covers the archive's
+# .gz.tmp and the stores' write-then-rename temp files.
+# The hooks run by docker exec, as root, under this add-on's AppArmor profile,
+# with no shell; a non-zero exit drops the add-on from the backup, so the hook
+# exits 0 on every path. pre sets a hold in /tmp and post clears it; while the
+# hold is fresh, the archive's housekeeping renames and deletes nothing.
 backup_exclude:
-  - "logs/*"
+  - "logs/*.log"
+  - "*.tmp"
+backup_pre: /usr/bin/zwave-tui-backup-hook pre
+backup_post: /usr/bin/zwave-tui-backup-hook post
 # Request access to Home Assistant's Core WebSocket/REST API so the add-on can
 # issue zwave_js/* commands (network_status, node/controller statistics
 # subscriptions, node_status/metadata) and call_service (button.press for ping;

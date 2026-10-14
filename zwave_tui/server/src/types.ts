@@ -204,7 +204,7 @@ import type { TrialView } from './zwave/refreshTrial';
 import type { SleeperWatch } from './zwave/missedReport';
 import type { PauseState } from './zwave/autonomyPause';
 import type { ActorArmView, LiveSpanView } from './zwave/outcomes';
-import type { DriverWsState } from './zwave/driverWsClient';
+import type { DriverWsState, S2LaneFault } from './zwave/driverWsClient';
 export type { DriverWsState } from './zwave/driverWsClient';
 import type { CoarseBucket } from './zwave/evidenceStore';
 export type { CoarseBucket } from './zwave/evidenceStore';
@@ -565,7 +565,9 @@ export interface DataProvider {
   /** The same link as a STATE (v0.43.0) — classify on this, never on the prose. */
   driverWsState?(): DriverWsState;
   /** WHY the S2 log lane is dark, or null when live/pending (v0.62.0). */
-  s2LaneFault?(): 'refused' | 'storm-stopped' | null;
+  s2LaneFault?(): S2LaneFault | null;
+  /** When a storm pause of the S2 lane ends (v0.76.0), or null. */
+  s2LaneResumeAt?(): number | null;
   /**
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.

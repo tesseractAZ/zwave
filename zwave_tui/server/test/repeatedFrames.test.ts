@@ -12,6 +12,10 @@ test('the driver\'s duplicate-drop line names its node; nothing else does (v0.74
   assert.equal(duplicateDropNodeId(ev('Dropping message with invalid payload (Reason: Duplicate command (sequence number 203))')), 16);
   assert.equal(duplicateDropNodeId(ev(['Dropping message with invalid payload (Reason: Duplicate command (s', 'equence number 203))'])), 16, 'a wrapped line still counts');
   assert.equal(duplicateDropNodeId(ev('Dropping message with invalid payload (Reason: something else)')), null);
+  // The 80-column cut can fall anywhere, inside either phrase (v0.76.0: matching ignores it).
+  assert.equal(duplicateDropNodeId(ev('Dropping message with invalid payload (Reason: Dupli\ncate command (sequence number 7))')), 16);
+  assert.equal(duplicateDropNodeId(ev('Dropping message with invalid payload (Reason: Duplicate command (s\nequence number 181))')), 16, 'the production shape (2026-10-14)');
+  assert.equal(duplicateDropNodeId(ev('Dropping message with inva\nlid payload (Reason: Duplicate command (sequence number 9))')), 16);
   assert.equal(duplicateDropNodeId(ev('Dropping message with invalid payload (Reason: Duplicate command)', { type: 'controller' })), null, 'no node context, no node');
   assert.equal(duplicateDropNodeId({ event: 'value updated', message: 'Duplicate command', context: { type: 'node', nodeId: 16 } }), null);
 });

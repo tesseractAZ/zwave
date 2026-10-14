@@ -540,10 +540,22 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
     // so a baseline would learn a bad link as "its normal" and never fire.
     {
       const s2 = windowS2(samples, now);
+      const k2 = key(id, 's2-desync');
+      if (s2 == null) {
+        // A window with no listening sample says nothing either way (v0.76.0:
+        // a storm pause, a silent or refused lane). An armed or matured
+        // s2-desync is HELD as it stands — neither cleared (a fresh dwell on
+        // resume, and episode churn) nor advanced (there is nothing to emit) —
+        // and lets go once the lane has been dark for a whole window: holds
+        // need deadlines, and a held key keeps the node out of baseline folding.
+        markDegrading(id, false);
+        const held = state.get(k2);
+        if (held && now - held.lastSeen > S2_WINDOW_MS) state.delete(k2);
+      }
       const b = s2 != null && s2 >= S2_ABS &&
         hadRecent(samples, now, S2_RECENT_MS, (s) => s.dS2Resync ?? 0);
-      markDegrading(id, b);
-      const since = dwell(state, key(id, 's2-desync'), b, now);
+      if (s2 != null) markDegrading(id, b);
+      const since = s2 == null ? null : dwell(state, k2, b, now);
       if (since != null) {
         breaching = true;
         out.push({

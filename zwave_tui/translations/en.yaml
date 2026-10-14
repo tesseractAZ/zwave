@@ -136,7 +136,8 @@ configuration:
       log; this archive keeps the add-on's log and the Z-Wave JS driver's log
       stream for longer, in daily files in the add-on's config folder
       (/addon_configs/<this add-on's slug>/logs, readable over SSH). Finished
-      days are gzipped, and the folder is excluded from backups.
+      days are gzipped and included in the add-on's backups; today's file is
+      not.
   log_archive_max_mb:
     name: Logs · Archive size cap (MB)
     description: >-

@@ -121,8 +121,9 @@ export TRIAL_PATH=/data/refresh_trial.json
 
 # ── Log archive (v0.75.4) ────────────────────────────────────────────────────
 # The add-on's log and the driver's log stream, in daily files in the add-on's
-# config folder (/addon_configs/<slug>/logs on the host). Kept out of backups by
-# backup_exclude. 0 days = off. Same bool dance for the driver stream.
+# config folder (/addon_configs/<slug>/logs on the host). Finished days are
+# backed up; today's file is not (config.yaml backup_exclude, backup_pre,
+# backup_post). 0 days = off. Same bool dance for the driver stream.
 export LOG_ARCHIVE_DIR=/config/logs
 export LOG_ARCHIVE_DAYS="$(bashio::config 'log_archive_days')"
 export LOG_ARCHIVE_MAX_MB="$(bashio::config 'log_archive_max_mb')"
@@ -131,6 +132,12 @@ if bashio::config.true 'log_archive_driver'; then
 else
   export LOG_ARCHIVE_DRIVER=0
 fi
+# The backup hold (v0.76.0): backup_pre creates it and backup_post removes it,
+# and housekeeping renames and deletes nothing while it is fresh. /tmp is
+# outside every backed-up folder and starts empty in every new container. The
+# hook defaults to the same path, because docker exec does not see this
+# environment.
+export LOG_ARCHIVE_HOLD=/tmp/zwave-tui-backup.hold
 
 # SUPERVISOR_TOKEN is injected automatically by the HA Supervisor (unlocked by
 # homeassistant_api: true) — the Node process inherits it. Do NOT export it.

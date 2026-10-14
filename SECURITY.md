@@ -121,12 +121,23 @@ seriously.
   **never proxied or re-exposed** to the TUI, ingress, or the add-on's log. The
   one place its log lines are kept is the durable log archive (v0.75.4): local
   daily files in the add-on's own config folder, readable by whoever can read
-  that folder (the SSH add-on, for instance), excluded from backups, and
-  **redacted before they are written**. zwave-js already masks lock user
+  that folder (the SSH add-on, for instance), and **redacted before they are
+  written**. Since v0.76.0 the finished, gzipped days are included in the
+  add-on's Home Assistant backups (today's file is not), so they go wherever
+  those backups go, encrypted when the backup is. zwave-js already masks lock user
   codes, admin codes, credentials and PINs in its own lines; the archive cuts
   them again, along with Entry Control keypad event data (which zwave-js masks
-  only for Enter), DSKs, key-shaped hex strings and tokens, including where
-  zwave-js's 80-column wrap splits one across two lines.
+  only for Enter), DSKs, key-shaped hex strings, S2 public keys and tokens,
+  including where zwave-js's 80-column wrap splits one across two lines. Raw
+  Serial API frames (SERIAL entries at `debug`, and the frame dump zwave-js
+  writes at `warn` when it cannot parse one) and raw `payload:` / `event
+  parameters:` values are cut to their first four bytes and their length, so a
+  non-secure frame's plaintext and the S0 key exchanged during an S0
+  inclusion do not reach the file through them. The only 128-bit hex values
+  kept are the two public S2 entropy inputs `verbose` prints (a Nonce Report's
+  receiver entropy, a SPAN extension's sender EI), which travel in clear and
+  reveal nothing without the network key. The archive marks each gap in the
+  driver stream with an `[archive]` line.
   `log_archive_driver: false` keeps only the add-on's own log; `log_archive_days:
   0` turns the archive off. None of the four
   transmits over RF: the log pair toggles this client's own receive flag and
@@ -147,7 +158,14 @@ seriously.
   nightly NVM backup (v0.65.0), and, since v0.74.0, a duplicate S2 frame dropped
   from a node. A match keeps only the node id (or the radio's off/on) and the
   time. The matcher logs and stores none of the line text, and nothing new is
-  sent; the archive above is the only place the text is kept.
+  sent; the archive above is the only place the text is kept. From the state
+  dump and the server's `log config updated` event it also keeps the driver's
+  log level (one of zwave-js's seven level names; anything else is dropped)
+  and the log node filter's node ids (v0.76.0). A storm guard pauses this
+  client's subscription above 3,000 lines a minute and resumes it on its own
+  (5 minutes, doubling to an hour), and after verbose lines ten minutes
+  without one re-subscribes once; both use the same two allowlisted commands,
+  and the allowlist itself is unchanged.
 - **Trust model.** Access over the Home Assistant sidebar (ingress) is already
   HA-authenticated, and the panel is **admin-only** (`panel_admin: true`) — with
   write actions on, the console can remove a failed node, rebuild every route and
@@ -248,6 +266,17 @@ seriously.
   Refusals are logged to the host's audit journal (`journalctl
   _TRANSPORT=audit` on the host), not to dmesg. A CI job compiles the profile
   on every change, and a test pins these rules.
+- **Backup hooks (v0.76.0).** Around each backup of this add-on the Supervisor
+  runs `/usr/bin/zwave-tui-backup-hook pre` and `post` inside the container
+  (docker exec, as root, confined by the same profile, without a shell). They
+  take one word from the Supervisor, plus three path variables used only by
+  the tests and never set in the container's environment; they create or
+  remove `/tmp/zwave-tui-backup.hold`, read `/data/options.json` to see whether
+  the archive is on, append one fixed line to the day's archive file, open no
+  socket, and always exit 0. The hooks add two docker exec calls to every
+  backup, and an exec-level failure drops the add-on from that backup, a risk
+  it did not carry before; the image build runs both once to catch a broken
+  hook before release.
 
 ## Scope
 

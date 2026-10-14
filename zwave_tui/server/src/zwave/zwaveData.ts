@@ -73,7 +73,7 @@ import { detectSymptoms, symptomaticNodes, armingNodes, windowTimeoutRate, type 
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
-import type { DriverWsState } from './driverWsClient';
+import type { DriverWsState, LogGap, S2LaneFault } from './driverWsClient';
 import { KILLED_AFTER_MS, type OpenEpisodeView, type ActorArmView, type LiveSpanView } from './outcomes';
 import { createAutonomyPause, PAUSE_ENTITY, type AutonomyPause, type PauseState } from './autonomyPause';
 import { refreshDiffers, type RefreshTrial, type TrialCandidate, type TrialView } from './refreshTrial';
@@ -371,6 +371,8 @@ export interface ZwaveDataOptions {
   driverWsUrl?: string | null;
   /** The driver's log stream, for the durable log archive (v0.75.4). */
   onDriverLog?: (ev: Record<string, unknown>) => void;
+  /** Gaps in the driver's log stream, for the archive (v0.76.0). */
+  onDriverLogGap?: (gap: LogGap) => void;
   /** Persistent BASELINES store (M3). Empty/null ⇒ in-memory only. */
   baselinesPath?: string | null;
   /** Persistent OUTCOMES ledger (M5). Empty/null ⇒ in-memory (re-learns on restart). */
@@ -503,7 +505,9 @@ export interface ZwaveData {
   sleeperWatches(now?: number): SleeperWatch[];
   /** A node's duplicate-frame bursts in the last 24 h (v0.74.0). */
   duplicateBursts(nodeId: number, now?: number): Burst[];
-  s2LaneFault(): 'refused' | 'storm-stopped' | null;
+  s2LaneFault(): S2LaneFault | null;
+  /** When a storm pause of the S2 log lane ends (v0.76.0), or null. */
+  s2LaneResumeAt(): number | null;
   openEpisodes(): OpenEpisodeSummary[] | null;
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   autoPingState(): AutoPingSnapshot | null;
@@ -1082,6 +1086,7 @@ class ZwaveDataImpl implements ZwaveData {
           log: this.log,
           callbacks: {
             onDriverLog: opts.onDriverLog,
+            onDriverLogGap: opts.onDriverLogGap,
             onHomeId: (id) => {
               this.driverHomeId = id;
               // A handshake means a NEW driver connection: the driver pings the
@@ -1314,8 +1319,12 @@ class ZwaveDataImpl implements ZwaveData {
 
   /** WHY the S2 log lane is dark (v0.62.0). No driver client — an install that
    *  opted out — is null, so it is never nagged about a lane it never had. */
-  s2LaneFault(): 'refused' | 'storm-stopped' | null {
+  s2LaneFault(): S2LaneFault | null {
     return this.driverWs?.s2LaneFault() ?? null;
+  }
+
+  s2LaneResumeAt(): number | null {
+    return this.driverWs?.s2LaneResumeAt() ?? null;
   }
 
   private sampleEvidence(): void {
@@ -1351,7 +1360,7 @@ class ZwaveDataImpl implements ZwaveData {
       const fresh = isFreshSample(prev, stats);
       this.prevSampleSig.set(n.nodeId, {
         seen: stats.lastSeen ?? 0, tx: stats.commandsTX, rx: stats.commandsRX,
-        to: stats.timeoutResponse, dr: stats.commandsDroppedTX,
+        to: stats.timeoutResponse, dr: stats.commandsDroppedTX, t: now,
       });
       const flaps = this.flapAccum.get(n.nodeId) ?? 0;
       // Carried for the confound guard below (v0.40.2): the guard LEVEL-samples
@@ -1360,10 +1369,15 @@ class ZwaveDataImpl implements ZwaveData {
       // the evidence tier already makes for flaps generally.
       if (flaps > 0) this.flapsThisTick.set(n.nodeId, flaps);
       const routeChanges = this.routeChangeAccum.get(n.nodeId) ?? 0;
-      // null when the S2 log lane is not listening — "switched off" must not
-      // read as "no resyncs" (v0.26 review). Same honest-unknown rule the
-      // driver-WS noise floor uses two blocks below.
-      const s2Resyncs = this.driverWs?.s2LaneLive() ? (this.s2Accum.get(n.nodeId) ?? 0) : null;
+      // null unless the S2 log lane was watched without a break since before
+      // this sample's window began — "switched off" must not read as "no
+      // resyncs" (v0.26 review), and a window dark for part of it is not a
+      // count (v0.76.0: a storm pause, a silence, a reconnect). Null too for a
+      // node the driver log's node filter leaves out: it logs nothing. Same
+      // honest-unknown rule the driver-WS noise floor uses two blocks below.
+      const filter = this.driverWs?.logNodeFilter() ?? null;
+      const s2Resyncs = s2WindowKnown(this.driverWs?.rfWatchSince() ?? null, prev?.t ?? null) && (filter == null || filter.has(n.nodeId))
+        ? (this.s2Accum.get(n.nodeId) ?? 0) : null;
       this.flapAccum.delete(n.nodeId);
       this.routeChangeAccum.delete(n.nodeId);
       this.s2Accum.delete(n.nodeId);
@@ -4128,6 +4142,15 @@ export interface SampleSig {
   rx: number;
   to: number;
   dr: number;
+  /** When the sample was taken (v0.76.0): the start of the next one's window. */
+  t?: number;
+}
+
+/** Was the S2 log lane watched, without a break, since before this sample's
+ *  window began (v0.76.0)? A window dark for any part of it reads unknown,
+ *  never a partial count; a node's first sample has no window start. */
+export function s2WindowKnown(watchSince: number | null, prevSampleAt: number | null): boolean {
+  return watchSince != null && prevSampleAt != null && watchSince <= prevSampleAt;
 }
 
 /** How long after a node's statistics event its sample waits (v0.64.6 review):

@@ -134,6 +134,8 @@ export const config = {
     days: intEnv(process.env.LOG_ARCHIVE_DAYS, 0, 0, 60),
     maxBytes: intEnv(process.env.LOG_ARCHIVE_MAX_MB, 200, 10, 2000) * 1024 * 1024,
     driver: process.env.LOG_ARCHIVE_DRIVER !== '0',
+    /** The backup hold file (v0.76.0, logArchive.ts BACKUPS); absent = never held. */
+    holdPath: process.env.LOG_ARCHIVE_HOLD || null,
   },
   /** Build stamp promoted from the Docker ARG (reported by /api/version). */
   version: process.env.BUILD_VERSION ?? '0.1.0',

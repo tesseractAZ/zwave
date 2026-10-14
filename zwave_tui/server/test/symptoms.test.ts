@@ -380,6 +380,27 @@ test('s2-desync: a SUSTAINED resync storm matures after dwell; 3× escalates to 
   assert.equal(hotFired.find((s) => s.kind === 's2-desync')!.severity, 'warn');
 });
 
+test('s2-desync: a window the log lane could not see HOLDS an armed or matured symptom for up to 30 min, then lets it go (v0.76.0)', () => {
+  const nodes = [node(1), node(17)];
+  const storm = (now: number) => input({ nodes, recent: new Map([[17, window(now, 31, { dS2Resync: 0.5 })]]), now });
+  const dark = (now: number) => input({ nodes, recent: new Map([[17, window(now, 31, { dS2Resync: null })]]), now });
+  const state: SymptomState = new Map();
+  const s = settle(storm, state, T, 6).find((x) => x.kind === 's2-desync');
+  assert.ok(s, 'the storm matured');
+  // A storm pause: the whole window reads unknown. Nothing to emit, nothing to clear.
+  const darkOut = settle(dark, state, T + 7 * MIN, 20);
+  assert.equal(darkOut.filter((x) => x.kind === 's2-desync').length, 0, 'unknown is not evidence');
+  assert.ok(state.has('17:s2-desync'), 'the dwell is held');
+  // The lane returns and the storm is still there: no fresh 5-minute dwell.
+  const back = detectSymptoms(storm(T + 28 * MIN), state).find((x) => x.kind === 's2-desync');
+  assert.equal(back?.sinceMs, s!.sinceMs, 'it resumes with its original onset');
+  // A lane dark for longer than a whole window: the hold lets go.
+  const state2: SymptomState = new Map();
+  settle(storm, state2, T, 6);
+  settle(dark, state2, T + 7 * MIN, 40);
+  assert.ok(!state2.has('17:s2-desync'), 'a hold has a deadline');
+});
+
 test('s2-desync: a single burst that STOPPED never matures (recency conjunct)', () => {
   const nodes = [node(1), node(17)];
   // 15 resyncs in one old sample; quiet padding keeps the ring populated. The
