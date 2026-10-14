@@ -369,6 +369,8 @@ export interface ZwaveDataOptions {
    * disabled; the add-on runs fine without it (dependent telemetry stays null).
    */
   driverWsUrl?: string | null;
+  /** The driver's log stream, for the durable log archive (v0.75.4). */
+  onDriverLog?: (ev: Record<string, unknown>) => void;
   /** Persistent BASELINES store (M3). Empty/null ⇒ in-memory only. */
   baselinesPath?: string | null;
   /** Persistent OUTCOMES ledger (M5). Empty/null ⇒ in-memory (re-learns on restart). */
@@ -1079,6 +1081,7 @@ class ZwaveDataImpl implements ZwaveData {
           url: driverUrl,
           log: this.log,
           callbacks: {
+            onDriverLog: opts.onDriverLog,
             onHomeId: (id) => {
               this.driverHomeId = id;
               // A handshake means a NEW driver connection: the driver pings the

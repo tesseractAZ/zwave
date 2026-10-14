@@ -119,6 +119,19 @@ export AUTONOMY_PATH=/data/autonomy.json
 # off, and the file is then left untouched.
 export TRIAL_PATH=/data/refresh_trial.json
 
+# ── Log archive (v0.75.4) ────────────────────────────────────────────────────
+# The add-on's log and the driver's log stream, in daily files in the add-on's
+# config folder (/addon_configs/<slug>/logs on the host). Kept out of backups by
+# backup_exclude. 0 days = off. Same bool dance for the driver stream.
+export LOG_ARCHIVE_DIR=/config/logs
+export LOG_ARCHIVE_DAYS="$(bashio::config 'log_archive_days')"
+export LOG_ARCHIVE_MAX_MB="$(bashio::config 'log_archive_max_mb')"
+if bashio::config.true 'log_archive_driver'; then
+  export LOG_ARCHIVE_DRIVER=1
+else
+  export LOG_ARCHIVE_DRIVER=0
+fi
+
 # SUPERVISOR_TOKEN is injected automatically by the HA Supervisor (unlocked by
 # homeassistant_api: true) — the Node process inherits it. Do NOT export it.
 

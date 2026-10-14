@@ -111,9 +111,10 @@ profile zwave_tui flags=(attach_disconnected,mediate_deleted) {
   # TypeScript and node_modules (/app). The server runs that TypeScript
   # through tsx, whose transform cache lives in the OS temp directory
   # (/tmp/tsx-0), not under /app. The server writes only its five stores in
-  # /data, each a temp file renamed into place. The Supervisor recreates the
-  # container on every add-on start, so these locks guard one container
-  # lifetime; persistence lives in /data, which stays writable.
+  # /data, each a temp file renamed into place, and the log archive in
+  # /config/logs (v0.75.4). The Supervisor recreates the container on every
+  # add-on start, so these locks guard one container lifetime; persistence
+  # lives in /data and /config, which stay writable.
   #
   # Mask is "wl", never "wal". "w" already includes append, and the parser
   # rejects any mask holding both "a" and "w"; a "wal" mask kept a sibling
@@ -133,9 +134,9 @@ profile zwave_tui flags=(attach_disconnected,mediate_deleted) {
 
   # Not locked: /command, /package and /etc/s6-overlay are PID1 trees, where a
   # wrong deny is an init crash-loop the add-on log never shows; /etc holds
-  # bashio's and s6's runtime edits. Never lock /run, /tmp or /data: s6
-  # executes service scripts from /run, tsx caches in /tmp, and the stores
-  # live in /data.
+  # bashio's and s6's runtime edits. Never lock /run, /tmp, /data or /config:
+  # s6 executes service scripts from /run, tsx caches in /tmp, the stores live
+  # in /data and the log archive in /config/logs.
 
   # --- Secrets and kernel interfaces ---------------------------------------
   # No process authenticates local users or keeps files under /root or /home.

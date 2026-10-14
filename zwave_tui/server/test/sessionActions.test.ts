@@ -256,7 +256,7 @@ test('SECURITY: an armed CONFIRM does NOT survive an idle re-lock + re-login', a
   const { runner, calls } = mkActions();
   const auth = {
     enabled: true, requireOnIngress: false, idleLockMs: 1,
-    hasUsers: () => true, verify: async () => true,
+    hasUsers: () => true, knows: () => true, verify: async () => true,
     blockedMsFor: () => 0, registerFailure: () => {}, registerSuccess: () => {},
   };
   let last = '';
@@ -645,7 +645,7 @@ test('SECURITY: a notice DETAIL line does not survive an idle re-lock', async ()
   // The boundary is crossed explicitly below by advancing lastActivity.
   const auth = {
     enabled: true, requireOnIngress: false, idleLockMs: 60_000,
-    hasUsers: () => true, verify: async () => true,
+    hasUsers: () => true, knows: () => true, verify: async () => true,
     blockedMsFor: () => 0, registerFailure: () => {}, registerSuccess: () => {},
   };
   let last = '';

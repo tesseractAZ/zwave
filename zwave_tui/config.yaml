@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.75.3"
+version: "0.75.4"
 slug: zwave_tui
 description: "Control-room TUI for Z-Wave mesh health — telnet + sidebar console, a learned advisory engine, and its conclusions as HA entities"
 url: https://github.com/tesseractAZ/zwave
@@ -57,6 +57,13 @@ panel_title: "Z-Wave TUI"
 panel_admin: true
 map:
   - data:rw
+  # The durable log archive (v0.75.4) lives in the add-on's own config folder
+  # (/config here; /addon_configs/<slug> on the host, readable over SSH).
+  - addon_config:rw
+# The log archive is history, not state: kept out of every backup (the
+# Supervisor applies these patterns to both /data and /config).
+backup_exclude:
+  - "logs/*"
 # Request access to Home Assistant's Core WebSocket/REST API so the add-on can
 # issue zwave_js/* commands (network_status, node/controller statistics
 # subscriptions, node_status/metadata) and call_service (button.press for ping;
@@ -85,6 +92,12 @@ options:
   # ── Refresh trial (pre-registered, DESIGN §3.5) ────────────────────────────
   # OFF by default. Needs write_actions_enabled AND auto-ping running.
   refresh_trial_enabled: false
+  # ── Log archive (v0.75.4) ──────────────────────────────────────────────────
+  # The add-on's log and the Z-Wave JS driver's log stream, kept past the
+  # host journal (~41 h). 0 days turns it off.
+  log_archive_days: 14
+  log_archive_max_mb: 200
+  log_archive_driver: true
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled: true
   # ── Login gate (guards DIRECT/telnet; HA-sidebar access is already authed) ──
@@ -110,6 +123,9 @@ schema:
   auto_ping_max_attempts: int(1,10)
   auto_ping_stale_min: int(0,1440)
   refresh_trial_enabled: bool
+  log_archive_days: int(0,60)
+  log_archive_max_mb: int(10,2000)
+  log_archive_driver: bool
   telnet_enabled: bool
   auth_enabled: bool
   auth_require_on_ingress: bool

@@ -142,6 +142,31 @@ configuration:
       el complemento se inicie con esta opción desactivada. Pulse Z en la
       pantalla ENGINE para pausarlo junto con todo lo demás. Ejecutar el ensayo
       no admite nada: aprobarlo solo hace revisable un refresco automático.
+  log_archive_days:
+    name: Registros · Días de archivo
+    description: >-
+      Días de registros que se guardan en el archivo propio del complemento,
+      incluido hoy (0 lo desactiva). El journal del host solo conserva alrededor
+      de un día y medio del registro de cada aplicación; este archivo guarda por
+      más tiempo el registro del complemento y el flujo de registro del
+      controlador Z-Wave JS, en archivos diarios en la carpeta de configuración
+      del complemento (/addon_configs/<slug del complemento>/logs, legible por
+      SSH). Los días terminados se comprimen con gzip y la carpeta queda fuera
+      de las copias de seguridad.
+  log_archive_max_mb:
+    name: Registros · Tamaño máximo del archivo (MB)
+    description: >-
+      El máximo de disco que puede usar el archivo. Al superarlo se borran
+      primero los archivos completos más antiguos; los de hoy nunca.
+  log_archive_driver:
+    name: Registros · Archivar el registro del controlador Z-Wave JS
+    description: >-
+      Guarda también el flujo de registro del controlador Z-Wave JS (al nivel de
+      registro del propio controlador), no solo el registro de este
+      complemento. Los códigos de usuario y de administrador de cerraduras, los
+      PIN, los DSK de SmartStart, las cadenas hexadecimales con forma de clave y
+      los tokens se ocultan antes de escribir nada. Desactivado guarda solo el
+      registro del complemento.
   # ── Acceso por telnet ───────────────────────────────────────────────────────
   telnet_enabled:
     name: Acceso · Habilitar la TUI por telnet

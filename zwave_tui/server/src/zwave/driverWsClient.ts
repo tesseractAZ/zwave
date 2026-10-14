@@ -90,6 +90,10 @@ export interface DriverWsCallbacks {
   /** How many Gets a user value refresh of this node sends (v0.75.0), from the
    *  state dump; null while the node has no values yet. See refreshQueriesOf. */
   onNodeRefreshQueries?: (nodeId: number, queries: number | null) => void;
+  /** Every driver `logging` event, for the durable log archive (v0.75.4),
+   *  which redacts secrets before anything reaches disk. Not called while the
+   *  storm meter has stopped the stream. */
+  onDriverLog?: (ev: Record<string, unknown>) => void;
 }
 
 export interface DriverWsClientOptions {
@@ -713,8 +717,10 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     log(`driver-ws: state dump processed (${flagged} nodes, bgRSSI ${bg ? 'present' : 'absent'})`);
   }
 
-  /** One streamed driver log line. Storm-metered, matched, and dropped —
-   *  the payload is never stored, logged, or forwarded (privileged socket). */
+  /** One streamed driver log line. Storm-metered and matched here, then
+   *  handed to the durable log archive when one is configured (v0.75.4,
+   *  logArchive.ts — redacted before it reaches disk); never logged to the
+   *  add-on's own log, proxied, or forwarded anywhere else (privileged socket). */
   const LOG_STORM_PER_MIN = 3000;
   function onLoggingEvent(ev: Record<string, unknown>): void {
     if (logStormStopped) return; // stop was sent; drain whatever is in flight
@@ -739,6 +745,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     if (rf === 'off') rfOffSince = now;
     else if (rf === 'on') rfOffSince = null;
     if (rf === 'on') lastRfOnAt = now;
+    cb.onDriverLog?.(ev);
     const nodeId = s2ResyncNodeId(ev);
     if (nodeId != null) cb.onS2Resync?.(nodeId);
     const dupNode = duplicateDropNodeId(ev);

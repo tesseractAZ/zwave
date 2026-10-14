@@ -28,6 +28,13 @@ import { parseUsers } from './auth/loginPolicy';
 const signalDisplay: 'margin' | 'dbm' =
   process.env.SIGNAL_DISPLAY === 'dbm' ? 'dbm' : 'margin';
 
+/** An integer option's env value, clamped to the schema's range; a missing or
+ *  non-numeric value is the default, never NaN (v0.75.4). */
+export function intEnv(raw: string | undefined, dflt: number, min: number, max: number): number {
+  const n = raw == null || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : dflt;
+}
+
 export const config = {
   /** HA-Ingress HTTP + xterm.js /console port (matches config.yaml ingress_port). */
   port: Number(process.env.PORT ?? 8788),
@@ -118,6 +125,15 @@ export const config = {
   refreshTrial: {
     enabled: process.env.REFRESH_TRIAL_ENABLED === '1',
     path: process.env.TRIAL_PATH || null,
+  },
+  /** The durable log archive (v0.75.4, logArchive.ts): the add-on's own log and
+   *  the driver's log stream in daily files under LOG_ARCHIVE_DIR (the run
+   *  script exports /config/logs). Absent dir or 0 days ⇒ off. */
+  logArchive: {
+    dir: process.env.LOG_ARCHIVE_DIR || null,
+    days: intEnv(process.env.LOG_ARCHIVE_DAYS, 0, 0, 60),
+    maxBytes: intEnv(process.env.LOG_ARCHIVE_MAX_MB, 200, 10, 2000) * 1024 * 1024,
+    driver: process.env.LOG_ARCHIVE_DRIVER !== '0',
   },
   /** Build stamp promoted from the Docker ARG (reported by /api/version). */
   version: process.env.BUILD_VERSION ?? '0.1.0',

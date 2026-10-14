@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.75.4
+
+### Added — a durable log archive, past the host journal
+
+HAOS fixes the host journal at 500 MB (`SystemMaxUse=500M` in a read-only
+`/etc/systemd/journald.conf`, with no persisted drop-in), and the busiest writer
+on the host decides how far back it reaches: about 41 h on the reference host,
+so a review more than a day and a half after the last one loses the gap. The
+add-on now keeps its own:
+
+- Every line it logs, and the Z-Wave JS driver's log stream at the driver's own
+  level, in daily files in its config folder (`/addon_configs/<slug>/logs` on
+  the host, readable over SSH without docker), each line stamped with its UTC
+  time. The boot sequence is included, shutdown flushes, and the fatal path
+  writes synchronously.
+- `log_archive_days` (default 14, `0` = off), `log_archive_max_mb` (default
+  200; the oldest whole files go first, today's never) and `log_archive_driver`
+  (default on). Finished days are gzipped; the folder is excluded from backups.
+- Redacted before anything is written. zwave-js already masks lock user
+  codes, admin codes, credentials and PINs in its own lines and skips value
+  changes it marks secret; the archive redacts again, for whatever a driver
+  version or a line shape lets through. Everything after a user code, admin
+  code, credential or admin PIN property is cut. An Entry Control
+  notification loses its event data: zwave-js masks it only for Enter and
+  cached keys, and a keypad can send the typed PIN with arm and disarm.
+  SmartStart DSKs, key-shaped hex strings, JWTs and bearer tokens are
+  replaced. zwave-js cuts its text at 80 columns mid-token, so each pattern is
+  also matched across those wraps.
+- A write that fails part-way resumes at the byte where it stopped, so nothing
+  is written twice. Unwritten lines are held one by one (oldest dropped first
+  past 1 MiB a stream), the failure is reported once per 10 minutes, and the
+  first write that succeeds records exactly how many lines were dropped. A
+  removed folder is recreated.
+- An uncaught throw or rejection files its stack and writes what is buffered
+  before Node exits as before; the shutdown and fatal paths write synchronously
+  what a flush had taken but not yet written.
+- A line held through a failing write past midnight joins the day already
+  compressed as one more gzip member, and a compression a crash interrupted is
+  cleared. A file dated after today (a clock that ran ahead) cannot age out, so
+  the size cap reaches it last instead of never.
+- A restore of the add-on from a backup replaces its config folder, so the
+  archive starts empty again.
+
+### Changed — a failed TUI login names the account only when it is one
+
+`auth: login FAILED for "<user>"` logged whatever was typed into the username
+field, including a password typed there by mistake, and the archive now keeps
+that line for days. A username that is not configured is logged as
+`an unknown username`; a configured one is still named.
+
+The driver stream had never been stored; SECURITY and DOCS now say where it is
+kept and how it is redacted.
+
+### Changed — CodeQL on Ubuntu 26.04 too
+
+CodeQL's published system requirements still list Ubuntu 22.04 and 24.04 only,
+but its analysis runs on 26.04 — this release's own run passed there — so it
+moves with every other job. The required check fails closed if a later release
+stops working.
+
+### Housekeeping
+
+Four Dependabot updates merged after a fresh run on 26.04: the fastify
+plugin/type patch group, `actions/setup-node` 7.1.0, `actions/upload-artifact`
+7.0.2 and the CodeQL action group.
+
 ## 0.75.3
 
 ### Changed — every build and check on a pinned Ubuntu 26.04 image

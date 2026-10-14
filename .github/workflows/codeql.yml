@@ -31,10 +31,11 @@ permissions:
 jobs:
   analyze:
     name: Analyze (javascript-typescript)
-    # Pinned to 24.04, not 26.04 like every other job: CodeQL's system
-    # requirements list Ubuntu 22.04 and 24.04 only (2026-10-12). Move it in
-    # the commit that finds 26.04 listed (test/workflowRunners.test.ts).
-    runs-on: ubuntu-24.04
+    # On 26.04 like every other job (v0.75.4). CodeQL's published system
+    # requirements still list Ubuntu 22.04 and 24.04 only (2026-10-13), but it
+    # runs here: the trial PR's analysis passed on 26.04 with no platform
+    # warning, and the required check fails closed if that ever changes.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Initialize CodeQL
