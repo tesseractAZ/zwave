@@ -471,11 +471,23 @@ expose the telnet port on a network you don't fully trust.
    `npm version X.Y.Z --no-git-tag-version` in `zwave_tui/server` sets both
    server files) — CI enforces the lock-step (`configContract.test.ts`) and
    `tag-release.yml` refuses to tag when `config.yaml` and `package.json`
-   disagree — add a `## X.Y.Z — DATE` section to `zwave_tui/CHANGELOG.md`, then
-   squash-merge with a subject that **starts with `Release vX.Y.Z`** — that
+   disagree — add a `## X.Y.Z` section (plain, no date) at the top of
+   `zwave_tui/CHANGELOG.md`, run `node .github/scripts/rotate-changelog.mjs`,
+   then squash-merge with a subject that **starts with `Release vX.Y.Z`** — that
    prefix is the trigger; CI gates the PR as usual. (**`release.yml`** is the
    one-click alternative: a `workflow_dispatch` that performs the same bumps,
-   writes the CHANGELOG section, and opens that release PR for you.)
+   writes and rotates the CHANGELOG, and opens that release PR for you. It opens
+   the PR with the workflow's own token, and GitHub starts no workflow for an
+   event that token causes, so CI runs only once the PR is closed and
+   reopened.)
+
+   The shipped changelog keeps only the newest releases, under 32 KiB: Home
+   Assistant renders the whole file in one dialog, and a long one took a long
+   time to open. The rotation script moves older sections into
+   [`docs/CHANGELOG-history.md`](https://github.com/tesseractAZ/zwave/blob/main/docs/CHANGELOG-history.md), which is never shipped. The heading
+   must be exactly `## X.Y.Z`: Home Assistant's update dialog then shows the
+   notes from the new release down to the installed one, and the whole file
+   otherwise. `test/changelogContract.test.ts` enforces both.
 2. **`tag-release.yml`** sees the merge subject, pushes the `vX.Y.Z` tag, and
    then dispatches **`publish-release.yml`** for that version
    (`workflow_dispatch`) — a tag pushed with the default `GITHUB_TOKEN` cannot

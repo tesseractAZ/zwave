@@ -291,7 +291,7 @@ test('release.yml bumps and stages every file the version contract pins together
   assert.match(r, /j\.packages\[""\]\.version = process\.env\.NEXT/,
     'release.yml must bump the lock\'s packages[""].version as well as its top-level version');
   const staged = /git add((?:[^\n]*\\\n)*[^\n]*)/.exec(r)?.[1] ?? '';
-  for (const f of ['zwave_tui/config.yaml', 'zwave_tui/server/package.json', 'zwave_tui/server/package-lock.json']) {
+  for (const f of ['zwave_tui/config.yaml', 'zwave_tui/server/package.json', 'zwave_tui/server/package-lock.json', 'zwave_tui/CHANGELOG.md', 'docs/CHANGELOG-history.md']) {
     assert.ok(staged.includes(f), `release.yml does not git add ${f}, so its bump would not reach the release PR`);
   }
 });
