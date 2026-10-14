@@ -3,8 +3,9 @@
 A telnet **control-room terminal UI** for a Home Assistant Z-Wave JS mesh — and a
 **learned remediation engine** that watches that mesh over time, learns each
 node's normal, and turns anomalies into grounded, ranked recommendations.
-Recommendations are never acted on automatically; the one autonomous mesh write
-is the opt-in, off-by-default **auto-ping** (see *Write actions & safety*).
+Recommendations are never acted on automatically. The autonomous mesh writes are
+the opt-in, off-by-default **auto-ping** and, switched on separately, the
+pre-registered **refresh trial** (see *Write actions & safety*).
 
 It talks to the **Home Assistant Core WebSocket** (the node roster, live
 statistics, and — behind a typed confirmation — maintenance, device-control, and
@@ -125,7 +126,7 @@ device doing right now?"* and *"how is it configured?"*:
 ![The Detail screen scrolled to the end of the dossier: the live link with signal and latency sparklines, LIVE ENTITIES (a motion sensor reading detected, a light on at 70 percent, a power sensor at 38.4 W), five CONFIG PARAMETERS (two with decoded enum meanings, one read-only), the route, traffic counters, and EVIDENCE](docs/screenshots/detail.svg)
 
 <details>
-<summary><b>Six more screens</b> — Controller, Topology, Heatmap, Log, Remedy, Interference (Engine, screen 9, has no screenshot yet)</summary>
+<summary><b>Seven more screens</b> — Controller, Topology, Heatmap, Log, Remedy, Interference, Engine</summary>
 
 #### Controller — radio health, noise floor, counters
 ![Controller screen](docs/screenshots/controller.svg)
@@ -144,6 +145,9 @@ device doing right now?"* and *"how is it configured?"*:
 
 #### Interference — noise floor, serial health, diurnal heatmap
 ![Interference screen](docs/screenshots/interference.svg)
+
+#### Engine — auto-ping, the refresh trial, and what the ledger has learned
+![The Engine screen: AUTO-PING running with its last pass, candidates and the nodes owed a sweep; REFRESH TRIAL running and waiting, with the eligible-node count and both arms' counts; the live ledger; and LEARNED, every rate with the n behind it, including the live-span count naming the nodes it came from](docs/screenshots/engine.svg)
 
 </details>
 
@@ -233,15 +237,35 @@ config writes can never run automatically. What needs a person is published as
 device, and otherwise once a problem has lasted an hour — so your own
 notification automation can tell you.
 
+**The refresh trial (v0.75.0, opt-in).** The one route by which a verb could ever
+be admitted is a pre-registered randomized trial (DESIGN §3.5), and
+`refresh_trial_enabled` runs it for the one candidate the evidence supports:
+when a mains node's `rtt-degraded` episode has been live for 10 minutes and
+nothing has acted on it, a fair coin decides between one `refresh values` and
+doing nothing. Both halves are scored the same way — a verification burst at
++20 minutes and the round trips of the next ten against the episode's own
+before-window — apart from everything the engine learns, until 30 decisions in
+each give one verdict (or 120 days pass). Only a node whose refresh asks more
+than the probe's one Get can take part, so on a mesh of plain switches and
+dimmers the trial sends nothing at all, and ENGINE says so. It needs write
+actions and auto-ping running, decides at most once per node per day, twice an
+hour and six times a day, only 09:00–20:00 and never within 10 minutes of your
+own action, and a node that goes Dead within 5 minutes of a refresh is excluded
+for a week (a second such death stops the trial until you restart with it off).
+Running it admits nothing; a pass only makes an automatic refresh reviewable.
+ENGINE shows its counts, and `sensor.zwave_tui_engine` publishes them
+(DOCS §11.14).
+
 **One pause for everything automatic (v0.72.0).** `Z` on the ENGINE screen, or an
 `input_boolean.zwave_tui_pause_autonomy` helper you create in Home Assistant,
-stops auto-ping's sweep, verification and dead-node ladder at once; it survives
+stops auto-ping's sweep, verification and dead-node ladder, and the refresh
+trial, at once; it survives
 restarts, fails closed, and once it is older than 24 hours raises the degraded
 alarm (while auto-ping is running for it to stop). A pause
 set from the TUI is resumed behind the typed `CONFIRM` (Controller 3 → `A`); one
 set by the toggle lifts when you turn the toggle off.
 
-**Auto-ping — the one autonomous mesh write (v0.30, opt-in).** With
+**Auto-ping — the autonomous probes (v0.30, opt-in).** With
 `auto_ping_enabled` on (and only under the master `write_actions_enabled` gate),
 the engine probes a mains node that has been **Dead past a dwell** (default
 10 min, then up to 3 attempts with 10/30/60 min waits between them — at the
@@ -318,7 +342,7 @@ re-asserted every 30 seconds:
 | entity | state | notable attributes |
 | --- | --- | --- |
 | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `paused_by`, `paused_since`, `auto_remediation`, `sleepers_watched`, `sleepers_total` |
+| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `paused_by`, `paused_since`, `auto_remediation`, `sleepers_watched`, `sleepers_total`, `refresh_trial` and its six counts (`refresh_trial_treated`, `…_treated_improved`, `…_treated_deaths`, `refresh_trial_held`, `…_held_improved`, `…_held_deaths`) |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
 | `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind or before the roster has loaded) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |
@@ -467,7 +491,9 @@ releasing anything — docs and tooling changes ride along until the next releas
 `ci.yml` (typecheck + tests + docs build + `amd64`/`aarch64` docker smoke builds)
 and `codeql.yml` (CodeQL `security-extended`; results are uploaded to the
 Security tab, and `check-sarif.mjs` fails the job on actionable findings) are
-both required status checks on every PR to `main`.
+both required status checks on every PR to `main`. Every job runs on a pinned
+`ubuntu-26.04` image (native `ubuntu-26.04-arm` for aarch64 builds) except CodeQL,
+which stays on `ubuntu-24.04`, the newest release CodeQL lists as supported.
 
 ## Local development
 

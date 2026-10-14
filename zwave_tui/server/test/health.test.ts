@@ -19,6 +19,13 @@ const makeNode = (over: Partial<NodeSnapshot> = {}): NodeSnapshot => ({
 
 const NOISE = -95;
 
+test('the health score takes a floor only if it is a reading: -128 and 0 score as the -95 fallback; -110 does not (v0.75.2)', () => {
+  const n = makeNode({ stats: emptyStats({ rssi: -88, rtt: 30, commandsTX: 50, commandsRX: 50 }) });
+  const fallback = scoreNode(n, -95);
+  for (const nf of [-128, -120, 0, Number.NaN]) assert.deepEqual(scoreNode(n, nf), fallback, `a ${nf} floor is not a reading`);
+  assert.notDeepEqual(scoreNode(n, -110), fallback, 'a real -110 floor is used: 22 dB of margin, not 7');
+});
+
 test('dead node scores 0 / F / dead with a D flag', () => {
   const r = scoreNode(makeNode({ status: NodeStatus.Dead, statusLabel: 'dead' }), NOISE);
   assert.equal(r.score, 0);

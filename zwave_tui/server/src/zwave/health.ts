@@ -200,6 +200,44 @@ export function rssiReading(v: number | null | undefined): number | null {
   return typeof v === 'number' && Number.isFinite(v) && v < 0 ? v : null;
 }
 
+/** The lowest background-noise value that is a measurement (v0.75.2). zwave-js
+ *  stands -128 dBm in for "no signal detected" (averageRSSI), and its EMA mixes
+ *  that stand-in into the readings around it; a real 900 MHz floor sits far
+ *  above this line (the reference controller reads -105 to -94 dBm). */
+export const NOISE_FLOOR_MIN_DBM = -120;
+
+/**
+ * A background-RSSI channel value that is a noise-floor READING (v0.75.2):
+ * finite, negative — 0 is the driver's "no value yet" seed and its stand-in for
+ * a saturated receiver — and above NOISE_FLOOR_MIN_DBM.
+ *
+ * THE rule. The screens' floor and their "measured" tags, the health score,
+ * the detectors' margins, the Interference floor and the persisted trend all
+ * take their floor from `medianNoiseFloor` below. Before v0.75.2 three of them
+ * kept -128 while two dropped it, so with every channel at "no signal detected"
+ * the screens showed `-128 dBm (measured)`, the health score used -95, and the
+ * weak-signal detector called its -95 fallback "measured".
+ */
+export function noiseReading(v: number | null | undefined): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v < 0 && v > NOISE_FLOOR_MIN_DBM ? v : null;
+}
+
+/** The representative noise floor: the median of the noise readings in the
+ *  LEADING contiguous run of channels (a null ends the run — the driver's own
+ *  convention for absent trailing channels), or null when there is none. */
+export function medianNoiseFloor(channels: readonly (number | null | undefined)[]): number | null {
+  const v: number[] = [];
+  for (const ch of channels) {
+    if (ch == null) break;
+    const r = noiseReading(ch);
+    if (r != null) v.push(r);
+  }
+  if (v.length === 0) return null;
+  v.sort((a, b) => a - b);
+  const m = v.length >> 1;
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
 function validRssi(v: number | null | undefined): number | null {
   return rssiReading(v);
 }
@@ -324,10 +362,7 @@ export function scoreNode(node: NodeSnapshot, noiseFloor: number): HealthResult 
   // routed node that ACK's final hop is repeater→controller, so the value
   // describes the LAST HOP, not the end device. Scoring the device's "signal"
   // from it (or raising W) would be confidently wrong; score neutral instead.
-  const nf =
-    Number.isFinite(noiseFloor) && noiseFloor < 0 && noiseFloor > -120
-      ? noiseFloor
-      : DEFAULT_NOISE_FLOOR;
+  const nf = noiseReading(noiseFloor) ?? DEFAULT_NOISE_FLOOR;
   const routed = !isLR && (stats.lwr?.repeaters?.length ?? 0) > 0;
   const rssi = validRssi(stats.rssi) ?? validRssi(stats.lwr?.rssi ?? null);
   // HOW MUCH OF THIS SCORE IS ASSUMED (v0.61.0). Signal (25%) and Route (20%)

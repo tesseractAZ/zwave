@@ -37,9 +37,9 @@ seriously.
   rebuild all). Only the bare `p` ping shortcut runs at once — and `Z` (or `z`)
   on ENGINE, which pauses automatic writes and sends nothing.
   Device control and config writes are operator-initiated only.
-- **The engine recommends; exactly one narrow path acts on its own.** The engine
-  is advisory by default: it diagnoses, and what it proposes waits for a person.
-  The single exception is **auto-ping**, which is *double*-gated —
+- **The engine recommends; two narrow paths act on their own, both opt-in.** The
+  engine is advisory by default: it diagnoses, and what it proposes waits for a
+  person. The first exception is **auto-ping**, which is *double*-gated —
   `auto_ping_enabled` defaults **off** *and* it independently obeys
   `write_actions_enabled`, so both must be turned on deliberately before it can
   do anything. With both on, a **mains-powered** node still Dead after the dwell
@@ -65,16 +65,39 @@ seriously.
   operator is rebuilding or removing), the first 5 minutes after a start (the
   dead-node ladder waits only until the roster is ready), while the controller
   reports its radio off (the nightly NVM backup), and while it is paused.
-  Nothing else — a full value refresh, re-interview, rebuild-routes,
-  remove-failed, device control, config writes — has any automatic path
-  whatsoever. Since v0.72.0 that is a decision, not a deferral: no verb passes
+  Apart from the refresh trial below, nothing else — a full value refresh,
+  re-interview, rebuild-routes, remove-failed, device control, config writes —
+  has any automatic path whatsoever. Since v0.72.0 that is a decision, not a deferral: no verb passes
   the admission rule (DESIGN §3.5), the automatic set is pinned empty by the
   type checker, and the seven state-changing verbs are in a fixed
   never-automatic set no option or efficacy reading can reach.
+- **The refresh trial is the second, and it is *triple*-gated (v0.75.0).**
+  `refresh_trial_enabled` defaults **off**, and the trial also needs
+  `write_actions_enabled` and auto-ping running with its last pass unsuppressed;
+  the owner's pause stops it at once. It is the pre-registered experiment of
+  DESIGN §3.5: for an eligible `rtt-degraded` episode on a mains node that is
+  Alive and that nothing has acted on, a fair coin decides between one
+  `zwave_js/refresh_node_values` and nothing. Only a node whose refresh sends
+  more than the verification probe's one Get is eligible, so on a mesh of plain
+  switches and dimmers the trial sends nothing. The send goes through a handle
+  holding that one call and nothing else (origin `trial`, refused at send time
+  when paused, when the node is not Alive, or while the Home Assistant socket is
+  not authenticated), and the assignment is on disk
+  before anything is sent. Limits: one decision per node per 24 h, 2 per hour,
+  6 per day, 09:00–20:00 local, one in flight until it is filed 30 minutes
+  later, never while an operator action runs or within 10 minutes of one. A node
+  that goes Dead within 5 minutes of a send that may have left is excluded for
+  7 days, and a second such death within 7 days latches the trial off (raising
+  `binary_sensor.zwave_tui_degraded`) until the add-on is started with the
+  option off; an unreadable trial file latches it too and is never overwritten.
+  A refresh reads every switch, light and sensor value the node has, so like
+  the routed read it can correct a stale Home Assistant state, which automations
+  react to. Running it admits nothing: refresh keeps all three of its failure
+  rows and the automatic set stays empty.
 - **One pause stops every autonomous frame (v0.72.0).** `Z` (or `z`) on the ENGINE
   screen, or an `input_boolean.zwave_tui_pause_autonomy` helper created in Home
   Assistant, stops auto-ping's
-  three lanes at once, the dead-node ladder included. It fails closed — an
+  three lanes and the refresh trial at once, the dead-node ladder included. It fails closed — an
   unreadable pause file, or a toggle last seen pausing and not yet re-read (or
   missing from Home Assistant's state list), reads as paused. A pause set from
   the TUI is resumed there, behind the typed **CONFIRM**; one set by the toggle

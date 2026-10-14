@@ -63,7 +63,7 @@ before it (source: `main()` in `server/src/index.ts`):
 | 3 | Source bridge | `buildZwaveDataSource` (`telnet/dataProvider.ts`) | Adapts `ZwaveData` → the `ZwaveDataSource` interface the provider consumes (`snapshot`, `controller`, `events`, `history`, `symptoms`, `engineStatus`, `efficacyFor`, `interference`, …). Extracted from an object literal in `index.ts` in v0.34 so the one bridge production uses is covered by tests. |
 | 4 | Shared data provider | `createTuiDataProvider` | The per-frame render cache both transports read; owns the fast `refreshMs` recompute timer. Returns `{ provider, stop }`. |
 | 4b | Action runner | `createActionRunner` | The mutating-action chokepoint (mesh maintenance: ping / refresh / re-interview / heal / rebuild / remove; **plus v0.23 operator device control + config writes: `controlEntity` / `setConfigParam`**), gated by `config.writeActions`; maintenance outcomes fold into the M5 ledger via `onOutcome` — device-control/config ops run `learn=false` and never do. |
-| 4c | Auto-ping | `startAutoPing` | The engine's one autonomous mesh write (§11.12), started only when both `auto_ping_enabled` and `write_actions_enabled` are on (with only the first on, a warning is logged and nothing starts). The dead-node ladder rides the runner's learning `ping`; the liveness sweep and verification probes ride non-learning verbs (v0.38.1) — since v0.71.0 the routed read `routedRead(n, 'probe')` wherever the node has a switch/light value, with the NoOp `probe` as the fallback. It also reads two v0.65.0 driver-side readings: the controller receiver-off accessor (`controllerRfOffSince`), which suppresses every lane, and the driver-reconnect stamp (`driverReconnectedAt`), so a driver restart's mesh-wide ping is never credited to a node as self-proven. |
+| 4c | Auto-ping | `startAutoPing` | The engine's autonomous probes (§11.12), started only when both `auto_ping_enabled` and `write_actions_enabled` are on (with only the first on, a warning is logged and nothing starts). The dead-node ladder rides the runner's learning `ping`; the liveness sweep and verification probes ride non-learning verbs (v0.38.1) — since v0.71.0 the routed read `routedRead(n, 'probe')` wherever the node has a switch/light value, with the NoOp `probe` as the fallback. It also reads two v0.65.0 driver-side readings: the controller receiver-off accessor (`controllerRfOffSince`), which suppresses every lane, and the driver-reconnect stamp (`driverReconnectedAt`), so a driver restart's mesh-wide ping is never credited to a node as self-proven. |
 | 5 | Auth | `createAuth` + `createAuthPolicy` | CORS/ws-origin allow-list and the direct-LAN login gate. |
 | 6 | HTTP + ingress console | `Fastify` + `registerWsConsole` | The `/console` xterm.js page, `/console/ws` transport, `/`, `/api/version`, `/api/health`. `/api/health` returns 200 only when the HA socket is authenticated **and** the roster is loaded **and** the provider reports no error; its body carries `ok`, `ready`, `nodes`, `haReady`, `lastUpdated`, `lastStatsUpdated`, `error` (the roster's), and — from v0.35 — `haError`, the HA socket's **own** last failure. The two are distinct and the second was previously unreachable: an auth rejection or a refused connect leaves the data layer with nothing to report but "not ready", so the only line naming the actual cause was the one the endpoint did not print. From v0.57.0 the body also carries the engine's conclusions — `degraded`, `degradedReason` and an `engine` object mirroring every published entity (§12.11) — while the HTTP code still tracks `ok` alone. |
 | 7 | Telnet transport | `startTelnetServer` | The raw-TCP TUI on `:2324`, on by default; `telnet_enabled: false` turns it off (then `/console` only). |
@@ -188,7 +188,13 @@ both WS surfaces and the substrate for the entire engine. Its startup sequence
    `Number(identifier.split('-')[1])`; the controller is node 1. This builds the
    `node_id ↔ device_id ↔ entities` maps that `network_status` (numeric ids only)
    cannot provide, plus the ping-button, battery, and firmware-update entity
-   indexes.
+   indexes. Once per connect, really (v0.75.3): the boot tick and the on-ready
+   callback both ask the moment the socket authenticates, so `ensureEntryId()`
+   and `ensureRegistries()` share the request already in flight — a request
+   parked before authentication goes out on the new connection, and one on a
+   socket that closes is rejected, so the next call fetches again. Before
+   v0.75.3 every connect discovered the entry and downloaded both registries
+   twice.
 3. **Poll `network_status`.** Every `refreshMs` (default 2000 ms), `refresh()`
    sends `zwave_js/network_status { entry_id }` — the cheapest complete mesh
    snapshot (roster + the 0..4 status enum, `is_routing`, `is_secure`, `ready`,
@@ -251,9 +257,9 @@ never inside a screen's `draw()`.
 
 `recompute()` (the fast path) runs `zwaveData.snapshot()` / `.controller()` /
 `.events()`, computes the representative noise floor once via
-`computeNoiseFloor()` (the **median** of the controller's per-channel background
-RSSI, filtering the driver sentinels `{127, 126, 125}` and any non-negative
-value; falls back to `DEFAULT_NOISE_FLOOR` when empty), then scores every node
+`computeNoiseFloor()` — `medianNoiseFloor` (`health.ts`), the **median** of the
+channels that are readings (finite, negative, above −120 dBm; v0.75.2), falling
+back to `DEFAULT_NOISE_FLOOR` when none is — then scores every node
 once with `scoreNode(n, noise)`. A read that throws keeps the last-good caches
 rather than clobbering them with garbage. `recompute()` is called once
 immediately to prime the first frame, then on `setInterval(recompute, refreshMs)`.
@@ -388,7 +394,10 @@ own recommendations. The `executor.ts` /
 admission rule (DESIGN §3.5). One autonomous write DOES ship outside that pipeline:
 **auto-ping** (§11.12, v0.30) — opt-in, off by default, ping and routed read only — which reads
 the same provider snapshots but never touches the planner or its
-recommendations.
+recommendations. A second ships since v0.75.0: the **refresh trial** (§11.14),
+off by default, the pre-registered experiment that sends one `refresh values` to
+a randomly chosen half of eligible `rtt-degraded` episodes. It runs only while
+auto-ping does, and it admits nothing.
 
 Every mutating action instead flows through the one authenticated path: the
 Actions Menu or a shortcut key (behind a typed CONFIRM for everything but the `p` ping) → `createActionRunner` (`zwaveActions`) → HA Core
@@ -1092,7 +1101,7 @@ else {
 }
 ```
 
-The margin window `[0, 14]` dB maps onto `[0, 1]`; the `W` (weak) threshold of 7 dB lands exactly at the midpoint (`signalFrac = 0.5`). The noise floor is validated to a plausible dBm range (`< 0` and `> -120`); anything else falls back to `DEFAULT_NOISE_FLOOR = -95` (a tunable, exported so `dataProvider` and the scorer agree on one value). See §4.5 for the routed-node neutrality rule and §4.11 for sentinel handling.
+The margin window `[0, 14]` dB maps onto `[0, 1]`; the `W` (weak) threshold of 7 dB lands exactly at the midpoint (`signalFrac = 0.5`). The noise floor is validated by `noiseReading` (`< 0` and `> NOISE_FLOOR_MIN_DBM = -120`) — the same rule every floor in the add-on is computed by (v0.75.2, below); anything else falls back to `DEFAULT_NOISE_FLOOR = -95` (a tunable, exported so `dataProvider`, the scorer and the detectors agree on one value). See §4.5 for the routed-node neutrality rule and §4.11 for sentinel handling.
 
 #### Lane 3 — Route (20%, folded to 0% for LR)
 
@@ -1771,7 +1780,7 @@ interface DriverWsCallbacks {
 }
 ```
 
-**Background RSSI — the real noise floor.** `parseBgRssi(bg)` extracts channels 0–3 from the controller's `statistics.backgroundRSSI` blob. Per channel it prefers the driver's own EMA (`average`) — the canonical floor estimate — and falls back to `current` only when `average` is absent; both pass through `cleanDbm` (sentinel/`≥125` → `null`). It returns `null` unless at least one channel has a finite value, so an all-empty blob never fires the callback. It is seeded once from the state dump (`onStateDump` reads `controller.statistics.backgroundRSSI`) and thereafter refreshed from `controller` `"statistics updated"` events (`onEvent`). The result type `BgRssiChannels = (number | null)[]` deliberately preserves channel *position* — channels 0/1 are mandatory and 2/3 optional-and-trailing (RESEARCH §1.5), so a null gap must not be compacted.
+**Background RSSI — the real noise floor.** `parseBgRssi(bg)` extracts channels 0–3 from the controller's `statistics.backgroundRSSI` blob. Per channel it prefers the driver's own EMA (`average`) — the canonical floor estimate — and falls back to `current` when `average` is absent; both pass through `cleanDbm`, which keeps the int8 range a radio can report (`-128 ≤ v < 125`) and maps the sentinels `≥125` and anything below `-128` to `null` (v0.75.1). An `average` of **exactly 0** beside a `current` of NotAvailable (127) is zwave-js's "no value yet" seed — `averageRSSI` returns 0 when its first reading is "not available" — not a 0 dBm floor (v0.75.1). A **trailing** run of such channels is absent, like a long-range channel the controller does not report, so it shows `—` instead of a red 0 dBm; an **interior** one keeps its 0, because a `null` would end the leading run of channels and drop the real readings after it, and no floor takes a non-negative value as a reading (`noiseReading`). A saturated receiver also averages as 0 dBm, but its `current` is ReceiverSaturated (126): that channel keeps its 0 and shows it. No floor takes a 0 as a reading (`noiseReading`, v0.75.2); a receiver that saturates after real readings decays toward 0 without reaching it, and reads as a very noisy floor. **Known limitation:** when the first poll after a driver start is "not available", the driver's EMA (α = 0.9) decays from that 0 seed — about −10, −19, −27 dBm … toward a true −100 — and after twenty polls the seed still carries 12 % of the weight (−88 dBm); those readings are negative and reach the floor. It has not been seen on the reference controller (its 30-minute tier never rose above −98 dBm in 13.7 days). It returns `null` unless at least one channel has a finite value, so an all-empty blob never fires the callback. It is seeded once from the state dump (`onStateDump` reads `controller.statistics.backgroundRSSI`) and thereafter refreshed from `controller` `"statistics updated"` events (`onEvent`). The result type `BgRssiChannels = (number | null)[]` deliberately preserves channel *position* — channels 0/1 are mandatory and 2/3 optional-and-trailing (RESEARCH §1.5), so a null gap must not be compacted.
 
 **Node `lastSeen`.** `parseLastSeen(node.statistics.lastSeen)` yields the *real* last-communication epoch — a datum HA's `network_status` does not forward (RESEARCH §3.7 notes `last_seen` "is not forwarded by api.py"). Seeded from each node in the state dump, then advanced by node `"statistics updated"` events. This is what the quiet-node detector needs to distinguish "silent because sleeping" from "silent because gone."
 
@@ -1814,7 +1823,7 @@ The consumer never trusts a driver reading indefinitely. Wherever the noise floo
 
 - The evidence sampler records the controller's per-channel `bgRssi` only when `now - driverBgRssi.at <= 90_000 && driverHomeOk()`; otherwise it records `null` — an honest unknown, never a re-used stale floor (`recordController(..., bg)`).
 - The controller snapshot's `backgroundRSSI` field applies the same 90 s gate and passes the channels through `leadingRun()` (the leading contiguous run of present channels, preserving true channel indices) — a stale or absent reading reverts to `[]`, which the UI renders as "noise —".
-- The engine's `hasRealNoise()` predicate uses the identical gate, so the mesh-interference detector knows whether a *measured* floor exists or whether it must fall back to `basis: 'inferred'` (interference-by-exclusion, severity-capped at `warn` — DESIGN §3.3).
+- **One rule for what a reading is (v0.75.2).** `health.ts` `noiseReading` — finite, negative, and above `NOISE_FLOOR_MIN_DBM = -120` — and `medianNoiseFloor`, the median of the readings in the leading run, compute every floor: the screens' (`computeNoiseFloor`, and their "measured" tag `hasRealNoise()`, which now means the floor came from a reading), the health score's, the detectors' (`symptoms.ts` `representativeFloor`, which also says whether it was measured), Interference's and the persisted trend's. 0 is the driver's "no value yet" seed and its stand-in for saturation; −128 is its stand-in for "no signal detected", which its EMA mixes into neighbouring readings, while a real floor sits far above −120 (the reference controller reads −105 to −94). Before v0.75.2 the screens, Interference and the trend kept −128 while the detectors dropped it per channel; the health score took the screens' floor and fell back to −95 only when that floor itself was at or below −120; and the detectors' "measured" flag only asked whether a driver sample existed. So with every channel at "no signal detected" the screens read `-128 dBm (measured)`, the health score used −95, and weak-signal labelled its −95 fallback `measured`; with channels `[-128, -104, -101, -93]` the screens used −102.5 and the detectors −101. Coarse trend buckets folded under the old rule with a stand-in in them are dropped on load.
 
 The M6 INTERFERENCE screen (`8`/`f`) is the human-facing terminus. `computeInterference` medians the present channels (`medianFloor`, matching the masthead) and classifies the floor with fixed absolute thresholds in `interference.ts`:
 
@@ -1827,7 +1836,7 @@ function noiseBand(floor, real) {
 }
 ```
 
-When the client is absent or dormant, the screen states the gap plainly rather than guessing: *"◷ unavailable — the read-only driver-WS client is not connected. (HA strips backgroundRSSI; set driver_ws_url to enable this.)"* This closes the loop back to §6.1 — the one signal HA structurally cannot provide is the one this screen is built around, and its absence is rendered as an honest null.
+When the client is absent or dormant, the screen states the gap plainly rather than guessing: *"◷ unavailable — the read-only driver-WS client is not connected. (HA strips backgroundRSSI; set driver_ws_url to enable this.)"* When it is connected but no channel is a reading (every value one of the driver's stand-ins), the channels are shown with `median — no reading` and *"◷ no floor yet — 0 is the driver's "no value yet" (or saturated), ≤ −120 its "no signal detected""* (v0.75.2) — never "not connected". This closes the loop back to §6.1 — the one signal HA structurally cannot provide is the one this screen is built around, and its absence is rendered as an honest null.
 
 ### 6.10 Configuration
 
@@ -2304,7 +2313,7 @@ timeoutCorrob = w != null ? w.rate >= WEAK_TIMEOUT_RATE (0.05)          // a mea
 b = !routed && !isLongRange && margin < WEAK_MARGIN_DB (7) && timeoutCorrob
 ```
 
-Corroboration is required by design: a thin margin that isn't costing deliveries is not yet a problem. **Until v0.69.0 it could never be met on a quiet mesh.** It needed a timeout *rate*, which needs 20 sends to one node in ten minutes, and the reference mesh's whole traffic is about 6 sends per ten minutes combined — so every node was unmeasured, always, and this detector could not start its dwell. Unmeasured is not "not suffering": on an unmeasured window, one failed delivery in the last 30 minutes corroborates — a send that exhausted its retries (a Dead transition, `dFlaps`) or an acknowledged reply-expecting send that went unanswered (`dTimeout`). The RSSI and route inputs read the same lookback, so the breach does not clear ten minutes after the single fresh sample a sparse node produces. A node that is Dead *now* is excluded — `node-down` owns it. The margin bar is unchanged. **Basis is honest about its floor** — `measured` only when `input.hasRealNoise()` (the driver-WS noise reading, Chapter 6/M2.5) is available; against the −95 fallback the row is `inferred` and the evidence value reads `"… (vs assumed −95 floor)"`. `markDegrading(id, true)` fires only once the symptom matures.
+Corroboration is required by design: a thin margin that isn't costing deliveries is not yet a problem. **Until v0.69.0 it could never be met on a quiet mesh.** It needed a timeout *rate*, which needs 20 sends to one node in ten minutes, and the reference mesh's whole traffic is about 6 sends per ten minutes combined — so every node was unmeasured, always, and this detector could not start its dwell. Unmeasured is not "not suffering": on an unmeasured window, one failed delivery in the last 30 minutes corroborates — a send that exhausted its retries (a Dead transition, `dFlaps`) or an acknowledged reply-expecting send that went unanswered (`dTimeout`). The RSSI and route inputs read the same lookback, so the breach does not clear ten minutes after the single fresh sample a sparse node produces. A node that is Dead *now* is excluded — `node-down` owns it. The margin bar is unchanged. **Basis is honest about its floor** — `measured` only when the floor came from a reading (`representativeFloor` → `medianNoiseFloor`, the one rule, v0.75.2; until then it asked only whether a driver sample existed); against the −95 fallback the row is `inferred` and the evidence value reads `"… (vs assumed −95 floor)"`. `markDegrading(id, true)` fires only once the symptom matures.
 
 **`ghost-suspect` — coverage-proven, zero comms (warn, inferred).**
 Deliberately the most conservative detector, because its eventual remediation (`remove_failed_node`) is destructive. It keys on *cumulative* coverage:
@@ -2788,7 +2797,7 @@ The remediation engine's fourth stage (evidence → baselines → symptoms → *
 
 Two properties define this milestone and everything below follows from them:
 
-1. **Advisory — as of M5, and still advisory for every action but one.** By design there is no `executor.ts` and no `auto_remediation` tier (DESIGN §3.5; `admission.ts`), so the planner recommends and a person acts. **As shipped this is no longer the whole story, and the difference shows up right here in the ledger.** v0.30's opt-in auto-ping added one autonomous remediation lane, and it runs through the same `ActionRunner` with `learn: true` and `origin: 'engine'` (`zwaveActions.ts`) — so the action arm is populated by operator type-CONFIRM actions **and** by engine auto-pings, not by the operator alone as this milestone originally described. The distinction that *is* still exact is per-lane, not per-actor: the **remediation** ping teaches the ledger, while the **measurement** probes — the sweep and the verification lanes — deliberately pass `learn: false` (v0.38.1) so instrumentation never scores itself. The learned numbers flow *back into* the planner as advice; they never trigger anything beyond that one gated lane.
+1. **Advisory — as of M5, and still advisory for every action but one.** By design there is no `executor.ts` and no `auto_remediation` tier (DESIGN §3.5; `admission.ts`), so the planner recommends and a person acts. **As shipped this is no longer the whole story, and the difference shows up right here in the ledger.** v0.30's opt-in auto-ping added one autonomous remediation lane, and it runs through the same `ActionRunner` with `learn: true` and `origin: 'engine'` (`zwaveActions.ts`) — so the action arm is populated by operator type-CONFIRM actions **and** by engine auto-pings, not by the operator alone as this milestone originally described. The distinction that *is* still exact is per-lane, not per-actor: the **remediation** ping teaches the ledger, while the **measurement** probes — the sweep and the verification lanes — deliberately pass `learn: false` (v0.38.1) so instrumentation never scores itself. The learned numbers flow *back into* the planner as advice; they never trigger anything beyond that one gated lane. The refresh trial (v0.75.0, §11.14) is apart from all of this: its send carries origin `trial`, its episodes file into no arm of this ledger, and it scores them itself — by the ledger's own rule, at a fixed horizon — with undecayed counts.
 2. **The unit is an episode, not an action.** The ledger records **every** symptom episode whether or not an action was taken. Episodes that resolve untouched are the **control arm** — the spontaneous-recovery base rate the mesh self-heals at. *Untouched now has teeth (v0.40):* an episode whose node went **Dead** mid-episode, or on which a successful remediation ran unattributed (the confirmation-window skip), is **confounded** — counted apart (`confounded(kind)`, its own REMEDY row, a closure-line tag) and credited to NEITHER arm, the non-improvements excluded from the control *n* as well. The audited exemplar: an rtt-degraded symptom cleared, the dead-remediation ping revived the node during the confirmation window, and the ledger booked "improved (no action)" — a spontaneous recovery that was nothing of the sort. The Dead transition is marked by the data layer (`markConfounded`), which owns node status; the skip path marks itself inside `recordAction`. A death that opens and closes **between two level samples** is invisible to a status read but not to the event-driven flap counter, which is drained into the evidence tier every tick — so the guard consults that counter too (v0.40.2), on the same argument the evidence tier already makes for flaps generally. **Never `dead-flap`** (pre-release review, critical): Dead status is that symptom's own *definition* — its node is Dead by construction while the episode is open, so status-marking it would structurally starve the dead-flap control arm forever, the exact v0.36 inert-learning-loop disease reintroduced by the guard built to protect the arms. A confound is a death *external* to the measured signal; the action-skip path still applies to every kind, dead-flap included. Without that control arm you cannot honestly say an action "helped," because a Z-Wave Plus mesh self-heals via explorer frames on its own (RESEARCH §5; on the reference mesh, light switches that healed unaided are the canonical example, and the "regression-to-the-mean trap" the guards below defend against).
 
 ### 9.1 Data shapes
@@ -2943,7 +2952,7 @@ The action arm was never operator-only: the dead-node ladder's pings feed it too
 - **Deaths after an action.** `noteDeadAfterAction(node, kind, at)` — called by the data layer wherever it marks a Dead or flapped node's episode confounded — counts, once per episode and at once (so an abandoned episode keeps it), a death within `KILLED_AFTER_MS` (15 min) of an action the node was alive for (`aliveAtAction`, read before the await). Never for `dead-flap`, whose definition is the death; never for the ladder, whose pings target Dead nodes; and never for a death on one of this add-on's own measurement probes (a probe still unanswered inside `ANSWER_GRACE_MS` when the node died). ENGINE shows it as `healNode: Dead ≤15m after ×2`, ranked with a measured regression.
 - **Route symptoms after an action.** A route-kind episode (`ROUTE_EFFECT_KINDS`) whose breach began while an action on the same node was running, or within `KILLED_AFTER_MS` after it settled, is counted against that action and actor as possible harm — never credit (`route symptoms opened ≤15m after: healNode (you) ×1`). Judged from the breach start (`dwellStartMs`), not dwell maturity, and only for a node that was Alive at launch: the route churn of the ladder reviving a Dead node is not the ping's harm.
 - **Windows open at the launch (v0.72.0 review).** The runner reports every learned verb's launch before the await (`onLaunch`) and its settle after (`onSettled`; an *outcome unknown* settles at its reply bound). The ledger keeps one record per launch per node, opening at the launch and closing `KILLED_AFTER_MS` after the settle; a death or a breach is judged against an action the node was Alive for whose window covers it — one still RUNNING at that moment first (the earliest-launched of those), otherwise the latest-launched — so a death during a twenty-minute heal is the heal's even if a quick ping ran and settled meanwhile, and a later ladder ping to the now-Dead node does not erase the heal's window. A launch that never left the add-on (the settle's effect is `none`: no device, socket not open) opens no window, holds nothing and cannot overlap. While an action runs on a node — or the controller reports a mesh-wide route rebuild — that node's episodes are held open (`planEpisodeLifecycle`'s `holdUntil`), and their confirmation window restarts at the settle: the after-window that scores them is a settled one, not the action's own last minutes, and an after-window check burst sent before an action settled — however quick the action — is sent again in it. A mesh-wide rebuild also confounds every open episode. A symptom is treated as already recovering only if it went absent before the action was sent.
-- **Live span.** Every closure is bucketed by how long its symptom was live — from `dwellStartMs` to the first tick it was seen absent, the clock the transient split uses — into `[0,10) [10,30) [30,60) [60,∞)` minutes, split scored (improved / no-change / worse, not confounded) from unscored, in a 30-day ring of daily slots. ENGINE's `live ≥10m: a/b scored since MM-DD` bit is the revisit condition of DESIGN §3.5: only episodes live that long could ever be evidence for an automatic action.
+- **Live span.** Every closure is bucketed by how long its symptom was live — from `dwellStartMs` to the first tick it was seen absent, the clock the transient split uses — into `[0,10) [10,30) [30,60) [60,∞)` minutes, split scored (improved / no-change / worse, not confounded) from unscored, in a 30-day ring of daily slots. ENGINE's `live ≥10m: a/b scored since MM-DD` bit is the revisit condition of DESIGN §3.5: only episodes live that long could ever be evidence for an automatic action. It counts episodes, not nodes: one chronically degraded node whose episode re-arms every half hour adds a closure each time — on the reference mesh one node once supplied 8 of 12 new closures — which is why the refresh trial (§11.14) caps each node at one trial decision a day in either arm. Since v0.75.1 the ring also keeps the scored ≥ 10 min closures **per node**, and the count moves to its own row — before the first attributed closure too, so the tallies before it cannot crowd it out — that names them in the same breath, in the longest of four forms that fits the width (every form keeps `from k nodes`, so the count is never shown unattributed, and down to the narrowest session width of 60 columns): `live ≥10m: 37/45 scored since 09-12 from 4 nodes (node 23: 22)` — how many nodes, and the one with the most when it has more than one. Per-node counts begin with v0.75.1, so until they cover every closure in the window the bit says how many they do cover, and since when — to the minute, from the first closure it attributed (`nodesSince`, persisted per kind), because every counted closure after that one is attributed and a day boundary would not be exact: `… · 5 since 10-12 14:03 from 2 nodes (node 23: 4)`. With no recorded start none is guessed (`… · 5 of them from 2 nodes`). A day from an older ledger file loads without them. Trial closures still count here.
 
 The closure line names the actor and the live span (`improved after healNode (you) live=12m`), prints the confounded tag on an attributed closure too, and adds `(node went Dead ≤15m after the action)` when that was counted. All new ledger fields are optional in `/data/outcomes.json`, which stays `v: 1`; a `reset()` (identity *start fresh*) and `loadJSON` clear every one of them.
 
@@ -3151,6 +3160,8 @@ A detector is allowed to fire on evidence the verifier is forbidden to accept. O
 
 > **A burst must SPAN less than the window it fills.** 5 probes at the original 120 s effective spacing (70 s requested, rounding up to the next 60 s tick) span 480 s against a 300 s window, so probes 1–2 age out before 4–5 arrive and the window never holds more than two or three readings — adding probes lengthened the stream without ever filling the window. At 60 s the same burst spans 240 s and fits, with two readings spare over the floor of 3. The count was checked against `MIN_OBS` twice; the span against `WINDOW_MS` neither time.
 
+> **The window is not cut before its last probe settles (v0.75.3).** A confirmation burst's fifth read can go out about a second before the window ends: its TX is ACKed into the evidence at once, but a missing reply — a timeout — reaches the counters seconds later and the evidence only at the next sample. Resolving on time alone scored that timed-out read as 0 of 5 (node 57, 10-11: `tmo=0.0%` while the read timed out 0.58 s after the verdict). `planEpisodeLifecycle` takes a `settleAt` per node — the latest measurement probe's send plus `PROBE_SETTLE_MS` (30 s, or two evidence samples if slower) — and closes an episode only once it has passed, waiting at most `EPISODE_SETTLE_CAP_MS` (2 min) beyond the window so a node probed without pause cannot hold its episode open. A close that waited keeps the after-window's **start** at five minutes before the nominal close and extends only its end (`heldAfterWindow`); a trailing five minutes from the later close dropped the burst's first read at slow evidence cadences (a 60 s `route_poll_interval` holds the close about two minutes), leaving four sends under the five-send floor. A close that did not wait is scored on the trailing window as before.
+
 > **A burst must also START promptly.** Releasing one node per tick is FIFO, so each burst stays contiguous — but node B's burst does not begin until node A's five probes finish, five minutes later. A confirmation burst is timed to land in one specific window; starting it late puts every probe past the edge. Tight but late is exactly as useless as spread out.
 
 The verifier's floor of 3 **plus margin** (v0.37.2; it was exactly 3, and production showed that choosing exactly the floor leaves no room for the ordinary: three readings must all land, be sampled, and carry a non-null RTT inside one 300 s window, from a burst already spanning ~240 s at the tick-rounded spacing, so one lost probe — ~2 % of NoOp probes in that sample — fails the verdict closed) — spaced at the 60 s effective spacing stated above so each is a separate observation rather than three packets carrying one reading's worth of information. Requests **top up**, never stack: a symptom that flaps ten times still owes one burst. They are drained through `drainVerifyRequests` — which returns `{ id, first }`, `first` read off the queue's own budget bookkeeping so the log's `burst start` label is ground truth rather than a clock heuristic (v0.38.2; two generations of time threshold each mislabeled a boundary in an audit: a per-node gap conflated inter-burst pauses with stretched bursts, then a 4-minute cutoff stamped `+180s` on a genuine boundary whenever a symptom cleared mid-burst and shortened the open→confirm pause below it) — and cleared by `decideAutoPings`, so they pass the **same** gate ladder as every other autonomous write — master switch, boot window, rebuild, controller RF off (v0.65.0), missing capability data, storm, an operator's one-node rebuild or removal (`operator-action`, v0.72.0) and the autonomy pause (`paused`, v0.72.0; `requestVerification` refuses new requests while paused); a node inside its post-kill hold has its burst left owed (v0.71.0) — and a Dead node is never verification-probed, because the remediation path owns it with its own dwell, backoff and attempt budget.
@@ -3281,23 +3292,25 @@ const MIN_SERIAL_SAMPLES = 2;  // need ≥2 controller samples to form any per-h
 
 ### 10.3 The noise floor — masthead-identical median
 
-**The number.** The representative floor is a **median**, computed identically to the masthead's `computeNoiseFloor` so the two screens can never disagree. `medianFloor(channels)` in interference.ts takes the **leading contiguous run** of channels — the driver's own convention, where a `null` channel *ends* the run — then medians the finite, negative values:
+**The number.** The representative floor is a **median**, and it is the same function the masthead's `computeNoiseFloor`, the health score, the detectors and the persisted trend use (v0.75.2), so no two of them can disagree. `medianFloor(channels)` in interference.ts is `medianNoiseFloor` from `health.ts`: it walks the **leading contiguous run** of channels — the driver's own convention, where a `null` channel *ends* the run — and medians the values that are readings:
 
 ```ts
-function leadingRun(channels: (number|null)[]): number[] {   // inlined to avoid a module cycle
-  const out = []; for (const ch of channels) { if (ch == null) break; out.push(ch); } return out;
+export function noiseReading(v) {           // health.ts
+  return typeof v === 'number' && Number.isFinite(v) && v < 0 && v > NOISE_FLOOR_MIN_DBM /* -120 */ ? v : null;
 }
-function medianFloor(channels) {
-  const vals = leadingRun(channels).filter(v => Number.isFinite(v) && v < 0).sort((a,b) => a - b);
-  if (!vals.length) return null;
-  const mid = vals.length >> 1;
-  return vals.length % 2 ? vals[mid] : (vals[mid-1] + vals[mid]) / 2;   // even → mean of the two middles
+export function medianNoiseFloor(channels) {
+  const v = [];
+  for (const ch of channels) { if (ch == null) break; const r = noiseReading(ch); if (r != null) v.push(r); }
+  if (v.length === 0) return null;
+  v.sort((a, b) => a - b);
+  const m = v.length >> 1;
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;   // even → mean of the two middles
 }
 ```
 
-The `< 0` predicate is what rejects the RSSI sentinels (125 = no-signal, 126 = saturated, 127 = not-available) that the driver uses in place of a real dBm. If no channel survives, the floor is `null`.
+The channels that count are readings by `noiseReading` (`health.ts`, v0.75.2): finite, negative and above −120 dBm. The raw sentinels (125 no-signal, 126 saturated, 127 not-available) never reach here — `parseBgRssi` maps them to `null` — but the driver's average stands values in for them: 0 for "no value yet" or saturation, −128 for "no signal detected". The `< 0` predicate alone let −128 through as a measured floor. If no channel is a reading, the floor is `null`.
 
-**Inputs and freshness.** `channels` comes from `input.bgChannels`, which the data layer sets only when the driver-WS reading is **≤ 90 s old AND the driver's `homeId` matches HA's** (`driverHomeOk()`); otherwise it is `null`, and `computeInterference` substitutes `[null,null,null,null]`. So `real = floor != null` — a live, in-network reading — and when it is false the screen prints the honest unavailable message instead of a fabricated dBm:
+**Inputs and freshness.** `channels` comes from `input.bgChannels`, which the data layer sets only when the driver-WS reading is **≤ 90 s old AND the driver's `homeId` matches HA's** (`driverHomeOk()`); otherwise it is `null`, and `computeInterference` substitutes `[null,null,null,null]`. So `real = floor != null` — a live, in-network reading — and when it is false the screen prints the honest unavailable message instead of a fabricated dBm (or, when the client is connected but no channel is a reading, the channels with `median — no reading`):
 
 ```
 ◷ unavailable — the read-only driver-WS client is not connected.
@@ -3495,7 +3508,7 @@ This is the concrete expression of the add-on's founding constraint: **the remed
 
 One deliberate exception exists since v0.30: **auto-ping** (§11.12) is a code path from a detector (Dead-past-dwell, the fixed-cadence liveness sweep, or an outcome-ledger verification request) to a WS `button.press` ping or (v0.70.0 ladder, v0.71.0 sweep and verification) one `zwave_js.refresh_value` routed read, with no human in the loop. It is off by default, double-gated behind `write_actions_enabled`, and restricted to two frames that command no device and leave nothing to undo. Every other mutating verb — every action this chapter catalogues — fires only when a person types `CONFIRM` and presses Enter.
 
-**The safety model, stated completely (v0.72.0).** What runs with no one present is auto-ping's three lanes — the dead-node ladder, the liveness sweep and the verification bursts — and nothing else. Those frames never command a device, but they have three effects an operator accepts by enabling auto-ping:
+**The safety model, stated completely (v0.72.0; the trial v0.75.0).** What runs with no one present is auto-ping's three lanes — the dead-node ladder, the liveness sweep and the verification bursts — and, when its own switch is on, the refresh trial (§11.14), and nothing else. Those frames never command a device, but they have three effects an operator accepts by enabling auto-ping:
 
 1. **An answer can change Home Assistant state.** If HA held a device's state wrong, the Report corrects it, and every automation triggered by that state reacts to the corrected value as if the device had changed.
 2. **A read can move a route.** A routed read that fails over leaves the controller using the route that worked (§11.12's reroute accounting).
@@ -3848,7 +3861,7 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 
 ### 11.12 Auto-ping — the autonomous writes (v0.30, extended v0.36)
 
-> **One pause for every autonomous write (v0.72.0).** `server/src/zwave/autonomyPause.ts`. Auto-ping's three lanes — the dead-node ladder, the liveness sweep and the verification bursts — are everything this add-on sends on its own, and one switch stops all three, the ladder included. It has two sources, and either pauses:
+> **One pause for every autonomous write (v0.72.0).** `server/src/zwave/autonomyPause.ts`. Auto-ping's three lanes — the dead-node ladder, the liveness sweep and the verification bursts — and the refresh trial (§11.14, v0.75.0; it decides only while auto-ping's last pass was unsuppressed, and reads the pause directly) are everything this add-on sends on its own, and one switch stops all of them, the ladder included. It has two sources, and either pauses:
 >
 > - **The TUI.** `Z` on ENGINE pauses at once — no `CONFIRM`, and no write-actions gate, because it removes writes and sends nothing. Controller 3 → `A` offers exactly one of *Pause automatic writes* / *Resume automatic writes*; both take the typed `CONFIRM`, and both are answerable on a read-only install (they act on this add-on's own state, like the identity answers — `isLocalDecisionKind`). The pause is persisted in `/data/autonomy.json` and has no expiry.
 > - **Home Assistant.** `input_boolean.zwave_tui_pause_autonomy`, which an administrator may create as a Toggle helper if wanted — the entity id must be exactly that. The add-on reads it from the `state_changed` feed and from the full `get_states` read (before the registry check, so it is read even before the registry loads) and never writes it. `on` pauses; `off` clears this source; a toggle last seen pausing that is **absent** from a full read stays paused (`missing`) — only a `state_changed` to nothing (a deletion) or a TUI resume forgets it. A missing toggle has no switch to turn off, so its exits are to recreate the helper (off) or to resume from the TUI, which forgets it; ENGINE and the resume notice say so.
@@ -4116,6 +4129,149 @@ locked over a row the operator can press.
 
 ---
 
+### 11.14 The refresh trial — a pre-registered experiment (v0.75.0)
+
+No verb passes the admission rule (§1.8, DESIGN §3.5), and DESIGN §3.5
+pre-registered the only path by which one ever could: a randomized trial with
+one verdict. v0.75.0 builds it for the one candidate kind whose live span
+supports it, `rtt-degraded`, and the verb `refreshValues`.
+
+**Off by default.** `refresh_trial_enabled` is its own switch. It also needs
+`write_actions_enabled` and auto-ping running unsuppressed, and it stops at once
+for the owner's pause (`Z` on ENGINE or the Home Assistant toggle), which it
+reads directly rather than through auto-ping's last pass. Running the trial
+**admits nothing**: `AutoVerb` stays `never`, the admission table keeps all three
+of refresh's failure rows (it names the trial in `alreadyAutonomousAs`), and the
+startup banner still says "none admitted".
+
+#### Which nodes can take part — the revisit condition, per node
+
+The revisit condition has two halves. The first, ≥ 30 scored closures live
+≥ 10 min within 30 days (§9.3), counts episodes, not nodes. The second is that
+the verb must differ from what the verification lane already sends to both
+arms, and that is checked per node. zwave-js's user refresh
+(`Node.refreshValues`) queries every actuator and sensor CC instance on every
+endpoint; the verification lane sends one routed-read Get on the node's own
+switch/light value (or a NoOp ping when it has none). The driver's state dump
+gives each node's CC instances (`refreshQueriesOf`, Notification excluded,
+since its refresh queries only pull-mode nodes), and a node is eligible only if
+its refresh **adds something**: at least two Gets where the probe reads a value,
+or at least one where the probe pings. On a mesh of plain switches and dimmers,
+each with one switch value and nothing else, no node qualifies: ENGINE says
+`eligible nodes: 0 of N mains`, the trial decides nothing, and after 120 days
+it retires as not measurable here. That is the pre-registered answer for such a
+mesh, not a fault.
+
+#### What one decision does
+
+On every engine tick, after this tick's deaths and confounds are known:
+
+1. **Gates**, in this order (the first that fails is shown on ENGINE as
+   "waiting: …"): the switch; the phase (a verdict or the deadline ends the
+   trial); the latch; write actions; the owner's pause; a known home id that
+   matches the one the trial started on; auto-ping's last pass fresh (≤ 3 min)
+   and unsuppressed; a known local time zone and an hour in **09:00–20:00**; no
+   operator action running, and none in the last **10 minutes** (every verb you
+   run, device control and config writes included); **no decision in flight**
+   (in flight until filed at +30 min); at most **2** decisions in the last hour
+   and **6** in the last 24 h.
+2. **Eligibility**, per open episode: `rtt-degraded`, live (not in its
+   confirmation window), not confounded, **nothing yet acted on it**, live
+   **≥ 10 minutes** from its dwell start, a mains listening node that is Alive,
+   a refresh that adds something (above), a before-window with at least three
+   round-trip readings, the node not excluded after a kill, and **no trial
+   decision on that node in the last 24 h**. The oldest eligible episode is
+   taken. Every one of these is checked before the coin, so both arms face the
+   same filter.
+3. **The coin.** p = 0.5, from `crypto.randomInt`. Treated or held.
+4. **Freeze and persist.** The ledger's episode is marked as the trial's: its
+   before-window stops being refined (in both arms) and it will file into no
+   ledger arm. The assignment is written to `/data/refresh_trial.json`
+   **before anything is sent**; a store that cannot be written sends nothing and
+   latches the trial off.
+5. **Send (treated only).** One `zwave_js/refresh_node_values` through a
+   narrowed handle that holds that one call and nothing else, as origin
+   `trial`, refused at send time if the owner has paused, the node is not
+   Alive (zwave-js answers a refresh of a Dead node before querying anything,
+   and Home Assistant still reports success), or the Home Assistant socket is
+   not authenticated (a queued send could go out after a pause set in the
+   meantime). A send that was refused or never left stays in the treated arm:
+   the analysis is by intention to treat.
+
+What a refresh can change is the same as a manual one (§11.2): it reads every
+value the node has, and a reading that corrects a stale Home Assistant state is
+a state change that state-triggered automations react to.
+
+#### Scoring at a fixed horizon
+
+Every decision is scored the same way in both arms, independently of when the
+ledger's detector decides the episode is over (that timing depends on traffic,
+which the treatment itself supplies):
+
+- **Before:** the episode's degraded window, frozen at the decision.
+- **+20 min:** a verification burst is requested for the node **in both arms**.
+- **After:** the node's round trips from +20 to +30 min (raw estimates, §9.x),
+  clear of the refresh's own traffic.
+- **+30 min:** the decision is filed. `scoreRecovery` — the ledger's own rule —
+  compares the two windows.
+
+| at +30 min | files as |
+| --- | --- |
+| the node went Dead **≤ 30 min after the decision** | **harm**: scoreable, not improved, and a death — in either arm, never "confounded" |
+| the owner paused, a route rebuild ran, or an operator action touched the node (or the whole mesh) inside the window — or the engine's tick stalled for more than 2 minutes inside it, so a pause or a rebuild could have come and gone unseen | unscoreable |
+| `improved` / `no-change` / `worse` | scored (`improved` is the success) |
+| `unverifiable` (too few readings) | unscoreable |
+| in flight across a restart, or dropped with its node or a mesh change | lost |
+
+Tallies are **plain counts per arm, never decayed**, apart from every ledger
+arm. Inside the ledger the trial's send is credited to nothing: any other open
+episode on that node is confounded by it, and any other action on a trial
+episode spoils that episode's comparison. Deaths and route episodes after a
+trial send are the trial's to count, never the ledger's killed-after or
+route-after tallies; a death after someone else's action on a trial episode is
+still booked against that action, as on any confounded episode.
+
+#### The verdict, the deadline, kills and the latch
+
+- **One verdict**, when both arms reach **30 scoreable decisions**, comparing
+  the **first 30** of each (later ones are shown as "past 30"): **pass** only if
+  the Wilson lower bound of the treated success rate is at least the held rate
+  **+ 5 points**, and treated deaths are at most held deaths + 1. Either way
+  nothing more is sent. A pass does not admit the verb: admission still needs
+  its failure rows deleted in review, a narrowed handle, its own default-off
+  option, your re-consent, and a permanent ≥ ⅓ holdout.
+- **Deadline:** 120 days from the trial's start without a verdict retires it
+  as *not measurable here*.
+- **Direct kill:** a node that goes Dead **≤ 5 minutes after an automatic send
+  that may have left** (succeeded, still pending, or failed without proof that
+  nothing was sent) is excluded from the trial for **7 days** — even when a
+  restart inside those 5 minutes already filed the decision as lost. A **second**
+  direct kill within 7 days **latches** the trial off: nothing is sent, ENGINE
+  shows the latch in red, and `binary_sensor.zwave_tui_degraded` turns on with
+  the reason. That latch clears only when the add-on starts with
+  `refresh_trial_enabled` off — an owner act, logged.
+- **Other latches** name their own way out: an unreadable trial file (move
+  `/data/refresh_trial.json` aside; it is never overwritten), a missing
+  `TRIAL_PATH`, or a `/data` that cannot be written — including a kill that
+  could not be saved, which latches the run and is written as soon as `/data`
+  accepts it.
+
+#### Where it shows
+
+- **ENGINE → REFRESH TRIAL**: off / running and why it is waiting / the
+  decision in flight (node, arm, send result) / the verdict; the eligible-node
+  count; then the counts per arm (scoreable/30, improved, deaths), any excluded
+  node, decisions past 30, unscoreable and lost, decisions in the last 24 h and
+  the deadline.
+- **`sensor.zwave_tui_engine`** attributes `refresh_trial` (`off`, `running`,
+  `latched`, `passed`, `failed`, `retired`) and `refresh_trial_treated`,
+  `_treated_improved`, `_treated_deaths`, `_held`, `_held_improved`,
+  `_held_deaths` — they change on a decision, a filing or the verdict, never
+  with the clock.
+- **Log screen and container log**: every decision (arm, live time, the frozen
+  before-window's round trip), every filing, every death inside a harm window,
+  every kill, the latch and the verdict.
+
 ## 12. Configuration, Deployment, Security & Operations
 
 Everything the add-on lets an operator tune, every internal path it writes, how a
@@ -4167,13 +4323,14 @@ telnet.enabled:          process.env.TELNET_ENABLED       !== '0',     // absent
 auth.enabled:            process.env.AUTH_ENABLED          === '1',     // absent ⇒ OFF
 auth.requireOnIngress:   process.env.AUTH_REQUIRE_ON_INGRESS === '1',   // absent ⇒ OFF
 autoPing.enabled:        process.env.AUTO_PING_ENABLED     === '1',     // absent ⇒ OFF (fail-closed, v0.30)
+refreshTrial.enabled:    process.env.REFRESH_TRIAL_ENABLED === '1',     // absent ⇒ OFF (fail-closed, v0.75.0)
 ```
 
-Write-actions, the login gate, and auto-ping default **off** when their env var
+Write-actions, the login gate, auto-ping and the refresh trial default **off** when their env var
 is missing; telnet defaults **on**. That asymmetry is intentional: a forgotten
 `WRITE_ACTIONS_ENABLED` leaves the add-on a read-only monitor, while a forgotten
 `TELNET_ENABLED` still serves the TUI. Because the run script *always* exports
-`1`/`0` for all five, the code-side default only ever binds in bare-metal dev; in
+`1`/`0` for all six, the code-side default only ever binds in bare-metal dev; in
 the add-on the exported value wins. The comment "OMITTING the export entirely
 makes the option DEAD (server only ever sees its code default)" is the invariant
 that keeps the two ends in lock-step.
@@ -4187,6 +4344,8 @@ advanced ones. Every option below is a **tunable default** unless noted.
 v0.72.0 adds **no option**: the pause on autonomous writes is runtime state
 (`Z` on ENGINE, or the optional `input_boolean.zwave_tui_pause_autonomy`;
 §11.12), and automatic remediation is decided, not configurable (DESIGN §3.5).
+v0.75.0 adds one, `refresh_trial_enabled` (§11.14): it switches on an
+experiment, not an admission.
 
 | Option (config.yaml) | Default | Schema | Env var (run script) | config.ts field | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -4195,13 +4354,14 @@ v0.72.0 adds **no option**: the pause on autonomous writes is runtime state
 | `auth_max_attempts` | `3` | `int(1,10)` | `AUTH_MAX_ATTEMPTS` | `config.auth.maxAttempts` | Failures before the connection is dropped. |
 | `auth_require_on_ingress` | `false` | `bool` | `AUTH_REQUIRE_ON_INGRESS` (1/0) | `config.auth.requireOnIngress` | Also gate the HA-sidebar console. |
 | `auto_ping_after_min` | `10` | `int(2,120)` | `AUTO_PING_AFTER_MS` (run script ×60000) | `config.autoPing.afterMs` | Dwell before a Dead mains node's first probe; waits of 10/30/60 m BETWEEN attempts. At the default `max_attempts=3` only the first two waits are reached (10 m dwell + 10 m + 30 m ⇒ ~50 m to the give-up); the 60 m rung governs the third wait onward at `max_attempts ≥ 4`. |
-| `auto_ping_enabled` | `false` | `bool` | `AUTO_PING_ENABLED` (numeric-bool) | `config.autoPing.enabled` | The engine's ONE autonomous write (§11.12). Also requires `write_actions_enabled` — the master gate is never bypassed. |
+| `auto_ping_enabled` | `false` | `bool` | `AUTO_PING_ENABLED` (numeric-bool) | `config.autoPing.enabled` | The engine's autonomous probes (§11.12). Also requires `write_actions_enabled` — the master gate is never bypassed. |
 | `auto_ping_max_attempts` | `3` | `int(1,10)` | `AUTO_PING_MAX_ATTEMPTS` | `config.autoPing.maxAttempts` | Probes per dead episode, then the node is left to the human path. Each unanswered ping is followed by one routed read (v0.70.0). Recovery resets the budget. |
 | `auto_ping_stale_min` | `120` | `int(0,1440)` | `AUTO_PING_STALE_MS` (run script ×60000) | `config.autoPing.staleMs` | Liveness sweep cadence: each listening non-Dead node is probed once per this interval, chatty or not — by one routed read since v0.71.0, a NoOp ping where it has no switch/light value; `0` disables the liveness lane. One probe per tick, stalest first. |
 | `driver_ws_url` | `ws://core-zwave-js:3000` | `str?` | `DRIVER_WS_URL` | `config.driverWsUrl` (`\|\| null`) | **Empty ⇒ disabled.** Strictly read-only telemetry. |
 | `ha_ws_url` | `ws://supervisor/core/websocket` | `str?` | `HA_WS_URL` | `config.haWsUrl` | Override to point at a different HA Core WS. Never the driver socket (that is `driver_ws_url`): the data layer speaks HA's `zwave_js/*` commands, which zwave-js-server does not serve. |
 | `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. Since v0.50.0 lines at `warn` and above are prefixed with their level (see §12.9); `info` stays bare. |
 | `refresh_interval` | `2` | `int(1,30)` | `REFRESH_INTERVAL_MS` | `config.refreshMs` | **seconds → ms**: run script does `* 1000`. Cheap render/roster cadence. |
+| `refresh_trial_enabled` | `false` | `bool` | `REFRESH_TRIAL_ENABLED` (numeric-bool) | `config.refreshTrial.enabled` | The pre-registered refresh trial (§11.14). Also requires `write_actions_enabled` and auto-ping running unsuppressed; sends nothing otherwise. A start with it off clears a kill latch. |
 | `route_poll_interval` | `10` | `int(5,120)` | `ROUTE_POLL_INTERVAL_MS` | `config.routePollMs` | **seconds → ms**. Expensive route/controller-stats cadence; also the evidence-sample tick. |
 | `signal_display` | `margin` | `list(margin\|dbm)` | `SIGNAL_DISPLAY` | `config.signalDisplay` | Anything not exactly `"dbm"` ⇒ `'margin'`. Live-toggleable in the TUI (`T`). |
 | `telnet_enabled` | `true` | `bool` | `TELNET_ENABLED` (1/0) | `config.telnet.enabled` | Fail-**open** (`!== '0'`). |
@@ -4257,12 +4417,20 @@ export EVIDENCE_PATH=/data/evidence.json  # M2 symptom-engine time series
 export BASELINES_PATH=/data/baselines.json# M3 learned per-node normals
 export OUTCOMES_PATH=/data/outcomes.json  # M5 action-efficacy ledger
 export AUTONOMY_PATH=/data/autonomy.json  # v0.72.0 the autonomy pause (§11.12)
+export TRIAL_PATH=/data/refresh_trial.json # v0.75.0 the refresh trial (§11.14)
 ```
 
 `/data/autonomy.json` differs from the stores above in one respect: it is
 written only when the pause changes (TUI pause/resume, or a new reading of the
 HA toggle), and an unreadable one reads as **paused** rather than as empty —
 fail closed, because it is a safety latch, not learned state.
+
+`/data/refresh_trial.json` (v0.75.0) holds the refresh trial's assignments,
+tallies, exclusions and latch. It is written through on every change and, for an
+assignment, **before** anything is sent. An unreadable or malformed file latches
+the trial off and is left untouched (its tallies may be the only record of the
+experiment); move it aside to start a new trial. A trial switched on with no
+`TRIAL_PATH` latches itself off.
 
 `config.ts` reads each with the `|| null` idiom, e.g.
 `historyPath: process.env.HISTORY_PATH || null`. The semantics of that pattern are
@@ -4433,6 +4601,8 @@ Five workflows guard and publish the project. Two gate every change:
    uploaded to the
    Security tab, and `.github/scripts/check-sarif.mjs` fails the job on
    actionable findings, because an upload alone does not fail a build.
+
+**Runners (v0.75.3).** Every job runs on a pinned image, never `ubuntu-latest`: `ubuntu-26.04`, with both image builds on native runners (`ubuntu-26.04-arm` for aarch64), except CodeQL, which stays on `ubuntu-24.04` because CodeQL's system requirements list Ubuntu 22.04 and 24.04 only. `ubuntu-latest` itself moves to 26.04 in a rollout from 2026-10-19 that would have changed python3, Docker, the docs job's pandoc and LibreOffice and the AppArmor job's `apparmor_parser` (5.0.2 on 26.04) under every job at once, and could mix images within one run. `test/workflowRunners.test.ts` holds the rule.
 
 Three form the release relay:
 
@@ -4667,7 +4837,7 @@ triggering on state can never disagree about the mesh:
   | entity | state | notable attributes |
   |---|---|---|
   | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-  | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`; since v0.72.0 `paused_by` (`["tui"]`, `["ha"]`, both, or null), `paused_since` (ISO or null) and `auto_remediation: none-admitted`; since v0.73.0 `sleepers_watched` and `sleepers_total` (counts for the missed-report watch) |
+  | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`; since v0.72.0 `paused_by` (`["tui"]`, `["ha"]`, both, or null), `paused_since` (ISO or null) and `auto_remediation: none-admitted`; since v0.73.0 `sleepers_watched` and `sleepers_total` (counts for the missed-report watch); since v0.75.0 `refresh_trial` (`off`/`running`/`latched`/`passed`/`failed`/`retired`) and `refresh_trial_treated`, `refresh_trial_treated_improved`, `refresh_trial_treated_deaths`, `refresh_trial_held`, `refresh_trial_held_improved`, `refresh_trial_held_deaths` (§11.14) |
   | `sensor.zwave_tui_summons` | count | `node_ids` |
   | `sensor.zwave_tui_symptoms` | count | `critical`, `warning`, `kinds` |
   | `sensor.zwave_tui_route_failures` | failures in 7 d, or `unknown` | `links`, `node_ids`, `last_failure_at`, `lower_bound` |

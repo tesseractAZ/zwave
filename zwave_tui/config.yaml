@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.74.4"
+version: "0.75.3"
 slug: zwave_tui
 description: "Control-room TUI for Z-Wave mesh health — telnet + sidebar console, a learned advisory engine, and its conclusions as HA entities"
 url: https://github.com/tesseractAZ/zwave
@@ -76,12 +76,15 @@ options:
   signal_display: margin
   write_actions_enabled: false
   # ── Self-healing (auto-ping) ───────────────────────────────────────────────
-  # OFF by default. This is the ONLY thing the engine does without a human
-  # pressing a key, and it still obeys write_actions_enabled.
+  # OFF by default. With the refresh trial below, the only things the engine
+  # does without a human pressing a key; both obey write_actions_enabled.
   auto_ping_enabled: false
   auto_ping_after_min: 10
   auto_ping_max_attempts: 3
   auto_ping_stale_min: 120
+  # ── Refresh trial (pre-registered, DESIGN §3.5) ────────────────────────────
+  # OFF by default. Needs write_actions_enabled AND auto-ping running.
+  refresh_trial_enabled: false
   # ── Telnet access ──────────────────────────────────────────────────────────
   telnet_enabled: true
   # ── Login gate (guards DIRECT/telnet; HA-sidebar access is already authed) ──
@@ -106,6 +109,7 @@ schema:
   auto_ping_after_min: int(2,120)
   auto_ping_max_attempts: int(1,10)
   auto_ping_stale_min: int(0,1440)
+  refresh_trial_enabled: bool
   telnet_enabled: bool
   auth_enabled: bool
   auth_require_on_ingress: bool

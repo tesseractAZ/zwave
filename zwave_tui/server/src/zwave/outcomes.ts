@@ -89,6 +89,11 @@ export interface OpenEpisodeView {
   confounded: boolean;
   /** freshN of the degraded window as it currently stands, or null. */
   beforeFreshN: number | null;
+  /** rtt readings in that window (v0.75.0): the refresh trial decides only
+   *  episodes whose before-window can be scored. */
+  beforeRttN?: number;
+  /** The refresh trial's arm for this episode, if it was decided (v0.75.0). */
+  trial?: 'treated' | 'held' | null;
 }
 
 /** One symptom episode: opens on symptom onset, closes on resolution. */
@@ -134,6 +139,10 @@ export interface Episode {
    *  because a dead-remediation ping revived the node mid-episode. Credited
    *  to NEITHER arm. */
   confounded?: boolean;
+  /** Decided by the refresh trial (v0.75.0): its before-window is frozen at
+   *  the decision, and at resolve it files into NO arm — the trial scores it
+   *  with undecayed counts of its own (refreshTrial.ts). */
+  trial?: 'treated' | 'held';
 }
 
 /** A decayed tally of episodes, their successes, and their REGRESSIONS. */
@@ -157,8 +166,9 @@ interface Tally {
   lastAt?: number;
 }
 
-/** Who ran an action (v0.72.0). */
-export type ActionActor = 'you' | 'engine';
+/** Who ran an action (v0.72.0). `trial` (v0.75.0) is the refresh trial's
+ *  send: kept out of every arm here, scored by refreshTrial.ts alone. */
+export type ActionActor = 'you' | 'engine' | 'trial';
 
 /**
  * How soon after an action a death is counted against it (v0.72.0). Long
@@ -197,7 +207,19 @@ export interface LiveSpanView {
   since: number;
   scored: [number, number, number, number];
   unscored: [number, number, number, number];
+  /** Scored closures live ≥ 10 min, per node, most first (v0.75.1): the count
+   *  is of episodes, and one chronic node that re-arms every half hour can
+   *  supply most of it. Kept only since v0.75.1, so it may cover fewer closures
+   *  than the buckets do — `byNodeN` says how many: every one since
+   *  `byNodeSince`, the first closure it attributed (null when unrecorded). */
+  byNode: { nodeId: number; n: number }[];
+  byNodeN: number;
+  byNodeSince: number | null;
 }
+
+/** One day of the live-span ring: closures per live bucket, scored apart from
+ *  unscored, and (v0.75.1) the scored ≥ 10 min ones per node. */
+interface LiveSpanDay { s: number[]; u: number[]; n?: Map<number, number> }
 
 export interface OutcomeStoreOptions {
   /** Per-command timeout rate at/under which a node is considered recovered.
@@ -342,6 +364,14 @@ export interface OutcomeStore {
    *  was open (v0.40). The data layer owns node status; the ledger cannot see
    *  it. The unattributed-action path marks itself inside recordAction. */
   markConfounded(nodeId: number | null, kind: SymptomKind): void;
+  /** Hand an open episode to the refresh trial (v0.75.0): freezes its
+   *  before-window and keeps it out of every arm. Returns that window, or
+   *  null when no such episode is open (or it is already a trial episode). */
+  markTrial(nodeId: number, kind: SymptomKind, arm: 'treated' | 'held'): WindowMetrics | null;
+  /** The ledger's own verdict rule for a pair of windows (v0.75.0): the refresh
+   *  trial scores its fixed-horizon windows with exactly what an episode
+   *  closure would use. */
+  score(kind: SymptomKind, before: WindowMetrics | null, after: WindowMetrics | null): Verdict;
   /**
    * Replace an OPEN episode's before-window with a better-evidenced one (v0.36).
    *
@@ -633,7 +663,7 @@ export function metricOf(kind: SymptomKind): RecoveryMetric {
  */
 const UNDERSAMPLED_AFTER_MS = 5 * 60_000;
 
-const MIN_OBS = 3; // minimum non-null rssi/rtt readings behind a trustworthy median
+export const MIN_OBS = 3; // minimum non-null rssi/rtt readings behind a trustworthy median
 const MIN_LIVE = 3; // minimum FRESH samples proving the node is alive & communicating (flap after-window)
 const RSSI_MIN_GAIN = 4; // dB — a meaningful signal-strength improvement
 const RTT_DROP_FRAC = 0.25; // ≥25% faster …
@@ -887,7 +917,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
   // (v0.72.0 second review): the pooled arm's own node set keeps growing.
   const legacyNodes = new Map<string, number>();
   // How long closed episodes were live: kind → first count + a day-keyed ring.
-  const liveSpans = new Map<SymptomKind, { since: number; days: Map<number, { s: number[]; u: number[] }> }>();
+  const liveSpans = new Map<SymptomKind, { since: number; days: Map<number, LiveSpanDay>; nodesSince?: number }>();
 
   const key = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
   const aKey = (kind: SymptomKind, act: ActionKind): string => `${kind}|${act}`;
@@ -925,7 +955,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // action is not its side effect, however late it matured.
       const start = openOpts?.dwellStartMs ?? onsetMs;
       const r = nodeId == null ? null : coveringAction(nodeId, start);
-      if (r && ROUTE_EFFECT_KINDS.has(kind)) {
+      // The refresh trial counts its own harm (v0.75.0), never here.
+      if (r && r.origin !== 'trial' && ROUTE_EFFECT_KINDS.has(kind)) {
         const rk = `${r.kind}|${r.origin}`;
         routeAfter.set(rk, (routeAfter.get(rk) ?? 0) + 1);
         dirty = true;
@@ -950,6 +981,19 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const prefix = `${nodeId ?? 'mesh'}:`;
       for (const [k, ep] of open) {
         if (!k.startsWith(prefix)) continue;
+        // The refresh trial (v0.75.0). Its send is that episode's treatment
+        // and nobody else's: credited to no other episode on the node, whose
+        // spontaneous-recovery claim it spoils. Any other action on a trial
+        // episode spoils the trial's comparison instead. A send that never
+        // happened (refused) changes nothing; the trial keeps its own record.
+        if (meta?.origin === 'trial') {
+          if (refused) continue;
+          if (ep.trial === 'treated' && ep.action == null) {
+            ep.action = { kind: actionKind, atMs, refused: false, origin: 'trial', ...(meta.aliveAtAction != null ? { aliveAtAction: meta.aliveAtAction } : {}) };
+          } else ep.confounded = true;
+          continue;
+        }
+        if (ep.trial != null) { ep.confounded = true; continue; }
         // A refusal indicts only the detectors that ASKED for this action
         // (v0.43.1) — see `onlyKinds` on the interface. Success attribution is
         // deliberately unscoped and keeps the node-wide behaviour above.
@@ -1004,7 +1048,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // death two minutes after a heal belongs to the heal, not to the ping
       // that preceded it by ten.
       const a = coveringAction(nodeId, atMs);
-      if (!a) return;
+      // The refresh trial counts deaths after its own send itself (v0.75.0). A
+      // death after anyone else's action on a trial episode is still that
+      // actor's, as on any confounded episode (v0.75.0 review).
+      if (!a || a.origin === 'trial') return;
       ep.killedAfter = true;
       // Counted NOW, not at resolve: an episode abandoned or lost to a restart
       // must not take the death with it.
@@ -1038,11 +1085,19 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       const scored: [number, number, number, number] = [0, 0, 0, 0];
       const unscored: [number, number, number, number] = [0, 0, 0, 0];
       const from = Math.floor(now / DAY_MS) - (LIVE_SPAN_DAYS - 1);
+      const perNode = new Map<number, number>();
       for (const [day, d] of ls.days) {
         if (day < from) continue;
         for (let i = 0; i < 4; i++) { scored[i] += d.s[i] ?? 0; unscored[i] += d.u[i] ?? 0; }
+        if (d.n) for (const [id, k] of d.n) perNode.set(id, (perNode.get(id) ?? 0) + k);
       }
-      return { since: ls.since, scored, unscored };
+      // The exact first attributed closure: from then on every counted closure
+      // is attributed, so "N since <it>" is exact. Without it there is no honest
+      // start to name — a day boundary is a UTC midnight that also counts the
+      // unattributed closures earlier that day (v0.75.1 review) — so none is.
+      const byNodeSince = perNode.size === 0 ? null : ls.nodesSince ?? null;
+      const byNode = [...perNode].map(([nodeId, n]) => ({ nodeId, n })).sort((a, b) => b.n - a.n || a.nodeId - b.nodeId);
+      return { since: ls.since, scored, unscored, byNode, byNodeN: byNode.reduce((a, x) => a + x.n, 0), byNodeSince };
     },
 
     routeSymptomsAfter(act, origin): number {
@@ -1055,6 +1110,22 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // control observation. Marked by the data layer, which owns node status.
       const ep = open.get(key(nodeId, kind));
       if (ep) ep.confounded = true;
+    },
+
+    markTrial(nodeId, kind, arm): WindowMetrics | null {
+      const ep = open.get(key(nodeId, kind));
+      // An episode something already acted on is not a clean decision in
+      // either arm (v0.75.0 review): held, it would score that action as a
+      // control; treated, the comparison is spoiled. The trial filters these
+      // before its coin; this refuses them too.
+      if (!ep || ep.trial != null || ep.action != null || !ep.before) return null;
+      ep.trial = arm;
+      return ep.before;
+    },
+
+    score(kind, before, after): Verdict {
+      if (!before || !after) return 'unverifiable';
+      return scoreRecovery(metricOf(kind), before, after, cfg.releaseRate, cfg.minEffect);
     },
 
     resolve(nodeId, kind, resolvedMs, after, resolveOpts): Episode | null {
@@ -1078,17 +1149,27 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         const liveMin = ((resolveOpts?.absentSinceMs ?? resolvedMs) - start) / 60_000;
         const b = liveMin >= LIVE_SPAN_EDGES_MIN[2] ? 3 : liveMin >= LIVE_SPAN_EDGES_MIN[1] ? 2 : liveMin >= LIVE_SPAN_EDGES_MIN[0] ? 1 : 0;
         const scoredClose = (ep.verdict === 'improved' || ep.verdict === 'no-change' || ep.verdict === 'worse') && !ep.confounded;
-        const ls = liveSpans.get(kind) ?? { since: resolvedMs, days: new Map() };
+        const ls: { since: number; days: Map<number, LiveSpanDay>; nodesSince?: number } = liveSpans.get(kind) ?? { since: resolvedMs, days: new Map() };
         const day = Math.floor(resolvedMs / DAY_MS);
-        const d = ls.days.get(day) ?? { s: [0, 0, 0, 0], u: [0, 0, 0, 0] };
+        const d: LiveSpanDay = ls.days.get(day) ?? { s: [0, 0, 0, 0], u: [0, 0, 0, 0] };
         (scoredClose ? d.s : d.u)[b] += 1;
+        // …and which node it came from, for the closures that count toward the
+        // revisit condition (scored, live ≥ 10 min) (v0.75.1).
+        if (scoredClose && b >= 1 && nodeId != null) {
+          (d.n ??= new Map()).set(nodeId, (d.n.get(nodeId) ?? 0) + 1);
+          ls.nodesSince ??= resolvedMs;
+        }
         ls.days.set(day, d);
         for (const k of [...ls.days.keys()]) if (k <= day - LIVE_SPAN_DAYS) ls.days.delete(k);
         liveSpans.set(kind, ls);
         dirty = true;
       }
 
-      if (ep.verdict === 'refused-misdiagnosis') {
+      if (ep.trial != null) {
+        // A refresh-trial episode (v0.75.0) files into NO arm and no tally
+        // here: the trial scores it, undecayed and apart (refreshTrial.ts).
+        // Its live span above still counts — that bit describes the kind.
+      } else if (ep.verdict === 'refused-misdiagnosis') {
         fp.set(kind, (fp.get(kind) ?? 0) + 1);
         dirty = true;
       } else if (ep.verdict === 'unverifiable' && ep.unprobeable) {
@@ -1239,7 +1320,9 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
           ? ' (confounded — the node died, was remediated, was re-routed by our own probe, or the checks were paused mid-episode; credited to neither arm)'
           : '';
       const liveM = Math.round(((resolveOpts?.absentSinceMs ?? resolvedMs) - (ep.dwellStartMs ?? ep.onsetMs - DWELL_MS)) / 60_000);
-      const who = ep.action ? ` after ${ep.action.kind} (${ep.action.origin ?? 'you'})` : ' (no action)';
+      const who = ep.trial != null
+        ? ` (refresh trial: ${ep.trial}${ep.action ? ', refresh sent' : ''} — filed by the trial, in no arm here)`
+        : ep.action ? ` after ${ep.action.kind} (${ep.action.origin ?? 'you'})` : ' (no action)';
       const killed = ep.killedAfter ? ` (node went Dead ≤${KILLED_AFTER_MS / 60_000}m after the action)` : '';
       log(`episode ${k} ${ep.verdict}${who} live=${liveM}m [before ${win(ep.before)} | after ${win(ep.after)}]${tag}${killed}`);
       return ep;
@@ -1262,6 +1345,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         actionKind: ep.action?.kind ?? null,
         confounded: ep.confounded === true,
         beforeFreshN: ep.before?.freshN ?? null,
+        beforeRttN: ep.before?.rttN ?? 0,
+        trial: ep.trial ?? null,
       }));
     },
 
@@ -1360,6 +1445,10 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       // Only an OPEN, unresolved episode: once a verdict is computed the
       // evidence behind it is history and must not be rewritten.
       if (!ep || ep.resolvedMs != null || ep.verdict != null) return false;
+      // Frozen at the refresh trial's decision (v0.75.0), in both arms: a
+      // treated episode must not be compared against readings taken after its
+      // own refresh, and the held arm must be measured the same way.
+      if (ep.trial != null) return false;
       // Strictly-better only. `freshN` is the count of samples that actually
       // carried new information, which is what every evidence floor gates on.
       const had = ep.before?.freshN ?? -1;
@@ -1497,7 +1586,7 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
         actorNodes: [...actorNodes.entries()].map(([k, v]) => [k, [...v]] as [string, number[]]),
         killedAfter: [...killedAfter.entries()],
         routeAfter: [...routeAfter.entries()],
-        liveSpan: [...liveSpans.entries()].map(([k, v]) => [k, { since: v.since, days: [...v.days.entries()].map(([d, x]) => [d, x.s, x.u]) }]),
+        liveSpan: [...liveSpans.entries()].map(([k, v]) => [k, { since: v.since, ...(v.nodesSince != null ? { nodesSince: v.nodesSince } : {}), days: [...v.days.entries()].map(([d, x]) => (x.n ? [d, x.s, x.u, [...x.n]] : [d, x.s, x.u])) }]),
         legacyArms: [...legacy.entries()],
         legacyNodes: [...legacyNodes.entries()],
         // Open episodes are intentionally NOT persisted — an episode spanning a
@@ -1558,15 +1647,21 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       for (const [k, v] of pairs(o.routeAfter)) if (count(v)) routeAfter.set(k, v);
       const ok4 = (a: unknown): a is number[] => Array.isArray(a) && a.length === 4 && a.every((x) => Number.isFinite(x) && x >= 0);
       for (const [k, raw] of pairs(o.liveSpan)) {
-        const v = raw as { since?: unknown; days?: unknown } | null;
+        const v = raw as { since?: unknown; days?: unknown; nodesSince?: unknown } | null;
         if (!v || typeof v !== 'object' || typeof v.since !== 'number' || !Number.isFinite(v.since) || !Array.isArray(v.days)) continue;
-        const days = new Map<number, { s: number[]; u: number[] }>();
+        const days = new Map<number, LiveSpanDay>();
         for (const e of v.days) {
           if (!Array.isArray(e)) continue;
-          const [d, sc, un] = e as unknown[];
-          if (typeof d === 'number' && Number.isFinite(d) && ok4(sc) && ok4(un)) days.set(d, { s: [...sc], u: [...un] });
+          const [d, sc, un, nn] = e as unknown[];
+          if (typeof d !== 'number' || !Number.isFinite(d) || !ok4(sc) || !ok4(un)) continue;
+          // The per-node counts (v0.75.1) are optional: a day from an older
+          // file, or a malformed list, loads without them.
+          const pairsOk = Array.isArray(nn) && nn.every((p) => Array.isArray(p) && p.length === 2 &&
+            Number.isInteger(p[0]) && p[0] >= 0 && Number.isFinite(p[1]) && p[1] > 0);
+          days.set(d, { s: [...sc], u: [...un], ...(pairsOk ? { n: new Map(nn as [number, number][]) } : {}) });
         }
-        liveSpans.set(k as SymptomKind, { since: v.since, days });
+        const ns = typeof v.nodesSince === 'number' && Number.isFinite(v.nodesSince) ? v.nodesSince : undefined;
+        liveSpans.set(k as SymptomKind, { since: v.since, days, ...(ns != null ? { nodesSince: ns } : {}) });
       }
       // The pre-actor share of each pooled arm, and the nodes that taught it:
       // carried in a v0.72.0 file, and SNAPSHOT from the pooled arm when an
@@ -1594,6 +1689,11 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
  *     carrying `absentSinceMs` (the FIRST tick it was seen absent) so the ledger
  *     can tell how long the symptom was live; the window itself is not live
  *     time (v0.64.6). */
+/** The longest an episode's close waits past its confirmation window for a
+ *  probe's outcome to land (v0.75.3): a node probed without pause cannot hold
+ *  its episode open for ever. */
+export const EPISODE_SETTLE_CAP_MS = 2 * 60_000;
+
 export function planEpisodeLifecycle(
   symptoms: { nodeId: number | null; kind: SymptomKind; subsumedBy?: string | null }[],
   openEpisodes: { key: string; nodeId: number | null; kind: SymptomKind }[],
@@ -1608,7 +1708,13 @@ export function planEpisodeLifecycle(
    *  the episode is a settled one, not the heal's own last minutes. The
    *  first-absence time is kept for the live-span measure. */
   holdUntil?: (nodeId: number | null) => number | null,
-): { toOpen: { nodeId: number | null; kind: SymptomKind }[]; toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number }[] } {
+  /** The earliest time the after-window may be cut, or null (v0.75.3 log
+   *  review): a probe sent just before the window's end is ACKed into the
+   *  evidence at once, but its missing reply — a timeout — reaches it seconds
+   *  later, so cutting first scored one timed-out read as 0 of 5. Waits at
+   *  most EPISODE_SETTLE_CAP_MS past the window. */
+  settleAt?: (nodeId: number | null) => number | null,
+): { toOpen: { nodeId: number | null; kind: SymptomKind }[]; toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number; closeAt: number; heldForProbe: boolean }[] } {
   const epKey = (nodeId: number | null, kind: SymptomKind): string => `${nodeId ?? 'mesh'}:${kind}`;
   // A symptom is "live" (must NOT resolve) whenever it is present — INCLUDING
   // when it is merely subsumed under a mesh event. Subsumption demotes the
@@ -1626,15 +1732,21 @@ export function planEpisodeLifecycle(
     if (s.subsumedBy != null) continue;
     if (!openSet.has(epKey(s.nodeId, s.kind))) toOpen.push({ nodeId: s.nodeId, kind: s.kind });
   }
-  const toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number }[] = [];
+  const toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number; closeAt: number; heldForProbe: boolean }[] = [];
   for (const ep of openEpisodes) {
     if (live.has(ep.key)) continue;
     const since = pending.get(ep.key) ?? now;
     pending.set(ep.key, since);
     const held = holdUntil?.(ep.nodeId) ?? null;
     const start = held == null ? since : Math.max(since, held);
-    if (now - start >= confirmMs) {
-      toResolve.push({ nodeId: ep.nodeId, kind: ep.kind, key: ep.key, absentSinceMs: since });
+    const settle = settleAt?.(ep.nodeId) ?? null;
+    const settled = settle == null || now >= settle || now - start >= confirmMs + EPISODE_SETTLE_CAP_MS;
+    if (now - start >= confirmMs && settled) {
+      // closeAt is the NOMINAL close (v0.75.3 review). When the close waited
+      // for a probe to settle (heldForProbe), the after-window keeps its start
+      // there, so the burst's first read is never aged out of it.
+      const closeAt = start + confirmMs;
+      toResolve.push({ nodeId: ep.nodeId, kind: ep.kind, key: ep.key, absentSinceMs: since, closeAt, heldForProbe: settle != null && settle > closeAt });
       pending.delete(ep.key);
     }
   }

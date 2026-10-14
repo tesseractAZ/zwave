@@ -36,12 +36,13 @@ import type {
   OpenEpisodeSummary,
   EngineStatus,
 } from '../types';
+import type { TrialView } from '../zwave/refreshTrial';
 import type { CoarseBucket } from '../zwave/evidenceStore';
 import type { DriverWsState } from '../zwave/driverWsClient';
 import type { SleeperWatch } from '../zwave/missedReport';
 import type { PauseState } from '../zwave/autonomyPause';
 import type { ActorArmView, LiveSpanView } from '../zwave/outcomes';
-import { scoreNode, DEFAULT_NOISE_FLOOR, rssiReading } from '../zwave/health';
+import { scoreNode, DEFAULT_NOISE_FLOOR, medianNoiseFloor } from '../zwave/health';
 
 /**
  * The subset of the `zwave/zwaveData` layer this provider consumes. The data
@@ -105,6 +106,8 @@ export interface ZwaveDataSource {
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   /** Auto-ping runtime state (v0.41), null when off. REQUIRED — see ackEvent. */
   autoPingState(): AutoPingSnapshot | null;
+  /** The refresh trial's state (v0.75.0). REQUIRED, like autoPingState. */
+  refreshTrial(now?: number): TrialView | null;
   /** The mesh-identity decision awaiting an operator answer, or null (v0.64.0). */
   pendingIdentity(): IdentityDecision | null;
   /** Every actor's arm for a kind (v0.72.0). */
@@ -199,14 +202,9 @@ const UNKNOWN_SCORE: HealthResult = {
 
 /** Median of the controller's per-channel background RSSI, sentinel-filtered. */
 function computeNoiseFloor(controller: ControllerSnapshot | null): number {
-  const raw = controller?.backgroundRSSI ?? [];
-  const vals = raw.filter(
-    (v) => rssiReading(v) != null,
-  );
-  if (vals.length === 0) return DEFAULT_NOISE_FLOOR;
-  const sorted = [...vals].sort((a, b) => a - b);
-  const mid = sorted.length >> 1;
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  // The one rule (health.ts noiseReading, v0.75.2): the detectors and the
+  // health score use the same floor this screen shows.
+  return medianNoiseFloor(controller?.backgroundRSSI ?? []) ?? DEFAULT_NOISE_FLOOR;
 }
 
 /**
@@ -262,6 +260,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     openEpisodes: () => zd.openEpisodes(),
     controlArm: (k) => zd.controlArm(k),
     autoPingState: () => zd.autoPingState(),
+    refreshTrial: (now) => zd.refreshTrial(now),
     pendingIdentity: () => zd.pendingIdentity(),
     actorArms: (k) => zd.actorArms(k),
     pooledArm: (k, a) => zd.pooledArm(k, a),
@@ -339,9 +338,9 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     cachedController = controller;
     cachedScores = scores;
     cachedNoiseFloor = noise;
-    cachedHasNoise = (controller?.backgroundRSSI ?? []).some(
-      (v) => rssiReading(v) != null,
-    );
+    // "measured" means the floor above came from a reading — not merely that
+    // a channel carried some number (v0.75.2: -128 is "no signal detected").
+    cachedHasNoise = medianNoiseFloor(controller?.backgroundRSSI ?? []) != null;
     cachedLastUpdated = zwaveData.lastUpdated?.() ?? cachedLastUpdated;
     cachedReady = zwaveData.ready?.() ?? nodes.length > 0;
     cachedError = zwaveData.lastError?.() ?? null;
@@ -394,6 +393,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     openEpisodes: () => zwaveData.openEpisodes(),
     controlArm: (kind) => zwaveData.controlArm(kind),
     autoPingState: () => zwaveData.autoPingState(),
+    refreshTrial: (now) => zwaveData.refreshTrial(now),
     pendingIdentity: () => zwaveData.pendingIdentity(),
     actorArms: (kind) => zwaveData.actorArms(kind),
     pooledArm: (kind, a) => zwaveData.pooledArm(kind, a),

@@ -34,7 +34,7 @@ function sparseRing(now: number, rssi: number, events: Ev[], denseTx = 0): Evide
 function inp(now: number, ring: EvidenceSample[], over: Partial<NodeSnapshot> = {}): DetectInput {
   return { now, nodes: [node(1), node(18, over)], controller: { backgroundRSSI: LIVE_FLOOR } as unknown as ControllerSnapshot, baselines: bl,
     latest: () => ring[ring.length - 1], recent: (id) => (id === 18 ? ring : []), coarse: () => [] as CoarseBucket[], controllerSamples: () => [],
-    coverage: () => null, rateRun: () => null, recordingSince: () => T - 30 * 86_400_000, sleeperWatch: () => null, duplicateBursts: () => [], hasRealNoise: () => true } as DetectInput;
+    coverage: () => null, rateRun: () => null, recordingSince: () => T - 30 * 86_400_000, sleeperWatch: () => null, duplicateBursts: () => [] } as DetectInput;
 }
 /** Tick every 10 s for `mins` minutes; return every minute a weak-signal was emitted. */
 let lastEvidence: unknown = null;
@@ -62,6 +62,24 @@ test('weak-signal (v0.69.0): unmeasured window: thin margin + a Dead flap pair f
   assert.ok(hits[hits.length - 1] <= 33.1, `still firing at ${hits[hits.length - 1]}`); // last failure at +3 → expires ~+33
   assert.ok(hits[hits.length - 1] >= 30, `cleared at ${hits[hits.length - 1]} — the breach must outlive the one fresh sample (+3) by more than WINDOW_MS`);
   assert.match(JSON.stringify(lastEvidence), /failed deliveries.*[12] in 30m \(too few sends for a rate\)/);
+});
+test('weak-signal (v0.75.2): "measured" means the floor came from a reading — never the −95 fallback', () => {
+  const withFloor = (channels: number[]) => (now: number) => ({ ...inp(now, sparseRing(now, RSSI, flapPair)), controller: { backgroundRSSI: channels } as unknown as ControllerSnapshot });
+  const at = (channels: number[]) => {
+    const state: SymptomState = new Map();
+    let ws: ReturnType<typeof detectSymptoms>[number] | undefined;
+    for (let s = 0; s <= 10 * 6; s++) ws = detectSymptoms(withFloor(channels)(T + s * CAD), state).find((x) => x.kind === 'weak-signal' && x.nodeId === 18) ?? ws;
+    return ws;
+  };
+  // Every channel at the driver's "no signal detected" stand-in: no reading, so
+  // the margin is against the assumed −95 floor — and says so.
+  const none = at([-128, -128, -128, -128])!;
+  assert.equal(none.basis, 'inferred', 'a fallback floor is not a measurement');
+  assert.match(JSON.stringify(none.evidence), /-3dB \(vs assumed −95 floor\)/);
+  // One stand-in among real readings: it is not part of the floor (−101, not −102.5).
+  const one = at([-125, -104, -101, -93])!;
+  assert.equal(one.basis, 'measured');
+  assert.match(JSON.stringify(one.evidence), /"SNR margin","value":"3dB"/, 'the margin is over the median of the READINGS, as the screens show it');
 });
 test('weak-signal (v0.69.0): unmeasured window: a thin margin ALONE (sweep ping answered) never fires — corroboration still required', () => {
   assert.deepEqual(run((now) => inp(now, sparseRing(now, RSSI, sweepOk)), 60), []);
