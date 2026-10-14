@@ -24,6 +24,7 @@ import { createAuth, ingressRedirectTarget, isAllowedOrigin, isSupervisorSource,
 import { createAuthPolicy, describeTelnetAuth } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
+import { logGapNote } from './zwave/driverWsClient';
 import { createActionRunner, NOT_SENT } from './zwave/zwaveActions';
 import { startAutoPing, PROBE_KILL_HOLD_MS, type AutoPingSnapshot } from './zwave/autoPing';
 import { buildZwaveDataSource, createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
@@ -82,6 +83,7 @@ async function main(): Promise<void> {
   const zwaveData = createZwaveData({
     client,
     onDriverLog: (ev) => archive.driver(ev),
+    onDriverLogGap: (g) => archive.note('zwave-js', logGapNote(g)),
     entryId: config.entryId,
     refreshMs: config.refreshMs,
     routePollMs: config.routePollMs,

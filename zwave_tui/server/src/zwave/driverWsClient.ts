@@ -30,8 +30,9 @@
  * log viewer for the operator. We take the full stream at the driver's current
  * level (the same lines the add-on log shows; the resync retry is `info`, the
  * terminal drop `warn`, so both arrive at the stock level) and drop
- * non-matching lines with one cheap substring test. A storm backstop stops OUR
- * subscription (nobody else's) if the stream runs hot, and log payloads are
+ * non-matching lines with one cheap substring test. A storm guard PAUSES our
+ * subscription (nobody else's) if the stream runs hot and resumes it on its own
+ * (v0.76.0); at verbose, a long silence re-subscribes once. Log payloads are
  * never re-logged or re-exposed — the matcher returns only a node id.
  *  - Dormant, never fatal: unreachable server / schema mismatch / homeId
  *    mismatch ⇒ the dependent telemetry stays null and detectors that need it
@@ -92,8 +93,13 @@ export interface DriverWsCallbacks {
   onNodeRefreshQueries?: (nodeId: number, queries: number | null) => void;
   /** Every driver `logging` event, for the durable log archive (v0.75.4),
    *  which redacts secrets before anything reaches disk. Not called while the
-   *  storm meter has stopped the stream. */
+   *  storm guard has paused the stream. */
   onDriverLog?: (ev: Record<string, unknown>) => void;
+  /** A gap or a change in the driver log stream, for an archive note (v0.76.0):
+   *  the subscription and the driver's log level, a storm pause and its resume,
+   *  a silence re-subscribe, a level change, a refusal, the end. Carries no
+   *  server text except the safeTag'd error code. */
+  onDriverLogGap?: (gap: LogGap) => void;
 }
 
 export interface DriverWsClientOptions {
@@ -108,6 +114,8 @@ export interface DriverWsClientOptions {
   reconnectBaseMs?: number;
   /** Terminate a socket silent for this long (ms). */
   livenessMs?: number;
+  /** The storm guard's limits (v0.76.0); tests shrink them, the add-on uses LOG_GUARD. */
+  logGuard?: Partial<LogGuardConfig>;
 }
 
 export type DriverWsState =
@@ -119,12 +127,17 @@ export type DriverWsState =
   | 'dormant' // permanent (schema mismatch) — no retry until restart
   | 'stopped'; // stop() called — start() can re-establish
 
+/** WHY the S2 log lane is dark (v0.76.0: a storm now pauses the lane rather
+ *  than stopping it, a lane can go silent, and below info the lines it counts
+ *  are never written). */
+export type S2LaneFault = 'refused' | 'storm-paused' | 'silent' | 'level';
+
 /**
  * WHY the S2 log lane is dark — extracted so it can be tested without a socket.
  *
- * `s2LaneLive` collapses four causes into one boolean, and its callers record
- * `null` — so a mesh whose S2-desync detector had been switched off by the
- * storm backstop looked identical to one with nothing to report, on screens
+ * `s2LaneLive` collapses several causes into one boolean, and its callers
+ * record `null` — so a mesh whose S2-desync detector had been switched off by
+ * the storm guard looked identical to one with nothing to report, on screens
  * that went on rendering DRIVER LINK `live` (v0.62.0).
  *
  * The PENDING case (`logsMsgId != null && !logsAcked`) deliberately returns
@@ -132,10 +145,12 @@ export type DriverWsState =
  * every reconnect is the always-on chip this codebase keeps refusing to add.
  */
 export function s2Fault(
-  o: { logsAcked: boolean; logsMsgId: string | null; logStormStopped: boolean; live: boolean },
-): 'refused' | 'storm-stopped' | null {
-  if (o.logStormStopped) return 'storm-stopped';
+  o: { logsAcked: boolean; logsMsgId: string | null; stormPaused: boolean; silent: boolean; live: boolean; levelLow?: boolean },
+): S2LaneFault | null {
+  if (o.stormPaused) return 'storm-paused';
   if (!o.logsAcked && o.logsMsgId == null && o.live) return 'refused';
+  if (o.levelLow && o.live) return 'level';
+  if (o.silent && o.live) return 'silent';
   return null;
 }
 
@@ -147,7 +162,20 @@ export interface DriverWsClient {
    *  review: it converted a switched-off measurement into a recovery). */
   s2LaneLive(): boolean;
   /** WHY the S2 log lane is dark, or null when it is live or merely pending. */
-  s2LaneFault(): 'refused' | 'storm-stopped' | null;
+  s2LaneFault(): S2LaneFault | null;
+  /** When a storm pause of the log lane ends, or null (v0.76.0). */
+  s2LaneResumeAt(): number | null;
+  /** The driver's log level as the server reports it (state dump, `log config
+   *  updated`), or null (v0.76.0). The stream itself can run at another level:
+   *  the forwarder keeps the level it started at. */
+  driverLogLevel(): DriverLogLevel | null;
+  /** The driver log's node filter, or null when every node is logged (v0.76.0).
+   *  A node outside it logs nothing, so its log lanes read unknown, never 0. */
+  logNodeFilter(): ReadonlySet<number> | null;
+  /** When the S2 lane's current unbroken watch began, or null when it is dark
+   *  (v0.76.0): `rfWatchSince`, moved on when the node filter changes — a
+   *  window that spans the change counts nodes it did not log, or the reverse. */
+  s2WatchSince(): number | null;
   start(): void;
   stop(): void;
   state(): DriverWsState;
@@ -166,7 +194,8 @@ export interface DriverWsClient {
   /** When the controller radio last came back on, or null (v0.73.0). */
   lastRfOnAt(): number | null;
   /** Since when the log stream has been watched without a break on this
-   *  connection; null while it is dark (v0.73.0). */
+   *  connection; null while it is dark (v0.73.0; a storm pause, a silence and
+   *  a reported level below info are breaks, v0.76.0). */
   rfWatchSince(): number | null;
 }
 
@@ -193,13 +222,40 @@ export function redactUrl(url: string): string {
  *  attacker-controlled payloads verbatim (log flooding / forged log lines). */
 export function safeTag(v: unknown, max = 40): string {
   if (typeof v !== 'string') return typeof v === 'number' ? String(v) : '?';
-  return v.replace(/[\x00-\x1f\x7f]/g, '').slice(0, max);
+  return v.replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, max);
 }
 
 /** A plausible Z-Wave node id (positive integer in range) or null — a hostile
  *  or buggy server must not grow the driver maps with junk ids. */
 export function saneNodeId(v: unknown): number | null {
   return typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= 4000 ? v : null;
+}
+
+const squash = (s: string): string => s.replace(/\s+/g, '');
+/** A driver `logging` event's message with every whitespace run removed
+ *  (v0.76.0). zwave-js-server formats each line with zwave-js's
+ *  formatLogMessage, which hard-cuts a line wider than 80 columns and joins the
+ *  pieces with "\n" wherever the column falls (core/src/log/format.ts) — a
+ *  production line read "Duplicate command (s" / "equence number 181))".
+ *  Squashing makes every phrase match independent of the cut. Server-sent:
+ *  matched, never logged or stored. */
+export function logText(ev: Record<string, unknown>): string {
+  const raw = ev.message;
+  const t = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.filter((x) => typeof x === 'string').join('') : '';
+  return squash(t);
+}
+const S2_SPAN = squash('SPAN extension');
+const S2_SPAN_DROP = squash('re-transmission with SPAN extension');
+const DUP_DROP = squash('Dropping message with invalid payload');
+const DUP_REASON = squash('Duplicate command');
+const RF_OFF = squash('Turning RF off');
+const RF_ON = squash('Turning RF on');
+/** The sane node id of a node-attributed controller line, or null. */
+function nodeLineId(ev: Record<string, unknown>): number | null {
+  if (ev.event !== 'logging') return null;
+  const ctx = ev.context as Record<string, unknown> | undefined;
+  if (!ctx || typeof ctx !== 'object' || ctx.type !== 'node') return null;
+  return saneNodeId(ctx.nodeId);
 }
 
 /** S2 SPAN-resync matcher (v0.26): the node id a driver `logging` event
@@ -213,20 +269,21 @@ export function saneNodeId(v: unknown): number | null {
  *   incoming (we could not decrypt the device; also node-attributed):
  *    · "Message authentication failed|No SPAN is established yet, cannot
  *       decode command. …"                                           (verbose)
- *  The incoming family only streams when the driver log level is `verbose`+;
- *  the outgoing pair arrives at the stock `info` level. Node attribution is
- *  REQUIRED (context.type === 'node' with a sane nodeId) — the un-attributed
- *  driver-level "Dropping message with invalid payload" line is deliberately
- *  NOT matched, so a hostile/buggy server cannot charge resyncs to nobody.
- *  The message text is server-sent: it is matched, never logged or stored. */
+ *  ONLY THE OUTGOING RETRY COUNTS (v0.76.0). The incoming family streams only
+ *  when the driver logs at `verbose` or finer — after every driver restart and
+ *  for every inbound frame out of SPAN step — so counting it made the absolute
+ *  S2_ABS threshold depend on a log setting: raising the level would have read
+ *  as a new S2 fault. Those lines stay in the log archive for review. Node
+ *  attribution is REQUIRED (context.type === 'node' with a sane nodeId) — the
+ *  un-attributed driver-level "Dropping message with invalid payload" line is
+ *  deliberately NOT matched, so a hostile/buggy server cannot charge resyncs to
+ *  nobody. Phrases match whitespace-squashed text, so the 80-column cut cannot
+ *  split them (logText). The message text is server-sent: it is matched, never
+ *  logged or stored. */
 export function s2ResyncNodeId(ev: Record<string, unknown>): number | null {
-  if (ev.event !== 'logging') return null;
-  const ctx = ev.context as Record<string, unknown> | undefined;
-  if (!ctx || typeof ctx !== 'object' || ctx.type !== 'node') return null;
-  const nodeId = saneNodeId(ctx.nodeId);
+  const nodeId = nodeLineId(ev);
   if (nodeId == null) return null;
-  const raw = ev.message;
-  const msg = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.filter((x) => typeof x === 'string').join('\n') : '';
+  const t = logText(ev);
   // ONE resync = ONE count. The outgoing family emits TWO lines for a single
   // failed transmission — the `retrying with SPAN extension...` attempt and,
   // if the retry also fails, `...after re-transmission with SPAN extension,
@@ -234,10 +291,8 @@ export function s2ResyncNodeId(ev: Record<string, unknown>): number | null {
   // and silently halved the effective S2_ABS threshold, so match only the
   // ATTEMPT line and let the drop line fall through (it is always preceded by
   // its own retry line, so nothing is lost).
-  if (msg.includes('re-transmission with SPAN extension')) return null;
-  if (msg.includes('SPAN extension')) return nodeId;
-  if (msg.includes('cannot decode command')) return nodeId;
-  return null;
+  if (t.includes(S2_SPAN_DROP)) return null;
+  return t.includes(S2_SPAN) ? nodeId : null;
 }
 
 /** The node whose S2 frame the driver just dropped as a DUPLICATE, or null
@@ -274,14 +329,10 @@ export function refreshQueriesOf(values: readonly DumpValue[]): number | null {
 }
 
 export function duplicateDropNodeId(ev: Record<string, unknown>): number | null {
-  if (ev.event !== 'logging') return null;
-  const ctx = ev.context as Record<string, unknown> | undefined;
-  if (!ctx || typeof ctx !== 'object' || ctx.type !== 'node') return null;
-  const nodeId = saneNodeId(ctx.nodeId);
+  const nodeId = nodeLineId(ev);
   if (nodeId == null) return null;
-  const raw = ev.message;
-  const msg = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.filter((x) => typeof x === 'string').join(' ') : '';
-  return msg.includes('Dropping message with invalid payload') && msg.includes('Duplicate command') ? nodeId : null;
+  const t = logText(ev);
+  return t.includes(DUP_DROP) && t.includes(DUP_REASON) ? nodeId : null;
 }
 
 /** How long a `Turning RF off` may stand without its `Turning RF on` (v0.65.0).
@@ -298,17 +349,23 @@ export const RF_OFF_MAX_MS = 120_000;
  *
  * Pure so every conjunct can be pinned by a test rather than by waiting two
  * minutes. Three ways a set `rfOffSince` must still read null: the link is no
- * longer live (we would never see the `on`), the log lane is dark (same), and
- * the deadline has passed. A write lane held off by a reading nobody can
- * refresh is exactly the stuck switch this deadline exists to prevent.
+ * longer live (we would never see the `on`), the log subscription was never
+ * acknowledged or was refused (same), and the deadline has passed. A write
+ * lane held off by a reading nobody can refresh is exactly the stuck switch
+ * this deadline exists to prevent.
+ *
+ * A storm PAUSE (v0.76.0) keeps a reading already taken until its own deadline
+ * instead of dropping it: at verbose and finer the busiest minute is likeliest
+ * inside the nightly NVM backup, the very blackout this gate exists for, and
+ * the deadline still bounds it. A pause never creates a reading by itself.
  */
 export function rfOffActive(
   rfOffSince: number | null,
   now: number,
-  link: { live: boolean; logsAcked: boolean; stormStopped: boolean },
+  link: { live: boolean; logsAcked: boolean },
 ): number | null {
   if (rfOffSince == null) return null;
-  if (!link.live || !link.logsAcked || link.stormStopped) return null;
+  if (!link.live || !link.logsAcked) return null;
   return now - rfOffSince < RF_OFF_MAX_MS ? rfOffSince : null;
 }
 
@@ -323,20 +380,111 @@ export function rfOffActive(
  * driver to mark a node Dead — a false death the add-on would then report and
  * remediate. auto-ping suppresses itself while this is on.
  *
- * Node attribution is deliberately NOT required (it is a controller-level
- * line), so the match is narrowed instead: the two exact phrases, and never a
- * node-attributed line, so a node's own message cannot switch the mesh's
- * sweep off. The text is server-sent: matched, never logged or stored.
+ * Only the controller's OWN lines count (context type 'controller', zwave-js
+ * core/src/log/Controller.ts print()), and only when they START with one of
+ * the two phrases (v0.76.0). At verbose the driver logs every Serial API
+ * message as a DRIVER dump whose CC tree can carry a device- or user-set
+ * string (a node name), and at debug value lines carry them too; the v0.65.0
+ * rule (anything but a node line, the phrase anywhere) let either flip the
+ * write lane's gate. The text is server-sent: matched, never logged or stored.
  */
 export function controllerRfEvent(ev: Record<string, unknown>): 'off' | 'on' | null {
   if (ev.event !== 'logging') return null;
   const ctx = ev.context as Record<string, unknown> | undefined;
-  if (ctx && typeof ctx === 'object' && ctx.type === 'node') return null;
-  const raw = ev.message;
-  const msg = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.filter((x) => typeof x === 'string').join('\n') : '';
-  if (msg.includes('Turning RF off')) return 'off';
-  if (msg.includes('Turning RF on')) return 'on';
+  if (!ctx || typeof ctx !== 'object' || ctx.type !== 'controller') return null;
+  const t = logText(ev);
+  if (t.startsWith(RF_OFF)) return 'off';
+  if (t.startsWith(RF_ON)) return 'on';
   return null;
+}
+
+/** Driver log levels, quietest first — winston's npm levels, which zwave-js
+ *  uses (core bindings/log/node.ts). Nothing logs at `http`. */
+export const DRIVER_LOG_LEVELS = ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'] as const;
+export type DriverLogLevel = (typeof DRIVER_LOG_LEVELS)[number];
+/** The driver's log level from a server-sent value, or null (v0.76.0). Only
+ *  the seven names are kept: the value is logged. */
+export function parseDriverLogLevel(v: unknown): DriverLogLevel | null {
+  return typeof v === 'string' && (DRIVER_LOG_LEVELS as readonly string[]).includes(v) ? (v as DriverLogLevel) : null;
+}
+export function levelAtLeast(l: DriverLogLevel | null, min: DriverLogLevel): boolean {
+  return l != null && DRIVER_LOG_LEVELS.indexOf(l) >= DRIVER_LOG_LEVELS.indexOf(min);
+}
+/** The driver log's node filter, or null when it logs every node (v0.76.0).
+ *  zwave-js logs a node line only when the filter is absent or lists the node
+ *  (core bindings/log/node.ts isNodeLoggingVisible), so a filter that is
+ *  present but empty, or holds no sane id, logs no node at all: an empty set,
+ *  never "every node". Only sane node ids are kept. */
+export function parseNodeFilter(v: unknown): ReadonlySet<number> | null {
+  if (!Array.isArray(v)) return null;
+  return new Set(v.map(saneNodeId).filter((x): x is number => x != null));
+}
+function sameFilter(a: ReadonlySet<number> | null, b: ReadonlySet<number> | null): boolean {
+  if (a == null || b == null) return a === b;
+  return a.size === b.size && [...a].every((x) => b.has(x));
+}
+
+export interface LogGuardConfig { perMin: number; pauseBaseMs: number; pauseMaxMs: number; calmMs: number; silenceMs: number; verboseRecentMs: number }
+/** The storm guard (v0.76.0): above `perMin` lines in a fixed 60 s window the
+ *  subscription pauses for 5 min, doubling per consecutive pause to 60 min; a
+ *  resumed stream that runs `calmMs` without tripping starts the ladder again.
+ *  `silenceMs` without a line re-subscribes once, armed only while the last
+ *  line came within `verboseRecentMs` of a verbose-or-finer one — about twice
+ *  the controller's ≤30 s background-RSSI poll, so a drop to info disarms it
+ *  on the first info line. */
+export const LOG_GUARD: Readonly<LogGuardConfig> = Object.freeze({ perMin: 3000, pauseBaseMs: 5 * 60_000, pauseMaxMs: 60 * 60_000, calmMs: 60 * 60_000, silenceMs: 10 * 60_000, verboseRecentMs: 60_000 });
+/** How long the storm guard pauses (v0.76.0): 5 → 10 → 20 → 40 → 60 min; a
+ *  burst at debug or silly takes the cap at once. */
+export function stormPauseMs(trip: number, level: DriverLogLevel | null, g: Pick<LogGuardConfig, 'pauseBaseMs' | 'pauseMaxMs'> = LOG_GUARD): number {
+  if (levelAtLeast(level, 'debug')) return g.pauseMaxMs;
+  const n = Math.max(1, Math.floor(trip));
+  return Math.min(g.pauseBaseMs * 2 ** Math.min(n - 1, 10), g.pauseMaxMs);
+}
+
+/** A gap or a change in the driver log stream (v0.76.0), for an archive note. */
+export type LogGap =
+  | { kind: 'subscribed'; at: number; level: DriverLogLevel | null; after: 'connect' | 'silence' }
+  | { kind: 'paused'; at: number; count: number; windowMs: number; perMin: number; limit: number; resumeAt: number; trip: number; level: DriverLogLevel | null }
+  | { kind: 'resumed'; at: number; pausedMs: number; dropped: number; trip: number }
+  | { kind: 'silent'; at: number; silentMs: number; level: DriverLogLevel }
+  | { kind: 'level'; at: number; from: DriverLogLevel | null; to: DriverLogLevel }
+  | { kind: 'filter'; at: number; nodes: number | null }
+  | { kind: 'refused'; at: number; code: string }
+  | { kind: 'ended'; at: number; reason: string; level: DriverLogLevel | null };
+
+/** "12s" / "5m00s" / "1h00m" — telnet/gauges' format, kept local so the driver
+ *  client does not import the TUI layer. */
+function durText(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `${m}m${String(sec % 60).padStart(2, '0')}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`;
+}
+
+/** The archive's sentence for a gap (v0.76.0). The dropped count covers only
+ *  lines that reached the add-on after the stop, plus the one that tripped it:
+ *  lines the driver logged while unsubscribed were never sent, and are not
+ *  estimated. */
+export function logGapNote(g: LogGap): string {
+  switch (g.kind) {
+    case 'subscribed':
+      return `driver log stream ${g.after === 'silence' ? 're-subscribed after silence' : 'subscribed'} — driver log level ${g.level ?? 'unknown'}`;
+    case 'paused':
+      return `driver log stream paused by the storm guard: ${g.count} lines in ${durText(g.windowMs)} (≈${g.perMin}/min, limit ${g.limit}/min, level ${g.level ?? 'unknown'}) — resumes in ${durText(g.resumeAt - g.at)} (pause ${g.trip})`;
+    case 'resumed':
+      return `driver log stream resumed after ${durText(g.pausedMs)} (pause ${g.trip}) — ${g.dropped} line(s) that arrived during the pause were dropped, and lines the driver logged while unsubscribed were never sent: none of them are in this file`;
+    case 'silent':
+      return `no driver log line for ${durText(g.silentMs)} after verbose lines — re-subscribing once (zwave-js-server's log forwarder may have been detached, e.g. by a Z-Wave JS UI debug capture, or the level lowered with no event)`;
+    case 'level':
+      return `driver log level ${g.from ?? 'unknown'} → ${g.to} (reported by the server; the stream follows it only when the change comes through driver.update_log_config or the forwarder restarts)`;
+    case 'filter':
+      return `driver log node filter → ${g.nodes == null ? 'every node' : `${g.nodes} node(s)`} — S2 counts start a new window`;
+    case 'refused':
+      return `driver log stream refused by the server (${g.code}) — nothing more is archived until the add-on reconnects`;
+    case 'ended':
+      return `driver log stream ended (${g.reason}) — loudest level received ${g.level ?? 'none'}; nothing is archived until it reconnects`;
+  }
 }
 
 /** A finite dBm value inside the int8 range and not a sentinel, or null
@@ -414,6 +562,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   const reconnectBaseMs = opts.reconnectBaseMs ?? 5_000;
   const reconnectMaxMs = reconnectBaseMs * 60; // ~5 min at the default base
   const livenessMs = opts.livenessMs ?? 5 * 60_000;
+  const g: LogGuardConfig = { ...LOG_GUARD, ...opts.logGuard };
 
   let ws: WebSocket | null = null;
   let state: DriverWsState = url ? 'connecting' : 'disabled';
@@ -442,11 +591,45 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
    *  later value event for exactly that value can be matched (v0.73.0). */
   const declaredRefs = new Map<number, DeclaredRef>();
   /** True only between a successful start_listening_logs ack and the next
-   *  disconnect / storm-stop — the S2 lane's liveness (see s2LaneLive). */
+   *  disconnect or re-subscribe — the S2 lane's liveness (see s2LaneLive). */
   let logsAcked = false;
-  let logStormStopped = false; // storm backstop tripped (until next reconnect)
-  let logEvWindowStart = 0; // rolling 60 s window for the storm meter
+  /** The storm guard (v0.76.0): a pause, its resume timer, what it dropped. */
+  let stormPausedAt: number | null = null;
+  let stormResumeAt: number | null = null;
+  let stormTimer: ReturnType<typeof setTimeout> | null = null;
+  let stormDropped = 0;
+  let stormTrips = 0; // consecutive pauses on this connection (the ladder)
+  let stormResumedAt: number | null = null;
+  let stormLevel: DriverLogLevel | null = null; // the level the pause was judged at
+  let pendingResume: { pausedAt: number; dropped: number; trip: number } | null = null;
+  let logEvWindowStart = 0; // fixed 60 s window for the storm meter
   let logEvCount = 0;
+  let logEvWindowTop: DriverLogLevel | null = null; // loudest `level` in the window
+  /** The driver's log level as the server reports it, and the loudest level
+   *  actually received on this subscription (v0.76.0): the forwarder keeps the
+   *  level it started at, so the two can differ. `loudestReceived` spans the
+   *  whole connection, for the 'ended' note; `seenLevel` is reset with the
+   *  watchdog. */
+  let driverLogLevel: DriverLogLevel | null = null;
+  let seenLevel: DriverLogLevel | null = null;
+  let loudestReceived: DriverLogLevel | null = null;
+  /** When the reported level last rose back to info or finer, or null: a window
+   *  that spans a stretch below info was not watched (v0.76.0). */
+  let levelOkSince: number | null = null;
+  let logNodeFilter: ReadonlySet<number> | null = null;
+  /** When the node filter last changed on this connection, or null (v0.76.0). */
+  let filterChangedAt: number | null = null;
+  /** The silence watchdog (v0.76.0): one re-subscribe per silent stretch. */
+  let lastLogEvAt: number | null = null;
+  let lastVerboseAt: number | null = null;
+  let silenceTried = false;
+  let subscribeWhy: 'connect' | 'resume' | 'silence' = 'connect';
+  /** The watchdog's state when the last lane ended, carried to the next
+   *  subscription to the same network (v0.76.0). A detached forwarder stays
+   *  detached across our reconnect while another client (HA, which keeps its
+   *  log subscription after debug logging is turned off) holds it started, and
+   *  a fresh subscription that never sees a verbose line would never arm. */
+  let carried: { homeId: number; silent: boolean; armed: boolean; level: DriverLogLevel | null } | null = null;
 
   /** The allowlist gate — defense in depth; nothing else may ever be sent.
    *  `extra` is spread FIRST so the checked `command`/`messageId` always win —
@@ -479,7 +662,36 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     reconnectTimer.unref?.();
   }
 
-  function teardownSocket(): void {
+  function clearStormTimer(): void {
+    if (stormTimer) {
+      clearTimeout(stormTimer);
+      stormTimer = null;
+    }
+  }
+
+  /** The silence watchdog is armed while the last line came within
+   *  `verboseRecentMs` of a verbose-or-finer one (v0.76.0). */
+  function watchdogArmed(): boolean {
+    return lastLogEvAt != null && lastVerboseAt != null && lastLogEvAt - lastVerboseAt <= g.verboseRecentMs;
+  }
+
+  /** The log lane ends with the socket: the archive gets one 'ended' note if a
+   *  subscription was active, paused or pending (v0.76.0). */
+  function endLogLane(reason: string): void {
+    clearStormTimer();
+    if (logsAcked || stormPausedAt != null || logsMsgId != null) cb.onDriverLogGap?.({ kind: 'ended', at: Date.now(), reason, level: loudestReceived });
+    if (logsAcked && serverHomeId != null && (silenceTried || watchdogArmed())) {
+      carried = { homeId: serverHomeId, silent: silenceTried, armed: !silenceTried, level: seenLevel };
+    } else if (logsAcked) carried = null;
+    logsAcked = false;
+    logsMsgId = null;
+    stormPausedAt = null;
+    stormResumeAt = null;
+    silenceTried = false;
+  }
+
+  function teardownSocket(reason = 'connection closed'): void {
+    endLogLane(reason);
     if (livenessTimer) {
       clearInterval(livenessTimer);
       livenessTimer = null;
@@ -510,17 +722,31 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
 
   function connect(): void {
     if (stopped || state === 'dormant' || !url) return;
-    teardownSocket();
+    teardownSocket('reconnecting');
     logsMsgId = null;
     // A blackout observed on the OLD connection says nothing about the new one,
     // and a `Turning RF on` that lands while we are disconnected is lost — so
     // the suppression never survives a reconnect (v0.65.0).
     rfOffSince = null;
     logsLiveSince = null;
-    logStormStopped = false;
     logsAcked = false;
+    stormDropped = 0;
+    stormTrips = 0;
+    stormResumedAt = null;
+    stormLevel = null;
+    pendingResume = null;
     logEvWindowStart = 0;
     logEvCount = 0;
+    logEvWindowTop = null;
+    driverLogLevel = null;
+    seenLevel = null;
+    loudestReceived = null;
+    levelOkSince = null;
+    logNodeFilter = null;
+    filterChangedAt = null;
+    lastLogEvAt = null;
+    lastVerboseAt = null;
+    subscribeWhy = 'connect';
     setState('connecting', `connecting to ${redactUrl(url)}`);
     let sock: WebSocket;
     try {
@@ -554,14 +780,14 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       livenessTimer = setInterval(() => {
         if (state !== 'live' && Date.now() - openedAt > handshakeMs) {
           (log.error ?? log)('driver-ws: handshake never completed — terminating socket for reconnect');
-          teardownSocket();
+          teardownSocket('handshake timeout');
           scheduleReconnect('handshake timeout');
           return;
         }
         const idle = Date.now() - lastMsgAt;
         if (idle > livenessMs) {
           log('driver-ws: no pong/traffic — terminating wedged socket for reconnect');
-          teardownSocket();
+          teardownSocket('no pong or traffic');
           scheduleReconnect('liveness timeout');
         } else if (idle >= livenessMs / 2 && ws && ws.readyState === WebSocket.OPEN) {
           try {
@@ -570,6 +796,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
             /* ping on a closing socket — the close handler will reconnect */
           }
         }
+        checkLogSilence(Date.now());
       }, checkMs);
       livenessTimer.unref?.();
     });
@@ -643,12 +870,41 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
         if (m.messageId === logsMsgId && logsMsgId != null) {
           // Log listening is OPTIONAL telemetry: a refusal degrades the S2
           // watch to dormant, it never touches the main listener.
-          log(success
-            ? 'driver-ws: log stream active (S2 SPAN-resync watch)'
-            : `driver-ws: log stream unavailable (${safeTag(m.errorCode ?? 'refused')}) — S2 and duplicate-frame watches dormant`);
+          const now = Date.now();
           logsAcked = success;
-          logsLiveSince = success ? Date.now() : null;
-          if (!success) logsMsgId = null;
+          logsLiveSince = success ? now : null;
+          // The last lane's watchdog, carried to a new connection to the same
+          // network while the dump still reports verbose or finer (v0.76.0):
+          // an unresolved silence keeps the lane 'silent' until a line arrives,
+          // and an armed watchdog arms again from this ack. A reported level
+          // below verbose (a server restarted at info) drops it.
+          const c = carried;
+          if (success && subscribeWhy === 'connect') carried = null;
+          if (success && subscribeWhy === 'connect' && c && c.homeId === serverHomeId && levelAtLeast(driverLogLevel, 'verbose')) {
+            if (c.silent) silenceTried = true;
+            else {
+              lastLogEvAt = now;
+              lastVerboseAt = now;
+              seenLevel = c.level;
+            }
+          }
+          if (success) {
+            if (pendingResume) {
+              stormResumedAt = now;
+              const pausedMs = now - pendingResume.pausedAt;
+              log(`driver-ws: log stream resumed after ${durText(pausedMs)} (pause ${pendingResume.trip}; ${pendingResume.dropped} line(s) received while paused were dropped)`);
+              cb.onDriverLogGap?.({ kind: 'resumed', at: now, pausedMs, dropped: pendingResume.dropped, trip: pendingResume.trip });
+            } else {
+              log(`driver-ws: log stream ${subscribeWhy === 'silence' ? 're-subscribed after silence' : 'active'} (S2 SPAN-resync watch; driver log level ${driverLogLevel ?? 'unknown'})`);
+              cb.onDriverLogGap?.({ kind: 'subscribed', at: now, level: driverLogLevel, after: subscribeWhy === 'silence' ? 'silence' : 'connect' });
+            }
+          } else {
+            const code = safeTag(m.errorCode ?? 'refused');
+            log(`driver-ws: log stream unavailable (${code}) — S2, duplicate-frame and RF-off watches dormant`);
+            cb.onDriverLogGap?.({ kind: 'refused', at: now, code });
+            logsMsgId = null;
+          }
+          pendingResume = null;
           return;
         }
         if (!success) {
@@ -703,6 +959,11 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   function onStateDump(stateBlob: unknown): void {
     if (!stateBlob || typeof stateBlob !== 'object') return;
     const s = stateBlob as Record<string, unknown>;
+    // The driver's log level and node filter as configured at connect time
+    // (zwave-js-server dumpState → driver.logConfig, v0.76.0).
+    const logCfg = (s.driver as Record<string, unknown> | undefined)?.logConfig as Record<string, unknown> | undefined;
+    driverLogLevel = parseDriverLogLevel(logCfg?.level);
+    logNodeFilter = parseNodeFilter(logCfg?.nodeFilter);
     // Controller: seed background RSSI if the driver already has a reading.
     const ctrl = s.controller as Record<string, unknown> | undefined;
     const ctrlStats = ctrl?.statistics as Record<string, unknown> | undefined;
@@ -714,29 +975,36 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     for (const n of nodes) {
       if (onNodeState(n)) flagged += 1;
     }
-    log(`driver-ws: state dump processed (${flagged} nodes, bgRSSI ${bg ? 'present' : 'absent'})`);
+    log(`driver-ws: state dump processed (${flagged} nodes, bgRSSI ${bg ? 'present' : 'absent'}, driver log level ${driverLogLevel ?? 'unknown'}${logNodeFilter ? `, log node filter ${logNodeFilter.size} node(s)` : ''})`);
   }
 
   /** One streamed driver log line. Storm-metered and matched here, then
    *  handed to the durable log archive when one is configured (v0.75.4,
    *  logArchive.ts — redacted before it reaches disk); never logged to the
    *  add-on's own log, proxied, or forwarded anywhere else (privileged socket). */
-  const LOG_STORM_PER_MIN = 3000;
   function onLoggingEvent(ev: Record<string, unknown>): void {
-    if (logStormStopped) return; // stop was sent; drain whatever is in flight
     const now = Date.now();
+    // A stop was sent: what is still in flight is counted, never matched or
+    // archived (v0.76.0).
+    if (stormPausedAt != null) { stormDropped += 1; return; }
+    lastLogEvAt = now;
+    // A silent lane's watch restarts at its first line, not at the re-subscribe
+    // that brought nothing back: the stretch between them was not watched.
+    if (silenceTried) logsLiveSince = now;
+    silenceTried = false;
     if (now - logEvWindowStart >= 60_000) {
       logEvWindowStart = now;
       logEvCount = 0;
+      logEvWindowTop = null;
     }
     logEvCount += 1;
-    if (logEvCount > LOG_STORM_PER_MIN) {
-      // The driver was likely switched to debug/silly. OUR unsubscribe only
-      // clears this client's receiveLogs flag — other subscribers (the HA log
-      // viewer) are untouched. Re-arms on the next reconnect.
-      logStormStopped = true;
-      send('stop_listening_logs');
-      log(`driver-ws: log stream storm (>${LOG_STORM_PER_MIN}/min — driver log level raised?) — S2 and duplicate-frame watches paused until reconnect`);
+    const lvl = parseDriverLogLevel(ev.level);
+    if (lvl != null && !levelAtLeast(logEvWindowTop, lvl)) logEvWindowTop = lvl;
+    if (lvl != null && !levelAtLeast(seenLevel, lvl)) seenLevel = lvl;
+    if (lvl != null && !levelAtLeast(loudestReceived, lvl)) loudestReceived = lvl;
+    if (levelAtLeast(lvl, 'verbose')) lastVerboseAt = now;
+    if (logEvCount > g.perMin) {
+      pauseLogs(now);
       return;
     }
     // The radio going down is not a node event, and it gates a WRITE lane, so
@@ -752,10 +1020,111 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     if (dupNode != null) cb.onDuplicateDrop?.(dupNode);
   }
 
+  /** The storm guard trips (v0.76.0): OUR unsubscribe clears only this
+   *  client's receiveLogs flag — other subscribers (the HA log viewer) are
+   *  untouched — and a timer resumes it. */
+  function pauseLogs(now: number): void {
+    const windowMs = Math.max(1, now - logEvWindowStart);
+    const count = logEvCount;
+    if (stormResumedAt != null && now - stormResumedAt >= g.calmMs) stormTrips = 0;
+    stormTrips += 1;
+    // Judged on the lines received; the reported level only when they carry
+    // none — the forwarder keeps the level it started at.
+    const level = logEvWindowTop ?? driverLogLevel;
+    const pauseMs = stormPauseMs(stormTrips, level, g);
+    const perMin = Math.round((count * 60_000) / windowMs);
+    stormPausedAt = now;
+    stormResumeAt = now + pauseMs;
+    stormLevel = level;
+    stormDropped = 1; // the line that tripped it is not archived either
+    send('stop_listening_logs');
+    clearStormTimer();
+    stormTimer = setTimeout(() => resumeLogs('resume'), pauseMs);
+    stormTimer.unref?.();
+    log(`driver-ws: log stream storm (${count} lines in ${durText(windowMs)}, ≈${perMin}/min, limit ${g.perMin}/min, level ${level ?? 'unknown'}) — paused ${durText(pauseMs)} (pause ${stormTrips}); S2, duplicate-frame and RF-off watches are dark until it resumes`);
+    cb.onDriverLogGap?.({ kind: 'paused', at: now, count, windowMs, perMin, limit: g.perMin, resumeAt: now + pauseMs, trip: stormTrips, level });
+  }
+
+  /** Re-subscribe through the ordinary ack path: after a storm pause, or once
+   *  after a silence (v0.76.0). A resumed stream is metered from zero. */
+  function resumeLogs(why: 'resume' | 'silence'): void {
+    clearStormTimer();
+    // A reconnect subscribes afresh. A socket already closing would fail the
+    // send and read as a refusal; the pause stands until the close lands.
+    if (state !== 'live' || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (stormPausedAt != null) pendingResume = { pausedAt: stormPausedAt, dropped: stormDropped, trip: stormTrips };
+    stormPausedAt = null;
+    stormResumeAt = null;
+    // A resumed stream is metered from zero, not from the window that tripped.
+    logEvWindowStart = 0;
+    logEvCount = 0;
+    logEvWindowTop = null;
+    seenLevel = null;
+    lastVerboseAt = null;
+    logsAcked = false;
+    logsLiveSince = null;
+    subscribeWhy = why;
+    logsMsgId = send('start_listening_logs');
+  }
+
+  /** The silence watchdog (v0.76.0). A Z-Wave JS UI debug capture replaces the
+   *  driver's log transports, which detaches zwave-js-server's forwarder while
+   *  the server still counts it as started, and no event says so. While lines
+   *  at verbose or finer are arriving, the controller's ≤30 s background-RSSI
+   *  poll guarantees more; silenceMs without one re-subscribes once, and the
+   *  lane reads 'silent' until a line arrives. At info a long silence is
+   *  normal: the first info line more than verboseRecentMs after the last
+   *  verbose one disarms it. A drop to info followed by no line at all cannot
+   *  be told from a detach. */
+  function checkLogSilence(now: number): void {
+    if (state !== 'live' || !ws || ws.readyState !== WebSocket.OPEN || !logsAcked || stormPausedAt != null || silenceTried) return;
+    if (!watchdogArmed()) return;
+    const silentMs = now - lastLogEvAt!;
+    if (silentMs < g.silenceMs) return;
+    silenceTried = true;
+    log(`driver-ws: no driver log line for ${durText(silentMs)} after verbose lines — re-subscribing once (a Z-Wave JS UI debug capture detaches zwave-js-server's log forwarder; a level lowered with no event looks the same)`);
+    cb.onDriverLogGap?.({ kind: 'silent', at: now, silentMs, level: seenLevel ?? 'verbose' });
+    send('stop_listening_logs');
+    resumeLogs('silence');
+  }
+
   function onEvent(ev: Record<string, unknown> | null): void {
     if (!ev) return;
     if (ev.event === 'logging') {
       onLoggingEvent(ev);
+      return;
+    }
+    // The driver's log level changed through driver.update_log_config (HA's
+    // Z-Wave JS Logs panel, HA debug logging) (v0.76.0). Z-Wave JS UI's own
+    // settings save and its debug-capture restore send nothing.
+    if (ev.source === 'driver' && ev.event === 'log config updated') {
+      const cfg = ev.config;
+      if (!cfg || typeof cfg !== 'object') return;
+      const now = Date.now();
+      // The event carries the whole log config, and JSON drops an unset filter:
+      // an absent nodeFilter means every node is logged again.
+      const filter = parseNodeFilter((cfg as Record<string, unknown>).nodeFilter);
+      if (!sameFilter(filter, logNodeFilter)) {
+        logNodeFilter = filter;
+        filterChangedAt = now;
+        log(`driver-ws: driver log node filter → ${filter == null ? 'every node' : `${filter.size} node(s)`}`);
+        cb.onDriverLogGap?.({ kind: 'filter', at: now, nodes: filter?.size ?? null });
+      }
+      const lvl = parseDriverLogLevel((cfg as Record<string, unknown>).level);
+      if (lvl == null || lvl === driverLogLevel) return;
+      const from = driverLogLevel;
+      driverLogLevel = lvl;
+      if (!levelAtLeast(lvl, 'verbose')) { seenLevel = null; lastVerboseAt = null; } // the watchdog disarms below verbose
+      // Back to info or finer from below it: what came before was not watched.
+      if (from != null && !levelAtLeast(from, 'info') && levelAtLeast(lvl, 'info')) levelOkSince = now;
+      log(`driver-ws: driver log level ${from ?? 'unknown'} → ${lvl}`);
+      cb.onDriverLogGap?.({ kind: 'level', at: now, from, to: lvl });
+      // A paused stream resumes early only into a QUIETER level: resuming into a
+      // louder one cannot end the storm (HA debug logging raises it to debug).
+      if (stormPausedAt != null) {
+        const quieter = stormLevel == null ? !levelAtLeast(lvl, 'debug') : DRIVER_LOG_LEVELS.indexOf(lvl) < DRIVER_LOG_LEVELS.indexOf(stormLevel);
+        if (quieter) resumeLogs('resume');
+      }
       return;
     }
     if (ev.source === 'controller' && ev.event === 'statistics updated') {
@@ -792,21 +1161,30 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     // HA's authenticated WS remains the source of truth for all of it.
   }
 
+  // Every way the lane can be dark, in one predicate: never started, the server
+  // refused it, the storm guard paused it, it went silent, or the socket is not
+  // currently live. Callers record `null` (unknown) rather than 0 when false.
+  // Below info the controller's and nodes' info lines are never written, so the
+  // reported level darkens the lane too (v0.76.0).
+  const levelLow = (): boolean => driverLogLevel != null && !levelAtLeast(driverLogLevel, 'info');
+  const laneLive = (): boolean => logsAcked && stormPausedAt == null && !silenceTried && state === 'live' && !levelLow();
+  const watchSince = (): number | null => (laneLive() && logsLiveSince != null ? Math.max(logsLiveSince, levelOkSince ?? logsLiveSince) : null);
+
   return {
-    s2LaneLive(): boolean {
-      // Every way the lane can be dark, in one predicate: never started, the
-      // server refused it, the storm backstop stopped it, or the socket is not
-      // currently live. Callers record `null` (unknown) rather than 0 when this
-      // is false.
-      return logsAcked && !logStormStopped && state === 'live';
-    },
-    s2LaneFault(): 'refused' | 'storm-stopped' | null {
-      return s2Fault({ logsAcked, logsMsgId, logStormStopped, live: state === 'live' });
+    s2LaneLive: laneLive,
+    s2LaneFault: (): S2LaneFault | null =>
+      s2Fault({ logsAcked, logsMsgId, stormPaused: stormPausedAt != null, silent: silenceTried, live: state === 'live', levelLow: levelLow() }),
+    s2LaneResumeAt: () => stormResumeAt,
+    driverLogLevel: () => driverLogLevel,
+    logNodeFilter: () => logNodeFilter,
+    s2WatchSince: () => {
+      const w = watchSince();
+      return w == null ? null : Math.max(w, filterChangedAt ?? w);
     },
     lastRfOnAt: () => lastRfOnAt,
-    rfWatchSince: () => (logsAcked && !logStormStopped && state === 'live' ? logsLiveSince : null),
+    rfWatchSince: watchSince,
     controllerRfOffSince(): number | null {
-      return rfOffActive(rfOffSince, Date.now(), { live: state === 'live', logsAcked, stormStopped: logStormStopped });
+      return rfOffActive(rfOffSince, Date.now(), { live: state === 'live', logsAcked });
     },
     start(): void {
       if (!url) {
@@ -829,7 +1207,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      teardownSocket();
+      teardownSocket('stopped');
       setState(url ? 'stopped' : 'disabled', 'stopped');
     },
     state: () => state,

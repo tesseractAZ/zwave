@@ -14,7 +14,7 @@ import { WebSocketServer, type WebSocket as WsSocket } from 'ws';
  * A minimal mock zwave-js-server: records every command the client sends
  * (the allowlist proof), answers the handshake, and lets tests push events.
  */
-export async function mockServer(over: { minSchema?: number; maxSchema?: number; homeId?: number; nodes?: unknown[] } = {}) {
+export async function mockServer(over: { minSchema?: number; maxSchema?: number; homeId?: number; nodes?: unknown[]; logLevel?: string; nodeFilter?: number[]; refuseLogs?: boolean } = {}) {
   const wss = new WebSocketServer({ port: 0 });
   await new Promise<void>((r) => wss.once('listening', () => r()));
   const commands: string[] = [];
@@ -28,6 +28,8 @@ export async function mockServer(over: { minSchema?: number; maxSchema?: number;
       commands.push(m.command);
       if (m.command === 'set_api_schema') {
         ws.send(JSON.stringify({ type: 'result', messageId: m.messageId, success: true, result: {} }));
+      } else if (m.command === 'start_listening_logs' && over.refuseLogs) {
+        ws.send(JSON.stringify({ type: 'result', messageId: m.messageId, success: false, errorCode: 'unknown_command' }));
       } else if (m.command === 'start_listening_logs' || m.command === 'stop_listening_logs') {
         ws.send(JSON.stringify({ type: 'result', messageId: m.messageId, success: true, result: {} }));
       } else if (m.command === 'start_listening') {
@@ -35,6 +37,10 @@ export async function mockServer(over: { minSchema?: number; maxSchema?: number;
           type: 'result', messageId: m.messageId, success: true,
           result: {
             state: {
+              // v0.76.0: the driver's log config, as zwave-js-server's dumpState sends it.
+              ...(over.logLevel != null || over.nodeFilter != null
+                ? { driver: { logConfig: { enabled: true, level: over.logLevel ?? 'info', ...(over.nodeFilter ? { nodeFilter: over.nodeFilter } : {}) } } }
+                : {}),
               controller: { statistics: { backgroundRSSI: { channel0: { average: -101, current: -99 }, channel1: { average: -97, current: -95 }, timestamp: 1 } } },
               nodes: over.nodes ?? [
                 { nodeId: 6, isListening: true, isFrequentListening: false, statistics: { lastSeen: '2026-07-16T20:00:00.000Z' } },
@@ -64,6 +70,17 @@ export async function mockServer(over: { minSchema?: number; maxSchema?: number;
     connectionCount: () => connections,
     push: (event: unknown) => sock?.send(JSON.stringify({ type: 'event', event })),
     dropClient: () => sock?.terminate(),
+    /** Change what the next connection is told (v0.76.0): a server restarted
+     *  at another level, another network. */
+    configure: (o: typeof over) => Object.assign(over, o),
+    /** Leave the client CLOSING (v0.76.0): a close frame written past ws's
+     *  state machine, with our read side paused, so the client's close
+     *  handshake never completes and its 'close' waits on ws's 30 s timer. */
+    holdClose: () => {
+      const raw = (sock as unknown as { _socket: import('node:net').Socket } | null)?._socket;
+      raw?.pause();
+      raw?.write(Buffer.from([0x88, 0x00]));
+    },
     close: () => new Promise<void>((r) => wss.close(() => r())),
   };
 }

@@ -1,0 +1,35 @@
+#!/bin/sh
+# Z-Wave TUI — the Supervisor's backup hooks (v0.76.0). config.yaml:
+#   backup_pre:  /usr/bin/zwave-tui-backup-hook pre
+#   backup_post: /usr/bin/zwave-tui-backup-hook post
+# Run by `docker exec`, as root, in /app, under the add-on's AppArmor profile,
+# without a shell (the Supervisor splits the string itself), and only for a hot
+# backup of a running add-on.
+#   pre   creates the hold file. While it is fresh the log archive's
+#         housekeeping renames and deletes nothing (logArchive.ts, BACKUPS): a
+#         file renamed or deleted while the Supervisor copies the folder drops
+#         the WHOLE add-on, /data included, from that backup.
+#   post  removes it. A Supervisor restarted mid-backup never runs post, so the
+#         archive ignores a hold 60 min or more away from now.
+# EXIT 0 ON EVERY PATH: a non-zero exit drops the add-on from the backup, and a
+# failed post does so after the copy has succeeded. The Supervisor sets no
+# timeout, so this touches only local files and takes no lock.
+# The Supervisor logs a hook's output only on a failure, so each phase is also
+# written into the day's archive file, while the archive is on (today's file is
+# not backed up). The line is stamped to the second. docker exec does not see
+# the run script's environment; the three variables exist for the tests.
+hold="${LOG_ARCHIVE_HOLD:-/tmp/zwave-tui-backup.hold}"
+dir="${LOG_ARCHIVE_DIR:-/config/logs}"
+opts="${LOG_ARCHIVE_OPTIONS:-/data/options.json}"
+case "$1" in
+  pre) if touch "$hold" 2>/dev/null; then what='backup started: archive housekeeping paused'; else what='backup started: the hold could not be set'; fi ;;
+  post) if rm -f "$hold" 2>/dev/null; then what='backup finished: archive housekeeping resumed'; else what='backup finished: the hold could not be removed (the archive ignores it after 60 min)'; fi ;;
+  *) exit 0 ;;
+esac
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# The archive is on when log_archive_days is not 0 (options.json, which the
+# Supervisor writes with every option; grep, so the check needs no jq).
+if [ -d "$dir" ] && grep -Eq '"log_archive_days"[[:space:]]*:[[:space:]]*[1-9]' "$opts" 2>/dev/null; then
+  printf '%s [backup] %s\n' "$now" "$what" 2>/dev/null >> "$dir/zwave-tui-${now%%T*}.log"
+fi
+exit 0

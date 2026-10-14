@@ -122,6 +122,11 @@ export interface DwellEntry {
   since: number;
   lastSeen: number;
   hits: number;
+  /** A matured symptom HELD through a dark lane (v0.76.0: s2-desync). It is not
+   *  emitted while held, but stays live for the episode lifecycle and the
+   *  activity log, and its 30-min window is judged on recency alone until no
+   *  unseen sample is left in it. */
+  held?: true;
 }
 export type SymptomState = Map<string, DwellEntry>;
 
@@ -540,18 +545,45 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
     // so a baseline would learn a bad link as "its normal" and never fire.
     {
       const s2 = windowS2(samples, now);
-      const b = s2 != null && s2 >= S2_ABS &&
-        hadRecent(samples, now, S2_RECENT_MS, (s) => s.dS2Resync ?? 0);
-      markDegrading(id, b);
-      const since = dwell(state, key(id, 's2-desync'), b, now);
-      if (since != null) {
-        breaching = true;
-        out.push({
-          kind: 's2-desync', nodeId: id, severity: s2! >= S2_ABS * S2_WARN_MULT ? 'warn' : 'watch',
-          sinceMs: since, basis: 'measured',
-          evidence: [{ label: 'S2 SPAN resyncs', value: `${s2} in 30m` }],
-          narrative: `${node.name} is repeatedly losing S2 nonce sync — the encrypted link is dropping frames faster than SPAN resynchronisation can hold. Usually marginal RF on a secure link (distance, interference), occasionally a device that keeps rebooting. Fix the link quality; re-interviewing or rebuilding routes does not repair RF.`,
-        });
+      const k2 = key(id, 's2-desync');
+      const e = state.get(k2);
+      const recentPos = hadRecent(samples, now, S2_RECENT_MS, (s) => s.dS2Resync ?? 0);
+      const recentDark = samples.some((s) => now - s.t <= S2_RECENT_MS && s.dS2Resync == null);
+      // The lane goes dark one sample at a time while the known ones age out of
+      // the window (v0.76.0: a storm pause, a silent or refused lane, a level
+      // below info), so the recent slice turns unseen long before the whole
+      // window does. Unseen with no resync in it says nothing either way: a
+      // MATURED s2-desync is HELD as it stands — neither cleared (a fresh dwell
+      // and a new episode on resume) nor advanced (there is nothing to emit) —
+      // and lets go once nothing has breached for a whole window: holds need
+      // deadlines. An ARMED one is dropped: maturing on resume from its pre-dark
+      // start would be a dwell nobody watched.
+      if (s2 == null || (!recentPos && recentDark)) {
+        markDegrading(id, false);
+        if (e) {
+          if (e.lastSeen - e.since < DWELL_MS || now - e.lastSeen > S2_WINDOW_MS) state.delete(k2);
+          else e.held = true;
+        }
+      } else {
+        // After a hold, the window's known sum covers only part of it, and a
+        // storm that never stopped reads under the threshold: a held key lets go
+        // only on a fully seen recent slice with no resync, until no unseen
+        // sample is left in the window.
+        const unseen = samples.some((s) => now - s.t <= S2_WINDOW_MS && s.dS2Resync == null);
+        const carried = e?.held === true && unseen;
+        if (e && !unseen) delete e.held;
+        const b = recentPos && (carried || s2 >= S2_ABS);
+        markDegrading(id, b);
+        const since = dwell(state, k2, b, now);
+        if (since != null) {
+          breaching = true;
+          out.push({
+            kind: 's2-desync', nodeId: id, severity: s2 >= S2_ABS * S2_WARN_MULT ? 'warn' : 'watch',
+            sinceMs: since, basis: 'measured',
+            evidence: [{ label: 'S2 SPAN resyncs', value: `${s2} in 30m${unseen ? ' (part of it unseen)' : ''}` }],
+            narrative: `${node.name} is repeatedly losing S2 nonce sync — the encrypted link is dropping frames faster than SPAN resynchronisation can hold. Usually marginal RF on a secure link (distance, interference), occasionally a device that keeps rebooting. Fix the link quality; re-interviewing or rebuilding routes does not repair RF.`,
+          });
+        }
       }
     }
 
@@ -927,6 +959,20 @@ export function symptomaticNodes(symptoms: Symptom[]): Set<number> {
  * samples ratchets the baseline toward the pathology and desensitizes the very
  * detector that would catch it next time.
  */
+/** Symptoms HELD through a dark lane (v0.76.0): not emitted — there is nothing
+ *  to show — but still live, so the episode lifecycle and the activity log
+ *  neither close them during a storm pause nor reopen them on resume. */
+export function heldSymptoms(state: SymptomState): { key: string; nodeId: number; kind: SymptomKind }[] {
+  const out: { key: string; nodeId: number; kind: SymptomKind }[] = [];
+  for (const [k, e] of state) {
+    if (e.held !== true) continue;
+    const i = k.indexOf(':');
+    const id = Number(k.slice(0, i));
+    if (Number.isInteger(id) && id > 0) out.push({ key: k, nodeId: id, kind: k.slice(i + 1) as SymptomKind });
+  }
+  return out;
+}
+
 export function armingNodes(state: SymptomState): Set<number> {
   const s = new Set<number>();
   for (const k of state.keys()) {

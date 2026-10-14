@@ -146,13 +146,13 @@ configuration:
     name: Registros · Días de archivo
     description: >-
       Días de registros que se guardan en el archivo propio del complemento,
-      incluido hoy (0 lo desactiva). El journal del host solo conserva alrededor
+      incluido hoy (0 lo desactiva y borra lo que escribió). El journal del host solo conserva alrededor
       de un día y medio del registro de cada aplicación; este archivo guarda por
       más tiempo el registro del complemento y el flujo de registro del
       controlador Z-Wave JS, en archivos diarios en la carpeta de configuración
       del complemento (/addon_configs/<slug del complemento>/logs, legible por
-      SSH). Los días terminados se comprimen con gzip y la carpeta queda fuera
-      de las copias de seguridad.
+      SSH). Los días terminados se comprimen con gzip y entran en las copias de
+      seguridad del complemento; el archivo de hoy no.
   log_archive_max_mb:
     name: Registros · Tamaño máximo del archivo (MB)
     description: >-

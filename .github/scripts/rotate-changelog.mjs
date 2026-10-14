@@ -64,9 +64,12 @@ export function rotate(shipped, history, budget = BUDGET) {
   const moved = [];
   while (versions.length > 1 && size(versions) > budget) moved.unshift(versions.pop());
   const h = splitSections(history || HISTORY_TITLE);
+  // A history holding only its title was trimmed to one newline when written:
+  // the first release moved under it needs the blank line back.
+  const head = h.sections.length || moved.length ? h.head.replace(/\n*$/, '\n\n') : h.head;
   return {
     shipped: (TITLE + versions.join('') + POINTER),
-    history: (h.head + moved.join('') + h.sections.join('')).replace(/\n+$/, '\n'),
+    history: (head + moved.join('') + h.sections.join('')).replace(/\n+$/, '\n'),
     moved: moved.map((x) => x.slice(0, x.indexOf('\n'))),
   };
 }

@@ -1,7 +1,9 @@
 import type { SleeperWatch } from '../src/zwave/missedReport';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSymptoms, windowTimeoutRate, type DetectInput, type SymptomState } from '../src/zwave/symptoms';
+import { detectSymptoms, heldSymptoms, windowTimeoutRate, type DetectInput, type SymptomState } from '../src/zwave/symptoms';
+import { planEpisodeLifecycle } from '../src/zwave/outcomes';
+import { diffSymptomLog } from '../src/zwave/zwaveData';
 import type { RateNormal, ContNormal, BaselineStore } from '../src/zwave/baselines';
 import { NodeStatus, type NodeSnapshot, type ControllerSnapshot } from '../src/types';
 import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage } from '../src/zwave/evidenceStore';
@@ -378,6 +380,122 @@ test('s2-desync: a SUSTAINED resync storm matures after dwell; 3× escalates to 
   const hot = (now: number) => input({ nodes, recent: new Map([[17, window(now, 31, { dS2Resync: 2 })]]), now });
   const hotFired = settle(hot, new Map(), T, 6);
   assert.equal(hotFired.find((s) => s.kind === 's2-desync')!.severity, 'warn');
+});
+
+/** A ring the way sampleEvidence fills it (v0.76.0 review): one sample a
+ *  minute appended at the head, so known samples age out while unknown ones
+ *  arrive — the lane is dark for t in [darkFrom, darkTo), and the first sample
+ *  after a resume is still unknown, its window spanning the gap. */
+function ring(now: number, rate: (t: number) => number, darkFrom = Infinity, darkTo = Infinity): EvidenceSample[] {
+  const out: EvidenceSample[] = [];
+  for (let m = 31; m >= 0; m--) {
+    const t = now - m * MIN;
+    out.push(ev({ t, dS2Resync: t >= darkFrom && t < darkTo ? null : rate(t) }));
+  }
+  return out;
+}
+const s2Of = (out: ReturnType<typeof detectSymptoms>) => out.find((x) => x.kind === 's2-desync');
+
+test('s2-desync: a lane that goes dark one sample at a time HOLDS a matured symptom through a 5-min pause — same onset after resume, no episode churn (v0.76.0 review)', () => {
+  const nodes = [node(1), node(17)];
+  // ~15 per 30 min both ways: a fractional rate, and one resync every other minute.
+  for (const [what, rate] of [['fractional', () => 0.5], ['alternating 0/1', (t: number) => (Math.round((t - T) / MIN) % 2 === 0 ? 1 : 0)]] as const) {
+    const inp = (now: number) => input({ nodes, recent: new Map([[17, ring(now, rate, T + 7 * MIN, T + 13 * MIN)]]), now });
+    const state: SymptomState = new Map();
+    const first = s2Of(settle(inp, state, T, 6));
+    assert.ok(first, `${what}: the storm matured`);
+    for (let m = 7; m <= 45; m++) {
+      const out = s2Of(detectSymptoms(inp(T + m * MIN), state));
+      assert.ok(state.has('17:s2-desync'), `${what} m${m}: never cleared`);
+      assert.equal(state.get('17:s2-desync')!.since, first!.sinceMs, `${what} m${m}: never re-armed`);
+      if (m >= 14) assert.equal(out?.sinceMs, first!.sinceMs, `${what} m${m}: emitted with its original onset`);
+    }
+  }
+});
+
+test('s2-desync: an ARMED key is dropped by a hold — maturing on resume from its pre-dark start would be a dwell nobody watched (v0.76.0 review)', () => {
+  const nodes = [node(1), node(17)];
+  const at = (now: number, r: EvidenceSample[]) => detectSymptoms(input({ nodes, recent: new Map([[17, r]]), now }), state);
+  const state: SymptomState = new Map();
+  at(T, ring(T, () => 0.5));
+  assert.equal(state.get('17:s2-desync')?.since, T, 'armed');
+  at(T + MIN, ring(T + MIN, () => 0.5, T - 4 * MIN, T + 2 * MIN)); // the recent slice unseen
+  assert.ok(!state.has('17:s2-desync'), 'an armed key is not held');
+  at(T + 2 * MIN, ring(T + 2 * MIN, () => 0.5));
+  assert.equal(state.get('17:s2-desync')?.since, T + 2 * MIN, 'it arms afresh');
+});
+
+test('s2-desync: a long pause lets a held symptom go a whole window after it last breached (v0.76.0 review)', () => {
+  const nodes = [node(1), node(17)];
+  const inp = (now: number) => input({ nodes, recent: new Map([[17, ring(now, () => 0.5, T + 7 * MIN)]]), now });
+  const state: SymptomState = new Map();
+  settle(inp, state, T, 6);
+  let lastSeen = 0;
+  for (let m = 7; m <= 50; m++) {
+    detectSymptoms(inp(T + m * MIN), state);
+    const e = state.get('17:s2-desync');
+    if (!e) {
+      assert.ok(T + m * MIN - lastSeen > 30 * MIN, `m${m}: let go only past its deadline`);
+      return;
+    }
+    if (!e.held) lastSeen = e.lastSeen;
+    else assert.ok(T + m * MIN - e.lastSeen <= 30 * MIN, `m${m}: held within the deadline`);
+  }
+  assert.fail('a hold has a deadline');
+});
+
+test('s2-desync: after a hold, a storm still under way that reads below the threshold on a partly unseen window is kept; a fully seen quiet slice clears it (v0.76.0 review)', () => {
+  const nodes = [node(1), node(17)];
+  // 0.5/min until T+31, then nothing; dark from T+7 to T+20 (13 min): on
+  // resume the known sum is ~9.5, under the 12 threshold.
+  const inp = (now: number) => input({ nodes, recent: new Map([[17, ring(now, (t) => (t < T + 31 * MIN ? 0.5 : 0), T + 7 * MIN, T + 20 * MIN)]]), now });
+  const state: SymptomState = new Map();
+  const first = s2Of(settle(inp, state, T, 6))!;
+  for (let m = 7; m <= 30; m++) {
+    const out = s2Of(detectSymptoms(inp(T + m * MIN), state));
+    if (m >= 21) {
+      assert.equal(out?.sinceMs, first.sinceMs, `m${m}: kept with its onset`);
+      assert.match(out!.evidence[0].value, /\(part of it unseen\)$/, `m${m}: and says the count is partial`);
+    }
+  }
+  let cleared = -1;
+  for (let m = 31; m <= 40 && cleared < 0; m++) {
+    if (!s2Of(detectSymptoms(inp(T + m * MIN), state)) && !state.has('17:s2-desync')) cleared = m;
+  }
+  assert.equal(cleared, 36, 'cleared once a fully seen 5-min slice shows no resync');
+});
+
+test('s2-desync: the post-hold carry lasts only while the window still holds an unseen sample — then the threshold judges again (v0.76.0 review)', () => {
+  const nodes = [node(1), node(17)];
+  // Resumes at 0.3/min: recent resyncs every minute, but ~9.3 per 30 min, under 12.
+  const inp = (now: number) => input({ nodes, recent: new Map([[17, ring(now, (t) => (t < T + 20 * MIN ? 0.5 : 0.3), T + 7 * MIN, T + 20 * MIN)]]), now });
+  const state: SymptomState = new Map();
+  settle(inp, state, T, 6);
+  for (let m = 7; m <= 49; m++) detectSymptoms(inp(T + m * MIN), state);
+  assert.ok(state.has('17:s2-desync'), 'm49: the unseen sample at T+19 is still in the window — carried');
+  detectSymptoms(inp(T + 50 * MIN), state);
+  assert.ok(!state.has('17:s2-desync'), 'm50: fully seen, and under the threshold');
+});
+
+test('heldSymptoms names what a dark lane holds; the episode lifecycle keeps it open without opening one, and the activity log does not call it cleared (v0.76.0 review)', () => {
+  const state: SymptomState = new Map([
+    ['17:s2-desync', { since: T, lastSeen: T, hits: 6, held: true }],
+    ['18:s2-desync', { since: T, lastSeen: T, hits: 6 }],
+    ['mesh:mesh-interference', { since: T, lastSeen: T, hits: 6, held: true }],
+  ]);
+  assert.deepEqual(heldSymptoms(state), [{ key: '17:s2-desync', nodeId: 17, kind: 's2-desync' }], 'held node keys only');
+  const pending = new Map<string, number>();
+  const open = [{ key: '17:s2-desync', nodeId: 17, kind: 's2-desync' as const }];
+  for (let m = 0; m <= 30; m++) {
+    const plan = planEpisodeLifecycle([{ nodeId: 17, kind: 's2-desync', held: true }, { nodeId: 19, kind: 's2-desync', held: true }], open, pending, T + m * MIN, 10 * MIN);
+    assert.deepEqual(plan.toResolve, [], `m${m}: a held episode does not close`);
+    assert.deepEqual(plan.toOpen, [], `m${m}: and a held symptom opens none`);
+  }
+  const logged = new Map([['17:s2-desync', { severity: 'watch' as const, nodeId: 17, kind: 's2-desync' as const }]]);
+  const held = diffSymptomLog(logged, [], new Set(['17:s2-desync']));
+  assert.deepEqual(held.events, [], 'not "cleared" while held');
+  assert.ok(held.next.has('17:s2-desync'), 'and not logged as new on resume');
+  assert.deepEqual(diffSymptomLog(logged, []).events.map((e) => e.text), ['s2-desync cleared']);
 });
 
 test('s2-desync: a single burst that STOPPED never matures (recency conjunct)', () => {

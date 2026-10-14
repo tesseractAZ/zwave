@@ -497,7 +497,6 @@ test('the log archive is wired end to end: options → run script → config →
   const read = (p: string) => readFileSync(resolve(here, p), 'utf8');
   const yamlTxt = read('../../config.yaml');
   assert.match(yamlTxt, /^map:\n  - data:rw\n(?:  #.*\n)*  - addon_config:rw$/m, 'the add-on config folder is mapped (at /config)');
-  assert.match(yamlTxt, /^backup_exclude:\n  - "logs\/\*"$/m, 'and the archive kept out of backups');
   const run = read('../../rootfs/etc/services.d/zwave-tui/run');
   assert.match(run, /^export LOG_ARCHIVE_DIR=\/config\/logs$/m);
   assert.match(run, /^export LOG_ARCHIVE_DAYS="\$\(bashio::config 'log_archive_days'\)"$/m);
@@ -507,9 +506,62 @@ test('the log archive is wired end to end: options → run script → config →
   assert.match(idx, /const archive = createLogArchive\(\{ \.\.\.config\.logArchive \}\);\nconst log = createLogger\(config\.logLevel, \(line\) => \{\n  process\.stdout\.write\(line\);\n  archive\.tui\(line\);/,
     'created before the logger, and every logged line reaches it');
   assert.match(idx, /onDriverLog: \(ev\) => archive\.driver\(ev\),/, 'the driver stream reaches it');
+  assert.match(idx, /onDriverLogGap: \(g\) => archive\.note\('zwave-js', logGapNote\(g\)\),/, 'and every gap in it is noted (v0.76.0)');
   assert.match(idx, /Promise\.allSettled\(\[app\.close\(\), archive\.close\(\)\]\)/, 'flushed on shutdown');
   assert.match(idx, /log\.fatal\(msg\);\n  archive\.flushSync\(\);/, 'and on the fatal path');
   assert.match(idx, /process\.on\('uncaughtExceptionMonitor', \(e, origin\) => \{\n  archive\.tui\([^\n]*\);\n  archive\.flushSync\(\);\n\}\);/, 'and on an uncaught throw or rejection, without changing how it exits');
   const zd = read('../src/zwave/zwaveData.ts');
-  assert.match(zd, /callbacks: \{\n            onDriverLog: opts\.onDriverLog,/, 'the data layer hands the stream to the driver client');
+  assert.match(zd, /callbacks: \{\n            onDriverLog: opts\.onDriverLog,\n            onDriverLogGap: opts\.onDriverLogGap,/, 'the data layer hands the stream and its gaps to the driver client');
+});
+
+/** Python's PurePath.match, for the pattern shapes config.yaml uses: compare
+ *  segments from the right, `*` within a segment, the pattern no longer than
+ *  the path. Cross-checked against Python 3.14's PurePosixPath.match, which the
+ *  Supervisor applies to every path of an app's /data and /config. */
+const pureMatch = (path: string, pattern: string): boolean => {
+  const ps = path.split('/').filter(Boolean), qs = pattern.split('/').filter(Boolean);
+  if (qs.length > ps.length) return false;
+  const seg = (q: string) => new RegExp('^' + q.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
+  return qs.every((q, i) => seg(q).test(ps[ps.length - qs.length + i]));
+};
+
+test('backups: finished log days go in; today\'s file and every temp file stay out; both hooks are wired, shipped executable and shell-free (v0.76.0)', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const read = (p: string) => readFileSync(resolve(here, p), 'utf8');
+  const yamlTxt = read('../../config.yaml');
+  assert.match(yamlTxt, /^backup_exclude:\n  - "logs\/\*\.log"\n  - "\*\.tmp"\nbackup_pre: \/usr\/bin\/zwave-tui-backup-hook pre\nbackup_post: \/usr\/bin\/zwave-tui-backup-hook post$/m);
+  assert.doesNotMatch(yamlTxt, /^backup:\s*cold/m, 'a cold backup would skip the hooks and stop the add-on');
+  const patterns = [...yamlTxt.matchAll(/^  - "([^"]+)"$/gm)].map((m) => m[1]).filter((p) => p.includes('*'));
+  const excluded = (p: string) => patterns.some((q) => pureMatch(p, q));
+  const cfg = '/data/app_configs/local_zwave_tui', data = '/data/apps/data/local_zwave_tui';
+  for (const p of [`${cfg}/logs/zwave-tui-2026-10-14.log`, `${cfg}/logs/zwave-js-2026-10-14.log`, `${cfg}/logs/zwave-js-2026-10-13.log.gz.tmp`]) {
+    assert.ok(excluded(p), `${p} stays out`);
+  }
+  for (const p of [`${cfg}/logs/zwave-tui-2026-10-13.log.gz`, `${cfg}/logs/zwave-js-2026-10-13.log.gz`, `${cfg}/logs`]) {
+    assert.ok(!excluded(p), `${p} goes in`);
+  }
+  for (const n of ['history', 'evidence', 'baselines', 'outcomes', 'autonomy', 'refresh_trial']) {
+    assert.ok(excluded(`${data}/${n}.json.tmp`), `${n}'s temp file stays out`);
+    assert.ok(!excluded(`${data}/${n}.json`), `${n} goes in`);
+  }
+  assert.ok(!excluded(`${data}/options.json`));
+  for (const cmd of [...yamlTxt.matchAll(/^backup_(?:pre|post): (.+)$/gm)].map((m) => m[1])) {
+    assert.match(cmd, /^[\w/.\- ]+$/, 'the Supervisor splits it without a shell');
+  }
+  assert.ok(read('../../rootfs/usr/bin/zwave-tui-backup-hook').startsWith('#!/bin/sh\n'));
+  const docker = read('../../Dockerfile');
+  assert.match(docker, /^RUN chmod a\+x \/etc\/services\.d\/zwave-tui\/run \/usr\/bin\/zwave-tui-backup-hook \\$/m);
+  assert.match(docker, /zwave-tui-backup-hook pre \\\n && test -f \/tmp\/hook-smoke\.hold \\\n && [^\n]*zwave-tui-backup-hook post \\\n && test ! -e \/tmp\/hook-smoke\.hold/, 'both phases run at build time');
+});
+
+test('the backup hold reaches the archive: run script → config → createLogArchive, and the hook uses the same path, outside every backed-up folder (v0.76.0)', () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const read = (p: string) => readFileSync(resolve(here, p), 'utf8');
+  const run = /^export LOG_ARCHIVE_HOLD=(\/tmp\/[\w.-]+)$/m.exec(read('../../rootfs/etc/services.d/zwave-tui/run'))?.[1];
+  const hook = /^hold="\$\{LOG_ARCHIVE_HOLD:-([^}]+)\}"$/m.exec(read('../../rootfs/usr/bin/zwave-tui-backup-hook'))?.[1];
+  assert.ok(run, 'the run script exports the hold path');
+  assert.equal(hook, run, 'the hook defaults to the same path (docker exec does not see the run script\'s environment)');
+  assert.ok(run!.startsWith('/tmp/'));
+  assert.match(read('../src/config.ts'), /holdPath: process\.env\.LOG_ARCHIVE_HOLD \|\| null,/);
+  assert.match(read('../../rootfs/usr/bin/zwave-tui-backup-hook'), /^opts="\$\{LOG_ARCHIVE_OPTIONS:-\/data\/options\.json\}"$/m, 'the archive-on check reads the add-on\'s options');
 });

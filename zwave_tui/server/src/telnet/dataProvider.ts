@@ -38,7 +38,7 @@ import type {
 } from '../types';
 import type { TrialView } from '../zwave/refreshTrial';
 import type { CoarseBucket } from '../zwave/evidenceStore';
-import type { DriverWsState } from '../zwave/driverWsClient';
+import type { DriverWsState, S2LaneFault } from '../zwave/driverWsClient';
 import type { SleeperWatch } from '../zwave/missedReport';
 import type { PauseState } from '../zwave/autonomyPause';
 import type { ActorArmView, LiveSpanView } from '../zwave/outcomes';
@@ -135,7 +135,9 @@ export interface ZwaveDataSource {
   /** Structured link state (v0.43.0). REQUIRED — see ackEvent. */
   driverWsState(): DriverWsState;
   /** WHY the S2 lane is dark (v0.62.0). REQUIRED — see ackEvent. */
-  s2LaneFault(): 'refused' | 'storm-stopped' | null;
+  s2LaneFault(): S2LaneFault | null;
+  /** When the S2 lane's storm pause ends (v0.76.0). REQUIRED — see ackEvent. */
+  s2LaneResumeAt(): number | null;
   /** Learned RSSI normal for a node (v0.35). REQUIRED — see ackEvent. */
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** REQUIRED — see ackEvent. Two of the three learned yardsticks had no bridge
@@ -275,6 +277,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     driverWsStatus: () => zd.driverWsStatus(),
     driverWsState: () => zd.driverWsState(),
     s2LaneFault: () => zd.s2LaneFault(),
+    s2LaneResumeAt: () => zd.s2LaneResumeAt(),
     rssiNormal: (n) => zd.rssiNormal(n),
     rttNormal: (n) => zd.rttNormal(n),
     timeoutNormal: (n) => zd.timeoutNormal(n),
@@ -408,6 +411,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     driverWsStatus: () => zwaveData.driverWsStatus(),
     driverWsState: () => zwaveData.driverWsState(),
     s2LaneFault: () => zwaveData.s2LaneFault(),
+    s2LaneResumeAt: () => zwaveData.s2LaneResumeAt(),
     rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
     rttNormal: (nodeId) => zwaveData.rttNormal(nodeId),
     timeoutNormal: (nodeId) => zwaveData.timeoutNormal(nodeId),

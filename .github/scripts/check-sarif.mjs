@@ -37,6 +37,19 @@ try {
 }
 
 const runs = Array.isArray(sarif.runs) ? sarif.runs : [];
+
+// A diff-informed analysis keeps a result only when its source or sink sits on
+// a line the pull request changed (codeql-action v4's default for PRs, marked
+// as runs[].properties.incrementalMode containing "diff-informed"). Passing it
+// would gate a PR on part of the code while claiming all of it: refuse it.
+// codeql.yml turns the mode off; this catches it coming back. "overlay" alone
+// is an incremental database build, not a filter, and passes.
+const narrowed = runs.filter((r) => String(r?.properties?.incrementalMode ?? '').split(',').includes('diff-informed'));
+if (narrowed.length > 0) {
+  console.error('ERROR: this SARIF comes from a diff-informed analysis (runs[].properties.incrementalMode includes "diff-informed").');
+  console.error('It covers only results whose source or sink is on a changed line; set CODEQL_ACTION_DIFF_INFORMED_QUERIES: \'false\' on the CodeQL job.');
+  process.exit(2);
+}
 let total = 0;
 const failing = [];
 const byLevel = { error: 0, warning: 0, note: 0, none: 0 };

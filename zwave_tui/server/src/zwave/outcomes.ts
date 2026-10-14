@@ -1695,7 +1695,9 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
 export const EPISODE_SETTLE_CAP_MS = 2 * 60_000;
 
 export function planEpisodeLifecycle(
-  symptoms: { nodeId: number | null; kind: SymptomKind; subsumedBy?: string | null }[],
+  /** `held` (v0.76.0): a symptom held through a dark lane is live — its episode
+   *  does not close — but opens none. */
+  symptoms: { nodeId: number | null; kind: SymptomKind; subsumedBy?: string | null; held?: boolean }[],
   openEpisodes: { key: string; nodeId: number | null; kind: SymptomKind }[],
   pending: Map<string, number>,
   now: number,
@@ -1729,7 +1731,7 @@ export function planEpisodeLifecycle(
   const openSet = new Set(openEpisodes.map((e) => e.key));
   const toOpen: { nodeId: number | null; kind: SymptomKind }[] = [];
   for (const s of symptoms) {
-    if (s.subsumedBy != null) continue;
+    if (s.subsumedBy != null || s.held) continue;
     if (!openSet.has(epKey(s.nodeId, s.kind))) toOpen.push({ nodeId: s.nodeId, kind: s.kind });
   }
   const toResolve: { nodeId: number | null; kind: SymptomKind; key: string; absentSinceMs: number; closeAt: number; heldForProbe: boolean }[] = [];

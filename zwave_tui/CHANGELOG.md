@@ -1,5 +1,145 @@
 # Changelog
 
+## 0.76.0
+
+Ready for the Z-Wave JS driver logging at `verbose`: the driver log stream
+pauses and resumes on its own, the S2 count no longer depends on the log level,
+the archive keeps what `verbose` adds and cuts raw frames, and finished log days
+go into backups.
+
+### Changed — the driver log stream pauses and resumes on its own
+
+- The storm guard used to stop the log subscription until the next reconnect,
+  which could be days away. The archive's driver stream and the S2,
+  duplicate-frame and RF-off watches then stayed dark, silently. Above 3,000
+  lines in a 60 s window it now pauses for 5 min, doubling per consecutive pause
+  to an hour, and resumes on its own. A stream that runs an hour without
+  tripping starts the ladder again.
+- A burst carrying `debug` or `silly` lines takes the full hour at once. A pause
+  is judged on the levels the lines carry, and on the reported level only when
+  they carry none. A reported change to a quieter level resumes early; a louder
+  one never does.
+- Lines that arrive while paused are counted, never matched or archived. S2
+  samples read unknown, and ENGINE shows `S2 lane storm-paused` with the time it
+  resumes. A resume that meets a socket already closing leaves the pause in
+  place instead of reading as a refused subscription.
+- A radio-off reading taken before a pause keeps its own 2-minute deadline
+  instead of being dropped, and a pause never creates one by itself. At
+  `verbose` the busiest minute is likeliest inside the nightly NVM backup, the
+  very blackout that gate exists for.
+
+### Added — the driver's log level is recorded; a detached feed is noticed
+
+- The level is read from the state dump and from the server's `log config
+  updated` event and recorded on the startup line, in the archive and on each
+  change. The level actually received is tracked too: the server's log
+  forwarder keeps the level it started at, and Z-Wave JS UI changes the
+  driver's level without an event.
+- A Z-Wave JS UI debug capture detaches the server's log forwarder with no
+  event. While lines at `verbose` or finer are arriving, ten minutes without
+  any line re-subscribes once, and the lane reads `silent` until a line
+  arrives; its watch starts again at that line. The first `info` line more
+  than a minute after the last verbose one disarms it. A drop to `info` with no
+  event, followed by no line at all, looks the same as a detach and costs one
+  re-subscribe.
+- An unresolved silence, or an armed watchdog, carries over a reconnect to the
+  same network. Home Assistant keeps its log subscription after its debug
+  logging is turned off, so a detached forwarder stays detached across the
+  reconnect.
+- A node the driver log's node filter leaves out records unknown S2, not 0, and
+  an empty filter logs no node. The filter follows `log config updated`, and a
+  change starts a new S2 window.
+- Below `info` the outgoing S2 retry is never written: ENGINE shows
+  `S2 lane level` and S2 samples read unknown, and so does the window that
+  spans a return to `info`.
+
+### Changed — the S2 count does not move when the driver logs at verbose
+
+- `s2-desync` counted two families. The incoming one ("cannot decode command")
+  streams only at `verbose` and finer, after each driver restart and for every
+  out-of-step inbound frame, so raising the level would have raised the count
+  against the same absolute threshold and read as a new S2 fault. The detector
+  now counts the outgoing retry alone, at `info` and finer. History and the
+  evidence file keep their meaning; the incoming lines stay in the archive.
+- An S2 sample counts only when the lane was watched since before its window
+  began, so a window that spans a pause, a re-subscribe or a reconnect reads
+  unknown instead of a partial count.
+- A lane that goes dark holds a matured `s2-desync` instead of clearing it,
+  from the first 5-min slice it partly cannot see, for up to a whole window
+  after it last breached; its episode stays open and the activity log does not
+  call it cleared. An armed one is dropped. After the hold, while the window is
+  still partly unseen, the symptom is judged on recency alone, so a storm still
+  under way is not read as cured by a partial count.
+
+### Fixed — log matching at verbose and finer
+
+- Matching no longer depends on where zwave-js's 80-column cut falls; a
+  production duplicate-frame line had been split mid-phrase.
+- The radio watch reads only the controller's own lines, starting with the
+  phrase. At `verbose` and finer a DRIVER dump or a value line could carry a
+  node name into it. No miscount was possible at the stock `info` level.
+- ENGINE no longer suggests raising the log level when the subscription is
+  refused; the server never refuses it for its level.
+
+### Changed — the log archive at verbose and debug
+
+- At `verbose` the archive blanked two public S2 values as if they were keys:
+  a Nonce Report's receiver entropy and a SPAN extension's sender EI. Both go
+  over the air in clear, and the SPAN is derived from them together with the
+  network key, so they are kept, only in place and in the form zwave-js
+  writes. Every other 128-bit hex string is still replaced, and so is a
+  32-byte S2 public key, which carries the DSK.
+- At `debug` zwave-js logs every byte exchanged with the controller; a
+  non-secure frame's payload is plaintext, a lock's user code included, and
+  during an S0 inclusion the network key travels under a published temporary
+  key. A SERIAL entry now keeps only its direction, its length and its first
+  four bytes. The frame dump zwave-js writes at `warn` (so at `info` too) when
+  it cannot parse a frame, and a raw `payload:`, `event parameters:` or
+  `parameters:` value, get the same cut, wraps under the tree's gutter
+  included. The controller's `[Notification]` line writes raw parameters at
+  `info` for an event with no definition. The live archive held none of these.
+- With the Z-Wave JS server in a development or test build, zwave-js also
+  prints decrypted S0/S2 plaintext, ciphertext, IVs and auth tags; each is cut
+  to its length. The official images run in production mode.
+- Control characters other than tab and newline are written as U+FFFD: a
+  node's name is decoded as raw bytes and could carry terminal escapes.
+- Every gap in the driver stream is marked with an `[archive]` line: the
+  subscription and the level, each pause and resume, a silence re-subscribe, a
+  level or node-filter change, a refusal, the end.
+
+### Changed — finished log days are backed up
+
+- The archive's finished days (`logs/*.log.gz`) now go into the add-on's
+  backups; today's file, still being written, and every temp file stay out
+  (`backup_exclude: ["logs/*.log", "*.tmp"]`, was `logs/*`).
+- The Supervisor copies a folder file by file, and a file renamed or deleted
+  mid-copy leaves the whole add-on, `/data` included, out of that backup;
+  Home Assistant 2026.10's backup screen does not report it. New
+  `backup_pre`/`backup_post` hooks set and clear a hold in `/tmp`, and while it
+  is fresh the archive's housekeeping compresses and deletes nothing. A hold
+  60 min or more away from now is ignored and reported once.
+- The hooks exit 0 on every path, record `backup started` / `backup finished`
+  in the day's archive file while the archive is on, and the image build runs
+  both once.
+- With `log_archive_days: 0` the files the archive wrote earlier are deleted at
+  start and hourly until none is left; otherwise an archive turned off would
+  ride along in every later backup.
+- A restore brings back the finished days up to the backup and loses
+  everything logged after it.
+- Expected size: an estimated 2 MB a backup with the driver at `verbose`, from
+  earlier Z-Wave JS UI logs, and a few hundred KB at `info`.
+
+### Changed — CI judges a pull request on the whole codebase
+
+- codeql-action v4 makes a pull request's analysis "diff-informed" by default,
+  keeping a result only when its source or sink sits on a changed line, so a
+  PR could pass while `main`'s full scan found the same flaw. `codeql.yml`
+  turns that off, and `check-sarif.mjs` refuses a SARIF marked diff-informed.
+- `rotate-changelog.mjs`: a release moved under a history holding only its
+  title is set off by a blank line.
+- The mutation harness's `--only` takes a comma-separated list, and fails on
+  any token that matches nothing.
+
 ## 0.75.5
 
 ### Fixed — the Changelog dialog in Home Assistant opens quickly
@@ -409,152 +549,6 @@ symptom holds while its bursts stay inside the 24-hour lookback.
 5 new tests and 12 new mutants pin these. They cover the hop from the driver's
 log line to the bursts accessor, the detector reading that record inside
 zwaveData, the episode skip, and the Long-Range card.
-
-## 0.73.4
-
-### Fixed — a FLiRS device read as "unknown"
-
-At the schema this add-on negotiates, zwave-js-server sends a node's FLiRS
-flag as its wake-up period (`false`, `"250ms"` or `"1000ms"`), not as a
-boolean. The client mapped the string forms to "unknown", so no FLiRS device
-was ever recognised as one. The string forms now read as FLiRS.
-
-### Fixed — the missed-report watch no longer clears a symptom with no report
-
-- The one-interval radio-off allowance widened a threshold even when the
-  radio-off, a log-stream storm stop or a driver-WS reconnect came after that
-  threshold had been crossed. A missed slot on a dead device could then be
-  logged `missed-report cleared`, or fall from `warn` to `watch`, with no report
-  from the device. A raised severity now holds until the node reports again or
-  its declared interval changes.
-- A node whose sleep flags are not known yet (before the first driver dump) is
-  no longer counted as a sleeper or listed on the SLEEPERS row.
-- The narrative names both reasons an extra interval may be allowed. The plan
-  card no longer says a sleeping device cannot be asked to report: a FLiRS
-  device can be reached at any time.
-
-### Corrected
-
-DOCS §1.2 lists the events the driver-WS client now reads. §7.2.3 counts 16
-kinds and lists `missed-report`. The SLEEPERS row is described as naming the
-unwatched sleepers that fit the width.
-
-2 new tests and 4 new mutants pin these, with one assertion inverted (unknown
-flags are not a sleeper), one test that passed for the wrong reason tightened,
-and the production-hop test now carrying the radio-off evidence and a dropped
-link.
-
-## 0.73.3
-
-### Security — dependency updates
-
-- `fastify` 5.12.3 → 5.12.5: a Denial of Service through an unhandled
-  exception on HTTP/2 trailer responses (the add-on serves HTTP/1).
-- `fast-uri` 3.1.7 → 3.1.8 and 4.1.4 → 4.2.1, both reached through the HTTP
-  server's schema compilers: inconsistent host case normalisation, and mailto
-  header injection, through percent-encoded input.
-
-No code change. `npm audit` reports no vulnerabilities in production
-dependencies.
-
-## 0.73.2
-
-### Fixed — a SmartStart provisioning entry was read as a node
-
-Home Assistant lists a device that is provisioned for SmartStart but not yet
-included as a `zwave_js` device identified `provision_<DSK>`. The registry join
-split every identifier on `-` and took the second block as the node id, so a
-provisioned thermostat became "node 40489": the join counted 40 nodes, and the
-node-status and statistics subscriptions for it failed as `not_found`. Only an
-identifier of the form `<home_id>-<node_id>` (optionally followed by `-…`),
-with a node id from 1 to 4000, now names a node.
-
-One new test pins it and two new mutants show both halves are load-bearing.
-
-## 0.73.1
-
-### Fixed — a sleeper still interviewing at connect time is watched once it is ready
-
-The driver-WS state dump carries no values for a node whose interview has not
-finished, so such a sleeper had no declared interval and stayed unwatched until
-the next reconnect re-sent the dump. The node's `ready` event carries its full
-state. It is now read the same way as the dump, so the declaration arrives as
-soon as the node is ready, and the value events for it are followed from then
-on.
-
-One new test pins it and one new mutant shows it is load-bearing.
-
-## 0.73.0
-
-### Added — `missed-report`: a sleeping device that stops reporting is no longer invisible
-
-A battery device that stopped reporting was covered by no layer. The driver
-rarely transmits to a sleeping node, so it seldom marks one Dead. The liveness
-sweep covers mains nodes only, and `quiet-node` is gated on
-`isListening === true`. The new symptom kind `missed-report` watches sleeping
-nodes against the report interval each device DECLARES:
-
-- The declaration is the node's Wake Up interval (Command Class 132), or else a
-  Configuration parameter whose label contains "heartbeat", in seconds, minutes
-  or hours. It is read from the driver's value DB through the driver-WS state
-  dump, then kept current from the value events for that one value.
-- Silence past 1.5 declared intervals raises a `watch`, and past 2.5 a `warn`.
-  A silence spanning a controller radio-off gets one more interval, because a
-  heartbeat sent during the nightly NVM backup is lost and not retried. So does
-  a silence the driver's log stream did not watch throughout.
-- A node is watched only while it sleeps, is not Dead (`node-down` owns that),
-  declares a readable interval above 0, has been heard, and the driver-WS link
-  is live. `sensor.zwave_tui_engine` gains `sleepers_watched` and
-  `sleepers_total`, and ENGINE's `SLEEPERS` row names each sleeper that is not
-  watched and why.
-- The first step offered is physical: a fresh battery, then a trigger that makes
-  the device transmit.
-
-Nothing is learned from traffic. A learned cadence could not tell a device's
-timer from a household routine, and two adversarial design rounds each found
-new false alarms in the rules added to separate them. A device that declares no
-interval is therefore not watched, and ENGINE says so. The driver-WS client
-sends nothing new; it reads one more value from what it already receives.
-
-### Corrected
-
-- DOCS: the driver does transmit to FLiRS devices (a NoOp at each driver start,
-  and Supervision replies) and can mark them Dead. Only Wake Up devices are
-  never marked Dead.
-
-13 new tests pin these. They cover each way a sleeper is not watched, both
-thresholds and their boundaries, the radio-off allowance and its limits, the
-declaration's source and units, a value event read only for the declaring
-value, the production hop from the dump to the watch, and the published counts.
-20 new mutants show each rule is load-bearing.
-
-## 0.72.1
-
-### Fixed — a summons no longer says a ping often revives the node
-
-`sensor.zwave_tui_recommendation` in state `summons` carried the planner's
-node-down headline, "a ping often revives it", after auto-ping had already
-spent its attempts on the node without an answer. The headline now states what
-the ladder did: "auto-ping gave up after N unanswered attempts". When the
-ladder gave up because its pings never left the add-on, it says the node itself
-was not tested. Before the ladder gives up, the planner's headline still leads.
-
-### Fixed — two auto-ping log lines said something other than what happened
-
-- After a node went Dead with the add-on's own sweep or verification probe to
-  it unanswered, every later ladder attempt was logged as "is still Dead after
-  the immediate retry". Only the second attempt follows that retry. The third
-  now reads "is still Dead after attempt 2".
-- Each verification probe line ended "N owed", where N is the number of NODES
-  the whole fleet's verification queue is serving. Printed beside one node, it
-  read as that node's own count of remaining probes, and it rose and fell as
-  other nodes' bursts overlapped. The line now reads "N nodes owed" ("1 node
-  owed").
-
-One new test pins the summons wording in all three cases and two tests are
-extended for the log lines. Five new mutants show each change is load-bearing,
-and the three existing mutants anchored on the verification line are
-re-pointed.
 
 ## Older releases
 
