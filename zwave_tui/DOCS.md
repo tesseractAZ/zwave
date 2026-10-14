@@ -4630,9 +4630,10 @@ Three form the release relay:
 3. **`release.yml`** (manual `workflow_dispatch`) — the one-click way to open a
    release: computes the next version, refuses one whose tag already exists,
    bumps `version:` in `config.yaml` together with `server/package.json` and the
-   two version fields of `server/package-lock.json`, prepends the CHANGELOG
-   section, and opens a `release/vX.Y.Z` PR titled `Release vX.Y.Z` with
-   auto-merge enabled.
+   two version fields of `server/package-lock.json`, prepends a plain
+   `## X.Y.Z` CHANGELOG section, rotates the oldest sections into
+   `docs/CHANGELOG-history.md`, and opens a `release/vX.Y.Z` PR titled
+   `Release vX.Y.Z` with auto-merge enabled.
 4. **`tag-release.yml`** (a push to `main` that touches `config.yaml`, acting only
    when the commit subject starts with `Release v`) — reads the version from
    `config.yaml`, refuses to tag when `server/package.json` disagrees, pushes the
@@ -4650,8 +4651,9 @@ Three form the release relay:
 
 Cutting a release is therefore: bump `version:` in `config.yaml`,
 `server/package.json` and `server/package-lock.json` together
-(`configContract.test.ts` pins them to each other), add the `## X.Y.Z — DATE`
-CHANGELOG section, and squash-merge with a subject that starts `Release vX.Y.Z`
+(`configContract.test.ts` pins them to each other), add a plain `## X.Y.Z`
+CHANGELOG section and run `node .github/scripts/rotate-changelog.mjs`, and
+squash-merge with a subject that starts `Release vX.Y.Z`
 — or run `release.yml`, which opens that PR. Tagging is automatic; there is no
 manual tag push. A merge whose subject does not start `Release v` releases
 nothing. The dispatch path remains for running the release of an existing tag:

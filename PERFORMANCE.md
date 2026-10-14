@@ -116,9 +116,10 @@ The tables and run figures below are from the v0.71.0 release run, 2026-09-23.
 | Test suite | **1 298 tests, 13.4 s** (`npm test`) |
 
 Full run at v0.71.0: **867 killed · 0 survived · 12 equivalent · 0 missing ·
-0 ambiguous · 0 invalid · 0 relabel.** §3 has not been re-profiled since; each
-later release's full-run tally is in the CHANGELOG (v0.72.0: 1017 killed,
-0 survived, 12 equivalent).
+0 ambiguous · 0 invalid · 0 relabel.** §3 has not been re-profiled since. The
+last full run on record is v0.72.0's (1017 killed, 0 survived, 12 equivalent),
+in [`docs/CHANGELOG-history.md`](https://github.com/tesseractAZ/zwave/blob/main/docs/CHANGELOG-history.md); later releases record only the
+mutants they added.
 
 ### Where the 2596 seconds actually go
 

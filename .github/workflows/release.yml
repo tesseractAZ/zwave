@@ -8,6 +8,7 @@ name: Release
 #     3. Bump `version:` in zwave_tui/config.yaml AND zwave_tui/server/package.json
 #        (plus the two version fields in its package-lock.json)
 #     4. Prepend a CHANGELOG section (your notes, or the commit log since the last tag)
+#        and rotate the oldest sections into docs/CHANGELOG-history.md
 #     5. Open a `release/vX.Y.Z` PR with auto-merge enabled
 #
 # `main` requires status checks that a freshly created commit has not run, so
@@ -114,10 +115,18 @@ jobs:
             body=$(git log --no-merges --pretty='- %s' ${range:-HEAD} | head -40)
             [[ -n "$body" ]] || body="- Maintenance release."
           fi
-          printf '# Changelog\n\n## %s — %s\n\n%s\n\n' \
-            "$NEXT" "$(date -u +%Y-%m-%d)" "$body" > /tmp/head.md
+          # A "## " heading inside the notes would split this release into two
+          # sections and fail the changelog contract: demote it to "###".
+          body=$(sed -E 's/^## /### /' <<<"$body")
+          # A plain "## X.Y.Z" heading, no date: Home Assistant's update dialog
+          # shows the notes from the new release down to the installed one when
+          # the heading is exactly that, and the whole file otherwise.
+          printf '# Changelog\n\n## %s\n\n%s\n\n' "$NEXT" "$body" > /tmp/head.md
           tail -n +3 zwave_tui/CHANGELOG.md >> /tmp/head.md
           mv /tmp/head.md zwave_tui/CHANGELOG.md
+          # Keep the shipped file under the size Home Assistant renders quickly:
+          # the oldest sections move to docs/CHANGELOG-history.md.
+          node .github/scripts/rotate-changelog.mjs
           echo "--- bumped ---"
           grep -E '^version:' zwave_tui/config.yaml
           node -p "require('./zwave_tui/server/package.json').version"
@@ -134,7 +143,8 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git checkout -b "$branch"
           git add zwave_tui/config.yaml zwave_tui/server/package.json \
-            zwave_tui/server/package-lock.json zwave_tui/CHANGELOG.md
+            zwave_tui/server/package-lock.json zwave_tui/CHANGELOG.md \
+            docs/CHANGELOG-history.md
           # The subject MUST start with "Release v" — tag-release.yml keys off it.
           git commit -m "Release v${NEXT}"
           git push -u origin "$branch"
