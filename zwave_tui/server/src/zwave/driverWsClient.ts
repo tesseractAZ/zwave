@@ -176,6 +176,10 @@ export interface DriverWsClient {
    *  (v0.76.0): `rfWatchSince`, moved on when the node filter changes — a
    *  window that spans the change counts nodes it did not log, or the reverse. */
   s2WatchSince(): number | null;
+  /** The log lane at a glance, for the engine sensor (v0.76.1): the reported
+   *  level, whether the S2 lane is watching, and whether the silence watchdog is
+   *  armed — until v0.76.1 visible only on the login-gated ENGINE screen. */
+  logWatch(): DriverLogWatch;
   start(): void;
   stop(): void;
   state(): DriverWsState;
@@ -441,6 +445,9 @@ export function stormPauseMs(trip: number, level: DriverLogLevel | null, g: Pick
   return Math.min(g.pauseBaseMs * 2 ** Math.min(n - 1, 10), g.pauseMaxMs);
 }
 
+/** The driver log lane at a glance (v0.76.1). */
+export interface DriverLogWatch { level: DriverLogLevel | null; laneLive: boolean; watchdogArmed: boolean }
+
 /** A gap or a change in the driver log stream (v0.76.0), for an archive note. */
 export type LogGap =
   | { kind: 'subscribed'; at: number; level: DriverLogLevel | null; after: 'connect' | 'silence' }
@@ -622,6 +629,8 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   /** The silence watchdog (v0.76.0): one re-subscribe per silent stretch. */
   let lastLogEvAt: number | null = null;
   let lastVerboseAt: number | null = null;
+  /** The watchdog state last written to the log (v0.76.1): one line per change. */
+  let watchdogNoted = false;
   let silenceTried = false;
   let subscribeWhy: 'connect' | 'resume' | 'silence' = 'connect';
   /** The watchdog's state when the last lane ended, carried to the next
@@ -673,6 +682,14 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
    *  `verboseRecentMs` of a verbose-or-finer one (v0.76.0). */
   function watchdogArmed(): boolean {
     return lastLogEvAt != null && lastVerboseAt != null && lastLogEvAt - lastVerboseAt <= g.verboseRecentMs;
+  }
+  /** One add-on log line when the watchdog arms or disarms (v0.76.1): arming
+   *  writes nothing else, so whether it was armed could not be shown. */
+  function noteWatchdog(why: string): void {
+    const armed = watchdogArmed();
+    if (armed === watchdogNoted) return;
+    watchdogNoted = armed;
+    log(`driver-ws: silence watchdog ${armed ? 'armed' : 'disarmed'} — ${why}`);
   }
 
   /** The log lane ends with the socket: the archive gets one 'ended' note if a
@@ -746,6 +763,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     filterChangedAt = null;
     lastLogEvAt = null;
     lastVerboseAt = null;
+    watchdogNoted = false; // the lane's 'ended' note already says it stopped
     subscribeWhy = 'connect';
     setState('connecting', `connecting to ${redactUrl(url)}`);
     let sock: WebSocket;
@@ -886,6 +904,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
               lastLogEvAt = now;
               lastVerboseAt = now;
               seenLevel = c.level;
+              noteWatchdog('carried over the reconnect');
             }
           }
           if (success) {
@@ -1003,6 +1022,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     if (lvl != null && !levelAtLeast(seenLevel, lvl)) seenLevel = lvl;
     if (lvl != null && !levelAtLeast(loudestReceived, lvl)) loudestReceived = lvl;
     if (levelAtLeast(lvl, 'verbose')) lastVerboseAt = now;
+    noteWatchdog(levelAtLeast(lvl, 'verbose') ? 'verbose lines are arriving' : `no verbose line in the ${durText(g.verboseRecentMs)} before this one`);
     if (logEvCount > g.perMin) {
       pauseLogs(now);
       return;
@@ -1061,6 +1081,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     logEvWindowTop = null;
     seenLevel = null;
     lastVerboseAt = null;
+    noteWatchdog(why === 'silence' ? 're-subscribed after the silence' : 'resumed after the storm pause');
     logsAcked = false;
     logsLiveSince = null;
     subscribeWhy = why;
@@ -1114,7 +1135,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       if (lvl == null || lvl === driverLogLevel) return;
       const from = driverLogLevel;
       driverLogLevel = lvl;
-      if (!levelAtLeast(lvl, 'verbose')) { seenLevel = null; lastVerboseAt = null; } // the watchdog disarms below verbose
+      if (!levelAtLeast(lvl, 'verbose')) { seenLevel = null; lastVerboseAt = null; noteWatchdog(`level ${lvl}`); } // the watchdog disarms below verbose
       // Back to info or finer from below it: what came before was not watched.
       if (from != null && !levelAtLeast(from, 'info') && levelAtLeast(lvl, 'info')) levelOkSince = now;
       log(`driver-ws: driver log level ${from ?? 'unknown'} → ${lvl}`);
@@ -1177,6 +1198,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     s2LaneResumeAt: () => stormResumeAt,
     driverLogLevel: () => driverLogLevel,
     logNodeFilter: () => logNodeFilter,
+    logWatch: (): DriverLogWatch => ({ level: driverLogLevel, laneLive: laneLive(), watchdogArmed: watchdogArmed() }),
     s2WatchSince: () => {
       const w = watchSince();
       return w == null ? null : Math.max(w, filterChangedAt ?? w);

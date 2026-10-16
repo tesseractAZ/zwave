@@ -204,7 +204,7 @@ import type { TrialView } from './zwave/refreshTrial';
 import type { SleeperWatch } from './zwave/missedReport';
 import type { PauseState } from './zwave/autonomyPause';
 import type { ActorArmView, LiveSpanView } from './zwave/outcomes';
-import type { DriverWsState, S2LaneFault } from './zwave/driverWsClient';
+import type { DriverWsState, S2LaneFault, DriverLogWatch } from './zwave/driverWsClient';
 export type { DriverWsState } from './zwave/driverWsClient';
 import type { CoarseBucket } from './zwave/evidenceStore';
 export type { CoarseBucket } from './zwave/evidenceStore';
@@ -568,6 +568,8 @@ export interface DataProvider {
   s2LaneFault?(): S2LaneFault | null;
   /** When a storm pause of the S2 lane ends (v0.76.0), or null. */
   s2LaneResumeAt?(): number | null;
+  /** The driver log lane at a glance (v0.76.1), or null without a driver client. */
+  driverLogWatch?(): DriverLogWatch | null;
   /**
    * The engine's LEARNED RSSI normal for a node (v0.35): median, MAD-derived
    * scale, whether it has graduated, and the days behind it.

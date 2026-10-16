@@ -434,6 +434,8 @@ test('a node-filter change starts a new S2 window, and a stretch below info read
   const cfg = (config: Record<string, unknown>) => srv.push({ source: 'driver', event: 'log config updated', config });
   try {
     await waitFor(() => gaps.includes('subscribed'));
+    // The data layer hands the real client's lane through (v0.76.1).
+    assert.deepEqual(zd.driverLogWatch(), { level: 'info', laneLive: true, watchdogArmed: false });
     pushStats(ha, statsEvent());
     pushStats(ha, statsEvent({ commands_tx: 11 }));
     await waitFor(() => after(0).includes(0));

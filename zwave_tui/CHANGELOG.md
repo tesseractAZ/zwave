@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.76.1
+
+Follow-ups from a 6.35 h trial of the Z-Wave JS driver at `verbose`: the driver
+log lane is visible to automations, the long-term evidence says when S2 was
+blind, and the engine sensor no longer reads 0 of 0 at boot.
+
+### Added — the driver log lane on the engine sensor
+
+- `sensor.zwave_tui_engine` gains `driver_log_level`, `s2_lane` (`live`,
+  `pending`, `storm-paused`, `silent`, `refused`, `level`, `down`, `disabled`)
+  and `silence_watchdog` (`armed`, `disarmed`). `/api/health` carries them
+  too. Until now the lane's state was shown only on the login-gated ENGINE
+  screen.
+- The silence watchdog writes one add-on log line when it arms or disarms. It
+  arms only while `verbose` lines arrive, and arming wrote nothing, so whether
+  it had armed could not be shown.
+
+### Added — long-term evidence counts the S2 samples it could see
+
+- Each 30-min evidence bucket now counts its known S2 samples (`s2N`) beside
+  the resync sum, so 0 resyncs over 0 known samples reads blind rather than
+  clean once the 40-min fine ring has rolled over. A bucket saved before
+  0.76.1 reads unknown.
+
+### Fixed — the engine sensor at boot
+
+- Nothing is published to Home Assistant before the first roster load. With
+  no node loaded every count was 0, and the engine sensor read "0 unmeasured
+  of 0" for about 30 s at each start.
+
+### Documented — what `verbose` costs here
+
+- The cost is the host journal, not the archive. The Z-Wave JS app writes
+  every driver entry to the journal, which is capped at 500 MB. The trial
+  measured about 5,600 more journal data objects an hour at `verbose`, which
+  would leave permanent `verbose` about 4 h above a 36 h journal floor on a
+  typical day. `info` stays the permanent level; `verbose` is set at runtime
+  for bounded investigations.
+- The archive at `verbose` is about 3.3 MB a day raw and 181–195 KB gzipped.
+- The storm guard counts driver entries, not printed lines: the nightly NVM
+  backup was 1,335 entries (5,271 lines) in its busiest 60 s, 44.5 % of the
+  limit. Restart, re-interview, heal, inclusion and reconnect bursts are
+  still unmeasured at `verbose`.
+
 ## 0.76.0
 
 Ready for the Z-Wave JS driver logging at `verbose`: the driver log stream
@@ -518,37 +562,6 @@ The server dependency updates merged after 0.74.0 (`@fastify/websocket`
 11.3.1, `tsx` and two others) ship in this release.
 
 5 new tests and 8 new mutants pin these.
-
-## 0.74.0
-
-### Added — `repeated-frames`: a link that works one way is no longer invisible
-
-A node that does not hear the controller's acknowledgement sends the same frame
-again, and the driver drops each S2 copy as a duplicate. On the reference mesh
-one dimmer, switched by an automation, repeated one reply 20 times in a minute.
-The only trace was a driver log line no surface read.
-
-- The driver-WS client now matches that log line in the stream it already
-  receives, and keeps only the node id and the time.
-- A burst is 5 or more drops from one node within a minute. The new symptom kind
-  `repeated-frames` (watch) fires after the dwell while the node has had two
-  bursts in 24 hours, or one of 15 or more, and never on a Dead node.
-- Over two measured days that flagged one node. Four other nodes, each with one
-  burst of 5–13, were not flagged.
-- The plan leads with the physical path, with a direct-link card for a
-  Long-Range node. A route rebuild is offered only blocked, because it helps
-  only after the path changed, and it deletes priority routes (RESEARCH §4.1).
-- It opens no ledger episode: a 24-hour count cannot be scored per sample, and
-  an episode would queue verification reads to the node whose link is failing.
-- When the driver's log lane is dark, ENGINE says that s2-desync and
-  repeated-frames detection are both off.
-
-Drop times are kept in memory only, so a restart starts the count again. The
-symptom holds while its bursts stay inside the 24-hour lookback.
-
-5 new tests and 12 new mutants pin these. They cover the hop from the driver's
-log line to the bursts accessor, the detector reading that record inside
-zwaveData, the episode skip, and the Long-Range card.
 
 ## Older releases
 

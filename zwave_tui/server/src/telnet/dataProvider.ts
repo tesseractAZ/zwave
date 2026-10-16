@@ -38,7 +38,7 @@ import type {
 } from '../types';
 import type { TrialView } from '../zwave/refreshTrial';
 import type { CoarseBucket } from '../zwave/evidenceStore';
-import type { DriverWsState, S2LaneFault } from '../zwave/driverWsClient';
+import type { DriverWsState, S2LaneFault, DriverLogWatch } from '../zwave/driverWsClient';
 import type { SleeperWatch } from '../zwave/missedReport';
 import type { PauseState } from '../zwave/autonomyPause';
 import type { ActorArmView, LiveSpanView } from '../zwave/outcomes';
@@ -138,6 +138,8 @@ export interface ZwaveDataSource {
   s2LaneFault(): S2LaneFault | null;
   /** When the S2 lane's storm pause ends (v0.76.0). REQUIRED — see ackEvent. */
   s2LaneResumeAt(): number | null;
+  /** The driver log lane at a glance (v0.76.1). REQUIRED — see ackEvent. */
+  driverLogWatch(): DriverLogWatch | null;
   /** Learned RSSI normal for a node (v0.35). REQUIRED — see ackEvent. */
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** REQUIRED — see ackEvent. Two of the three learned yardsticks had no bridge
@@ -278,6 +280,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     driverWsState: () => zd.driverWsState(),
     s2LaneFault: () => zd.s2LaneFault(),
     s2LaneResumeAt: () => zd.s2LaneResumeAt(),
+    driverLogWatch: () => zd.driverLogWatch(),
     rssiNormal: (n) => zd.rssiNormal(n),
     rttNormal: (n) => zd.rttNormal(n),
     timeoutNormal: (n) => zd.timeoutNormal(n),
@@ -412,6 +415,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     driverWsState: () => zwaveData.driverWsState(),
     s2LaneFault: () => zwaveData.s2LaneFault(),
     s2LaneResumeAt: () => zwaveData.s2LaneResumeAt(),
+    driverLogWatch: () => zwaveData.driverLogWatch(),
     rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
     rttNormal: (nodeId) => zwaveData.rttNormal(nodeId),
     timeoutNormal: (nodeId) => zwaveData.timeoutNormal(nodeId),

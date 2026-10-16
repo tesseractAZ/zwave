@@ -192,6 +192,10 @@ export interface CoarseBucket {
   routeChanges: number;
   /** S2 SPAN-resync events folded into this bucket (v0.26). */
   s2: number;
+  /** How many of its samples had a KNOWN S2 reading (v0.76.1): `s2` sums only
+   *  those, so 0 resyncs over 0 known samples was blind, not clean. Null in a
+   *  bucket restored from before v0.76.1, whose count was never recorded. */
+  s2N: number | null;
   /** Aggregates over FRESH rssi/rtt observations only. */
   rssiN: number;
   rssiSum: number;
@@ -431,6 +435,8 @@ interface CoarseCols {
   rc: number[];
   /** Optional: absent in pre-v0.26 snapshots (revives as 0s). */
   s2?: number[];
+  /** Optional: absent before v0.76.1 (revives as null — unknown, not 0). */
+  s2N?: (number | null)[];
   rN: number[];
   rS: number[];
   rMin: (number | null)[];
@@ -731,7 +737,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     if (!b) {
       b = {
         t0, n: 0, freshN: 0, invalidW: 0, dTx: 0, dTimeout: 0, dDropTx: 0, dRx: 0,
-        flaps: 0, routeChanges: 0, s2: 0, rssiN: 0, rssiSum: 0, rssiMin: null, rssiMax: null,
+        flaps: 0, routeChanges: 0, s2: 0, s2N: 0, rssiN: 0, rssiSum: 0, rssiMin: null, rssiMax: null,
         rttN: 0, rttSum: 0, rateMin: null,
       };
       ring.push(b);
@@ -749,7 +755,10 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     if (s.dRx != null) b.dRx += s.dRx;
     b.flaps += s.dFlaps;
     b.routeChanges += s.dRouteChanges;
-    if (s.dS2Resync != null) b.s2 += s.dS2Resync; // null = lane dark, not zero
+    if (s.dS2Resync != null) {
+      b.s2 += s.dS2Resync; // null = lane dark, not zero
+      if (b.s2N != null) b.s2N += 1; // a restored bucket's count stays unknown
+    }
     // rssi/rtt carry information only when fresh (pseudo-replication guard).
     if (s.fresh && s.rssi != null) {
       b.rssiN += 1;
@@ -839,6 +848,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       last.flaps += b.flaps;
       last.routeChanges += b.routeChanges;
       last.s2 += b.s2;
+      last.s2N = last.s2N == null || b.s2N == null ? null : last.s2N + b.s2N;
       last.rssiN += b.rssiN;
       last.rssiSum += b.rssiSum;
       last.rssiMin = last.rssiMin == null ? b.rssiMin : b.rssiMin == null ? last.rssiMin : Math.min(last.rssiMin, b.rssiMin);
@@ -1144,6 +1154,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
                 flaps: cols.fl?.[i] ?? 0,
                 routeChanges: cols.rc?.[i] ?? 0,
                 s2: cols.s2?.[i] ?? 0,
+                s2N: cols.s2N == null ? null : numOrNull(cols.s2N[i]),
                 rssiN: cols.rN?.[i] ?? 0,
                 rssiSum: cols.rS?.[i] ?? 0,
                 rssiMin: numOrNull(cols.rMin?.[i]),
@@ -1319,7 +1330,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           if (!Number.isInteger(id) || id <= 0) continue;
           const keep = ring.filter((b) => bucketWorthPersisting(b) && b.t0 >= saveCutoff);
           if (keep.length === 0) continue;
-          const cols: CoarseCols = { t0: [], n: [], fN: [], iW: [], dTx: [], dTo: [], dDr: [], dRx: [], fl: [], rc: [], s2: [], rN: [], rS: [], rMin: [], rMax: [], ttN: [], ttS: [], rate: [] };
+          const cols: CoarseCols = { t0: [], n: [], fN: [], iW: [], dTx: [], dTo: [], dDr: [], dRx: [], fl: [], rc: [], s2: [], s2N: [], rN: [], rS: [], rMin: [], rMax: [], ttN: [], ttS: [], rate: [] };
           for (const b of keep) {
             cols.t0.push(b.t0);
             cols.n.push(b.n);
@@ -1332,6 +1343,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             cols.fl.push(b.flaps);
             cols.rc.push(b.routeChanges);
             cols.s2!.push(b.s2);
+            cols.s2N!.push(b.s2N);
             cols.rN.push(b.rssiN);
             cols.rS.push(b.rssiSum);
             cols.rMin.push(b.rssiMin);

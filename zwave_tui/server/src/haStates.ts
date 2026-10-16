@@ -146,6 +146,13 @@ export function buildStates(data: DataProvider, now: number = Date.now(), bo: Bu
   const warn = syms.filter((s) => s.severity === 'warn').length;
   const ap = data.autoPingState?.() ?? null;
   const eng = data.engineStatus();
+  // The driver log lane (v0.76.1): what feeds the S2, duplicate-frame and
+  // RF-off watches, and whether the silence watchdog is armed.
+  const lw = data.driverLogWatch?.() ?? null;
+  const s2Lane = lw == null ? 'disabled'
+    : data.driverWsState?.() !== 'live' ? 'down'
+    : lw.laneLive ? 'live'
+    : (data.s2LaneFault?.() ?? 'pending');
   // A held identity decision is degraded by the EXISTING definition — the
   // engine is structurally unable to do its job: it is running with no learned
   // state and cannot resume until a person answers. It is also the only engine
@@ -325,6 +332,13 @@ export function buildStates(data: DataProvider, now: number = Date.now(), bo: Bu
         refresh_trial_held: tv?.held.n ?? 0,
         refresh_trial_held_improved: tv?.held.ok ?? 0,
         refresh_trial_held_deaths: tv?.held.deaths ?? 0,
+        // v0.76.1: the driver log lane — the reported level, the S2 lane
+        // (live | pending | storm-paused | silent | refused | level | down |
+        // disabled) and the silence watchdog, which arms only while verbose
+        // lines arrive. They move on a lane event, never with the clock.
+        driver_log_level: lw?.level ?? null,
+        s2_lane: s2Lane,
+        silence_watchdog: lw == null ? null : lw.watchdogArmed ? 'armed' : 'disarmed',
       },
     },
     // ROUTE FAILURES (v0.68.0). Recorded per node since v0.3x and shown on the
@@ -409,6 +423,9 @@ export function startHaStates(
 
   const publishOnce = async (): Promise<void> => {
     if (!opts.token) return;
+    // Not before the first roster (v0.76.1): with no node loaded every count is
+    // 0, and the engine sensor read "0 unmeasured of 0" for ~30 s at each boot.
+    if (!opts.data.ready()) return;
     let tickErr: string | null = null;
     let failed = 0;
     let total = 0;

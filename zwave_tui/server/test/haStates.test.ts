@@ -16,6 +16,7 @@ const sym = (over: Partial<Symptom> = {}): Symptom =>
   ({ kind: 'dead-flap', nodeId: 7, severity: 'warn', since: 1, narrative: 'x', basis: 'measured', members: [], ...over } as never);
 
 const data = (over: Partial<DataProvider> = {}): DataProvider => ({
+  ready: () => true,
   symptoms: () => [],
   engineStatus: () => ({ enabled: true, ready: 3, total: 38, timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 22, rssiReady: 22, band: 0, bands: 6 }),
   autoPingState: () => AP() as never,
@@ -394,7 +395,9 @@ test('the recommendation is the sixth entity; the other five keep their ids and 
       'sleepers_watched', 'sleepers_total',
       // v0.75.0: the refresh trial's phase and counts.
       'refresh_trial', 'refresh_trial_treated', 'refresh_trial_treated_improved', 'refresh_trial_treated_deaths',
-      'refresh_trial_held', 'refresh_trial_held_improved', 'refresh_trial_held_deaths']);
+      'refresh_trial_held', 'refresh_trial_held_improved', 'refresh_trial_held_deaths',
+      // v0.76.1: the driver log lane.
+      'driver_log_level', 's2_lane', 'silence_watchdog']);
   const r = by(s, ENTITY_RECOMMENDATION);
   assert.equal(r.state, 'none');
   assert.equal(r.attrs.automatic, false);
@@ -494,4 +497,35 @@ test('the refresh trial: a phase word and plain counts on the engine; a latch is
     assert.equal(by(both, ENTITY_DEGRADED).state, 'on');
     assert.match(String(by(both, ENTITY_DEGRADED).attrs.reason), new RegExp(`suppressed:${why}`), `${why} is not hidden by the trial latch`);
   }
+});
+
+test('the engine sensor carries the driver log lane: level, S2 lane state, silence watchdog (v0.76.1)', () => {
+  const eng = (over: Partial<DataProvider>) => by(buildStates(data(over)), ENTITY_ENGINE).attrs;
+  const lw = (o: Partial<{ level: string | null; laneLive: boolean; watchdogArmed: boolean }> = {}) =>
+    () => ({ level: 'verbose', laneLive: true, watchdogArmed: true, ...o }) as never;
+  // No driver client (an install that opted out): nothing to report.
+  assert.deepEqual([eng({}).driver_log_level, eng({}).s2_lane, eng({}).silence_watchdog], [null, 'disabled', null]);
+  const live = { driverWsState: () => 'live' as never };
+  assert.deepEqual([eng({ ...live, driverLogWatch: lw() }).driver_log_level, eng({ ...live, driverLogWatch: lw() }).s2_lane, eng({ ...live, driverLogWatch: lw() }).silence_watchdog], ['verbose', 'live', 'armed']);
+  assert.equal(eng({ ...live, driverLogWatch: lw({ watchdogArmed: false, level: 'info' }) }).silence_watchdog, 'disarmed');
+  // Dark: the fault names why; with none it is pending; a link that is not live is down.
+  assert.equal(eng({ ...live, driverLogWatch: lw({ laneLive: false }), s2LaneFault: () => 'storm-paused' }).s2_lane, 'storm-paused');
+  assert.equal(eng({ ...live, driverLogWatch: lw({ laneLive: false }), s2LaneFault: () => null }).s2_lane, 'pending');
+  assert.equal(eng({ driverWsState: () => 'backoff' as never, driverLogWatch: lw() }).s2_lane, 'down');
+});
+
+test('nothing is published before the first roster: the engine sensor read "0 of 0" for ~30 s at boot (v0.76.1)', async () => {
+  let ready = false;
+  let posts = 0;
+  const pub = startHaStates({
+    data: data({ ready: () => ready }), baseUrl: 'http://x', token: 't', writeActions: false, intervalMs: 3_600_000,
+    fetchImpl: (async () => { posts += 1; return { ok: true } as Response; }) as never,
+  });
+  try {
+    await pub.publishNow();
+    assert.equal(posts, 0, 'not ready: nothing is sent');
+    ready = true;
+    await pub.publishNow();
+    assert.ok(posts > 0, 'ready: everything is sent');
+  } finally { pub.stop(); }
 });

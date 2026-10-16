@@ -207,7 +207,7 @@ const DATA: DataProvider = {
   // typechecked while asserting a member that reads `undefined` in production.
   evidenceCoarse: () => [{
     t0: NOW - 12 * 86_400_000, n: 96, freshN: 72, invalidW: 0,
-    dTx: 480, dTimeout: 6, dDropTx: 1, dRx: 460, flaps: 0, routeChanges: 2, s2: 0,
+    dTx: 480, dTimeout: 6, dDropTx: 1, dRx: 460, flaps: 0, routeChanges: 2, s2: 0, s2N: 96,
     rssiN: 72, rssiSum: -4464, rssiMin: -70, rssiMax: -55,
     rttN: 72, rttSum: 2160, rateMin: 100,
   }],

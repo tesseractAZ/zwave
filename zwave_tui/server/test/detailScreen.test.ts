@@ -738,7 +738,7 @@ test('every EVIDENCE label fits the 8-column cell so the values align (v0.48.1)'
 // disables the check the fixture exists to perform.
 const CB = (over: Partial<CoarseBucket> = {}): CoarseBucket => ({
   t0: 0, n: 10, freshN: 8, invalidW: 0, dTx: 100, dTimeout: 2, dDropTx: 1, dRx: 95,
-  flaps: 0, routeChanges: 0, s2: 0,
+  flaps: 0, routeChanges: 0, s2: 0, s2N: 10,
   rssiN: 10, rssiSum: -650, rssiMin: -70, rssiMax: -60,
   rttN: 10, rttSum: 400, rateMin: 100, ...over,
 });
