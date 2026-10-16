@@ -211,6 +211,49 @@ test('coverage metadata: registerNode + cumulative counts survive ring eviction'
   assert.equal(s.recordingSince(), FIXED);
 });
 
+test('a coarse bucket counts its KNOWN S2 samples, so 0 resyncs over 0 known reads blind — and an older file revives the count as unknown (v0.76.1)', () => {
+  const path = freshPath();
+  const s = mkStore(path);
+  s.registerNode(6, FIXED);
+  s.record(6, stats({ commandsTX: 100 }), NodeStatus.Alive, FRESH, FIXED); // no s2Resyncs: the lane was dark
+  s.record(6, stats({ commandsTX: 110 }), NodeStatus.Alive, { ...FRESH, s2Resyncs: 0 }, FIXED + TICK);
+  s.record(6, stats({ commandsTX: 120 }), NodeStatus.Alive, { ...FRESH, s2Resyncs: 2 }, FIXED + 2 * TICK);
+  assert.deepEqual([s.coarseForNode(6)[0].s2, s.coarseForNode(6)[0].s2N], [2, 2], 'the dark sample is not counted');
+  s.save();
+  const back = mkStore(path);
+  back.load();
+  assert.equal(back.coarseForNode(6)[0].s2N, 2, 'round-trips');
+  // A file written before v0.76.1 has no s2N column: unknown, not 0 — and it
+  // stays unknown when the restored bucket goes on filling.
+  const raw = JSON.parse(readFileSync(path, 'utf8'));
+  const strip = (o: unknown): void => { if (o && typeof o === 'object') for (const [k, v] of Object.entries(o)) { if (k === 's2N') delete (o as Record<string, unknown>)[k]; else strip(v); } };
+  strip(raw);
+  writeFileSync(path, JSON.stringify(raw));
+  const old = mkStore(path);
+  old.load();
+  assert.equal(old.coarseForNode(6)[0].s2N, null);
+  old.record(6, stats({ commandsTX: 130 }), NodeStatus.Alive, { ...FRESH, s2Resyncs: 1 }, FIXED + 3 * TICK);
+  assert.deepEqual([old.coarseForNode(6)[0].s2, old.coarseForNode(6)[0].s2N], [3, null]);
+  // Duplicate-t0 buckets (a backward clock step) merge on load: known counts
+  // add, and one unknown makes the sum unknown.
+  for (const [second, want] of [[3, 5], [null, null]] as const) {
+    const dup = JSON.parse(readFileSync(path, 'utf8'));
+    const find = (o: Record<string, unknown>): Record<string, unknown[]> | null => {
+      if (Array.isArray(o.t0) && Array.isArray(o.s2)) return o as Record<string, unknown[]>;
+      for (const v of Object.values(o)) if (v && typeof v === 'object') { const f = find(v as Record<string, unknown>); if (f) return f; }
+      return null;
+    };
+    const c = find(dup)!;
+    for (const k of Object.keys(c)) if (Array.isArray(c[k])) c[k] = [...c[k], c[k][0]];
+    c.s2N = [2, second];
+    writeFileSync(path, JSON.stringify(dup));
+    const m = mkStore(path);
+    m.load();
+    assert.equal(m.coarseForNode(6).length, 1);
+    assert.equal(m.coarseForNode(6)[0].s2N, want, `merge of 2 and ${second}`);
+  }
+});
+
 /* ── Persistence ─────────────────────────────────────────────────────────── */
 
 test('save → load round-trips EVERY column with null fidelity (fine, coarse, controller, route-fails, coverage)', () => {

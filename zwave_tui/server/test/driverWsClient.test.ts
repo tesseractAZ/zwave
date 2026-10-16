@@ -877,6 +877,38 @@ test('a stream resumed after a storm pause is not judged silent on the lines bef
   }
 });
 
+test('the silence watchdog writes one line when it arms or disarms, and logWatch reports the lane (v0.76.1)', async () => {
+  const srv = await mockServer({ logLevel: 'verbose' });
+  const { callbacks } = collect();
+  const lines: string[] = [];
+  let n = 0;
+  const client = createDriverWsClient({ url: srv.url, callbacks: { ...callbacks, onDriverLog: () => { n += 1; } }, reconnectBaseMs: 60, log: (m: string) => lines.push(m), logGuard: { verboseRecentMs: 200 } });
+  client.start();
+  const watch = () => lines.filter((l) => /silence watchdog/.test(l));
+  try {
+    await waitFor(() => client.s2LaneLive());
+    assert.deepEqual(client.logWatch(), { level: 'verbose', laneLive: true, watchdogArmed: false }, 'no verbose line yet');
+    srv.push(verboseLine);
+    srv.push(verboseLine);
+    await waitFor(() => n === 2);
+    assert.deepEqual(watch(), ['driver-ws: silence watchdog armed — verbose lines are arriving'], 'one line, not one per line');
+    assert.equal(client.logWatch().watchdogArmed, true);
+    await sleep(300);
+    srv.push(logEvent(6, 'an info line'));
+    await waitFor(() => n === 3);
+    assert.equal(watch()[1], 'driver-ws: silence watchdog disarmed — no verbose line in the 0s before this one');
+    srv.push(verboseLine);
+    await waitFor(() => n === 4);
+    srv.push({ source: 'driver', event: 'log config updated', config: { level: 'info' } });
+    await waitFor(() => client.driverLogLevel() === 'info');
+    assert.deepEqual(watch().slice(2), ['driver-ws: silence watchdog armed — verbose lines are arriving', 'driver-ws: silence watchdog disarmed — level info']);
+    assert.deepEqual(client.logWatch(), { level: 'info', laneLive: true, watchdogArmed: false });
+  } finally {
+    client.stop();
+    await srv.close();
+  }
+});
+
 test('the storm pause is judged on the lines received: a reported debug level with verbose lines takes the first rung (v0.76.0 review)', async () => {
   for (const [line, rung, level] of [[{ level: 'verbose' }, 300, 'verbose'], [{ level: undefined }, 60_000, 'debug']] as const) {
     const srv = await mockServer({ logLevel: 'debug' });
@@ -1187,6 +1219,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       driverWsState: () => 'backoff',
       s2LaneFault: () => 'storm-paused',
       s2LaneResumeAt: () => 1234,
+      driverLogWatch: () => ({ level: 'verbose', laneLive: false, watchdogArmed: true }),
       autoPingState: () => ({ lastTickMs: 42, suppressed: 'storm', listening: 35, deadListening: 1, staleDue: 2, stalestMs: 60, verifyOwed: 3, config: { enabled: true, writeActions: true, afterMs: 1, maxAttempts: 3, staleMs: 1 }, nodes: [] }),
       rssiNormal: (n: number) => ({ median: -n, scale: 3, ready: true, days: 7 }),
   } as never);
@@ -1222,6 +1255,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
     assert.equal(provider.provider.controlArm?.('rtt-degraded')?.n, 6, 'controlArm crosses the bridge');
     assert.equal(provider.provider.s2LaneFault?.(), 'storm-paused', 's2LaneFault crosses the bridge');
     assert.equal(provider.provider.s2LaneResumeAt?.(), 1234, 's2LaneResumeAt crosses the bridge (v0.76.0)');
+    assert.deepEqual(provider.provider.driverLogWatch?.(), { level: 'verbose', laneLive: false, watchdogArmed: true }, 'driverLogWatch crosses the bridge (v0.76.1)');
     assert.equal(provider.provider.autoPingState?.()?.suppressed, 'storm', 'autoPingState crosses the bridge');
     assert.equal(provider.provider.driverWsStatus?.(), 'live (schema 41)', 'driverWsStatus crosses the bridge');
     assert.equal(provider.provider.driverWsState?.(), 'backoff', 'driverWsState crosses the bridge');

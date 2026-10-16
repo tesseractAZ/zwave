@@ -64,7 +64,7 @@ import {
   type ProbeClassLite,
   type ProbeFrameLite,
 } from './evidenceStore';
-import { createDriverWsClient, type DriverWsClient, type BgRssiChannels } from './driverWsClient';
+import { createDriverWsClient, type DriverWsClient, type BgRssiChannels, type DriverLogWatch } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
@@ -508,6 +508,8 @@ export interface ZwaveData {
   s2LaneFault(): S2LaneFault | null;
   /** When a storm pause of the S2 log lane ends (v0.76.0), or null. */
   s2LaneResumeAt(): number | null;
+  /** The driver log lane at a glance, or null without a driver client (v0.76.1). */
+  driverLogWatch(): DriverLogWatch | null;
   openEpisodes(): OpenEpisodeSummary[] | null;
   controlArm(kind: SymptomKind): { n: number; ok: number; bad: number; nodes: number; minN: number } | null;
   autoPingState(): AutoPingSnapshot | null;
@@ -1325,6 +1327,10 @@ class ZwaveDataImpl implements ZwaveData {
 
   s2LaneResumeAt(): number | null {
     return this.driverWs?.s2LaneResumeAt() ?? null;
+  }
+
+  driverLogWatch(): DriverLogWatch | null {
+    return this.driverWs?.logWatch() ?? null;
   }
 
   private sampleEvidence(): void {

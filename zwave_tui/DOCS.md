@@ -1967,8 +1967,8 @@ log listening unsafe, all handled here:
 2. **There is no throttling of any kind** — one WebSocket message per log line
    per subscribed client, synchronously in the driver's logging pipeline. At
    `debug`/`silly` levels that is every serial frame. The client therefore
-   carries its own **storm guard** (`LOG_GUARD`): above 3000 logging events in
-   a fixed 60 s window it sends `stop_listening_logs` and **pauses** this
+   carries its own **storm guard** (`LOG_GUARD`): above 3000 logging EVENTS
+   (one per driver entry, however many lines it prints) in a fixed 60 s window it sends `stop_listening_logs` and **pauses** this
    client's subscription (v0.76.0; before, it stopped until the next
    reconnect, which could be days). The pause lasts 5 min, doubling per
    consecutive pause to a 60 min cap; a stream that runs 60 min after a resume
@@ -1985,7 +1985,11 @@ log listening unsafe, all handled here:
    resumes, and the archive marks the gap (§12.9). A resume that meets a socket
    already closing leaves the pause in place until the close lands, rather than
    reading as a refused subscription. A diagnostic that can drown
-   the Pi it is diagnosing is not a diagnostic.
+   the Pi it is diagnosing is not a diagnostic. Measured at `verbose`
+   (2026-10-15): the busiest window was the nightly NVM backup, 1,335 events
+   (5,271 lines) in 60 s, 44.5 % of the limit. A Z-Wave JS restart, a
+   re-interview, a heal, an inclusion and a reconnect have never been measured
+   at `verbose` against it.
 3. **The stream runs at the level its forwarder started at**, not at whatever
    the driver reports now. zwave-js-server creates the forwarder's transport at
    the driver's level when the first client subscribes, and refreshes it only
@@ -2026,6 +2030,23 @@ that spans it reads `null` too. A level or a filter that Z-Wave JS UI's
 settings save changes sends no event (`driver.updateOptions`) and stays
 invisible until the next connect.
 
+#### What `verbose` costs on this host (v0.76.1)
+
+The Z-Wave JS app hard-codes `forceConsole`, so every driver entry at the
+level also goes to the host journal (Docker's journald log driver). The journal
+is capped at 500 MB and rotates a file at about 85,300 data objects, so its
+reach is that capacity divided by everything every app writes. A 6.35 h trial
+on 2026-10-15 measured `verbose` adding about 5,600 data objects an hour
+(about 628 driver entries an hour against 3.4 at `info`; 84 % of them queue
+busy/idle and background-RSSI lines). At that rate a permanent `verbose`
+settles about 4 h above a 36 h journal floor on a typical day and at or below
+it on a day the camera stack logs heavily, so `info` stays the permanent
+level and `verbose` is for bounded investigations: set it at runtime through
+Home Assistant's `zwave_js/update_log_config` (no restart; it reverts at the
+next driver restart), start only with enough journal reach, and keep it off
+across the nightly NVM backup. The TUI follows the change within a second,
+records it in the archive, and keeps the S2 watch unbroken.
+
 #### A detached forwarder (v0.76.0)
 
 A Z-Wave JS UI debug capture replaces the driver's log transports
@@ -2036,7 +2057,9 @@ While lines at `verbose` or finer are arriving (the last line came within
 60 s, `verboseRecentMs`, of a verbose one), the controller's ≤30 s
 background-RSSI poll guarantees more, so 10 min without any line re-subscribes
 ONCE per silent stretch (`stop_listening_logs` then `start_listening_logs`).
-The lane reads `silent` (unknown) until a line arrives, and its watch, the S2
+Arming and disarming each write one add-on log line (v0.76.1), and the engine
+sensor's `silence_watchdog` attribute shows the state. The lane reads `silent`
+(unknown) until a line arrives, and its watch, the S2
 window and the RF watch with it, starts again at that line: the stretch
 between the re-subscribe and the line was not watched.
 
@@ -2080,7 +2103,10 @@ A matched event increments a per-node accumulator, `s2Accum`, which drains into
 the next evidence sample exactly as `flapAccum` does (§5) — the same
 event-accumulator discipline, for the same reason: level-sampling a rate this
 bursty would miss sub-window storms by construction. The sample field is
-`dS2Resync`, folded into the coarse tier as `s2` (a `null` adds nothing). It is
+`dS2Resync`, folded into the coarse tier as `s2` (a `null` adds nothing), and
+since v0.76.1 each coarse bucket also counts its known samples as `s2N`, so a
+bucket's 0 resyncs over 0 known samples reads blind rather than clean (`s2N` is
+`null` in a bucket saved before v0.76.1, whose count was never recorded). It is
 `null` unless the lane was watched without a break since before the sample's
 window began (v0.76.0, `s2WindowKnown` on `s2WatchSince`): a node's first
 sample, and the first after any connect, storm resume, silence (whose watch
@@ -5029,10 +5055,12 @@ radio.
 >   `… [backup] backup started: …` / `… [backup] backup finished: …` into the
 >   day's `zwave-tui-YYYY-MM-DD.log` while the archive is on (stamped to the
 >   second, written directly, so up to 2 s out of order), because a hook's own
->   output reaches no log. Size: what the `.gz` days hold — an estimated 2 MB a
->   backup for 14 days with the driver at `verbose` (from earlier Z-Wave JS UI
->   verbose file logs, about 140 KB a day gzipped), a few hundred KB at `info`,
->   bounded by `log_archive_max_mb`. A restore replaces the add-on's config
+>   output reaches no log. Size: what the `.gz` days hold — measured in a
+>   6.35 h verbose trial (2026-10-15), about 3.3 MB a day raw and 181–195 KB a
+>   day gzipped at `verbose` (about 2.7 MB a backup for 14 days), and about
+>   16 KB a day raw at `info`, bounded by `log_archive_max_mb`. The archive is
+>   not what makes `verbose` expensive: the Z-Wave JS app writes every entry to
+>   the host journal too (§6.11). A restore replaces the add-on's config
 >   folder with the backup's copy: finished days up to the day before the
 >   backup return, and every line written after it is lost — copy
 >   `/addon_configs/<slug>/logs` off first if those days matter; a backup made
@@ -5138,7 +5166,7 @@ triggering on state can never disagree about the mesh:
   | entity | state | notable attributes |
   |---|---|---|
   | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-  | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`; since v0.72.0 `paused_by` (`["tui"]`, `["ha"]`, both, or null), `paused_since` (ISO or null) and `auto_remediation: none-admitted`; since v0.73.0 `sleepers_watched` and `sleepers_total` (counts for the missed-report watch); since v0.75.0 `refresh_trial` (`off`/`running`/`latched`/`passed`/`failed`/`retired`) and `refresh_trial_treated`, `refresh_trial_treated_improved`, `refresh_trial_treated_deaths`, `refresh_trial_held`, `refresh_trial_held_improved`, `refresh_trial_held_deaths` (§11.14) |
+  | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`; since v0.72.0 `paused_by` (`["tui"]`, `["ha"]`, both, or null), `paused_since` (ISO or null) and `auto_remediation: none-admitted`; since v0.73.0 `sleepers_watched` and `sleepers_total` (counts for the missed-report watch); since v0.75.0 `refresh_trial` (`off`/`running`/`latched`/`passed`/`failed`/`retired`) and `refresh_trial_treated`, `refresh_trial_treated_improved`, `refresh_trial_treated_deaths`, `refresh_trial_held`, `refresh_trial_held_improved`, `refresh_trial_held_deaths` (§11.14); since v0.76.1 `driver_log_level` (the level the server reports, or null), `s2_lane` (`live` / `pending` / `storm-paused` / `silent` / `refused` / `level` / `down` / `disabled`) and `silence_watchdog` (`armed` / `disarmed`, or null without a driver client) (§6.11). Nothing is published before the first roster load: until v0.76.1 every count read 0 of 0 for about 30 s at each boot |
   | `sensor.zwave_tui_summons` | count | `node_ids` |
   | `sensor.zwave_tui_symptoms` | count | `critical`, `warning`, `kinds` |
   | `sensor.zwave_tui_route_failures` | failures in 7 d, or `unknown` | `links`, `node_ids`, `last_failure_at`, `lower_bound` |
