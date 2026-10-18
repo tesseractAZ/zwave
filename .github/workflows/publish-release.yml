@@ -187,7 +187,7 @@ jobs:
             BUILD_FROM=${{ steps.base.outputs.image }}
             BUILD_ARCH=${{ matrix.arch }}
             BUILD_DATE=${{ github.event.repository.updated_at }}
-            BUILD_DESCRIPTION=Telnet control-room TUI for Z-Wave mesh/node health
+            BUILD_DESCRIPTION=SSH control-room TUI for Z-Wave mesh/node health
             BUILD_NAME=Z-Wave TUI
             BUILD_REF=${{ github.sha }}
             BUILD_REPOSITORY=${{ github.repository }}
