@@ -23,14 +23,14 @@
 #   true` and `write_actions_enabled: true` (verified against a real deployment),
 #   moving those under an `access:`/`auth:` group would silently return the login
 #   gate to its `false` default while write actions stayed ON — an unauthenticated
-#   LAN telnet listener with lock/unlock and remove-failed-node available. It is
+#   LAN listener (telnet until v0.76) with lock/unlock and remove-failed-node available. It is
 #   invisible too: `users` keeps its key, so the form still shows the populated
 #   user rows, and index.ts's "auth_enabled but no users" warning never fires.
 #
 #   Shadow-key migration was evaluated and is worse: `bashio::config.exists`
 #   cannot distinguish a value cleared to "" from an absent one, and `users` is a
 #   structured list that cannot be shadowed at all — a restrictive merge there
-#   locks the operator out of telnet, the direct port AND the sidebar.
+#   locks the operator out of SSH, the direct port AND the sidebar.
 #
 #   So: NEVER nest or rename an existing option key to tidy this form. If a
 #   future release must regroup, it needs a major version, an explicit breaking
@@ -150,19 +150,20 @@ configuration:
       level), not just this add-on's log. Lock user codes, admin codes and PINs,
       SmartStart DSKs, key-shaped hex strings and tokens are redacted before
       anything is written. Off keeps only the add-on's own log.
-  # ── Telnet access ──────────────────────────────────────────────────────────
-  telnet_enabled:
-    name: Access · Enable telnet TUI
+  # ── SSH access ─────────────────────────────────────────────────────────────
+  ssh_enabled:
+    name: Access · Enable SSH TUI
     description: >-
-      Serve the full-screen TUI on the telnet port for terminals on your LAN.
-      Telnet is unencrypted — on an untrusted network turn on the login gate
-      below, or leave this off and use only the browser console in the HA
-      sidebar.
+      Serve the full-screen TUI over SSH on the add-on's port (2324) for
+      terminals on your LAN: ssh -p 2324 <user>@<host>. Logins use a username
+      and password from the login gate below, so turn it on and add a user;
+      with the gate off every login is refused. The host key fingerprint is in
+      the add-on log.
   # ── Login gate ─────────────────────────────────────────────────────────────
   auth_enabled:
     name: Login gate · Require login (direct access)
     description: >-
-      Require a username and password for DIRECT access — telnet, or hitting the
+      Require a username and password for DIRECT access — SSH, or hitting the
       port directly. Access through the HA sidebar is already authenticated by
       Home Assistant and is not gated (unless you also turn on the next option).
       Add at least one user below first — with none configured, direct access is

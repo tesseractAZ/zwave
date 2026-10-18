@@ -28,10 +28,10 @@ export DRIVER_WS_URL="$(bashio::config 'driver_ws_url')"
 # literal strings "true"/"false", so the knob must be reduced to 1/0 here.
 # OMITTING the export entirely makes the option DEAD (server only ever sees its
 # code default). Every bool option below gets this treatment.
-if bashio::config.true 'telnet_enabled'; then
-  export TELNET_ENABLED=1
+if bashio::config.true 'ssh_enabled'; then
+  export SSH_ENABLED=1
 else
-  export TELNET_ENABLED=0
+  export SSH_ENABLED=0
 fi
 
 # ── Self-healing (auto-ping) ────────────────────────────────────────────────
@@ -83,18 +83,19 @@ export AUTH_IDLE_LOCK_MIN="$(bashio::config 'auth_idle_lock_min')"
 # of {username,password}. Fall back to an empty array if the key is absent.
 export ZWAVE_USERS="$(jq -c '.users // []' /data/options.json 2>/dev/null || echo '[]')"
 
-# ── Hard-coded runtime paths (dual-stack :: bind for HTTP + telnet) ───────────
+# ── Hard-coded runtime paths (dual-stack :: bind for HTTP + SSH) ──────────────
 export PORT=8788
 export HOST=::
-export TELNET_HOST=::
+export SSH_HOST=::
 # FIXED, not an option. config.yaml publishes the container's 2324 via
 # `ports: "2324/tcp"`, and that key is the CONTAINER port — a literal, not
 # something an option can move. The old `telnet_port` option changed only what
 # the server BOUND TO inside the container, so setting it to anything but 2324
-# left the published port pointing at nothing and silently killed LAN telnet
+# left the published port pointing at nothing and silently killed the LAN TUI
 # with no error anywhere. To change the port ON THE LAN, remap the host side in
-# the add-on's Network panel; the container side stays 2324.
-export TELNET_PORT=2324
+# the add-on's Network panel; the container side stays 2324. SSH since v0.77.0.
+export SSH_PORT=2324
+export SSH_HOST_KEY=/data/ssh_host_ed25519_key
 # v0.5 persistent RSSI/RTT sparkline history — atomic JSON ring on the /data
 # volume so the graphs survive a restart / reconnect / power blip. Flush cadence
 # is fixed in code (120 s + on shutdown); no user knob.
@@ -142,7 +143,7 @@ export LOG_ARCHIVE_HOLD=/tmp/zwave-tui-backup.hold
 # SUPERVISOR_TOKEN is injected automatically by the HA Supervisor (unlocked by
 # homeassistant_api: true) — the Node process inherits it. Do NOT export it.
 
-bashio::log.info "Starting Z-Wave TUI on :${PORT} (telnet=${TELNET_ENABLED}:${TELNET_PORT})…"
+bashio::log.info "Starting Z-Wave TUI on :${PORT} (ssh=${SSH_ENABLED}:${SSH_PORT})…"
 
 cd /app/server
 exec npm start

@@ -71,6 +71,9 @@ export interface TuiSessionOptions {
   /** Connection is pre-authenticated (e.g. via HA Ingress) — skips the login
    *  gate unless the policy sets `requireOnIngress`. Defaults to false. */
   trusted?: boolean;
+  /** The transport already checked the login gate's credentials (SSH, v0.77.0):
+   *  no in-band login prompt. */
+  preAuthenticated?: boolean;
   /** Peer IP — used in auth log lines AND as the throttle key. */
   peer?: string;
   /** Transport callback to drop the connection (used on login lockout). */
@@ -235,7 +238,7 @@ export class TuiSession {
     // Decide whether this connection faces the login gate. Trusted (ingress)
     // connections skip it unless the policy explicitly requires it there.
     const trusted = opts.trusted ?? false;
-    this.authRequired = !!this.auth?.enabled && (!trusted || !!this.auth?.requireOnIngress);
+    this.authRequired = !!this.auth?.enabled && !opts.preAuthenticated && (!trusted || !!this.auth?.requireOnIngress);
     if (this.authRequired) {
       if (!this.auth!.hasUsers()) {
         // Misconfiguration: auth on, but no users. Fail CLOSED for untrusted

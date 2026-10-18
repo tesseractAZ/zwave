@@ -1,6 +1,6 @@
 # Z-Wave TUI — Complete System & Engine Reference
 
-This is the definitive technical reference for the **Z-Wave TUI** Home Assistant add-on: a telnet/xterm control-room TUI plus a learned remediation engine for a Z-Wave JS mesh — advisory in all but one deliberate, narrow case (auto-ping, §11.12). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the screens and endpoints it produces, the configuration knobs that tune it, and its edge-case guards.
+This is the definitive technical reference for the **Z-Wave TUI** Home Assistant add-on: an SSH/xterm control-room TUI plus a learned remediation engine for a Z-Wave JS mesh — advisory in all but one deliberate, narrow case (auto-ping, §11.12). It documents **every** feature and engine — what each does, its inputs, the exact algorithm and math it computes, how data traces through the pipeline to it and where its output goes, the screens and endpoints it produces, the configuration knobs that tune it, and its edge-case guards.
 
 The add-on is a Node/TypeScript server (`server/`) that talks to Home Assistant's Z-Wave JS integration over the HA Core WebSocket (the node roster, live statistics, and — gated behind a typed CONFIRM — mutating actions: mesh maintenance plus, as of v0.23, operator device control + config writes) and, read-only, to the Z-Wave JS **driver** WebSocket (the real background-RSSI noise floor and capability flags that HA does not expose). It persists a per-node evidence time-series on `/data`, learns each node's "normal", detects mesh symptoms, turns them into grounded recommendations, and learns which of those actually help — surfaced across nine terminal screens over a telnet server (`:2324`) and an xterm.js `/console` (HA ingress, `:8788`). **Every operator action that sends to the mesh, except the one-key ping shortcut (`p`), must be armed by typing CONFIRM**, whether it starts from the Actions Menu or a shortcut key (`Z` on ENGINE, which only pauses automatic writes and sends nothing, needs none). The single exception is **auto-ping** (§11.12): an opt-in, off-by-default liveness/remediation probe — the one write the engine issues without a human present, chosen because a ping is idempotent and has nothing to undo. Everything else the engine produces is a recommendation a person must confirm.
 
@@ -42,7 +42,7 @@ The whole shape, verbatim from the `index.ts` file header:
                                                               │
                          ┌────────────────────────────────────┤
                          ▼                                    ▼
-                  telnet server (:2324)          xterm.js /console (:8788, ingress)
+                  SSH server (:2324)             xterm.js /console (:8788, ingress)
 ```
 
 One `zwaveData` layer owns the upstream subscriptions and evidence; one shared
@@ -66,7 +66,7 @@ before it (source: `main()` in `server/src/index.ts`):
 | 4c | Auto-ping | `startAutoPing` | The engine's autonomous probes (§11.12), started only when both `auto_ping_enabled` and `write_actions_enabled` are on (with only the first on, a warning is logged and nothing starts). The dead-node ladder rides the runner's learning `ping`; the liveness sweep and verification probes ride non-learning verbs (v0.38.1) — since v0.71.0 the routed read `routedRead(n, 'probe')` wherever the node has a switch/light value, with the NoOp `probe` as the fallback. It also reads two v0.65.0 driver-side readings: the controller receiver-off accessor (`controllerRfOffSince`), which suppresses every lane, and the driver-reconnect stamp (`driverReconnectedAt`), so a driver restart's mesh-wide ping is never credited to a node as self-proven. |
 | 5 | Auth | `createAuth` + `createAuthPolicy` | CORS/ws-origin allow-list and the direct-LAN login gate. |
 | 6 | HTTP + ingress console | `Fastify` + `registerWsConsole` | The `/console` xterm.js page, `/console/ws` transport, `/`, `/api/version`, `/api/health`. `/api/health` returns 200 only when the HA socket is authenticated **and** the roster is loaded **and** the provider reports no error; its body carries `ok`, `ready`, `nodes`, `haReady`, `lastUpdated`, `lastStatsUpdated`, `error` (the roster's), and — from v0.35 — `haError`, the HA socket's **own** last failure. The two are distinct and the second was previously unreachable: an auth rejection or a refused connect leaves the data layer with nothing to report but "not ready", so the only line naming the actual cause was the one the endpoint did not print. From v0.57.0 the body also carries the engine's conclusions — `degraded`, `degradedReason` and an `engine` object mirroring every published entity (§12.11) — while the HTTP code still tracks `ok` alone. |
-| 7 | Telnet transport | `startTelnetServer` | The raw-TCP TUI on `:2324`, on by default; `telnet_enabled: false` turns it off (then `/console` only). |
+| 7 | SSH transport | `startSshServer` | The raw-TCP TUI on `:2324`, on by default; `ssh_enabled: false` turns it off (then `/console` only). |
 | 7b | Home Assistant states | `startHaStates` | Publishes the engine's conclusions as six HA entities (`binary_sensor.zwave_tui_degraded` plus five sensors) every 30 s, after Fastify binds (§12.11); a no-op without `SUPERVISOR_TOKEN`. |
 
 Stages 1–4 are the data spine; 4b–7b are consumers of it. Note that stage 4
@@ -306,29 +306,36 @@ and an initial size, and owns view-state, input dispatch (`applyKey`), rendering
 (`renderScreen`), and the login gate. The transports differ only in byte framing
 and trust:
 
-- **Telnet TUI, `:2324`** (`telnet/server.ts`). A raw `node:net` TCP server
-  speaking just enough telnet to force character-at-a-time mode (`IAC WILL ECHO`,
-  `WILL/DO SGA`, `DO NAWS`). `parseInput()` strips IAC sequences and emits
-  transport-agnostic `SessionEvent`s (arrows via CSI/SS3, NAWS resize, CR/LF,
-  Ctrl-C, Tab, Backspace/DEL, printable ASCII), holding back incomplete trailing
-  sequences. It enters the alt-screen buffer on connect and restores the primary
-  buffer + cursor on exit. It is **unauthenticated** (`trusted: false`) — hence
-  only the telnet port is published on the LAN, guarded by the login gate, capped
-  at `MAX_TELNET_CONNS = 16`, with a 4096-byte inbound buffer cap to drop runaway
-  garbage. Both caps refuse through `refuseSocket()`, which writes the goodbye
-  with `end()` and then **destroys the socket after `REFUSE_LINGER_MS = 1000`**
-  unless the peer closes first. `end()` alone is a half-close: the descriptor
-  stays the server's until the peer closes its own side, and a refused socket
-  joins no `conns` set, so neither the active counter nor the idle sweep can see
-  it — a peer that never closes pinned one descriptor per refusal, without
-  limit, on the branch whose purpose is to shed load (v0.50.0). Accept and
-  teardown are both logged, teardown carrying the session duration and the
-  remaining active count. Controlled by `telnet_enabled` (default `true`; turning it off makes the run script export `TELNET_ENABLED=0`).
+- **SSH TUI, `:2324`** (`telnet/server.ts`; telnet until v0.76.1). The `ssh2`
+  library inside the Node process, behind a plain `node:net` server that owns
+  TCP: it applies the caps (`MAX_CONNS = 16`, 4 per source IP), TCP keepalive
+  and the idle sweep (nothing received for 30 min), then hands each socket to
+  ssh2 (`injectSocket`). ssh2 reports a connection only after the client's
+  version line, so sockets are paired with connections by peer address and
+  port. Logins are **password only**, checked against the login gate's users
+  with its per-peer backoff (`auth_max_attempts`); with the gate off or no user
+  configured, every login is refused and the add-on log says why once per
+  connection; usernames and passwords are never logged. One terminal per
+  connection: a pty request gives the size (80×24 without one) and
+  `window-change` resizes it; exec and subsystems (sftp) are refused. The
+  session opens with `preAuthenticated` (no in-band login prompt; SSH already
+  checked). `parseInput()` turns the terminal's bytes into transport-agnostic
+  `SessionEvent`s (arrows via CSI/SS3, CR/LF, Ctrl-C, Tab, Backspace/DEL,
+  printable ASCII), holding back an incomplete trailing sequence. The ed25519
+  host key is generated on first start at `/data/ssh_host_ed25519_key` (0600,
+  written through a rename), reused afterwards and replaced with a warning if
+  it does not parse; its SHA256 fingerprint is on the startup line. Both caps
+  refuse through `refuseSocket()`, which ends the socket and **destroys it
+  after `REFUSE_LINGER_MS = 1000`** unless the peer closes first: `end()` alone
+  is a half-close, and a peer that never closes pinned one descriptor per
+  refusal (v0.50.0). Accept and teardown are both logged, teardown carrying the
+  session duration and the remaining active count. Controlled by `ssh_enabled`
+  (default `true`; off makes the run script export `SSH_ENABLED=0`).
 - **xterm.js `/console`, `:8788` (HA Ingress)** (`telnet/wsConsole.ts`). Registered
   on the Fastify app: `GET /console` serves a self-contained xterm.js page,
   `/console/xterm.js` + `/console/xterm.css` serve the vendored dist from
   `node_modules` (no CDN — offline ethos), and `/console/ws` is the WebSocket
-  transport. `parseXtermData()` mirrors the non-IAC half of the telnet parser
+  transport. `parseXtermData()` mirrors the SSH transport's key parser
   (xterm delivers decoded keys; resize arrives out-of-band as
   `{type:'resize',cols,rows}`). This is the add-on's HA sidebar view: reached
   through the Ingress token prefix, so `ingress_port: 8788` is **not** published
@@ -344,13 +351,13 @@ when it both carries an `X-Ingress-Path` header *and* originates from the
 the unspoofable socket peer, since `trustProxy: false`). Before v0.24.3 this was
 the whole Supervisor *subnet*, which every sibling add-on shares. A trusted upgrade skips the
 login gate unless the policy sets `requireOnIngress`; a direct-LAN upgrade is
-gated like telnet.
+gated like SSH.
 
 ### 1.6 Startup sequence & graceful shutdown
 
 **Startup** proceeds top-down through §1.1: the HA client starts connecting, the
 data layer begins discovery + polling, the provider primes its caches
-synchronously (so the very first frame has data, not nulls), then the telnet
+synchronously (so the very first frame has data, not nulls), then the SSH
 server binds, then Fastify, and — last — the Home Assistant states publisher
 starts (§12.11). `main().catch()` logs `FATAL:` and exits 1
 on any bootstrap rejection.
@@ -360,7 +367,7 @@ on any bootstrap rejection.
 `SIGTERM` / `SIGINT`:
 
 ```
-telnet.stop()      // stop accepting/serving TCP sessions
+sshTui.stop()      // stop accepting/serving SSH sessions
 haStates.stop()    // clear the Home Assistant states publish timer
 stopProvider()     // clear the fast refresh timer (+ dormant route timer)
 zwaveData.stop()   // clear poll/flush/coarse/evidence timers, persist to /data
@@ -379,7 +386,7 @@ they never hold the event loop open at exit.
 ### 1.7 IPv6 dual-stack bind rationale
 
 Both listeners default their bind host to `::` (`config.host` and
-`config.telnet.host`), documented in the `config.ts` header. Node does **not** set
+`config.ssh.host`), documented in the `config.ts` header. Node does **not** set
 `IPV6_V6ONLY`, so one `::` socket accepts both IPv4 and IPv6. Binding only
 `0.0.0.0` silently breaks clients that resolve a hostname to its IPv6 address —
 macOS does this by default for `.local` names — because they reach the host's IPv6
@@ -677,7 +684,7 @@ Statistics subscriptions are not on a timer at all — they are opened once per 
 
 ## 3. The Control-Room TUI: Screens, Navigation & Rendering
 
-The TUI is the human-facing half of the add-on: an instrument-panel–style console that renders over telnet (raw TCP) or an xterm.js WebSocket, driven by one per-session state machine. This chapter documents the rendering substrate — the nine screens, the key map that moves between them, the shared frame contract every screen wears, the ANSI-aware layout primitives and terminal gauges they draw with, the width-responsive Overview table, and the anti-flicker draw loop that repaints once a second without smearing. Three of the nine screens — **Remedy**, **Interference** and **Engine** — are the front ends of the remediation engine and get their own chapters; here they appear only as members of the registry and targets of the key map.
+The TUI is the human-facing half of the add-on: an instrument-panel–style console that renders over SSH or an xterm.js WebSocket, driven by one per-session state machine. This chapter documents the rendering substrate — the nine screens, the key map that moves between them, the shared frame contract every screen wears, the ANSI-aware layout primitives and terminal gauges they draw with, the width-responsive Overview table, and the anti-flicker draw loop that repaints once a second without smearing. Three of the nine screens — **Remedy**, **Interference** and **Engine** — are the front ends of the remediation engine and get their own chapters; here they appear only as members of the registry and targets of the key map.
 
 Everything in this layer is **pure render over cached data**. The screen functions receive a `DataProvider` whose accessors return the last cached values (`server/src/types.ts`, the `DataProvider` interface) and must never recompute Z-Wave state inside `draw()`. The single source of truth for "what nodes, in what order" is `visibleNodes()` in `server/src/telnet/input.ts`; the session computes it once per frame and hands the same array to every screen so a selection index means the same node everywhere.
 
@@ -737,7 +744,7 @@ type InputEvent =
   | { type: 'enter' } | { type: 'tab' } | { type: 'escape' } | { type: 'ctrlc' };
 ```
 
-The telnet parser (`server.ts`, `parseInput`) strips IAC framing, decodes NAWS window-size sub-negotiations into `resize` events, and recognizes a **bare** CSI/SS3 `A/B/C/D` as an arrow (longer sequences — modified arrows, bracketed paste, mouse — are swallowed). The xterm parser (`wsConsole.ts`, `parseXtermData`) mirrors the non-IAC half. Feeding both into `TuiSession.feed()` keeps navigation transport-agnostic.
+The SSH transport's parser (`server.ts`, `parseInput`; it also stripped telnet IAC framing until v0.76.1) recognizes a **bare** CSI/SS3 `A/B/C/D` as an arrow (longer sequences — modified arrows, bracketed paste, mouse — are swallowed). The xterm parser (`wsConsole.ts`, `parseXtermData`) mirrors it; both transports deliver the window size out of band. Feeding both into `TuiSession.feed()` keeps navigation transport-agnostic.
 
 **Dispatch order.** `TuiSession.feed()` (`session.ts`) gates keys through session-owned modes before the generic map ever sees them: `ctrlc` (universal disconnect) → `denied` → login gate → `/`-filter capture → `Z`/`z` on ENGINE (pause every autonomous write, v0.72.0; either case since v0.74.2) → action-in-flight (all keys swallowed but `Esc`, which detaches the action) → **config value-picker (v0.23)** → pending type-CONFIRM → dismiss action notice → Actions Menu → `a`/`A` open menu → mutating shortcut keys (only when `actions.enabled`) → finally `applyKey(view, ev, data, log)` in `input.ts`. The value-picker + type-CONFIRM sit *ahead* of the menu-open, so `a` can never re-open the menu while a confirm or a value entry is in flight. Inside `applyKey`, the **Log and Detail screens get first refusal** via `applyLogKey` / `applyDetailKey` (each owns its own cursor/scroll and keys), returning `null` to fall through to the generic handler for anything it doesn't claim.
 
@@ -989,7 +996,7 @@ no intermediate hop to report, so there is nothing honest to put there.
 
 ### 3.8 The anti-flicker 1 Hz draw loop
 
-Both transports drive the same cadence: `setInterval(() => session.draw(), 1000)` (telnet `startTelnetServer()` in `server.ts`; xterm `registerWsConsole()` in `wsConsole.ts`). Input events call `session.draw()` immediately on `redraw`; the 1 s tick catches live data changes (clocks, spinners, roster refreshes). `TuiSession.draw()` (`session.ts`) makes that repaint flicker-free through four mechanisms:
+Both transports drive the same cadence: `setInterval(() => session.draw(), 1000)` (SSH `startSshServer()` in `server.ts`; xterm `registerWsConsole()` in `wsConsole.ts`). Input events call `session.draw()` immediately on `redraw`; the 1 s tick catches live data changes (clocks, spinners, roster refreshes). `TuiSession.draw()` (`session.ts`) makes that repaint flicker-free through four mechanisms:
 
 1. **Frame-hash skip.** `draw()` builds the full frame body once (`HIDE_CURSOR + CURSOR_HOME`, then each line + `CLEAR_EOL`, then a trailing `CLEAR_BELOW`), hashes it with a stable 32-bit **FNV-1a** (`offset 2166136261`, `prime 16777619`, `>>> 0`, `.toString(36)`), and if the hash equals `lastFrameHash` **writes nothing at all** — no terminal work, no flicker. FNV-1a is chosen over `node:crypto` to stay off the hot path for a ~2–4 KB string.
 2. **Synchronized atomic frames.** When a write does happen, the body is wrapped in `BEGIN_SYNC … END_SYNC` (mode 2026) so supporting terminals buffer and flip the whole frame atomically; the per-line `CLEAR_EOL` + trailing `CLEAR_BELOW` cover every transition without a blank-and-repaint, and `CURSOR_HOME` avoids scrolling.
@@ -3942,12 +3949,12 @@ This is the one thread by which manual operator behaviour feeds the learning eng
 
 Two independent auth mechanisms protect the add-on. Keep them distinct:
 
-1. **The TUI login gate** (`auth/loginPolicy.ts`) — username/password in front of *interactive TUI sessions* (telnet `:2324` and the xterm `/console`). This is the primary subject here.
+1. **The TUI login gate** (`auth/loginPolicy.ts`) — username/password in front of *interactive TUI sessions* (SSH `:2324` and the xterm `/console`). This is the primary subject here.
 2. **The HTTP/ws origin layer** (`auth.ts`, `createAuth`) — the CORS origin allow-list and the `/console/ws` upgrade origin check. **Actuating the mesh is gated by `write_actions_enabled` at the action layer, not here.**
 
 > **Changed in v0.24.4.** This layer used to include `requireWriteAuth`, a Fastify preHandler described as protecting "future mutating HTTP routes" via Supervisor-sourced ingress, same-origin, or an `X-Zwave-Write-Token` header. It was registered on **zero** routes and had no caller — there are no mutating HTTP routes; every action goes through the TUI. Its bootstrap nonetheless wrote a long-lived token to `/data` on every boot. A control that authorises nothing while persisting a secret is worse than none: it implies a protection that does not exist. `requireWriteAuth`, `tokenEquals` and `loadOrCreateWriteToken` are gone. An existing install may still hold a stale `/data/zwave-write-token.txt`; it authorises nothing and can be deleted.
 
-#### Trust model — ingress-trusted vs telnet-always-gated
+#### Trust model — ingress-trusted vs SSH-always-gated
 
 The decisive line is in the `TuiSession` constructor:
 
@@ -3958,7 +3965,7 @@ authRequired = !!auth?.enabled && (!trusted || !!auth?.requireOnIngress)
 - **HA Ingress (sidebar)** connections are `trusted`. Home Assistant has already authenticated the user; the add-on recognises them by the `X-Ingress-Path` header **and** a Supervisor-subnet source IP. `isIngressTrusted(req) = !!headers['x-ingress-path'] && isSupervisorSource(req.ip)`, where `isSupervisorSource` tests membership of the address `supervisor` actually **resolves to**, pinned once at startup by `pinSupervisorAddress()` before the server listens (normalising IPv4-mapped IPv6). Resolution failure **fails closed**: nothing is trusted and the operator simply logs in.
 
 > **Changed in v0.24.3.** This used to match the whole **`172.30.32.0/23`** hassio bridge — which is where every *sibling add-on container* lives, not just the Supervisor. Because `:8788` is ingress-only, every peer able to open that socket was already inside the `/23`, so the second term was always true and the expression collapsed to *"did the client send a header it chooses."* Any sibling add-on — or an SSRF in a third-party one — got a login-free operator session. The header **alone is forgeable** by anything reaching the published LAN port, so the socket-peer pin (`trustProxy: false`, so `req.ip` is unspoofable) is what makes it trustworthy. Trusted connections **skip the login** unless `requireOnIngress` is set.
-- **Telnet (`:2324`)** is always constructed with `trusted: false` (`startTelnetServer()` in `server.ts`) — it is direct LAN and never HA-authenticated — so it **always faces the login gate whenever `auth_enabled`.**
+- **SSH (`:2324`)** is always constructed with `trusted: false` (`startSshServer()` in `server.ts`) — it is direct LAN and never HA-authenticated — so it **always faces the login gate whenever `auth_enabled`.**
 - The `/console/ws` transport computes `trusted = isTrusted(req)` per upgrade (`registerWsConsole()` in `wsConsole.ts`).
 
 #### Password handling — scrypt, plaintext, constant cost
@@ -3977,7 +3984,7 @@ A failed login is logged as `auth: login FAILED for "<user>" from <peer> (n/max)
 
 #### Shared per-peer backoff
 
-Brute-force resistance lives in a `throttle` map keyed by **peer IP**, shared across telnet + console so **dropping and reconnecting does not reset the budget**:
+Brute-force resistance lives in a `throttle` map keyed by **peer IP**, shared across SSH + console so **dropping and reconnecting does not reset the budget**:
 
 - `registerFailure(peer)` increments `fails`. Once `fails >= maxAttempts`, it arms an escalating backoff:
 
@@ -4014,7 +4021,7 @@ All values are HA add-on options (`zwave_tui/config.yaml`), bridged to env by th
 | `auth_idle_lock_min` | `int(0,240)` | `0` | `AUTH_IDLE_LOCK_MIN` | Idle minutes before re-lock; `0` = never |
 | `auth_max_attempts` | `int(1,10)` | `3` | `AUTH_MAX_ATTEMPTS` | Failures before backoff / session drop |
 | `auth_require_on_ingress` | bool | `false` | `AUTH_REQUIRE_ON_INGRESS` | Also require login over the HA sidebar |
-| `telnet_enabled` | bool | `true` | `TELNET_ENABLED` | Serve the telnet TUI on `:2324` |
+| `ssh_enabled` | bool | `true` | `SSH_ENABLED` | Serve the SSH TUI on `:2324` |
 | `users` | list of `{username,password}` | `[]` | `ZWAVE_USERS` (compact JSON) | Login credentials; plaintext or `scrypt:salt:hash` |
 | `write_actions_enabled` | bool | `false` | `WRITE_ACTIONS_ENABLED` | Master gate for all nine mutating verbs (the seven mesh-maintenance verbs, device control and config writes) and for auto-ping; off = read-only monitor |
 
@@ -4033,7 +4040,7 @@ Internal (non-tunable) constants: `CONFIRM_WORD = 'CONFIRM'`; scrypt `SCRYPT_KEY
 | Keys swallowed while `actionInFlight` (all but `Esc`, which detaches, and `Z` on ENGINE) | `feed()` in `session.ts` | Double-submitting an action; after `Esc` a second action may start, and the ledger's overlap confound (§9.3) keeps it from taking the first one's credit |
 | Login buffers length-bounded, input ignored while verifying | `handleLoginKey()` in `session.ts` | Buffer abuse; keys racing an in-flight scrypt |
 | `mode='denied'` when enabled w/o users | `TuiSession` constructor, `session.ts` | Silently allowing LAN access on misconfig |
-| Per-source-IP telnet cap (4) + idle reclaim + TCP keepalive | `telnet/server.ts` | One host taking every telnet slot; silent sockets holding slots forever |
+| Per-source-IP SSH cap (4) + idle reclaim + TCP keepalive | `telnet/server.ts` | One host taking every SSH slot; silent sockets holding slots forever |
 | `rebuildAll`/`stopRebuild` mutual exclusion | `buildMenu()` in `actionsCatalog.ts` | Offering a no-op action |
 | `resetActionState()` on login & re-lock | `resetLogin()` in `session.ts` | A half-armed destructive action surviving the auth boundary |
 | Shared per-peer throttle, capped map | `blockedMsFor` / `registerFailure` in `loginPolicy.ts` | Reconnect resetting brute-force budget; map growth flood |
@@ -4487,10 +4494,10 @@ The load-bearing subtlety is how booleans cross the boundary. A naive
 every bool to `1`/`0` with an explicit `if`:
 
 ```bash
-if bashio::config.true 'telnet_enabled'; then
-  export TELNET_ENABLED=1
+if bashio::config.true 'ssh_enabled'; then
+  export SSH_ENABLED=1
 else
-  export TELNET_ENABLED=0
+  export SSH_ENABLED=0
 fi
 ```
 
@@ -4499,7 +4506,7 @@ uniform**, which encodes each knob's fail-safe posture:
 
 ```ts
 writeActions:            process.env.WRITE_ACTIONS_ENABLED === '1',     // absent ⇒ OFF (fail-closed)
-telnet.enabled:          process.env.TELNET_ENABLED       !== '0',     // absent ⇒ ON  (fail-open)
+ssh.enabled:          process.env.SSH_ENABLED       !== '0',     // absent ⇒ ON  (fail-open)
 auth.enabled:            process.env.AUTH_ENABLED          === '1',     // absent ⇒ OFF
 auth.requireOnIngress:   process.env.AUTH_REQUIRE_ON_INGRESS === '1',   // absent ⇒ OFF
 autoPing.enabled:        process.env.AUTO_PING_ENABLED     === '1',     // absent ⇒ OFF (fail-closed, v0.30)
@@ -4508,11 +4515,11 @@ logArchive.driver:       process.env.LOG_ARCHIVE_DRIVER    !== '0',     // absen
 ```
 
 Write-actions, the login gate, auto-ping and the refresh trial default **off** when their env var
-is missing; telnet and the archive's driver stream default **on** (the archive
+is missing; SSH and the archive's driver stream default **on** (the archive
 itself is off without `LOG_ARCHIVE_DAYS`, so a missing driver flag archives
 nothing). That asymmetry is intentional: a forgotten
 `WRITE_ACTIONS_ENABLED` leaves the add-on a read-only monitor, while a forgotten
-`TELNET_ENABLED` still serves the TUI. Because the run script *always* exports
+`SSH_ENABLED` still serves the TUI. Because the run script *always* exports
 `1`/`0` for all seven, the code-side default only ever binds in bare-metal dev; in
 the add-on the exported value wins. The comment "OMITTING the export entirely
 makes the option DEAD (server only ever sees its code default)" is the invariant
@@ -4532,7 +4539,7 @@ experiment, not an admission.
 
 | Option (config.yaml) | Default | Schema | Env var (run script) | config.ts field | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `auth_enabled` | `false` | `bool` | `AUTH_ENABLED` (1/0) | `config.auth.enabled` | Gates DIRECT (telnet/`:8788`) access only. |
+| `auth_enabled` | `false` | `bool` | `AUTH_ENABLED` (1/0) | `config.auth.enabled` | Gates DIRECT (SSH/`:8788`) access only. |
 | `auth_idle_lock_min` | `0` | `int(0,240)` | `AUTH_IDLE_LOCK_MIN` | `config.auth.idleLockMin` | Minutes of no keystrokes ⇒ re-lock; `0` disables. |
 | `auth_max_attempts` | `3` | `int(1,10)` | `AUTH_MAX_ATTEMPTS` | `config.auth.maxAttempts` | Failures before the connection is dropped. |
 | `auth_require_on_ingress` | `false` | `bool` | `AUTH_REQUIRE_ON_INGRESS` (1/0) | `config.auth.requireOnIngress` | Also gate the HA-sidebar console. |
@@ -4550,7 +4557,7 @@ experiment, not an admission.
 | `refresh_trial_enabled` | `false` | `bool` | `REFRESH_TRIAL_ENABLED` (numeric-bool) | `config.refreshTrial.enabled` | The pre-registered refresh trial (§11.14). Also requires `write_actions_enabled` and auto-ping running unsuppressed; sends nothing otherwise. A start with it off clears a kill latch. |
 | `route_poll_interval` | `10` | `int(5,120)` | `ROUTE_POLL_INTERVAL_MS` | `config.routePollMs` | **seconds → ms**. Expensive route/controller-stats cadence; also the evidence-sample tick. |
 | `signal_display` | `margin` | `list(margin\|dbm)` | `SIGNAL_DISPLAY` | `config.signalDisplay` | Anything not exactly `"dbm"` ⇒ `'margin'`. Live-toggleable in the TUI (`T`). |
-| `telnet_enabled` | `true` | `bool` | `TELNET_ENABLED` (1/0) | `config.telnet.enabled` | Fail-**open** (`!== '0'`). |
+| `ssh_enabled` | `true` | `bool` | `SSH_ENABLED` (1/0) | `config.ssh.enabled` | Fail-**open** (`!== '0'`). |
 | `users` | `[]` | repeatable `{username: str, password: password}` | `ZWAVE_USERS` (JSON) | `config.auth.users` | See §12.2.1 — lifted with `jq`, not `bashio::config`. |
 | `write_actions_enabled` | `false` | `bool` | `WRITE_ACTIONS_ENABLED` (1/0) | `config.writeActions` | Master gate for all mutating actions. Off ⇒ pure monitor. |
 | `zwave_entry_id` | `""` | `str?` | `ZWAVE_ENTRY_ID` | `config.entryId` (`\|\| null`) | Empty ⇒ auto-discover via `config_entries/get`. |
@@ -4569,7 +4576,7 @@ Two schema choices are deliberate and marked "do not tidy" in `config.yaml`:
 Its keys must byte-match the `config.yaml` option keys: a typo silently falls
 back to the raw KEY with no warning. Port labels are single-sourced from
 `config.yaml`'s `ports_description:` (there is no `network:` block in the
-translations), and the `2324/tcp` label reads **"Telnet TUI (NO AUTH — keep on a
+translations), and the `2324/tcp` label reads **"SSH TUI (NO AUTH — keep on a
 trusted LAN). Change the LAN port here, in Network."**
 
 #### 12.2.1 The `users` list is lifted differently
@@ -4596,8 +4603,8 @@ they survive restarts, reconnects, and updates):
 ```bash
 export PORT=8788
 export HOST=::
-export TELNET_HOST=::
-export TELNET_PORT=2324                # fixed; remap the LAN side in Network
+export SSH_HOST=::
+export SSH_PORT=2324                # fixed; remap the LAN side in Network
 export HISTORY_PATH=/data/history.json    # v0.5 RSSI/RTT sparkline ring
 export EVIDENCE_PATH=/data/evidence.json  # M2 symptom-engine time series
 export BASELINES_PATH=/data/baselines.json# M3 learned per-node normals
@@ -4671,7 +4678,7 @@ inherits it. `config.ts` reads it as `supervisorToken: process.env.SUPERVISOR_TO
 
 #### 12.3.1 Dual-stack bind
 
-`HOST`/`TELNET_HOST` default to `::` so Fastify and the telnet server listen
+`HOST`/`SSH_HOST` default to `::` so Fastify and the SSH server listen
 dual-stack. Node does not set `IPV6_V6ONLY`, so one `::` socket accepts both v4
 and v6. The header comment in `config.ts` documents *why* this matters: binding
 only `0.0.0.0` silently breaks clients that resolve a hostname to its IPv6
@@ -4930,7 +4937,7 @@ baselines, history — are wiped from memory and **parked** with saves latched o
 nothing archived or deleted, until the operator answers the identity decision
 (v0.64.0; see the Mesh Identity chapter).
 
-**Scope.** In scope: the add-on server (`server/`), its HTTP/console/telnet
+**Scope.** In scope: the add-on server (`server/`), its HTTP/console/SSH
 surfaces, the action-runner, and the auth paths. Out of scope (report upstream):
 HA Core, the Z-Wave JS integration and driver, the Supervisor, and the physical
 radio.
@@ -5098,7 +5105,7 @@ Subsystems that take a bare `(msg: string) => void` accept `LogSink` instead —
 the callable plus optional `debug`/`warn`/`error`. Six were widened because
 their failures were otherwise unreportable: the four persistence stores (a
 failed save is the ONLY signal that a store stopped persisting — no screen, no
-`/api/health` field), the telnet listener (a listen failure means the LAN port
+`/api/health` field), the SSH listener (a listen failure means the LAN port
 never opened and nothing else says so), and the console asset check. Each opts
 in per call with `(log.error ?? log)(…)` — the asset check with `warn`. A
 seventh, the driver-WS client, claims `error` for its handshake timeout alone;
@@ -5147,7 +5154,7 @@ long: the cap hides what the frame would have disclosed.
 ### 12.11 The machine-readable boundary
 
 Everything the engine concludes was, until v0.57.0, reachable only from a
-telnet screen behind a login gate — which nothing can poll and nobody watches at
+SSH screen behind a login gate — which nothing can poll and nobody watches at
 3am. `/api/health` answered exactly one question, "can this add-on see Home
 Assistant?", so a mesh with every node Dead and the ladder exhausted still
 returned `200 OK`.

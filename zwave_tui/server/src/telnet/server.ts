@@ -1,28 +1,31 @@
 /**
- * Telnet control-room TUI server for the Z-Wave TUI add-on.
+ * SSH control-room TUI server for the Z-Wave TUI add-on (v0.77.0; telnet until
+ * v0.76.1).
  *
- * A raw TCP server speaking just enough of the telnet protocol to put a
- * standard `telnet` client into character-at-a-time mode (a raw `nc`
- * negotiates nothing, so it stays line-buffered). Each
- * connection gets a live, keyboard-driven Z-Wave mesh dashboard rendered with
- * ANSI. No dependencies: Node's `net` + hand-rolled telnet negotiation + ANSI.
+ * Each login gets the live, keyboard-driven Z-Wave mesh dashboard rendered with
+ * ANSI, over an encrypted channel. Logins use the login gate's own users
+ * (`auth_enabled`, `users`; auth/loginPolicy.ts), password only, with its
+ * per-peer backoff. With the gate off, or no user configured, every login is
+ * refused and the add-on log says why: an SSH port that admits anyone would
+ * only look safer than the telnet port it replaces.
  *
- * Adapted from ecoflow-panel's `telnet/server.ts`. The telnet transport — TCP
- * + IAC negotiation + NAWS + the alt-screen lifecycle + the IAC byte parser —
- * is preserved; only the per-session data source (`DataProvider`) and the
- * parsed event shapes (our transport-agnostic `SessionEvent`) differ.
+ * TCP stays ours: a plain `net` server applies the connection caps, keep-alive
+ * and the idle reclaim before handing each socket to ssh2 (`injectSocket`), so
+ * a refused or abandoned peer is closed on our schedule, never on the peer's.
+ * The host key (ed25519) is generated once and kept in /data; its fingerprint
+ * is logged at every start, to compare with what a client shows on first
+ * connect.
  *
- * Bind host is `::` (dual-stack). Gated by `config.telnet.enabled` at the
- * call site (index.ts): when off, this server is never started.
- *
- * SECURITY: unauthenticated unless the login gate is on (`auth_enabled`,
- * auth/loginPolicy.ts) — without it, keep the port on a trusted LAN.
+ * Bind host is `::` (dual-stack). Gated by `config.ssh.enabled` at the call
+ * site (index.ts): when off, this server is never started.
  */
-
-import { createServer } from 'node:net';
+import { createServer, type Socket } from 'node:net';
+import { existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import ssh2 from 'ssh2';
+import type { AuthContext, Connection, ParsedKey, ServerChannel } from 'ssh2';
 import type { LogSink } from '../logger';
 import { fmtElapsed } from './gauges';
-import type { Socket } from 'node:net';
 import type { DataProvider, ActionRunner } from '../types';
 import type { AuthPolicy } from '../auth/loginPolicy';
 import { TuiSession } from './session';
@@ -32,94 +35,44 @@ import {
   ENTER_ALT_BUFFER, EXIT_ALT_BUFFER,
 } from './ansi';
 
-/* ── Telnet protocol bytes ── */
-const IAC = 255;
-const DONT = 254;
-const DO = 253;
-const WONT = 252;
-const WILL = 251;
-const SB = 250;
-const SE = 240;
-const OPT_ECHO = 1;
-const OPT_SGA = 3;
-const OPT_NAWS = 31;
+const { Server: SshServer, utils: sshUtils } = ssh2;
 
-interface TelnetConn {
+interface SshConn {
   socket: Socket;
-  /** Source address, kept for the per-IP connection cap. */
+  /** Source address, kept for the per-IP connection cap and the login backoff. */
   ip: string;
-  /**
-   * Epoch ms of the last byte RECEIVED from the peer. Deliberately not "last
-   * activity": the server writes a redraw every second, and a write must not
-   * count as evidence the peer is alive — the absent peer is exactly what the
-   * reclaim sweep exists to detect.
-   */
+  /** Epoch ms of the last byte RECEIVED on the connection (keystrokes, window
+   *  changes, the client's keep-alives). Writes never count: the 1 Hz redraw
+   *  must not keep an absent peer alive. */
   lastRxAt: number;
-  /** Epoch ms the connection was accepted — the teardown line's duration
-   *  (v0.50.0), which is what tells a stuck session from a brief one. */
+  /** Epoch ms the TCP connection was accepted (for the teardown line). */
   openedAt: number;
-  session: TuiSession;
+  client: Connection | null;
+  /** The login gate's username once authenticated; never logged. */
+  user: string | null;
+  stream: ServerChannel | null;
+  session: TuiSession | null;
   inbuf: Buffer;
   timer: NodeJS.Timeout | null;
   /** Idle-flush timer for a lone trailing ESC byte (see onData). */
   escTimer: NodeJS.Timeout | null;
+  /** The gate-off refusal is logged once per connection, not per attempt. */
+  gateNoted: boolean;
+  closed: boolean;
 }
 
 /**
- * Parse a raw input buffer into transport-agnostic events, stripping telnet
- * IAC sequences. Incomplete trailing sequences are returned in `rest` to be
- * prepended to the next chunk.
+ * Parse a raw input buffer into transport-agnostic key events. An incomplete
+ * trailing escape sequence is returned in `rest`, to be prepended to the next
+ * chunk. (Until v0.77.0 this also stripped telnet IAC sequences; SSH delivers
+ * the terminal's bytes as they are, and its window size out of band.)
  */
-function parseInput(buf: Buffer): { events: SessionEvent[]; rest: Buffer } {
+export function parseInput(buf: Buffer): { events: SessionEvent[]; rest: Buffer } {
   const events: SessionEvent[] = [];
   const n = buf.length;
   let i = 0;
   while (i < n) {
     const b = buf[i];
-
-    if (b === IAC) {
-      if (i + 1 >= n) break; // incomplete
-      const cmd = buf[i + 1];
-      if (cmd === IAC) {
-        i += 2; // escaped 0xFF data byte — ignore
-        continue;
-      }
-      if (cmd === SB) {
-        // Sub-negotiation: scan for IAC SE.
-        let j = i + 2;
-        let seAt = -1;
-        let incomplete = false;
-        while (j < n) {
-          if (buf[j] === IAC) {
-            if (j + 1 >= n) {
-              incomplete = true;
-              break;
-            }
-            if (buf[j + 1] === SE) {
-              seAt = j;
-              break;
-            }
-            j += 2; // IAC IAC (escaped) or IAC <x> inside SB
-            continue;
-          }
-          j++;
-        }
-        if (incomplete || seAt < 0) break; // wait for the rest
-        const sub = buf.subarray(i + 2, seAt);
-        if (sub.length >= 5 && sub[0] === OPT_NAWS) {
-          events.push({ type: 'resize', w: (sub[1] << 8) | sub[2], h: (sub[3] << 8) | sub[4] });
-        }
-        i = seAt + 2;
-        continue;
-      }
-      if (cmd >= WILL && cmd <= DONT) {
-        if (i + 2 >= n) break; // incomplete — need the option byte
-        i += 3; // consume IAC <will/wont/do/dont> <opt>; no reply needed
-        continue;
-      }
-      i += 2; // other 2-byte command (NOP, etc.)
-      continue;
-    }
 
     if (b === 0x1b) {
       // ESC — possibly an arrow-key sequence.
@@ -186,262 +139,259 @@ function parseInput(buf: Buffer): { events: SessionEvent[]; rest: Buffer } {
   return { events, rest: buf.subarray(i) };
 }
 
-export interface TelnetServerOptions {
-  /** The shared, timer-refreshed data provider (created once in index.ts). */
+export interface SshServerOptions {
   data: DataProvider;
   host: string;
   port: number;
   log: LogSink;
-  /** Initial signal-unit default passed through to each session. */
+  /** The host key, OpenSSH format (see loadOrCreateHostKey). */
+  hostKey: string;
   signalDisplay?: 'margin' | 'dbm';
-  /** Login policy. Telnet is always direct LAN — never trusted — so an enabled
-   *  policy always gates it. */
   auth?: AuthPolicy;
-  /** Mutating-action runner (v0.3), present only when write_actions_enabled. */
   actions?: ActionRunner;
-  /**
-   * Read-inactivity timeout and TCP keepalive, in ms. Production never sets
-   * these — the defaults below are the shipped values. They exist so tests can
-   * drive the reclaim path with a short timeout instead of asserting that a
-   * line of source exists, which is what the v0.24.4 test did: deleting BOTH
-   * `setKeepAlive` and `setTimeout` left all 497 tests green.
-   */
+  /** Close a connection that has RECEIVED nothing for this long (default 30 min). */
   idleTimeoutMs?: number;
   keepAliveMs?: number;
 }
 
-/** Concurrent telnet connection cap — bounds resource use (and, with the login
- *  gate, the number of in-flight credential checks). Mirrors the ws console. */
-const MAX_TELNET_CONNS = 16;
-/**
- * Per-source-IP cap. Without it, ONE host could take every slot: the global cap
- * is all that stood between a single LAN machine and a total denial of the TUI
- * to every operator.
- */
+/** Concurrent connection caps: the global one bounds resource use, the per-IP
+ *  one keeps a single host from starving every operator. */
+const MAX_CONNS = 16;
 const MAX_CONNS_PER_IP = 4;
-/**
- * Reclaim a socket that goes quiet. A peer that connects and then sends nothing
- * — never even negotiating telnet — used to hold its slot FOREVER: no
- * setTimeout, no keepalive, and the only timers on a connection were the 60 ms
- * ESC flush and the 1 Hz redraw, neither of which reclaims anything. 16 silent
- * sockets denied the TUI permanently. Generous, because a legitimate operator
- * may sit and watch a screen for a long time without typing — the 1 Hz redraw
- * writes to the socket but does not reset a READ timeout, so this must be long
- * enough not to evict someone who is simply reading.
- */
 const IDLE_TIMEOUT_MS = 30 * 60_000;
-/** Detect half-open peers (yanked cable, NAT drop) that never send a FIN. */
 const KEEPALIVE_MS = 60_000;
 
+/** How long a refused socket may linger before it is destroyed (v0.50.0). */
 export const REFUSE_LINGER_MS = 1_000;
 
 /**
- * Say goodbye to a refused socket, then TAKE THE FD BACK.
- *
- * `end()` is a HALF-close: it sends our FIN and leaves the descriptor ours
- * until the peer closes its own side. A refused socket also joins no `conns`
- * set, so neither the active counter nor the idle sweep can ever see it — the
- * one branch whose entire job is to SHED load was the one that leaked.
- *
- * Module scope, and the socket is a narrow structural type, because the
- * invariant here has NO observable on the wire: a peer cannot distinguish a
- * half-closed server from a destroyed one, so the only honest place to assert
- * it is against the decision itself.
+ * Refuse a connection and RECLAIM IT ON OUR SCHEDULE (v0.50.0): `end()` alone
+ * is a half-close, and a peer that never sends FIN pinned one descriptor per
+ * refusal on the very branch whose job is to shed load. Say goodbye, then take
+ * it back.
  */
 export function refuseSocket(
   socket: Pick<Socket, 'end' | 'destroy' | 'once'>,
   msg: string,
   lingerMs: number = REFUSE_LINGER_MS,
 ): void {
-  // Bounds a peer that stalls the flush by never reading.
   const kill = setTimeout(() => { try { socket.destroy(); } catch { /* already gone */ } }, lingerMs);
-  // Do not hold the process open for a socket we are discarding.
   kill.unref?.();
-  // A peer that closes on cue costs us nothing — do not fire a stray destroy.
   socket.once('close', () => clearTimeout(kill));
   try { socket.end(msg); } catch { /* ignore */ }
 }
 
-export function startTelnetServer(opts: TelnetServerOptions): { stop: () => void } {
+/** The SHA256 fingerprint of a host key, as `ssh` and `ssh-keygen -lf` print it. */
+export function hostKeyFingerprint(key: string): string {
+  const parsed = sshUtils.parseKey(key);
+  if (parsed instanceof Error) throw parsed;
+  const k = (Array.isArray(parsed) ? parsed[0] : parsed) as ParsedKey;
+  return 'SHA256:' + createHash('sha256').update(k.getPublicSSH()).digest('base64').replace(/=+$/, '');
+}
+
+/**
+ * The host key at `path`, generated (ed25519) on first use and written 0600
+ * through a rename. A file that does not parse is replaced, and the add-on log
+ * says so: clients will warn that the host key changed.
+ */
+export function loadOrCreateHostKey(path: string, log: LogSink): { key: string; fingerprint: string } {
+  if (existsSync(path)) {
+    try {
+      const key = readFileSync(path, 'utf8');
+      return { key, fingerprint: hostKeyFingerprint(key) };
+    } catch (e) {
+      (log.warn ?? log)(`ssh: the host key at ${path} could not be read (${(e as Error).message}) — generating a new one; clients will warn that the host key changed`);
+    }
+  }
+  const key = sshUtils.generateKeyPairSync('ed25519').private;
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, key, { mode: 0o600 });
+  renameSync(tmp, path);
+  const fingerprint = hostKeyFingerprint(key);
+  log(`ssh: generated a new host key (${fingerprint})`);
+  return { key, fingerprint };
+}
+
+export function startSshServer(opts: SshServerOptions): { stop: () => void } {
   const { data, host, port, log, signalDisplay, auth, actions } = opts;
   const idleTimeoutMs = opts.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
   const keepAliveMs = opts.keepAliveMs ?? KEEPALIVE_MS;
-  const conns = new Set<TelnetConn>();
+  const conns = new Set<SshConn>();
+  /** Sockets handed to ssh2 and not yet matched to its connection, by peer address:port. */
+  const pending = new Map<string, SshConn>();
 
-  const safeWrite = (socket: Socket, payload: string | Buffer) => {
+  const write = (conn: SshConn, payload: string): void => {
     try {
-      if (!socket.destroyed && socket.writable) socket.write(payload);
-    } catch {
-      /* peer vanished mid-write — the close handler will clean up */
-    }
+      if (conn.stream && !conn.stream.destroyed && conn.stream.writable) conn.stream.write(payload);
+    } catch { /* peer vanished mid-write — the close handler cleans up */ }
   };
 
-  const endConn = (conn: TelnetConn) => {
-    if (!conns.has(conn)) return;
+  const endConn = (conn: SshConn): void => {
+    if (conn.closed) return;
+    conn.closed = true;
     conns.delete(conn);
-    // A SESSION'S END IS ON THE RECORD (v0.50.0). 165 "client connected" lines
-    // in the corpus and ZERO teardown lines: no session's end, duration or
-    // cause of death was recorded anywhere, so "are connections accumulating"
-    // could only be answered by reading a counter on the NEXT connect line —
-    // and a session that ended silently was indistinguishable from one still
-    // open. The remaining count is the number that answers the leak question
-    // directly.
-    log(`telnet: client ${conn.ip} disconnected after ${fmtElapsed(Date.now() - conn.openedAt)} (${conns.size} active)`);
-    if (conn.timer) {
-      clearInterval(conn.timer);
-      conn.timer = null;
+    for (const [k, c] of pending) if (c === conn) pending.delete(k);
+    log(`ssh: client ${conn.ip} disconnected after ${fmtElapsed(Date.now() - conn.openedAt)} (${conns.size} active)`);
+    if (conn.timer) { clearInterval(conn.timer); conn.timer = null; }
+    if (conn.escTimer) { clearTimeout(conn.escTimer); conn.escTimer = null; }
+    if (conn.stream) {
+      write(conn, SHOW_CURSOR + RESET + EXIT_ALT_BUFFER + '\r\n');
+      try { conn.stream.exit(0); conn.stream.end(); } catch { /* ignore */ }
     }
-    if (conn.escTimer) {
-      clearTimeout(conn.escTimer);
-      conn.escTimer = null;
-    }
-    try {
-      if (!conn.socket.destroyed) {
-        // Restore the user's primary screen buffer + cursor on exit so their
-        // terminal returns to whatever was visible before they ran `telnet`.
-        // Without ?1049l the alt-buffer remains active and they'd see a blank
-        // terminal until they manually re-enter primary mode.
-        conn.socket.write(SHOW_CURSOR + RESET + EXIT_ALT_BUFFER + '\r\n');
-        conn.socket.end();
-      }
-    } catch {
-      /* ignore */
-    }
+    try { conn.client?.end(); } catch { /* ignore */ }
+    refuseSocket(conn.socket, '');
   };
 
-  const onData = (conn: TelnetConn, chunk: Buffer) => {
-    // New bytes arrived — any pending lone-ESC was actually the start of a
-    // sequence, so cancel its idle flush.
+  const onData = (conn: SshConn, chunk: Buffer): void => {
+    const session = conn.session;
+    if (!session) return;
     if (conn.escTimer) { clearTimeout(conn.escTimer); conn.escTimer = null; }
     conn.inbuf = conn.inbuf.length ? Buffer.concat([conn.inbuf, chunk]) : chunk;
     if (conn.inbuf.length > 4096) conn.inbuf = conn.inbuf.subarray(conn.inbuf.length - 64); // drop runaway garbage
     const { events, rest } = parseInput(conn.inbuf);
     conn.inbuf = Buffer.from(rest);
-    const r = conn.session.feed(events);
-    if (r.quit) {
-      endConn(conn);
-      return;
-    }
-    if (r.redraw) conn.session.draw();
-    // parseInput holds back a lone trailing ESC (it can't yet tell a bare Escape
-    // keypress from the start of an arrow sequence). Flush it as a real Escape
-    // after a short idle so a single Esc isn't dead until the next keystroke.
+    const r = session.feed(events);
+    if (r.quit) { endConn(conn); return; }
+    if (r.redraw) session.draw();
+    // A lone ESC is the Escape key unless more bytes follow within 60 ms.
     if (conn.inbuf.length === 1 && conn.inbuf[0] === 0x1b) {
       conn.escTimer = setTimeout(() => {
         conn.escTimer = null;
         if (!(conn.inbuf.length === 1 && conn.inbuf[0] === 0x1b)) return;
         conn.inbuf = Buffer.alloc(0);
-        const rr = conn.session.feed([{ type: 'escape' }]);
+        const rr = session.feed([{ type: 'escape' }]);
         if (rr.quit) { endConn(conn); return; }
-        if (rr.redraw) conn.session.draw();
+        if (rr.redraw) session.draw();
       }, 60);
     }
   };
 
-  /**
-   * Refuse a connection and RECLAIM IT ON OUR SCHEDULE (v0.50.0).
-   *
-   * Both cap branches used to `socket.end(...)` and return. That is a
-   * HALF-close: our write side shuts down, but the readable half and the file
-   * descriptor stay ours until the PEER sends FIN. And because the refusal
-   * returns before `setKeepAlive` and never joins `conns`, the kernel never
-   * probes the peer and the idle sweep — which walks `conns` — can never see
-   * it. A peer that simply never closes (an attacker, or a half-open host whose
-   * NAT entry expired) pinned one fd per refusal, without limit, on the exact
-   * branch whose job is to SHED load. Measured live at v0.49.1: 30 sockets held
-   * against 4 accepted sessions.
-   *
-   * Say goodbye, then take it back.
-   */
-  const refuse = (socket: Socket, why: string, msg: string): void => {
+  /** Password only, against the login gate's users, with its per-peer backoff.
+   *  Usernames are never logged: a password typed into that field would be. */
+  const authenticate = async (conn: SshConn, ctx: AuthContext): Promise<void> => {
+    if (!auth?.enabled || !auth.hasUsers()) {
+      if (!conn.gateNoted) {
+        conn.gateNoted = true;
+        (log.warn ?? log)(`ssh: login from ${conn.ip} refused — the login gate is off or has no users; turn on auth_enabled and add a user`);
+      }
+      ctx.reject([]);
+      return;
+    }
+    if (ctx.method !== 'password') { ctx.reject(['password']); return; }
+    const wait = auth.blockedMsFor(conn.ip);
+    if (wait > 0) {
+      log(`ssh: login from ${conn.ip} refused — backing off ${Math.ceil(wait / 1000)} s after failed attempts`);
+      ctx.reject(['password']);
+      return;
+    }
+    const ok = await auth.verify(ctx.username, ctx.password);
+    if (conn.closed) return;
+    if (ok) {
+      auth.registerSuccess(conn.ip);
+      conn.user = ctx.username;
+      ctx.accept();
+      return;
+    }
+    auth.registerFailure(conn.ip);
+    log(`ssh: failed login from ${conn.ip}${auth.knows(ctx.username) ? '' : ' (unknown user)'}`);
+    ctx.reject(['password']);
+  };
+
+  /** One terminal per connection: a pty (optional — 80×24 without one), then a
+   *  shell. exec, subsystems (sftp) and port forwarding are refused. */
+  const onSession = (conn: SshConn, accept: () => import('ssh2').Session): void => {
+    const sess = accept();
+    let w = 80;
+    let h = 24;
+    sess.on('pty', (ok, _no, info) => { w = info.cols || w; h = info.rows || h; ok?.(); });
+    sess.on('window-change', (ok, _no, info) => {
+      ok?.();
+      if (conn.session && info.cols && info.rows) {
+        const r = conn.session.feed([{ type: 'resize', w: info.cols, h: info.rows }]);
+        if (r.redraw) conn.session.draw();
+      }
+    });
+    sess.on('exec', (_ok, no) => no?.());
+    sess.on('subsystem', (_ok, no) => no?.());
+    sess.on('shell', (ok, no) => {
+      if (conn.session || conn.closed) { no?.(); return; }
+      const stream = ok();
+      conn.stream = stream;
+      conn.session = new TuiSession({
+        write: (payload) => write(conn, payload),
+        data,
+        width: w,
+        height: h,
+        signalDisplay,
+        log,
+        auth,
+        actions,
+        trusted: false, // direct LAN — never HA-authenticated
+        preAuthenticated: true, // SSH checked the login gate's credentials
+        peer: conn.ip,
+        onClose: () => endConn(conn),
+      });
+      write(conn, ENTER_ALT_BUFFER + HIDE_CURSOR + CLEAR_SCREEN);
+      conn.session.draw();
+      conn.timer = setInterval(() => conn.session?.draw(), 1000);
+      stream.on('data', (d: Buffer) => onData(conn, d));
+      stream.on('close', () => endConn(conn));
+      stream.on('error', () => endConn(conn));
+    });
+  };
+
+  const ssh = new SshServer({ hostKeys: [opts.hostKey], ident: 'zwave-tui' }, (client, info) => {
+    client.on('error', () => { /* handled by close */ });
+    const conn = pending.get(`${info.ip}|${info.port}`);
+    if (!conn || conn.closed) { client.end(); return; }
+    pending.delete(`${info.ip}|${info.port}`);
+    conn.client = client;
+    client.on('authentication', (ctx) => { void authenticate(conn, ctx); });
+    client.on('ready', () => {
+      log(`ssh: login from ${conn.ip} (${conns.size} active)`);
+      client.on('session', (accept) => onSession(conn, accept));
+    });
+    client.on('close', () => endConn(conn));
+  });
+  ssh.on('error', () => { /* per-connection errors end that connection */ });
+
+  const refuse = (socket: Socket, why: string): void => {
     log(why);
-    refuseSocket(socket, msg);
+    refuseSocket(socket, '');
   };
 
   const server = createServer((socket) => {
+    // An error listener FIRST: an RST on a socket with none crashes the add-on.
+    socket.on('error', () => { /* handled by close */ });
     socket.setNoDelay(true);
-    // Attach an error listener IMMEDIATELY. A socket that errors (e.g. RST) with
-    // no 'error' listener throws an uncaught exception that would crash the whole
-    // add-on — this must exist before the cap-refuse `end()` and before the
-    // per-connection handlers below.
-    socket.on('error', () => { /* connection errors are handled by close/endConn */ });
-    // Reject beyond the connection cap before doing any per-session work.
-    if (conns.size >= MAX_TELNET_CONNS) {
-      refuse(socket, `telnet: connection cap (${MAX_TELNET_CONNS}) reached — refusing ${socket.remoteAddress ?? '?'}`,
-        'Too many connections — try again later.\r\n');
-      return;
-    }
-    // Per-IP cap: the global cap alone let ONE host starve every operator.
-    const peerIp = socket.remoteAddress ?? '?';
+    const ip = socket.remoteAddress ?? '?';
+    if (conns.size >= MAX_CONNS) { refuse(socket, `ssh: connection cap (${MAX_CONNS}) reached — refusing ${ip}`); return; }
     let sameIp = 0;
-    for (const c of conns) if (c.ip === peerIp) sameIp += 1;
-    if (sameIp >= MAX_CONNS_PER_IP) {
-      refuse(socket, `telnet: per-IP cap (${MAX_CONNS_PER_IP}) reached — refusing ${peerIp}`,
-        'Too many connections from your address — try again later.\r\n');
-      return;
-    }
-    // Half-open peers (yanked cable, expired NAT entry) never send a FIN, so
-    // ask the kernel to probe them.
+    for (const c of conns) if (c.ip === ip) sameIp += 1;
+    if (sameIp >= MAX_CONNS_PER_IP) { refuse(socket, `ssh: per-IP cap (${MAX_CONNS_PER_IP}) reached — refusing ${ip}`); return; }
+    // Half-open peers (yanked cable, expired NAT entry) never send a FIN.
     socket.setKeepAlive(true, keepAliveMs);
-    // NOTE: the idle reclaim is the `sweep` interval below, NOT
-    // `socket.setTimeout`. v0.24.4 used setTimeout and claimed in a comment
-    // that it "fires on READ inactivity, so the server's own 1 Hz redraw does
-    // not keep a dead socket alive". That is not how Node behaves: the socket
-    // timer is reset by reads AND writes, so the redraw refreshed it forever
-    // and the timeout could never fire. The feature was inert from the day it
-    // shipped, and the test that covered it only grepped for the source line.
-    const session = new TuiSession({
-      write: (payload) => safeWrite(socket, payload),
-      data,
-      signalDisplay,
-      log,
-      auth,
-      actions,
-      trusted: false, // telnet is direct LAN — never HA-authenticated
-      peer: peerIp,
-      onClose: () => { try { socket.end(); } catch { /* already gone */ } },
-    });
-    const conn: TelnetConn = { socket, ip: peerIp, session, inbuf: Buffer.alloc(0), timer: null, escTimer: null, lastRxAt: Date.now(), openedAt: Date.now() };
+    const conn: SshConn = { socket, ip, lastRxAt: Date.now(), openedAt: Date.now(), client: null, user: null, stream: null, session: null, inbuf: Buffer.alloc(0), timer: null, escTimer: null, gateNoted: false, closed: false };
     conns.add(conn);
-    log(`telnet: client connected from ${socket.remoteAddress ?? '?'} (${conns.size} active)`);
-
-    // Negotiate character-at-a-time mode + ask for the window size.
-    socket.write(
-      Buffer.from([
-        IAC, WILL, OPT_ECHO,
-        IAC, WILL, OPT_SGA,
-        IAC, DO, OPT_SGA,
-        IAC, DO, OPT_NAWS,
-      ]),
-    );
-    // Enter alt-screen buffer so we don't pollute the user's scrollback and our
-    // frame boundaries can't smear into earlier output.
-    safeWrite(socket, ENTER_ALT_BUFFER + HIDE_CURSOR + CLEAR_SCREEN);
-    session.draw();
-    conn.timer = setInterval(() => session.draw(), 1000);
-
-    // node:net never delivers strings on a socket without setEncoding(); the
-    // @types/node ≥ 22.19 union of `string | Buffer` is a theoretical-only
-    // possibility for our setup, so coerce to keep the inner signature tight.
-    socket.on('data', (d) => { conn.lastRxAt = Date.now(); onData(conn, d as Buffer); });
-    socket.on('close', () => endConn(conn));
-    socket.on('error', () => endConn(conn));
+    log(`ssh: client connected from ${ip} (${conns.size} active)`);
+    pending.set(`${ip}|${socket.remotePort}`, conn);
+    socket.once('close', () => endConn(conn));
+    socket.on('data', () => { conn.lastRxAt = Date.now(); });
+    ssh.injectSocket(socket);
   });
 
-  // ERROR: a listen failure means the LAN port never opened, and nothing else
-  // reports it — the TUI is simply unreachable, silently, at `log_level: warning`.
-  server.on('error', (e: any) => (log.error ?? log)(`telnet: server error: ${e?.message ?? e}`));
+  // A listen failure means the LAN port never opened, and nothing else says so.
+  server.on('error', (e: Error) => (log.error ?? log)(`ssh: server error: ${e?.message ?? e}`));
   server.listen(port, host);
 
-  // Reclaim connections that have RECEIVED nothing for idleTimeoutMs. Runs on
-  // its own cadence rather than per-socket so one timer covers every peer.
-  // unref()'d so it can never hold the process open on its own.
+  // Reclaim connections that have RECEIVED nothing for idleTimeoutMs, including
+  // ones that never finished logging in. One timer covers every peer.
   const sweepMs = Math.min(60_000, Math.max(50, Math.floor(idleTimeoutMs / 2)));
   const sweep = setInterval(() => {
     const cutoff = Date.now() - idleTimeoutMs;
     for (const conn of [...conns]) {
       if (conn.lastRxAt > cutoff) continue;
-      log(`telnet: idle ${idleTimeoutMs}ms with no inbound data — closing ${conn.ip}`);
+      log(`ssh: idle ${idleTimeoutMs}ms with no inbound data — closing ${conn.ip}`);
       endConn(conn);
     }
   }, sweepMs);

@@ -1,7 +1,7 @@
 name: "Z-Wave TUI"
-version: "0.76.1"
+version: "0.77.0"
 slug: zwave_tui
-description: "Control-room TUI for Z-Wave mesh health — telnet + sidebar console, a learned advisory engine, and its conclusions as HA entities"
+description: "Control-room TUI for Z-Wave mesh health — SSH + sidebar console, a learned advisory engine, and its conclusions as HA entities"
 url: https://github.com/tesseractAZ/zwave
 arch:
   - aarch64
@@ -34,12 +34,12 @@ stage: experimental
 # on the official HA base images.
 init: false
 host_network: false
-# Only the telnet TUI port is published on the LAN. The web console (:8788) is
+# Only the SSH TUI port is published on the LAN. The web console (:8788) is
 # reached through HA Ingress (below), not a mapped host port.
 ports:
   "2324/tcp": 2324
 ports_description:
-  "2324/tcp": "Telnet TUI (login optional — turn on auth_enabled, or keep it on a trusted LAN). Change the LAN port here, in Network."
+  "2324/tcp": "SSH TUI (password login with a login-gate user; refused while auth_enabled is off). Change the LAN port here, in Network."
 # HA Ingress: makes the browser terminal appear as a sidebar item inside Home
 # Assistant (visible in the HA mobile app), authenticated through HA's normal
 # session. Same server, same port — HA's hassio_ingress reverse-proxies in.
@@ -112,8 +112,8 @@ options:
   log_archive_max_mb: 200
   log_archive_driver: true
   # ── Telnet access ──────────────────────────────────────────────────────────
-  telnet_enabled: true
-  # ── Login gate (guards DIRECT/telnet; HA-sidebar access is already authed) ──
+  ssh_enabled: true
+  # ── Login gate (guards DIRECT/SSH; HA-sidebar access is already authed) ─────
   auth_enabled: false
   auth_require_on_ingress: false
   users: []
@@ -139,7 +139,7 @@ schema:
   log_archive_days: int(0,60)
   log_archive_max_mb: int(10,2000)
   log_archive_driver: bool
-  telnet_enabled: bool
+  ssh_enabled: bool
   auth_enabled: bool
   auth_require_on_ingress: bool
   # `users` is a repeatable {username, password} row; password renders masked.

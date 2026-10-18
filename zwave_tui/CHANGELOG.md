@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.77.0
+
+The LAN terminal is SSH: telnet is removed.
+
+### Changed — SSH replaces telnet on port 2324
+
+- The full-screen TUI is served over SSH on the same port, 2324, so nothing
+  changes on the LAN side: `ssh -p 2324 <user>@<host>`. Telnet sent the login
+  and everything on screen in clear text.
+- Logins are password only, using the login gate's existing users
+  (`auth_enabled`, `users`) and its per-address backoff after
+  `auth_max_attempts`. With the gate off, or no user configured, every login is
+  refused, and the add-on log says why. Usernames and passwords are never
+  logged.
+- The host key (ed25519) is generated on first start in `/data` and kept; its
+  fingerprint is on the startup log line, to compare with what `ssh` shows on
+  the first connection.
+- Each connection gets one terminal. The window size comes from the SSH client
+  and follows resizes; exec and subsystems (sftp) are refused. The connection
+  caps (16, 4 per address), keep-alive and the 30-minute idle reclaim carry
+  over.
+- The option `telnet_enabled` is now `ssh_enabled` (on by default).
+- The sidebar console is unchanged.
+
 ## 0.76.1
 
 Follow-ups from a 6.35 h trial of the Z-Wave JS driver at `verbose`: the driver
@@ -530,38 +554,6 @@ nothing; resuming stays behind Controller 3 → A and the typed CONFIRM.
 
 One new test and one new mutant pin it; three mutants anchored on the handler
 are re-pointed.
-
-## 0.74.1
-
-### Fixed — no share rounds into a claim
-
-DETAIL rounded every share with plain rounding. One unanswered probe in 475
-read "474/475 answered (100%)", and 748 fresh samples of 638,906 read "0%".
-A shared rule now prints "100%" only when every one counted and "0%" only when
-none did; a share that rounds to either end reads ">99%" or "<1%". It applies
-to the Probes, Samples and Frame rows, and the same screen's Windows row
-already used "<1%". A test that had pinned "999/1000 (100%)" now expects ">99%".
-
-### Fixed — the console's connection label covered the command bar
-
-The web console's "connected" label is fixed over the terminal's last row,
-which is the command bar. On ENGINE it covered `[Z] PAUSE`, the key that stops
-every autonomous write. It now leaves two seconds after the link is up, and
-comes back while the link is down.
-
-### Fixed — ENGINE names every kind it does not score
-
-`missed-report` and `repeated-frames` open no ledger episode, but only
-`node-down` had a "not scored by design" row on ENGINE, so the other two were
-absent without a word. Each now has a row with its own reason, and the ledger's
-reason sentence (shared with REMEDY) covers both.
-
-### Changed — dependency updates
-
-The server dependency updates merged after 0.74.0 (`@fastify/websocket`
-11.3.1, `tsx` and two others) ship in this release.
-
-5 new tests and 8 new mutants pin these.
 
 ## Older releases
 
