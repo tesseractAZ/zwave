@@ -1058,6 +1058,27 @@ improving) and switch B (77, "DROP 25 %", direct @ 100k, F):
 
 ---
 
+## 8a. Z-Wave JS driver log levels (verified at source, 2026-10-14)
+
+- zwave-js 15.31.1 uses winston's npm levels (error < warn < info < http <
+  verbose < debug < silly; nothing logs at http). `info` already carries
+  awake/asleep/dead/alive, pings, rebuilds, the NVM backup with RF off/on,
+  interview progress, the outgoing S2 SPAN retry and duplicate-frame drops.
+- `verbose` adds every Serial API message with its CC tree, per-frame RSSI,
+  every SendData transmit report (status, duration, repeaters, attempts,
+  speed, route scheme, ACK RSSI per hop, the failing hop) and the inbound S2
+  "Requesting a nonce" family. `debug` adds raw serial hex (plaintext for
+  non-secure frames) and is not safe to archive unredacted.
+- zwave-js-server 3.11.0 runs one global log forwarder at the level it started
+  at; only `driver.update_log_config` restarts it and emits `log config
+  updated`. Z-Wave JS UI's settings save and its debug capture change the
+  driver's level with no event, and a debug capture detaches the forwarder.
+- The official Z-Wave JS app hard-codes `forceConsole`, so every entry at the
+  level also reaches the host journal; its durable setting is the app option
+  `log_level` (a restart), while HA's `zwave_js/update_log_config` is runtime
+  only and reverts at the next driver restart.
+- Home Assistant's controller-statistics subscription omits background RSSI.
+
 ## 9. References (primary, by domain)
 
 **Specs:** ITU-T G.9959 (2015) `itu.int/rec/T-REC-G.9959-201501-I`; Silicon Labs
