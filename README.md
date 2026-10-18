@@ -37,7 +37,9 @@ and installs pull it from GHCR.
 > **Works with any Z-Wave JS network.** Nothing about a specific controller or
 > mesh is hard-coded: the `zwave_js` config-entry id is **auto-discovered** at
 > startup and the node roster comes from the device/entity registries. Developed
-> and tested against a Zooz ZST39 LR 800-series controller on a ~39-node mesh.
+> and tested against a Zooz ZST39 LR 800-series controller on a ~39-node mesh,
+> which moved to a Home Assistant Connect ZWA-2 on 2026-10-16 (same home id,
+> no re-pairing; the engine's learned state carried over).
 
 ## The advisory engine
 
@@ -322,6 +324,11 @@ A TUI session costs
 **4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
 rate but one whole-frame redraw per second.
 
+At `verbose` (a 6.35 h trial, 2026-10-15) the Z-Wave JS app ran at **0.13 %**
+of one core, the archive grew about **190 KB a day** gzipped, and the busiest
+minute (the nightly NVM backup) reached **44.5 %** of the storm guard's limit;
+what rules `verbose` out as the permanent level is the host journal.
+
 That document also carries what is *not* measured, and why most of it does not
 need to be — and, for the two items that did earn measuring, what the numbers
 overturned. The mutation harness is **not** startup-bound, as had been guessed:
@@ -342,7 +349,7 @@ re-asserted every 30 seconds:
 | entity | state | notable attributes |
 | --- | --- | --- |
 | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `paused_by`, `paused_since`, `auto_remediation`, `sleepers_watched`, `sleepers_total`, `refresh_trial` and its six counts (`refresh_trial_treated`, `…_treated_improved`, `…_treated_deaths`, `refresh_trial_held`, `…_held_improved`, `…_held_deaths`) |
+| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `paused_by`, `paused_since`, `auto_remediation`, `sleepers_watched`, `sleepers_total`, `refresh_trial` and its six counts (`refresh_trial_treated`, `…_treated_improved`, `…_treated_deaths`, `refresh_trial_held`, `…_held_improved`, `…_held_deaths`), and since v0.76.1 the driver log lane: `driver_log_level`, `s2_lane`, `silence_watchdog` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
 | `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind or before the roster has loaded) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |
@@ -421,6 +428,22 @@ These are *unmanaged* states — created over the REST API, with no device and n
 Re-publishing on the interval self-heals that within 30 seconds rather than
 adding an MQTT dependency. The entity ids are published API: renaming one breaks
 every automation built on it.
+
+## Logs and backups
+
+The host journal keeps only about a day and a half of every app's log, so the
+add-on keeps its own **durable log archive** (v0.75.4): its own log and the
+Z-Wave JS driver's log stream, redacted before they are written, one file a
+day under `/addon_configs/<slug>/logs`, gzipped when finished, 14 days and at
+most 200 MB by default (`log_archive_days`, `log_archive_max_mb`,
+`log_archive_driver`). Since v0.76.0 the finished days go into Home Assistant
+backups, with `backup_pre`/`backup_post` hooks that hold housekeeping while a
+backup copies the folder.
+
+The driver stays at `info`, its permanent level. `verbose` adds per-frame
+transmit detail and is meant for bounded investigations, set at runtime with no
+restart; a 2026-10-15 trial showed that the host journal, not the archive, is
+what it costs (**[PERFORMANCE.md §4c](./PERFORMANCE.md)**, DOCS §6.11 and §12.9).
 
 ## Install
 

@@ -14,8 +14,9 @@ section names its own method.
 - **Measured at:** each figure section states when it was measured — a
   version, a date or both; the newest is §3, v0.71.0 (2026-09-23), and §8
   lists every re-measurement
-- **Reference mesh:** 39 nodes (38 + controller), Zooz ZST39 LR 800-series,
-  ~14 days of continuous evidence
+- **Reference mesh:** 39 nodes (38 + controller), Zooz ZST39 LR 800-series
+  for every figure up to 2026-10-16, then a Home Assistant Connect ZWA-2
+  (firmware 1.2) — §4c; ~14 days of continuous evidence
 - **Host:** Raspberry Pi 5, Home Assistant OS, add-on container
 - **Dev machine (build/verify figures):** Apple silicon, Node 26
 
@@ -348,6 +349,32 @@ fallback, so every margin in §4a is relative to real conditions.
 
 ---
 
+## 4c. Driver log levels and the log archive (v0.76.0, 2026-10-15)
+
+A 6.35 h trial ran the Z-Wave JS driver at `verbose` (set at runtime, no
+restart), 19:38–02:02 MST, on the Zooz stick; everything else was unchanged.
+
+| measure | `info` | `verbose` |
+| --- | ---: | ---: |
+| driver entries reaching the archive | 3.4 / h | 628 / h |
+| archive size, raw | ~16 KB / day | ~3.3 MB / day |
+| archive size, gzipped | — | 181–195 KB / day |
+| Z-Wave JS app CPU (10-min intervals) | 0.110 % | 0.133 % |
+| busiest 60 s against the storm guard (3,000 events) | — | 1,335 events (5,271 lines), 44.5 % — the 00:00 MST NVM backup |
+| host-journal data objects added | — | ~5,600 / h |
+
+84 % of the `verbose` entries were queue busy/idle and background-RSSI lines.
+The cost that matters is the host journal: the Z-Wave JS app hard-codes
+`forceConsole`, so every entry also reaches journald (capped at 500 MB, a file
+rotating at ~85,300 data objects). At the measured rate a permanent `verbose`
+would settle about 4 h above a 36 h journal floor on a typical day, so `info`
+stays the permanent level. TUI v0.76.0 tracked all four level changes within a
+second and paused nothing.
+
+After the move to the ZWA-2 (2026-10-16) the controller's background noise
+floor read −100 to −102 dBm, against −99.7 to −103.5 dBm on the Zooz across
+October: the same range.
+
 ## 5. Cold start
 
 Measured by restarting the add-on and polling from a second machine, **n=1** per
@@ -517,6 +544,7 @@ implied open work.
 
 | date | version | what changed |
 | --- | --- | --- |
+| 2026-10-15/16 | v0.76.0–v0.76.1 | §4c added: the `verbose` trial (archive size, CPU, storm-guard margin, journal cost) and the ZWA-2's noise floor; the reference controller moved from the Zooz ZST39 to a Home Assistant Connect ZWA-2 |
 | 2026-09-23 | v0.71.0 | §3 re-measured: 879 mutants (867 killed · 12 equivalent), 2596 s wall · 1002 s user · 127 s sys, 1 298 tests in 13.4 s; the measurement lanes' routed read, the post-kill hold, between-tick deaths and read-failover attribution added 141 mutants (one retired) and 65 tests; three of the new mutants are labelled equivalent, each with its edge case |
 | 2026-09-23 | v0.70.0 | §3 re-measured: 738 mutants (729 killed · 9 equivalent), 1910 s wall · 861 s user · 105 s sys, 1 233 tests in 12.9 s; the routed read and the Dead-refresh guard added 23 mutants and 21 tests |
 | 2026-09-22 | v0.69.0 tree | §3 re-measured: 715 mutants (706 killed · 9 equivalent), 1842 s wall · 796 s user · 97 s sys, 1 212 tests in 12.7 s; the harness now refuses a test name with no file; both stale test names fixed (only one had forced a full-suite fallback), so full-suite fallbacks fell from 10 to the 9 equivalents |
