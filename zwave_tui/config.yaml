@@ -111,7 +111,7 @@ options:
   log_archive_days: 14
   log_archive_max_mb: 200
   log_archive_driver: true
-  # ── Telnet access ──────────────────────────────────────────────────────────
+  # ── SSH access ─────────────────────────────────────────────────────────────
   ssh_enabled: true
   # ── Login gate (guards DIRECT/SSH; HA-sidebar access is already authed) ─────
   auth_enabled: false

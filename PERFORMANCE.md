@@ -383,7 +383,7 @@ each row's poll interval is in its last column:
 
 | milestone | measured | poll granularity |
 | --- | --- | --- |
-| telnet accepting connections again | **+5.8 s** | 250 ms |
+| the TUI port (telnet then) accepting connections again | **+5.8 s** | 250 ms |
 | first frame with a **populated roster** | **same moment** (+8.0 s on a coarser 300 ms/2.2 s sampler) | 300 ms |
 
 The second row is the number an operator experiences, and the finding is that
@@ -428,7 +428,9 @@ than probing the whole mesh on every restart.
 ## 5a. Per-session bandwidth
 
 Measured against the live add-on (v0.63.7 on the Pi) over a 60 s window after a
-10 s warm-up, with the terminal size negotiated over telnet NAWS. No
+10 s warm-up, with the terminal size negotiated over telnet NAWS (the LAN
+transport until v0.76.1; SSH since v0.77.0 adds its encryption and framing,
+not re-measured). No
 quiet-detection, no averaging across the opening paint.
 
 | terminal | opening paint | median | p95 | **steady** |
@@ -526,7 +528,7 @@ at these magnitudes:
   mostly metadata). Columnar numeric JSON compresses by an unknown factor, so
   this does not bound the uncompressed size — but nothing about a store this
   small changes a decision. (The backup made for it was deleted afterwards.)
-- **Throughput.** The per-IP telnet cap (4), global telnet cap (16) and separate
+- **Throughput.** The per-IP SSH cap (4), global SSH cap (16; telnet until v0.76.1) and separate
   `/console/ws` cap (16) bound concurrency by policy at 32 simultaneously-drawing
   sessions. That is a limit, not a measured capacity, and one operator will not
   approach it.

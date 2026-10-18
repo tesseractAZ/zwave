@@ -31,6 +31,6 @@ build_from:
 
 labels:
   org.opencontainers.image.title: Z-Wave TUI
-  org.opencontainers.image.description: Telnet control-room TUI for Z-Wave mesh/node health
+  org.opencontainers.image.description: SSH control-room TUI for Z-Wave mesh/node health
   org.opencontainers.image.source: https://github.com/tesseractAZ/zwave
   org.opencontainers.image.licenses: MIT
