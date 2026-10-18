@@ -1,6 +1,6 @@
 # Z-Wave TUI
 
-A telnet **control-room terminal UI** for a Home Assistant Z-Wave JS mesh — and a
+An SSH **control-room terminal UI** for a Home Assistant Z-Wave JS mesh — and a
 **learned remediation engine** that watches that mesh over time, learns each
 node's normal, and turns anomalies into grounded, ranked recommendations.
 Recommendations are never acted on automatically. The autonomous mesh writes are
@@ -14,14 +14,14 @@ for what HA does not expose: the real background-noise floor, capability flags,
 each sleeping device's declared report interval, and the driver log lines behind
 the S2-resync and repeated-frame watches. It persists a per-node
 evidence time-series, scores every node worst-health-first, detects mesh symptoms,
-and recommends fixes — across **nine screens**, over a telnet server and a
+and recommends fixes — across **nine screens**, over an SSH server and a
 browser console, and publishes what it concludes as Home Assistant entities.
 
 ![The Overview screen: a live node table sorted worst-health-first, with per-node health scores, SNR margin, RTT, timeout rate, hop count, data rate and triage flags](docs/screenshots/overview.svg)
 
 **One engine, three front doors — two for people, one for machines:**
 
-- **Telnet** on port `2324` — a full-screen terminal on your LAN.
+- **SSH** on port `2324` — a full-screen terminal on your LAN (telnet until v0.76.1).
 - **Browser console** in the Home Assistant sidebar (HA Ingress) — works inside
   the HA mobile app, no extra ports exposed.
 - **Home Assistant entities** + `GET /api/health` — everything the engine
@@ -304,9 +304,9 @@ decision is answerable even in read-only mode, since it touches nothing on the
 mesh, and it raises `binary_sensor.zwave_tui_degraded` so you hear about it
 without having the console open.
 
-**Access.** If you expose the LAN telnet port on an untrusted network, enable the
-optional **login gate** (plaintext or `scrypt:` passwords, with a per-peer
-backoff). The sidebar console is **restricted to Home Assistant administrators** —
+**Access.** The LAN port is SSH (v0.77.0), with password logins for the
+**login gate**'s users (plaintext or `scrypt:` passwords, with a per-peer
+backoff); with the gate off, every SSH login is refused. The sidebar console is **restricted to Home Assistant administrators** —
 the same position the official Z-Wave JS add-on takes, and appropriate for a panel
 that can remove a failed node or unlock a lock.
 
@@ -462,19 +462,17 @@ already set up.
    `zwave_js` config entry and builds the node roster from the device/entity
    registries.
 4. Turn on **Show in sidebar** on the add-on's Info page and open **Z-Wave TUI**
-   there (or use **Open Web UI**), or connect over LAN telnet:
+   there (or use **Open Web UI**), or connect over SSH from your LAN, as a user
+   of the login gate (turn on `auth_enabled` and add one first):
    ```bash
-   telnet <homeassistant-ip> 2324
+   ssh -p 2324 <user>@<homeassistant-ip>
    ```
-   Use a real telnet client. The server negotiates character-at-a-time input and
-   the window size, and a raw `nc` does neither, so each key waits for Enter and
-   the Enter is read as a keypress of its own (on the Overview it opens Detail).
-   Without a telnet client, `stty raw -echo; nc <homeassistant-ip> 2324; stty sane`
-   works at 80×24.
+   The host key's fingerprint is on the add-on's startup log line, to compare
+   with what `ssh` shows on the first connection.
 
 Optional: turn on **Enable Write Actions** to unlock the gated actions (see
 [Write actions & safety](#write-actions--safety)), and the **login gate** if you
-expose the telnet port on a network you don't fully trust.
+use the SSH port (it refuses every login while the gate is off).
 
 > **Developing against a clone?** You can also run it as a *local* add-on: copy the
 > add-on files to `/addons/zwave_tui` on the HA host, delete the `image:` line from

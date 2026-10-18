@@ -64,7 +64,7 @@ RUN chmod a+x /etc/services.d/zwave-tui/run /usr/bin/zwave-tui-backup-hook \
  && LOG_ARCHIVE_HOLD=/tmp/hook-smoke.hold LOG_ARCHIVE_DIR=/tmp/hook-smoke-none /usr/bin/zwave-tui-backup-hook post \
  && test ! -e /tmp/hook-smoke.hold
 
-# Web + API on 8788; telnet TUI on 2324.
+# Web + API on 8788; SSH TUI on 2324.
 EXPOSE 8788 2324
 
 # Add-on metadata — re-declare the ARGs we need inside this stage so LABEL

@@ -121,21 +121,19 @@ test('every env var the run script exports is consumed by the server', () => {
   );
 });
 
-test('the telnet port the server binds matches the published ports: key', () => {
-  // The `ports:` key is the CONTAINER port. If the run script ever exports a
-  // TELNET_PORT that differs from it, the published mapping points at nothing
-  // and LAN telnet dies with no error anywhere — the exact v0.24.4 defect.
+test('the SSH port the server binds matches the published ports: key (telnet until v0.76.1)', () => {
+  // The `ports:` key is the CONTAINER port. If the run script ever exports an
+  // SSH_PORT that differs from it, the published mapping points at nothing
+  // and the LAN TUI dies with no error anywhere — the exact v0.24.4 defect.
   const cfg = read('config.yaml');
   const published = /^ {2}"(\d+)\/tcp":/m.exec(cfg);
   assert.ok(published, 'no published tcp port found in config.yaml');
   const run = read('rootfs/etc/services.d/zwave-tui/run');
-  const bound = /^export TELNET_PORT=(\d+)\s*$/m.exec(run);
-  assert.ok(bound, 'run script must export a LITERAL TELNET_PORT (not a bashio option)');
-  assert.equal(
-    bound[1],
-    published[1],
-    'the bound telnet port and the published container port disagree',
-  );
+  const bound = /^export SSH_PORT=(\d+)\s*$/m.exec(run);
+  assert.ok(bound, 'run script must export a LITERAL SSH_PORT (not a bashio option)');
+  assert.equal(bound[1], published[1], 'the bound SSH port and the published container port disagree');
+  assert.doesNotMatch(run, /TELNET_/, 'no telnet export is left behind');
+  assert.match(read('server/src/config.ts'), /port: Number\(process\.env\.SSH_PORT \?\? 2324\)/, 'the server reads the exported port');
 });
 
 test('log_level actually reaches a consumer', () => {

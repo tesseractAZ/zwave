@@ -23,6 +23,10 @@ import { parseUsers, createAuthPolicy } from '../src/auth/loginPolicy';
 import { truncate, visLen } from '../src/telnet/ansi';
 import { errMsg } from '../src/zwave/zwaveData';
 import { readFileSync } from 'node:fs';
+import ssh2 from 'ssh2';
+
+/** One host key for every SSH-server test (v0.77.0). */
+const TEST_HOST_KEY = ssh2.utils.generateKeyPairSync('ed25519').private;
 import { mkNode, mockData } from './_logHelpers';
 
 /** Fixed high port for the telnet cap probe (0 gives no discoverable port). */
@@ -239,13 +243,14 @@ test('the write-token gate is GONE, not merely unused', () => {
   }
 });
 
-test('one host cannot take every telnet slot', async () => {
+test('one host cannot take every SSH slot', async () => {
   // The global cap alone let a single LAN machine hold all 16 slots with
-  // sockets that never even negotiate telnet, denying the TUI to everyone.
-  const { startTelnetServer } = await import('../src/telnet/server');
+  // sockets that never even start the SSH handshake, denying the TUI to everyone.
+  const { startSshServer } = await import('../src/telnet/server');
   const { connect } = await import('node:net');
 
-  const srv = startTelnetServer({
+  const srv = startSshServer({
+    hostKey: TEST_HOST_KEY,
     data: mockData({ nodes: [mkNode()] }),
     host: '127.0.0.1',
     port: TELNET_TEST_PORT,
@@ -266,7 +271,8 @@ test('one host cannot take every telnet slot', async () => {
       s.on('data', (d) => { got += d; });
       s.on('error', () => { results[i] = 'ERR'; if (++settled === N) done(); });
       setTimeout(() => {
-        results[i] = /Too many connections from your address/.test(got) ? 'REFUSED' : got ? 'OK' : 'quiet';
+        // An accepted socket gets the server's SSH banner at once; a refused one is closed with nothing.
+        results[i] = got.startsWith('SSH-2.0-') ? 'OK' : 'REFUSED';
         s.destroy();
         if (++settled === N) done();
       }, 900);
@@ -279,7 +285,7 @@ test('one host cannot take every telnet slot', async () => {
     // passing. A previous version fell back to grepping the source here, which
     // asserted nothing about behaviour AND never actually ran (deleting the
     // per-IP cap still left the suite green through this branch).
-    assert.fail('telnet server never accepted a connection — the cap was not exercised');
+    assert.fail('SSH server never accepted a connection — the cap was not exercised');
   }
   const refused = results.filter((r) => r === 'REFUSED').length;
   assert.ok(refused >= 1,
@@ -295,11 +301,12 @@ test('a silent socket is reclaimed by the idle timeout', async () => {
   // Driven with a 250 ms timeout via the test-only option. The v0.24.4 test
   // asserted only that the SOURCE LINE existed, and did so from a branch that
   // never executed — deleting both socket options left 497 tests green.
-  const { startTelnetServer } = await import('../src/telnet/server');
+  const { startSshServer } = await import('../src/telnet/server');
   const { connect } = await import('node:net');
 
   const logs: string[] = [];
-  const srv = startTelnetServer({
+  const srv = startSshServer({
+    hostKey: TEST_HOST_KEY,
     data: mockData({ nodes: [mkNode()] }),
     host: '127.0.0.1',
     port: TELNET_TEST_PORT + 1,
@@ -330,7 +337,7 @@ test('accepted sockets get TCP keepalive, to catch half-open peers', async () =>
   // setKeepAlive is invisible from the client end, so assert it at the source
   // of truth: the socket method the server calls on accept.
   const net = await import('node:net');
-  const { startTelnetServer } = await import('../src/telnet/server');
+  const { startSshServer } = await import('../src/telnet/server');
 
   const calls: Array<[boolean, number]> = [];
   const original = net.Socket.prototype.setKeepAlive;
@@ -344,7 +351,8 @@ test('accepted sockets get TCP keepalive, to catch half-open peers', async () =>
   } as typeof original;
 
   try {
-    const srv = startTelnetServer({
+    const srv = startSshServer({
+    hostKey: TEST_HOST_KEY,
       data: mockData({ nodes: [mkNode()] }),
       host: '127.0.0.1',
       port: TELNET_TEST_PORT + 2,
@@ -418,10 +426,11 @@ test('an ACTIVE operator is never evicted by the idle sweep', async () => {
   // The reclaim must key on INBOUND data. If the sweep ignored `lastRxAt`, a
   // fully-engaged operator would be dropped mid-session every idleTimeoutMs —
   // a far worse bug than the slot exhaustion the sweep exists to prevent.
-  const { startTelnetServer } = await import('../src/telnet/server');
+  const { startSshServer } = await import('../src/telnet/server');
   const { connect } = await import('node:net');
 
-  const srv = startTelnetServer({
+  const srv = startSshServer({
+    hostKey: TEST_HOST_KEY,
     data: mockData({ nodes: [mkNode()] }),
     host: '127.0.0.1',
     port: TELNET_TEST_PORT + 3,
@@ -568,11 +577,11 @@ test('a refused peer that closes on cue is not destroyed twice (v0.50.0)', async
   assert.deepEqual(calls, ['end:no room\r\n'], 'no stray destroy after a clean close');
 });
 
-test('a telnet session logs its END, its duration and the remaining count (v0.50.0)', async () => {
+test('an SSH connection logs its END, its duration and the remaining count (v0.50.0; v0.77.0)', async () => {
   // 50 hours of production log: 165 "client connected" lines and ZERO teardown
   // lines. A session that ended was indistinguishable from one still open, so
   // the "(N active)" counter could only ever be read as a high-water mark.
-  const { startTelnetServer } = await import('../src/telnet/server');
+  const { startSshServer } = await import('../src/telnet/server');
   const { connect } = await import('node:net');
 
   // A private port of our own. The first draft guarded its assertions on a
@@ -580,7 +589,8 @@ test('a telnet session logs its END, its duration and the remaining count (v0.50
   // by running nothing — a survivor in the harness was the only thing that said so.
   const port = 24500 + Math.floor(Math.random() * 400);
   const lines: string[] = [];
-  const srv = startTelnetServer({
+  const srv = startSshServer({
+    hostKey: TEST_HOST_KEY,
     data: mockData({ nodes: [mkNode()] }),
     host: '127.0.0.1',
     port,
@@ -600,7 +610,7 @@ test('a telnet session logs its END, its duration and the remaining count (v0.50
   srv.stop();
 
   const dump = lines.join(' | ');
-  assert.ok(lines.some((l) => /telnet: client connected from/.test(l)),
+  assert.ok(lines.some((l) => /ssh: client connected from/.test(l)),
     `the server never accepted the connection, so this test proves nothing: ${dump}`);
   const bye = lines.filter((l) => /disconnected after/.test(l));
   assert.ok(bye.length > 0, `a connect with no teardown line: ${dump}`);

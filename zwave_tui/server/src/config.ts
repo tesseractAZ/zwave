@@ -141,13 +141,15 @@ export const config = {
   version: process.env.BUILD_VERSION ?? '0.1.0',
 
   /**
-   * Telnet control-room TUI (:2324). Same dual-stack `::` rationale as the
-   * HTTP bind. Gated by `telnet_enabled`; the run script exports `1` / `0`.
+   * SSH control-room TUI (:2324; telnet until v0.76.1). Same dual-stack `::`
+   * rationale as the HTTP bind. Gated by `ssh_enabled`; the run script exports
+   * `1` / `0`. The host key lives in /data so it survives updates.
    */
-  telnet: {
-    enabled: process.env.TELNET_ENABLED !== '0',
-    host: process.env.TELNET_HOST ?? '::',
-    port: Number(process.env.TELNET_PORT ?? 2324),
+  ssh: {
+    enabled: process.env.SSH_ENABLED !== '0',
+    host: process.env.SSH_HOST ?? '::',
+    port: Number(process.env.SSH_PORT ?? 2324),
+    hostKeyPath: process.env.SSH_HOST_KEY ?? '/data/ssh_host_ed25519_key',
   },
 
   /**

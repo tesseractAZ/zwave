@@ -19,7 +19,7 @@
 #   nueva nunca se escribió y por lo tanto toma su valor predeterminado. En una
 #   instalación con `auth_enabled: true` y `write_actions_enabled: true`, eso
 #   devolvería silenciosamente la puerta de inicio de sesión a `false` mientras
-#   las acciones de escritura siguen ACTIVAS: un puerto telnet sin autenticar
+#   las acciones de escritura siguen ACTIVAS: un puerto telnet sin autenticar (hasta v0.76)
 #   con bloqueo/desbloqueo de cerraduras disponible.
 #
 #   Por eso: NUNCA anide ni renombre una clave existente para ordenar este
@@ -167,19 +167,21 @@ configuration:
       PIN, los DSK de SmartStart, las cadenas hexadecimales con forma de clave y
       los tokens se ocultan antes de escribir nada. Desactivado guarda solo el
       registro del complemento.
-  # ── Acceso por telnet ───────────────────────────────────────────────────────
-  telnet_enabled:
-    name: Acceso · Habilitar la TUI por telnet
+  # ── Acceso por SSH ──────────────────────────────────────────────────────────
+  ssh_enabled:
+    name: Acceso · Habilitar la TUI por SSH
     description: >-
-      Publica la TUI de pantalla completa en el puerto telnet para terminales de
-      su red local. Telnet no está cifrado: en una red que no sea de confianza,
-      active la puerta de inicio de sesión de abajo, o deje esto desactivado y
-      use solamente la consola web de la barra lateral de Home Assistant.
+      Publica la TUI de pantalla completa por SSH en el puerto del complemento
+      (2324) para terminales de su red local: ssh -p 2324 <usuario>@<host>. El
+      inicio de sesión usa un usuario y contraseña de la puerta de abajo, así
+      que actívela y agregue un usuario; con la puerta desactivada se rechaza
+      todo inicio de sesión. La huella de la clave del host está en el registro
+      del complemento.
   # ── Puerta de inicio de sesión ──────────────────────────────────────────────
   auth_enabled:
     name: Inicio de sesión · Exigir inicio de sesión (acceso directo)
     description: >-
-      Exige usuario y contraseña para el acceso DIRECTO: por telnet o entrando
+      Exige usuario y contraseña para el acceso DIRECTO: por SSH o entrando
       al puerto directamente. El acceso por la barra lateral de Home Assistant
       ya está autenticado por HA y no se restringe (salvo que active también la
       opción siguiente). Agregue al menos un usuario abajo primero: sin ninguno

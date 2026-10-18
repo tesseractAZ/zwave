@@ -196,7 +196,8 @@ export function createAuthPolicy(cfg: AuthPolicyConfig): AuthPolicy {
 }
 
 /**
- * How the telnet listener's auth posture should be described in the startup log.
+ * How the SSH listener's auth posture should be described in the startup log
+ * (v0.77.0; it described the telnet listener until v0.76.1).
  *
  * This exists as a function purely so it can be TESTED. The startup line used to
  * end in the hardcoded string "(no auth — trusted LAN only)" regardless of the
@@ -206,6 +207,6 @@ export function createAuthPolicy(cfg: AuthPolicyConfig): AuthPolicy {
  * covered it, because a log line built inline during boot is not reachable from
  * a unit test.
  */
-export function describeTelnetAuth(enabled: boolean): string {
-  return enabled ? '(login required)' : '(no auth — trusted LAN only)';
+export function describeSshAuth(enabled: boolean, hasUsers: boolean): string {
+  return enabled && hasUsers ? '(password login, the login gate\'s users)' : '(every login refused — turn on auth_enabled and add a user)';
 }

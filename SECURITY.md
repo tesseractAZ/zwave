@@ -176,7 +176,7 @@ seriously.
   Ingress trust is **pinned to the address `supervisor` resolves to**, resolved
   once before the server listens, so a *sibling add-on* on the same Supervisor
   bridge cannot forge it; resolution failure **fails closed**. Every session that
-  is not genuine ingress — telnet, the only port published on the LAN (`ports:`
+  is not genuine ingress — SSH, the only port published on the LAN (`ports:`
   maps 2324 alone), and any console connection from a peer other than the
   Supervisor — is gated by an optional login (`auth_enabled`, users with
   plaintext or `scrypt:` passwords; `auth_require_on_ingress` extends it to
@@ -185,9 +185,13 @@ seriously.
   async verify so concurrent sessions contend for one counter. The login gate
   **fails closed** (denies) when enabled with no users configured, and a row
   with a blank password is rejected rather than becoming an account whose
-  password is `""`. Telnet can also be switched off entirely
-  (`telnet_enabled: false`), leaving only the console.
-- **The telnet listener bounds one host.** A global 16-connection cap, a
+  password is `""`. The LAN port is SSH since v0.77.0 (telnet until v0.76.1):
+  password logins for the login gate's users only, and every login refused
+  while the gate is off or has no user; exec and subsystems (sftp) are refused,
+  and the ed25519 host key is generated once in `/data` (0600) with its
+  fingerprint on the startup log line. It can be switched off entirely
+  (`ssh_enabled: false`), leaving only the console.
+- **The SSH listener bounds one host.** A global 16-connection cap, a
   **per-source-IP cap of 4**, reclamation of connections that have *received*
   nothing for 30 minutes, and TCP keepalive for half-open peers. Without the
   per-IP cap and the idle reclaim, a single LAN machine could hold every slot
@@ -283,7 +287,7 @@ seriously.
 
 ## Scope
 
-In scope: the add-on server (`zwave_tui/server/`), its HTTP/console/telnet
+In scope: the add-on server (`zwave_tui/server/`), its HTTP/console/SSH
 surfaces, the action-runner and auth paths, the container definition
 (`zwave_tui/Dockerfile`, `zwave_tui/config.yaml`, `zwave_tui/apparmor.txt` and
 the s6 run script), and the release workflows that publish the GHCR images

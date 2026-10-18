@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createAuthPolicy, hashPassword, parseUsers, describeTelnetAuth } from '../src/auth/loginPolicy';
+import { createAuthPolicy, hashPassword, parseUsers, describeSshAuth } from '../src/auth/loginPolicy';
 
 test('parseUsers: bad / non-array JSON → []', () => {
   assert.deepEqual(parseUsers(undefined), []);
@@ -77,7 +77,10 @@ test('the telnet startup banner reports the auth posture actually in force', () 
   // that a port offering lock/unlock and remove-failed-node was unauthenticated.
   // It was a false statement about a security control, in the one place an
   // operator goes to check that control.
-  assert.equal(describeTelnetAuth(true), '(login required)');
-  assert.equal(describeTelnetAuth(false), '(no auth — trusted LAN only)');
-  assert.notEqual(describeTelnetAuth(true), describeTelnetAuth(false));
+  // v0.77.0: the SSH listener refuses every login unless the gate is on AND has
+  // a user, and the startup line says which.
+  assert.equal(describeSshAuth(true, true), "(password login, the login gate's users)");
+  for (const [on, users] of [[false, true], [true, false], [false, false]] as const) {
+    assert.equal(describeSshAuth(on, users), '(every login refused — turn on auth_enabled and add a user)');
+  }
 });

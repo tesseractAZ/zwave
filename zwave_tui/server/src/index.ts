@@ -21,7 +21,7 @@ import fastifyCors from '@fastify/cors';
 import { config } from './config';
 import { createLogger } from './logger';
 import { createAuth, ingressRedirectTarget, isAllowedOrigin, isSupervisorSource, pinSupervisorAddress } from './auth';
-import { createAuthPolicy, describeTelnetAuth } from './auth/loginPolicy';
+import { createAuthPolicy, describeSshAuth } from './auth/loginPolicy';
 import { createHaWsClient } from './ha/haWsClient';
 import { createZwaveData } from './zwave/zwaveData';
 import { logGapNote } from './zwave/driverWsClient';
@@ -29,7 +29,7 @@ import { createActionRunner, NOT_SENT } from './zwave/zwaveActions';
 import { startAutoPing, PROBE_KILL_HOLD_MS, type AutoPingSnapshot } from './zwave/autoPing';
 import { buildZwaveDataSource, createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
 import { registerWsConsole } from './telnet/wsConsole';
-import { startTelnetServer } from './telnet/server';
+import { startSshServer, loadOrCreateHostKey } from './telnet/server';
 import { buildStates, startHaStates, ENTITY_DEGRADED, HA_STATE_PUBLISH_MS } from './haStates';
 import { NodeStatus, type LogEvent } from './types';
 import { appArmorLabel } from './securityLabel';
@@ -393,26 +393,25 @@ async function main(): Promise<void> {
     });
   });
 
-  // 7) Telnet transport (opt-in).
-  let telnet: { stop: () => void } | null = null;
-  if (config.telnet.enabled) {
-    telnet = startTelnetServer({
+  // 7) SSH transport (v0.77.0; telnet until v0.76.1).
+  let sshTui: { stop: () => void } | null = null;
+  if (config.ssh.enabled) {
+    const hostKey = loadOrCreateHostKey(config.ssh.hostKeyPath, log);
+    sshTui = startSshServer({
       data: provider,
-      host: config.telnet.host,
-      port: config.telnet.port,
+      host: config.ssh.host,
+      port: config.ssh.port,
       log,
+      hostKey: hostKey.key,
       signalDisplay: config.signalDisplay,
       auth: loginPolicy,
       actions,
     });
-    // Report the policy this listener ACTUALLY enforces. The suffix used to be
-    // the hardcoded string "(no auth — trusted LAN only)", printed whether or
-    // not the login gate was on — so on an authenticated deployment the startup
-    // log stated the opposite of the truth about a security control, and on an
-    // unauthenticated one it was right only by accident.
-    log(`telnet TUI on ${config.telnet.host}:${config.telnet.port} ${describeTelnetAuth(loginPolicy.enabled)}`);
+    // Report the policy this listener ACTUALLY enforces (v0.27 lesson: a
+    // hard-coded suffix once told an authenticated deployment the opposite).
+    log(`ssh TUI on ${config.ssh.host}:${config.ssh.port} ${describeSshAuth(loginPolicy.enabled, loginPolicy.hasUsers())} — host key ${hostKey.fingerprint}`);
   } else {
-    log('telnet TUI disabled (telnet_enabled=false) — /console only');
+    log('ssh TUI disabled (ssh_enabled=false) — /console only');
   }
 
   await app.listen({ host: config.host, port: config.port });
@@ -440,7 +439,7 @@ async function main(): Promise<void> {
     if (closing) return;
     closing = true;
     log(`${sig} — shutting down`);
-    try { telnet?.stop(); } catch { /* ignore */ }
+    try { sshTui?.stop(); } catch { /* ignore */ }
     try { haStates.stop(); } catch { /* ignore */ }
     try { stopProvider(); } catch { /* ignore */ }
     try { zwaveData.stop(); } catch { /* ignore */ }

@@ -66,7 +66,7 @@ profile zwave_tui flags=(attach_disconnected,mediate_deleted) {
   # s6 signals its own services; Node signals nothing outside the container.
   signal,
 
-  # TCP: the HTTP + WebSocket console (8788), the telnet TUI (2324) and the
+  # TCP: the HTTP + WebSocket console (8788), the SSH TUI (2324) and the
   # outbound Home Assistant Core and Z-Wave JS WebSockets. Not enforced by the
   # host parser (see PARSER); raw sockets are blocked through the capability
   # list instead (net_raw below).
