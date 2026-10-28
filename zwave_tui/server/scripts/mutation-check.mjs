@@ -1452,7 +1452,7 @@ const MUTANTS = [
     // day after each restart and held 28 % of fresh RTT readings out of the
     // baselines, when only 3-8 of 38 nodes per restart had a large seed.
     find: '  if (!seed || seed.k0 > k) return ceiling;',
-    repl: '  return ceiling;',
+    repl: '  if (!seed || seed.k0 > k || (true as boolean)) return ceiling;',
     what: 'a node whose first reading after the restart was normal gets its full sensitivity back' },
   { id: 'rtt-restart-seed-stale', file: 'src/zwave/symptoms.ts', tests: ['symptoms'],
     find: '  if (!seed || seed.k0 > k) return ceiling;',
