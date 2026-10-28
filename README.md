@@ -1,21 +1,61 @@
 # Z-Wave TUI
 
-An SSH **control-room terminal UI** for a Home Assistant Z-Wave JS mesh — and a
-**learned remediation engine** that watches that mesh over time, learns each
-node's normal, and turns anomalies into grounded, ranked recommendations.
-Recommendations are never acted on automatically. The autonomous mesh writes are
-the opt-in, off-by-default **auto-ping** and, switched on separately, the
-pre-registered **refresh trial** (see *Write actions & safety*).
+**A mesh-observability and remediation engine for Z-Wave JS networks on Home Assistant.**
 
-It talks to the **Home Assistant Core WebSocket** (the node roster, live
-statistics, and — behind a typed confirmation — maintenance, device-control, and
-config-write actions) and, strictly read-only, to the **Z-Wave JS driver WebSocket**
-for what HA does not expose: the real background-noise floor, capability flags,
-each sleeping device's declared report interval, and the driver log lines behind
-the S2-resync and repeated-frame watches. It persists a per-node
-evidence time-series, scores every node worst-health-first, detects mesh symptoms,
-and recommends fixes — across **nine screens**, over an SSH server and a
-browser console, and publishes what it concludes as Home Assistant entities.
+It measures every link in the mesh continuously, learns what normal looks like
+for each node, detects faults the Z-Wave statistics alone cannot show, and turns
+them into ranked, evidence-backed fixes. Then it checks whether those fixes
+worked: each one is scored against the mesh's own spontaneous recovery rate. Operators work
+in an SSH control-room terminal or a browser console in the Home Assistant
+sidebar. Automations read the same conclusions as Home Assistant entities and a
+health endpoint.
+
+### What the engine does
+
+- **Measures every link.** Each node is measured on:
+  - signal margin over the *live* 900 MHz noise floor, which the engine recovers from the Z-Wave JS driver because Home Assistant does not expose it;
+  - round-trip time, reply-timeout rate and negotiated data rate;
+  - hop count and the last working and next-to-last working routes, with failing hops recorded from the driver's route-failure reports.
+
+  An opt-in liveness sweep sends one routed read per node on a cadence, so
+  mains devices that never speak on their own are still measured.
+- **Learns each node's normal.** A persistent evidence time-series (a fine ring
+  plus a multi-day coarse tier) feeds per-node baselines.
+  - Baselines are learned per time-of-day band, across several distinct days.
+  - Windows that contain a symptom are quarantined, so a fault cannot teach its own baseline to accept it.
+  - Counter resets and quiet windows never produce invented readings.
+- **Detects faults.** Fourteen per-node detectors cover:
+  - acute and chronic return-path loss;
+  - dead-flapping, node down and quiet nodes;
+  - rate fallback, RTT degradation and weak signal;
+  - route churn, chatty devices and suspected ghosts;
+  - missed reports;
+  - S2 nonce-resync storms and repeated frames, both read from the driver's log stream, which no statistics counter covers.
+
+  Cross-node correlation folds an edge cluster behind one repeater, or a
+  mesh-wide interference event, into a single cause instead of N faults.
+- **Plans remediation.** Each symptom becomes a ranked plan, with physical
+  guidance first because most Z-Wave faults are physical, followed by any safe
+  executable probe. Safety gates fail closed, and a route rebuild is shown only
+  to advise against it.
+- **Learns from outcomes.** Every episode is recorded with before-and-after
+  evidence. An action is credited only when it beats the mesh's spontaneous
+  recovery rate for that symptom by a real margin. A pre-registered refresh
+  trial runs the same comparison as a two-arm experiment.
+- **Watches interference.** It shows:
+  - a multi-day noise-floor trend and a diurnal timeout heatmap;
+  - controller serial-link health kept apart from RF, so a USB fault is not mistaken for interference.
+- **Protects the mesh.** The engine is read-only by default.
+  - Every operator write sits behind a typed `CONFIRM`.
+  - The only autonomous writes are the opt-in probes. They are admitted risk-first and pause themselves during a storm.
+  - The 0–100 health score states how much of itself rests on defaults instead of measurement.
+
+| | |
+| --- | --- |
+| Server | about 32,000 lines of TypeScript; 9 screens; SSH, browser and Home Assistant entity interfaces |
+| Detection | 14 per-node detectors, 2 cross-node correlations, controller serial-link health |
+| Verification | 1,588 tests; a mutation-testing harness of about 860 hand-written mutants, run on the code each release touches |
+| Integration | Home Assistant Core WebSocket (roster, statistics, gated actions) plus a read-only Z-Wave JS driver WebSocket (noise floor, capabilities, log stream) |
 
 ![The Overview screen: a live node table sorted worst-health-first, with per-node health scores, SNR margin, RTT, timeout rate, hop count, data rate and triage flags](docs/screenshots/overview.svg)
 
