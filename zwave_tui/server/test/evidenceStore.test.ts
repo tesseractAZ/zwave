@@ -89,6 +89,16 @@ test('rttSeed keeps the first fresh RTT reading of each driver lifetime (v0.77.1
   assert.equal(s.rttSeed(6), null, 'and an evicted node keeps none');
 });
 
+test('rttSeed is memory only: a reset and a load both discard it (v0.77.1)', () => {
+  for (const op of ['reset', 'load'] as const) {
+    const s = mkStore(freshPath());
+    s.record(6, stats({ commandsTX: 1, rtt: 1390 }), NodeStatus.Alive, FRESH, FIXED);
+    assert.ok(s.rttSeed(6), `${op}: precondition`);
+    s[op]();
+    assert.equal(s.rttSeed(6), null, `${op}: the next fresh reading starts over`);
+  }
+});
+
 test('WHOLE-WINDOW invalidation: ONE backwards counter nulls ALL deltas (one driver, one restart)', () => {
   // Design review: per-field nulling let cross-lifetime deltas through — a
   // window that spans a restart is invalid for EVERY counter, including the

@@ -1073,9 +1073,9 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       routeFails.clear();
       meta.clear();
       lastCounters.clear();
+      rttSeeds.clear();
       lastCtrl = null;
       rateRuns.clear();
-      rttSeeds.clear();
       try {
         if (!existsSync(path)) return fine;
         const parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
@@ -1464,9 +1464,9 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       routeFails.clear();
       meta.clear();
       lastCounters.clear();
+      rttSeeds.clear();
       lastCtrl = null;
       rateRuns.clear();
-      rttSeeds.clear();
       since = null;
       loadedHomeId = homeId;
       // Rewrite disk NOW — a crash between reset and the next flush must not

@@ -1506,6 +1506,14 @@ const MUTANTS = [
     find: '      rateRuns.delete(nodeId);\n      rttSeeds.delete(nodeId);\n',
     repl: '      rateRuns.delete(nodeId);\n',
     what: 'an evicted node keeps no seed' },
+  { id: 'rtt-seed-reset-with-the-store', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    find: '      rttSeeds.clear();\n      lastCtrl = null;\n      rateRuns.clear();\n      since = null;',
+    repl: '      lastCtrl = null;\n      rateRuns.clear();\n      since = null;',
+    what: 'a reset discards the seeds with the rest of the store' },
+  { id: 'rtt-seed-cleared-on-load', file: 'src/zwave/evidenceStore.ts', tests: ['evidenceStore'],
+    find: '      rttSeeds.clear();\n      lastCtrl = null;\n      rateRuns.clear();\n      try {',
+    repl: '      lastCtrl = null;\n      rateRuns.clear();\n      try {',
+    what: 'a load starts the seeds over, since they are not saved' },
   { id: 'baseline-fold-skips-seeded-rtt', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
     // rtt-degraded no longer arms on the seed, so quarantine no longer keeps
     // those readings out of the baseline; without this the baseline learns them.

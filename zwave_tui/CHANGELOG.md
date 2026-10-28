@@ -35,12 +35,12 @@ neither fires nor arms, a normal first reading that restores full sensitivity,
 new excess under a large seed that still fires, the allowance subtracted to
 the millisecond, the store keeping each lifetime's first fresh reading, and
 the baseline holding out the RTT reading on a copy, against the band's own
-median, and nothing else — and 31 new mutants (one existing mutant
+median, and nothing else — and 33 new mutants (one existing mutant
 re-anchored) show each guard is load-bearing.
 
 ### Documented
 
-- The README's verification figures are corrected: 1,631 tests, and 1,484
+- The README's verification figures are corrected: 1,632 tests, and 1,486
   mutants in the harness, 13 of them labelled equivalent.
 
 ## 0.77.0
