@@ -400,8 +400,17 @@ test('ZERO samples renders a DASH for the fresh share — never a confident 0%',
   ));
   const row = out.find((l) => /Samples/.test(l));
   assert.ok(row, 'the Samples row renders');
-  assert.match(row!, /—/, 'no measurement is a dash');
-  assert.ok(!/\(0% lifetime\)/.test(row!), 'a 0% over zero samples would be a fabricated reading');
+  // v0.77.1: honestPct() prints a dash over zero samples too, so "a dash
+  // somewhere" passed for "fresh 0 (— lifetime)": a count and a share claimed
+  // over no measurement. The dash must BE the reading.
+  assert.match(row!, /fresh —(?!\S)/, 'no measurement is a dash');
+  assert.ok(!/lifetime/.test(row!), 'zero samples claims no lifetime share — not 0%, not a dash share');
+  // ...while samples with none fresh IS a measured 0%: the guard is on the
+  // sample count, not the fresh count.
+  const measured = evidenceLines(withEvidence(
+    { firstSeenAt: Date.now() - 60_000, samples: 12, freshSamples: 0, statusFeedLive: true, statsFeedLive: true },
+  )).find((l) => /Samples/.test(l));
+  assert.match(measured!, /fresh 0 \(0% lifetime\)/, 'twelve stale samples are a reading, not a dash');
 });
 
 /* ── v0.37: the liveness sweep's own record ────────────────────────────────── */
@@ -584,6 +593,14 @@ test('a node whose learning is PAUSED says so — "3d so far" is not advancing',
   }
   assert.doesNotMatch(yardLines(withYard({ baselineHold: () => null })).join('\n'),
     /Learning is PAUSED/, 'a node that is learning says nothing');
+});
+
+test('RTT learning paused by a driver restart says so, with the count (v0.77.1)', () => {
+  const out = yardLines(withYard({ baselineHold: () => null, rttSeedHold: () => 12 })).join('\n');
+  assert.match(out, /RTT learning is PAUSED/, 'the hold must render');
+  assert.match(out, /driver restarted 12 tx ago/, 'and say how far into the new average it is');
+  assert.doesNotMatch(yardLines(withYard({ baselineHold: () => null, rttSeedHold: () => null })).join('\n'),
+    /RTT learning is PAUSED/, 'a node whose RTT is learning says nothing');
 });
 
 test("a ROUTED node's RSSI normal is labelled last-hop, and loses its health colour", () => {

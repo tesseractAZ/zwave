@@ -1437,6 +1437,84 @@ test('the engine tick RETAINS the quarantine it builds (v0.48.0)', async () => {
   }
 });
 
+/** A booted ZwaveData whose engine tick can be driven by hand, with node 7's
+ *  baseline fold recorded (v0.77.1). */
+async function seedFoldRig(prefix: string) {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 60_000, routePollMs: 60_000, evidenceSampleMs: 60_000,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  const priv = zd as unknown as {
+    runEngine: (now: number) => void;
+    lastNodes: NodeSnapshot[];
+    baselines: {
+      observe: (id: number, s: { rtt: number | null; rssi: number | null }, q: boolean) => void;
+      rttNormal: (id: number, at: number) => { median: number; scale: number; ready: boolean; days: number } | null;
+    };
+    evidenceStore: {
+      record: (id: number, stats: NodeSnapshot['stats'], status: NodeStatus, extras: { fresh: boolean }, at: number) => void;
+      forNode: (id: number) => { rtt: number | null }[];
+    };
+  };
+  const folded: (number | null)[] = [];
+  const rssi: (number | null)[] = [];
+  const stored: (number | null)[] = [];
+  const held: (number | null)[] = [];
+  const observe = priv.baselines.observe.bind(priv.baselines);
+  priv.baselines.observe = (id, s, q) => {
+    if (id === 7) { folded.push(s.rtt); rssi.push(s.rssi); }
+    observe(id, s, q);
+  };
+  const roster = zd.snapshot();
+  const base = roster.find((n) => n.nodeId === 7)!;
+  let t = Date.now();
+  const tick = (tx: number, rtt: number) => {
+    const stats = { ...base.stats, commandsTX: tx, rtt, rssi: -60 };
+    t += 60_000;
+    priv.evidenceStore.record(7, stats, NodeStatus.Alive, { fresh: true }, t);
+    priv.lastNodes = roster.map((n) => (n.nodeId === 7 ? { ...n, stats } : n));
+    priv.runEngine(t);
+    const ring = priv.evidenceStore.forNode(7);
+    stored.push(ring[ring.length - 1].rtt);
+    held.push(zd.rttSeedHold(7));
+  };
+  const done = () => { zd.stop(); rmSync(dir, { recursive: true, force: true }); };
+  return { priv, tick, folded, rssi, stored, held, done };
+}
+
+test('the baseline fold leaves out an RTT reading a driver restart can still move (v0.77.1)', async () => {
+  // rtt-degraded no longer arms on the restart seed, so quarantine no longer
+  // holds those readings out; the fold has to. The first fresh reading of the
+  // lifetime (900 ms at tx 3) bounds what the restart still adds:
+  // 0.75^16 × 900 = 9.02 ms > 8 at tx 19, 6.77 ms at tx 20.
+  const r = await seedFoldRig('zwtui-seed-');
+  try {
+    for (const tx of [3, 19, 20, 400]) r.tick(tx, 900);
+    assert.deepEqual(r.folded, [null, null, 900, 900], 'held out while the restart can still move it by more than 8 ms');
+    assert.deepEqual(r.rssi, [-60, -60, -60, -60], 'only the RTT reading is held out');
+    assert.deepEqual(r.stored, [900, 900, 900, 900], 'the stored sample is left alone; only the fold sees it nulled');
+    assert.deepEqual(r.held, [3, 19, null, null], 'DETAIL is told while learning is paused, with the count');
+  } finally {
+    r.done();
+  }
+});
+
+test('the fold measures the restart against the band\'s own median (v0.77.1)', async () => {
+  // A first reading of 900 against a 890 ms normal is 10 ms of restart, 7.5 ms
+  // one transmission later. Against a median of 0 it would be held for 17 more.
+  const r = await seedFoldRig('zwtui-seedmed-');
+  try {
+    r.priv.baselines.rttNormal = () => ({ median: 890, scale: 8, ready: true, days: 5 });
+    for (const tx of [3, 4]) r.tick(tx, 900);
+    assert.deepEqual(r.folded, [null, 900]);
+  } finally {
+    r.done();
+  }
+});
+
 
 test('a departed node discarding its learning is visible IN THE TUI (v0.53.0)', async () => {
   // Eviction throws away weeks of learned baselines, the persisted evidence

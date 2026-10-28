@@ -3,6 +3,40 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.74.3
+
+### Fixed — rtt verdicts no longer reward traffic
+
+zwave-js keeps a node's `rtt` as a running average (`0.75 × rtt + 0.25 × new`,
+once per acknowledged transmission). The ledger scored rtt-degraded episodes on
+medians of that average, which forgets a slow command faster the more commands
+follow it. Episodes "improved" partly because of how often the node was probed,
+and an action that sends many reads, such as a value refresh, would have looked
+effective for its traffic alone, the effect a trial of that action would have
+measured.
+
+- Each sample now gives the mean raw round trip of the transmissions since the
+  previous sample, recovered from the average and the transmit count: `(rtt −
+  0.75^k × rtt_prev) / (1 − 0.75^k)` with `k = dTx`.
+- A sample with no new transmission adds nothing; before, it counted the same
+  average again. An estimate the counters contradict is dropped.
+- rtt-degraded tallies learned before this release, in the control arm and in
+  each action's arm, were scored on the average and decay out with use.
+
+Two tests and five mutants pin the estimator, its seed and the carry-forward.
+
+## 0.74.2
+
+### Fixed — a lowercase z did not pause
+
+ENGINE's pause key matched only an uppercase `Z`, so a plain `z` did nothing,
+although the key exists to be reached for in a hurry and other keys (`a`, `q`)
+take either case. It now takes both. Pausing still asks nothing and sends
+nothing; resuming stays behind Controller 3 → A and the typed CONFIRM.
+
+One new test and one new mutant pin it; three mutants anchored on the handler
+are re-pointed.
+
 ## 0.74.1
 
 ### Fixed — no share rounds into a claim

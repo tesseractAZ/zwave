@@ -137,6 +137,20 @@ export interface RateRun {
  *  closer than this to the previous counted one are the same exchange (v0.64.6). */
 export const RATE_FALLBACK_MIN_GAP_MS = 30_000;
 
+/**
+ * The first fresh RTT reading this store saw in the driver's current lifetime
+ * (v0.77.1): the average `a0` as it stood at `commandsTX = k0`. It bounds what
+ * the restart burst can still be adding to the average (symptoms
+ * rttRestartResidue). Dropped when the node's counters go backwards (a new
+ * driver), so the next fresh reading starts the new lifetime's. Memory only:
+ * after an add-on restart the first reading is taken mid-lifetime, where the
+ * fixed 2 s ceiling is the tighter bound anyway.
+ */
+export interface RttSeed {
+  k0: number;
+  a0: number;
+}
+
 /** Fold one sample into a node's rate run (pure, v0.64.6). Only reading ticks
  *  move it: a reading at >= 100 proves the route and clears the run; a reading
  *  below counts once when separate from the previous counted one; a reading on
@@ -371,6 +385,8 @@ export interface EvidenceStore {
    *  restored on load even when the fine ring is not; re-folded from the ring
    *  for a file written without it; dropped by evictNode and reset. */
   rateRun(nodeId: number): RateRun | null;
+  /** The first fresh RTT reading of the driver's current lifetime (v0.77.1). */
+  rttSeed(nodeId: number): RttSeed | null;
   coarseForNode(nodeId: number): CoarseBucket[];
   controllerSamples(): ControllerSample[];
   /** The long-horizon (multi-day) controller noise-floor tier (30-min buckets). */
@@ -670,6 +686,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   const ctrlCoarse: CtrlCoarseBucket[] = []; // long-horizon controller noise-floor tier
   const routeFails = new Map<number, RouteFailureEvent[]>();
   const rateRuns = new Map<number, RateRun>();
+  const rttSeeds = new Map<number, RttSeed>();
   const meta = new Map<number, NodeCoverage>();
   const lastCounters = new Map<number, CounterSnapshot>();
   let lastCtrl: CtrlSnapshot | null = null;
@@ -877,6 +894,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       const hadC = coarse.delete(nodeId);
       routeFails.delete(nodeId);
       rateRuns.delete(nodeId);
+      rttSeeds.delete(nodeId);
       meta.delete(nodeId);
       lastCounters.delete(nodeId);
       if (had || hadC) dirty = true;
@@ -915,6 +933,14 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         isFrequentListening: extras?.isFrequentListening ?? null,
       };
       lastCounters.set(nodeId, cur);
+      // A new driver (any counter backwards, the guardedDeltas rule) starts a
+      // new RTT average, so its first fresh reading is the one to keep.
+      if (prev && (cur.tx < prev.tx || cur.timeout < prev.timeout || cur.dropTx < prev.dropTx || cur.rx < prev.rx)) {
+        rttSeeds.delete(nodeId);
+      }
+      if (fresh && sample.rtt != null && stats.commandsTX >= 1 && !rttSeeds.has(nodeId)) {
+        rttSeeds.set(nodeId, { k0: stats.commandsTX, a0: sample.rtt });
+      }
       const ring = fine.get(nodeId) ?? [];
       ring.push(sample);
       if (ring.length > maxSamples) ring.splice(0, ring.length - maxSamples);
@@ -994,6 +1020,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
 
     forNode: (nodeId) => fine.get(nodeId) ?? [],
     rateRun: (nodeId) => rateRuns.get(nodeId) ?? null,
+    rttSeed: (nodeId) => rttSeeds.get(nodeId) ?? null,
     coarseForNode: (nodeId) => coarse.get(nodeId) ?? [],
     controllerSamples: () => ctrlRing,
     controllerCoarse: () => ctrlCoarse,
@@ -1046,6 +1073,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       routeFails.clear();
       meta.clear();
       lastCounters.clear();
+      rttSeeds.clear();
       lastCtrl = null;
       rateRuns.clear();
       try {
@@ -1436,6 +1464,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       routeFails.clear();
       meta.clear();
       lastCounters.clear();
+      rttSeeds.clear();
       lastCtrl = null;
       rateRuns.clear();
       since = null;

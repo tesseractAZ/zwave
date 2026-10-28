@@ -596,6 +596,9 @@ export interface DataProvider {
   /** Whether baseline learning is PAUSED for this node, and why (v0.48.0) —
    *  as of the last engine tick, not as of now. */
   baselineHold?(nodeId: number): 'symptomatic' | 'arming' | null;
+  /** Transmissions since the driver restarted, while that restart still holds
+   *  this node's RTT out of the baseline (v0.77.1); else null. */
+  rttSeedHold?(nodeId: number): number | null;
   /** Epoch ms of the last node-or-controller STATISTICS event (v0.48.0). */
   lastStatsUpdated?(): number | null;
   /** M6 interference view (cached) — the noise floor, its trend, controller
