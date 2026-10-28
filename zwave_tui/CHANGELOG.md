@@ -38,9 +38,14 @@ the baseline holding out the RTT reading on a copy, against the band's own
 median, and nothing else — and 33 new mutants (one existing mutant
 re-anchored) show each guard is load-bearing.
 
+Two older checks a mutant slipped past are tightened: the auto-ping wiring
+check reads only auto-ping's own options (the refresh trial's copy has its
+own check and mutant), and zero samples must show the fresh share as a bare
+dash.
+
 ### Documented
 
-- The README's verification figures are corrected: 1,632 tests, and 1,486
+- The README's verification figures are corrected: 1,632 tests, and 1,487
   mutants in the harness, 13 of them labelled equivalent.
 
 ## 0.77.0

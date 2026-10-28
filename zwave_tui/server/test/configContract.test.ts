@@ -427,7 +427,13 @@ test("index.ts carries the runner's launch stamp to the manual probe (v0.64.5)",
   assert.match(index, /listeningOf: \(n\) => zwaveData\.listensForCommands\(n\)/, 'FLiRS counts as listening for a queued write');
   assert.match(index, /onLaunch: \(kind, nodeId, origin, at, alive\) => zwaveData\.noteActionLaunched\(kind, nodeId, origin, at, alive\)/);
   assert.match(index, /onSettled: \(kind, nodeId, origin, at, settledAt, effect\) => zwaveData\.noteActionSettled\(kind, nodeId, origin, at, settledAt, effect\)/);
-  assert.match(index, /operatorBusy: \(\) => actions\.operatorActionInFlight\(\) != null/, 'auto-ping stands down for a one-node rebuild');
+  // v0.77.1: read inside auto-ping's own options. The refresh trial's copy
+  // (pinned in refreshTrial.test.ts) also matched across the whole file, so
+  // stubbing auto-ping's flag stayed green.
+  const apStart = index.indexOf('autoPing = startAutoPing({');
+  const apEnd = index.indexOf('zwaveData.setAutoPingSnapshot(', apStart);
+  assert.ok(apStart > -1 && apEnd > apStart, 'the auto-ping options block is found');
+  assert.match(index.slice(apStart, apEnd), /operatorBusy: \(\) => actions\.operatorActionInFlight\(\) != null,/, 'auto-ping stands down for a one-node rebuild');
   assert.match(
     index,
     /setProbeNotePending\(\(n, sentAt\) => autoPing\?\.notePending\(n, 'manual', sentAt\)\)/,

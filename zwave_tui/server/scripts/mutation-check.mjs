@@ -4835,6 +4835,12 @@ const MUTANTS = [
     find: "      operatorBusy: () => actions.operatorActionInFlight() != null,",
     repl: "      operatorBusy: () => false,",
     what: "auto-ping is handed the in-flight flag" },
+  // v0.77.1: the refresh trial's inline copy of the same flag — pinned by its
+  // own assertion, so neither copy can stand in for the other.
+  { id: "index-trial-operator-busy-not-wired", file: "src/index.ts", tests: ["refreshTrial"],
+    find: "operatorBusy: () => actions.operatorActionInFlight() != null });",
+    repl: "operatorBusy: () => false });",
+    what: "the refresh trial is handed the in-flight flag" },
   { id: "session-no-detach", file: "src/telnet/session.ts", tests: ["sessionActions"],
     find: "          this.detached.add(this.actionSeq);\n",
     repl: "",
@@ -6261,8 +6267,9 @@ const MUTANTS = [
     repl: '  const fitCap = Math.max(1, budget - 2);\n  const canDisclose = ranked.length > fitCap;\n  const shown = canDisclose ? ranked.slice(0, fitCap - 1) : ranked.slice(0, fitCap);\n  const max = perDayOf(ranked[0]);',
     what: 'the stability disclosure is subtracted once too — never "+N more" over nothing' },
   { id: 'evidence-no-samples-dash', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
-    // Coerces "no measurement" into a confident 0%: zero samples renders
-    // "(0% lifetime)" — a fabricated reading over absent data.
+    // Coerces "no measurement" into a reading: zero samples renders
+    // "fresh 0 (— lifetime)" in the red tone — a count and a share claimed over
+    // absent data (honestPct supplies the dash, so "a dash" alone is no test).
     find: '      const pct = cov.samples > 0 ? Math.round((cov.freshSamples / cov.samples) * 100) : null;',
     repl: '      const pct = Math.round((cov.freshSamples / Math.max(1, cov.samples)) * 100);',
     what: 'zero samples is a dash, never a confident 0%' },
