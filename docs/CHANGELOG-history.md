@@ -3,6 +3,42 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.74.4
+
+### Changed — a narrower AppArmor profile, and the server says which one runs
+
+The add-on's AppArmor profile was a blanket grant with a per-path allow list
+under it, and a blanket `file,` rule made that list grant nothing. It now
+narrows access the way that works under `file,`: with deny rules.
+
+- **Capabilities** are an exact allow list: chown, dac_override, fowner,
+  fsetid, kill, setgid, setuid. `dac_read_search`, `sys_chroot` and
+  `net_bind_service` are gone (both listeners use unprivileged ports), and
+  `net_raw`, `setfcap` and the rest of the dangerous set are refused with an
+  audit record.
+- **Shipped code is write-locked** for the container's lifetime with `audit
+  deny … wl` on `/init`, `/bin`, `/sbin`, `/lib`, `/usr` and `/app`: no
+  writes, creates, renames, chmod, chown or hardlinks, even for root. Reading
+  and executing are unchanged; the stores in `/data`, tsx's cache in `/tmp`
+  and s6's `/run` stay writable, and the PID1 trees are left alone.
+- **ptrace** denies only `trace`; the old bare `deny ptrace` also took away
+  the read that docker-exec diagnostics use, silently. The redundant per-path
+  allow list is gone.
+- The header now documents how the Supervisor loads the profile (it renames
+  the profile to the add-on's slug; the old "must be `addon_<slug>`" warning
+  was wrong), how to validate it with a fresh compile, and how to boot-test it
+  against the host's parser before a release.
+
+At startup the server reads the AppArmor label it runs under and logs it
+(`security: AppArmor local_zwave_tui (enforce)`), or logs a WARNING when the
+profile is not in force: a profile the host parser rejects is otherwise not
+reported anywhere.
+
+A CI job compiles the profile on every change. Nine tests pin the label reader
+and the profile's invariants: the three blanket grants, the capability list,
+the `wl` write-locks, no `wal` mask, no deny on the PID1 trees, `/run`, `/tmp`
+or `/data`, and the ptrace rule.
+
 ## 0.74.3
 
 ### Fixed — rtt verdicts no longer reward traffic
