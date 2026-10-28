@@ -1,6 +1,6 @@
 {
   "name": "zwave-tui-server",
-  "version": "0.77.1",
+  "version": "0.77.2",
   "engines": {
     "node": ">=22.0.0 <23.0.0"
   },
@@ -19,7 +19,7 @@
     "@fastify/cors": "^11",
     "@fastify/websocket": "^11",
     "@xterm/xterm": "6.0.0",
-    "fastify": "^5.12.5",
+    "fastify": "^5.12.7",
     "ssh2": "^1.17.0",
     "tsx": "^4.23.15",
     "ws": "^8"
