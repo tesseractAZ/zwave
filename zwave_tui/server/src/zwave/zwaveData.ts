@@ -65,11 +65,11 @@ import {
   type ProbeFrameLite,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels, type DriverLogWatch } from './driverWsClient';
-import { createBaselineStore, bandOf, N_BANDS, type BaselineStore } from './baselines';
+import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttRestartResidue, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -1479,7 +1479,12 @@ class ZwaveDataImpl implements ZwaveData {
       if (n.isController) continue;
       const ring = ev.forNode(n.nodeId);
       if (ring.length === 0) continue;
-      bl.observe(n.nodeId, ring[ring.length - 1], quarantine.has(n.nodeId));
+      // Nor an RTT reading the driver's post-restart seed can still move by
+      // more than the RTT baseline resolves (v0.77.1). Quarantine used to hold
+      // those out because they tripped rtt-degraded; they no longer do.
+      const s = ring[ring.length - 1];
+      const seeded = s.rtt != null && rttRestartResidue(n.stats.commandsTX, 0) > RTT_MAD_FLOOR;
+      bl.observe(n.nodeId, seeded ? { ...s, rtt: null } : s, quarantine.has(n.nodeId));
     }
   }
 

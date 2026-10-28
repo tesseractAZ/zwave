@@ -1,7 +1,7 @@
 import type { SleeperWatch } from '../src/zwave/missedReport';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSymptoms, heldSymptoms, windowTimeoutRate, type DetectInput, type SymptomState } from '../src/zwave/symptoms';
+import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, RTT_SEED_MAX_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
 import { planEpisodeLifecycle } from '../src/zwave/outcomes';
 import { diffSymptomLog } from '../src/zwave/zwaveData';
 import type { RateNormal, ContNormal, BaselineStore } from '../src/zwave/baselines';
@@ -638,6 +638,58 @@ test('rtt-degraded still fires for a node that talks less often than the dwell (
   const out = detectSymptoms(inp(T2 - 60_000), state); // dwell elapsed
   assert.ok(out.some((s) => s.kind === 'rtt-degraded'),
     'a sparsely-reporting node with a sustained bad RTT never surfaced');
+});
+
+/* ── rtt-degraded vs a driver restart's seed (v0.77.1) ─────────────────────
+ *
+ * zwave-js re-seeds each node's RTT average on every restart with one
+ * measurement from the restart burst; on the reference mesh that seed sat at
+ * 0.7–1.3 s against a 20–60 ms normal and re-tripped rtt-degraded for hours.
+ * `commandsTX` counts the measurements in the average, so the seed's leftover
+ * is bounded by 0.75^(commandsTX−1) × (RTT_SEED_MAX_MS − median).
+ */
+
+/** A node whose driver has sent `tx` acknowledged transmissions since it started. */
+const txNode = (id: number, tx: number): NodeSnapshot => node(id, { stats: { commandsTX: tx } as never });
+const rttFires = (tx: number, rtt: number): Symptom | undefined => {
+  const bl = baselineStub({ rtt: { median: 30, scale: 8, ready: true, days: 5 } });
+  const inp = (now: number) => input({ nodes: [node(1), txNode(6, tx)], recent: new Map([[6, window(now, 10, { rtt, fresh: true })]]), baselines: bl, now });
+  return settle(inp, new Map(), T, 6).find((s) => s.kind === 'rtt-degraded');
+};
+
+test('rttRestartResidue: the seed weighs 0.75^(commandsTX−1); an unknown counter gets nothing', () => {
+  assert.equal(rttRestartResidue(1, 30), RTT_SEED_MAX_MS - 30, 'one measurement IS the seed');
+  assert.equal(rttRestartResidue(2, 30), 0.75 * (RTT_SEED_MAX_MS - 30));
+  assert.equal(rttRestartResidue(12, 30), 0.75 ** 11 * (RTT_SEED_MAX_MS - 30));
+  assert.equal(rttRestartResidue(0, 30), RTT_SEED_MAX_MS - 30, 'no transmission yet is still a fresh lifetime');
+  assert.equal(rttRestartResidue(12.9, 30), rttRestartResidue(12, 30), 'a counter is whole');
+  assert.equal(rttRestartResidue(1, RTT_SEED_MAX_MS + 5), 0, 'a median above the ceiling leaves nothing to allow');
+  assert.equal(rttRestartResidue(Number.NaN, 30), 0);
+  assert.equal(rttRestartResidue(undefined as never, 30), 0, 'no counter, no claim of a restart');
+  assert.ok(rttRestartResidue(30, 30) < 1, 'it has decayed to nothing by the 30th transmission');
+});
+
+test('rtt-degraded: a seed-sized reading right after a driver restart does not fire; the same reading on a settled average does', () => {
+  // 600 ms against 30±8. After 3 transmissions the seed can still add
+  // 0.5625 × 1970 ≈ 1108 ms; after 500 it can add nothing.
+  assert.equal(rttFires(3, 600), undefined, 'the restart seed alone explains it');
+  assert.ok(rttFires(500, 600), 'a settled average that high is the link');
+});
+
+test('rtt-degraded: a large real slowdown still fires inside the restart window, and says how much it allowed for', () => {
+  // 12 transmissions in: allowance 0.75^11 × 1970 ≈ 83 ms; 400 − 83 is far over 30 + 4×8.
+  const s = rttFires(12, 400);
+  assert.ok(s, 'an excess beyond anything the seed could add is not hidden');
+  assert.deepEqual(s.evidence.find((e) => e.label === 'restart allowance'),
+    { label: 'restart allowance', value: '83ms (12 tx since driver start)' });
+  assert.equal(rttFires(500, 400)?.evidence.some((e) => e.label === 'restart allowance'), false,
+    'a settled average carries no allowance row');
+});
+
+test('rtt-degraded: the allowance is subtracted before the usual test, to the millisecond', () => {
+  // threshold 30 + 4×8 = 62; allowance at 12 tx = 83.06 ms.
+  assert.equal(rttFires(12, 145), undefined, '145 − 83.06 = 61.94 is under 62');
+  assert.ok(rttFires(12, 146), '146 − 83.06 = 62.94 is over 62');
 });
 
 /* ── route-churn: a SymptomKind that existed but was never emitted ────────

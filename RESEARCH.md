@@ -343,6 +343,18 @@ Scoring the average itself rewards traffic, because it forgets a slow command
 faster the more commands follow it. Since v0.74.3 the outcome ledger scores
 `rtt-degraded` on this estimate (DESIGN §3.6).
 
+**A driver restart re-seeds the average** *(source — zwave-js 15.31.2
+`Node.ts` `updateRTT`: the first measurement sets `rtt` outright; statistics
+are in memory only; empirical — the reference mesh's 30-min evidence buckets
+across four restarts, 10-16..10-26; added for v0.77.1)*: after a restart
+`commandsTX` counts the measurements in the average, and the first one, taken
+inside the restart's own burst, still weighs `0.75^(commandsTX − 1)`. It
+landed at 0.7–1.3 s on nodes that sit at 20–60 ms and decayed along exactly
+that curve (node 63 after the 10-24 restart: 1218 → 798 → 612 → … → 65 ms by
+its 16th transmission). `rtt-degraded` takes that leftover out before testing
+a reading, and the RTT baseline does not learn a reading it can still move by
+more than 8 ms (DOCS §7.1.7).
+
 ---
 
 ## 2. Routing mechanics & statistics semantics

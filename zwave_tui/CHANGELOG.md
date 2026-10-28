@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.77.1
+
+`rtt-degraded` no longer fires on the round-trip average a Z-Wave JS restart
+leaves behind.
+
+### Fixed — `rtt-degraded` after a driver restart
+
+- zwave-js keeps each node's round-trip time as a running average, in memory
+  only. A restart seeds it with one measurement from the restart's own burst,
+  and every later acknowledged transmission keeps 0.75 of it. On the reference
+  mesh that seed landed at 0.7–1.3 s on nodes that sit at 20–60 ms and took
+  6–12 h to wash out of quiet nodes. Every fresh statistics event from such a
+  node re-tripped `rtt-degraded`: nine 5–8 min symptoms in the 5 h after the
+  10-24 restart, against 1–7 symptom onsets a day before.
+- The detector now takes out the most that seed can still add,
+  `0.75^(commandsTX − 1) × (2 s − median)`, before its usual test.
+  `commandsTX` counts the measurements in the average, so the allowance needs
+  no clock and no restart detection. It is under 1 ms by the 30th
+  transmission, and a slowdown larger than it still fires inside the window,
+  with a `restart allowance` evidence row.
+- The RTT baseline no longer learns a reading that seed can still move by more
+  than 8 ms (through the 20th transmission after a restart). Until now those
+  readings were kept out only while they tripped `rtt-degraded`.
+
+5 new tests pin these — the seed's exact weight, a seed-sized reading that
+stays quiet, the same reading on a settled average that fires, a large real
+slowdown that fires inside the window, the allowance subtracted to the
+millisecond, and the baseline holding out the RTT reading and nothing else —
+and 11 new mutants (one existing mutant re-anchored) show each guard is
+load-bearing.
+
+### Documented
+
+- The README's verification figures are corrected: 1,625 tests, and 1,464
+  mutants in the harness, 13 of them labelled equivalent.
+
 ## 0.77.0
 
 The LAN terminal is SSH: telnet is removed.
@@ -520,40 +556,6 @@ A CI job compiles the profile on every change. Nine tests pin the label reader
 and the profile's invariants: the three blanket grants, the capability list,
 the `wl` write-locks, no `wal` mask, no deny on the PID1 trees, `/run`, `/tmp`
 or `/data`, and the ptrace rule.
-
-## 0.74.3
-
-### Fixed — rtt verdicts no longer reward traffic
-
-zwave-js keeps a node's `rtt` as a running average (`0.75 × rtt + 0.25 × new`,
-once per acknowledged transmission). The ledger scored rtt-degraded episodes on
-medians of that average, which forgets a slow command faster the more commands
-follow it. Episodes "improved" partly because of how often the node was probed,
-and an action that sends many reads, such as a value refresh, would have looked
-effective for its traffic alone, the effect a trial of that action would have
-measured.
-
-- Each sample now gives the mean raw round trip of the transmissions since the
-  previous sample, recovered from the average and the transmit count: `(rtt −
-  0.75^k × rtt_prev) / (1 − 0.75^k)` with `k = dTx`.
-- A sample with no new transmission adds nothing; before, it counted the same
-  average again. An estimate the counters contradict is dropped.
-- rtt-degraded tallies learned before this release, in the control arm and in
-  each action's arm, were scored on the average and decay out with use.
-
-Two tests and five mutants pin the estimator, its seed and the carry-forward.
-
-## 0.74.2
-
-### Fixed — a lowercase z did not pause
-
-ENGINE's pause key matched only an uppercase `Z`, so a plain `z` did nothing,
-although the key exists to be reached for in a hurry and other keys (`a`, `q`)
-take either case. It now takes both. Pausing still asks nothing and sends
-nothing; resuming stays behind Controller 3 → A and the typed CONFIRM.
-
-One new test and one new mutant pin it; three mutants anchored on the handler
-are re-pointed.
 
 ## Older releases
 

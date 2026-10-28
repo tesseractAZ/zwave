@@ -198,6 +198,37 @@ const TIMEOUT_RATE_ABS = 0.15; // chronic absolute threshold (health-check rubri
 const TIMEOUT_RATE_MULT = 3; // relative: window rate ≫ this × baseline
 const CHRONIC_DAYS_MS = 2 * 24 * 60_000 * 60; // 2 days sustained → chronic
 const RTT_Z = 4; // z-score over route-stratified baseline
+/**
+ * The highest first-after-restart RTT that `rttRestartResidue` allows for
+ * (v0.77.1). The restart-seeded readings in the reference mesh's 14-day store
+ * peaked at 1.34 s across four driver restarts (10-16..10-26), and 2 s is the
+ * RTT histogram's top finite edge. A higher seed gets a partial allowance, which
+ * is the behaviour before v0.77.1.
+ */
+export const RTT_SEED_MAX_MS = 2000;
+
+/**
+ * How far above `median` a node's RTT average can still be pushed by the
+ * driver's FIRST measurement since it started (v0.77.1).
+ *
+ * The average lives in driver memory only, so every restart re-seeds it with
+ * one measurement taken inside the restart's own burst, and each acknowledged
+ * transmission after that keeps 0.75 of it (the source is cited at
+ * outcomes.rawRttOf). With `commandsTX` measurements in the average the seed
+ * still weighs 0.75^(commandsTX − 1).
+ *
+ * On the reference mesh the seed landed at 0.7–1.3 s on nodes that sit at
+ * 20–60 ms and then decayed along exactly that curve (node 63 after the 10-24
+ * restart: 1218 → 798 → 612 → … → 65 ms by its 16th transmission). Every fresh
+ * stats event from a quiet node re-tripped rtt-degraded for hours: nine 5–8 min
+ * blips in the 5 h after that restart, against 1–7 symptom onsets a day before.
+ *
+ * An unknown counter gets no allowance: nothing says a restart happened.
+ */
+export function rttRestartResidue(commandsTX: number, median: number): number {
+  if (!Number.isFinite(commandsTX)) return 0;
+  return 0.75 ** (Math.max(1, Math.floor(commandsTX)) - 1) * Math.max(0, RTT_SEED_MAX_MS - median);
+}
 const WEAK_MARGIN_DB = 7; // direct-node weak-signal margin
 const WEAK_TIMEOUT_RATE = 0.05; // weak-signal corroboration on a MEASURED window (≥ MIN_WINDOW_TX sends)
 // weak-signal corroboration on an UNMEASURED window: a delivery-failure EVENT this recent.
@@ -684,13 +715,21 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // is at most 10 min old, and for a level signal the newest reading IS
       // the current best estimate — unlike flaps/timeouts/resyncs, where a
       // count from a burst that has stopped is stale evidence of a past event.
-      const b = !!(norm?.ready && obs != null && obs.rtt > norm.median + RTT_Z * norm.scale);
+      //
+      // The reading is tested with the restart's seed taken out (v0.77.1): an
+      // excess that seed alone could produce is the restart, not the link.
+      const residue = norm ? rttRestartResidue(node.stats.commandsTX, norm.median) : 0;
+      const b = !!(norm?.ready && obs != null && obs.rtt - residue > norm.median + RTT_Z * norm.scale);
       const since = dwell(state, key(id, 'rtt-degraded'), b, now);
       if (since != null) {
         breaching = true;
         out.push({
           kind: 'rtt-degraded', nodeId: id, severity: 'watch', sinceMs: since, basis: 'measured',
-          evidence: [{ label: 'RTT', value: `${Math.round(rtt!)}ms` }, { label: 'baseline', value: `${Math.round(norm!.median)}±${Math.round(norm!.scale)}ms` }],
+          evidence: [
+            { label: 'RTT', value: `${Math.round(rtt!)}ms` },
+            { label: 'baseline', value: `${Math.round(norm!.median)}±${Math.round(norm!.scale)}ms` },
+            ...(residue >= 1 ? [{ label: 'restart allowance', value: `${Math.round(residue)}ms (${node.stats.commandsTX} tx since driver start)` }] : []),
+          ],
           narrative: `${node.name}'s round-trip time is far above its normal for this route and time of day.`,
         });
       }
