@@ -586,6 +586,14 @@ test('a node whose learning is PAUSED says so — "3d so far" is not advancing',
     /Learning is PAUSED/, 'a node that is learning says nothing');
 });
 
+test('RTT learning paused by a driver restart says so, with the count (v0.77.1)', () => {
+  const out = yardLines(withYard({ baselineHold: () => null, rttSeedHold: () => 12 })).join('\n');
+  assert.match(out, /RTT learning is PAUSED/, 'the hold must render');
+  assert.match(out, /driver restarted 12 tx ago/, 'and say how far into the new average it is');
+  assert.doesNotMatch(yardLines(withYard({ baselineHold: () => null, rttSeedHold: () => null })).join('\n'),
+    /RTT learning is PAUSED/, 'a node whose RTT is learning says nothing');
+});
+
 test("a ROUTED node's RSSI normal is labelled last-hop, and loses its health colour", () => {
   // `stats.rssi` is the signal from whatever repeater relayed the frame, so for
   // a routed node this row describes a link the device is not on either end of.

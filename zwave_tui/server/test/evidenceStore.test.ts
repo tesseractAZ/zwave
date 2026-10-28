@@ -63,6 +63,32 @@ test('RESET GUARD: a backwards counter (driver restart) yields NULL deltas, then
   assert.equal(next.dTimeout, 2);
 });
 
+test('rttSeed keeps the first fresh RTT reading of each driver lifetime (v0.77.1)', () => {
+  const s = mkStore(freshPath());
+  let t = FIXED;
+  const rec = (over: Partial<NodeStats>, extras = FRESH) => s.record(6, stats(over), NodeStatus.Alive, extras, (t += TICK));
+  rec({ commandsTX: 0, rtt: null });
+  assert.equal(s.rttSeed(6), null, 'no transmission yet: the driver has no average');
+  rec({ commandsTX: 1, rtt: 1390 }, { fresh: false });
+  assert.equal(s.rttSeed(6), null, 'a copied, non-fresh value is not a reading');
+  rec({ commandsTX: 1, rtt: 1390 });
+  assert.deepEqual(s.rttSeed(6), { k0: 1, a0: 1390 });
+  rec({ commandsTX: 2, rtt: 1046 });
+  assert.deepEqual(s.rttSeed(6), { k0: 1, a0: 1390 }, 'later readings do not replace it');
+  rec({ commandsTX: 0, rtt: null });
+  assert.equal(s.rttSeed(6), null, 'a counter going backwards is a new driver, and a new average');
+  rec({ commandsTX: 0, rtt: 55 });
+  assert.equal(s.rttSeed(6), null, 'an RTT with no transmission behind it is the old driver\'s, not a reading');
+  rec({ commandsTX: 3, rtt: 27 });
+  assert.deepEqual(s.rttSeed(6), { k0: 3, a0: 27 }, 'whose first fresh reading is kept in turn');
+  rec({ commandsTX: 4, rtt: 26, timeoutResponse: 0, commandsRX: 0 });
+  s.record(6, stats({ commandsTX: 5, rtt: 25, commandsRX: 3 }), NodeStatus.Alive, FRESH, (t += TICK));
+  s.record(6, stats({ commandsTX: 6, rtt: 24, commandsRX: 1 }), NodeStatus.Alive, FRESH, (t += TICK));
+  assert.deepEqual(s.rttSeed(6), { k0: 6, a0: 24 }, 'any counter backwards, not only commandsTX');
+  s.evictNode(6);
+  assert.equal(s.rttSeed(6), null, 'and an evicted node keeps none');
+});
+
 test('WHOLE-WINDOW invalidation: ONE backwards counter nulls ALL deltas (one driver, one restart)', () => {
   // Design review: per-field nulling let cross-lifetime deltas through — a
   // window that spans a restart is invalid for EVERY counter, including the

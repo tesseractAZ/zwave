@@ -674,6 +674,13 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           : 'Learning is PAUSED — this node is arming a symptom, so the baseline is held until it settles',
           inner, c.yellow));
       }
+      // RTT learning alone can be paused too (v0.77.1): right after a driver
+      // restart the average still carries the restart burst's measurements.
+      const seedHold = data.rttSeedHold?.(n.nodeId) ?? null;
+      if (seedHold != null) {
+        body.push(note(`RTT learning is PAUSED — the driver restarted ${seedHold} tx ago, and its first round trips still weigh in this node's average`,
+          inner, c.yellow));
+      }
       // A node the engine cannot see must SAY so here, because every quiet
       // verdict elsewhere on this screen silently depends on it.
       if (!cov.statusFeedLive && !cov.statsFeedLive) {

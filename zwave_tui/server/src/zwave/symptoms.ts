@@ -21,7 +21,7 @@ import type { SleeperWatch } from './missedReport';
 import { repeatsFrames, type Burst } from './repeatedFrames';
 import type { NodeSnapshot, ControllerSnapshot, NodeStatus } from '../types';
 import { NodeStatus as NS } from '../types';
-import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage, RateRun } from './evidenceStore';
+import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage, RateRun, RttSeed } from './evidenceStore';
 import type { BaselineStore } from './baselines';
 import { medianNoiseFloor, DEFAULT_NOISE_FLOOR } from './health';
 
@@ -146,6 +146,9 @@ export interface DetectInput {
    *  acknowledged transmissions, kept by the store so it outlives the fine
    *  window a sweep-only node's next transmission does not arrive inside. */
   rateRun: (nodeId: number) => RateRun | null;
+  /** The first fresh RTT reading of the driver's current lifetime (v0.77.1),
+   *  which bounds what the restart burst can still add to the average. */
+  rttSeed: (nodeId: number) => RttSeed | null;
   /** The CONFIGURED liveness-sweep cadence in ms (v0.63.0), or undefined when
    *  the sweep is off. quiet-node's dwell is derived from this rather than from
    *  the default the constant was written against — on an install that
@@ -199,35 +202,51 @@ const TIMEOUT_RATE_MULT = 3; // relative: window rate ≫ this × baseline
 const CHRONIC_DAYS_MS = 2 * 24 * 60_000 * 60; // 2 days sustained → chronic
 const RTT_Z = 4; // z-score over route-stratified baseline
 /**
- * The highest first-after-restart RTT that `rttRestartResidue` allows for
- * (v0.77.1). The restart-seeded readings in the reference mesh's 14-day store
- * peaked at 1.34 s across four driver restarts (10-16..10-26), and 2 s is the
- * RTT histogram's top finite edge. A higher seed gets a partial allowance, which
- * is the behaviour before v0.77.1.
+ * The highest first-after-restart RTT the fixed half of `rttRestartResidue`
+ * allows for (v0.77.1). The highest restart-seeded reading in the reference
+ * mesh's 14-day store, across four driver restarts (10-16..10-26), was about
+ * 1.39 s (node 63, rebuilt from a two-reading 30-min bucket and the decay that
+ * followed it), and 2 s is the RTT histogram's top finite edge.
  */
 export const RTT_SEED_MAX_MS = 2000;
 
 /**
- * How far above `median` a node's RTT average can still be pushed by the
- * driver's FIRST measurement since it started (v0.77.1).
+ * How far above `median` a node's RTT average can still be pushed by what the
+ * driver measured right after it started (v0.77.1).
  *
  * The average lives in driver memory only, so every restart re-seeds it with
  * one measurement taken inside the restart's own burst, and each acknowledged
  * transmission after that keeps 0.75 of it (the source is cited at
  * outcomes.rawRttOf). With `commandsTX` measurements in the average the seed
- * still weighs 0.75^(commandsTX − 1).
+ * still weighs 0.75^(commandsTX − 1), so a seed of at most RTT_SEED_MAX_MS adds
+ * at most 0.75^(commandsTX − 1) × (RTT_SEED_MAX_MS − median).
  *
- * On the reference mesh the seed landed at 0.7–1.3 s on nodes that sit at
- * 20–60 ms and then decayed along exactly that curve (node 63 after the 10-24
- * restart: 1218 → 798 → 612 → … → 65 ms by its 16th transmission). Every fresh
- * stats event from a quiet node re-tripped rtt-degraded for hours: nine 5–8 min
- * blips in the 5 h after that restart, against 1–7 symptom onsets a day before.
+ * When the store holds the first fresh reading of this lifetime (`seed`: the
+ * average `a0` at `k0` transmissions), everything measured up to it adds
+ * exactly 0.75^(commandsTX − k0) × (a0 − median), and the smaller of the two is
+ * used. Most nodes' first reading after a restart is already normal (27–33 of
+ * 38 per restart on the reference mesh), so their allowance is gone within a
+ * few transmissions. The fixed ceiling still caps a reading first seen
+ * mid-lifetime, after an add-on restart, where `a0` is not the seed.
  *
- * An unknown counter gets no allowance: nothing says a restart happened.
+ * On the reference mesh the large seeds were about 0.7–1.4 s on nodes that sit
+ * at 20–60 ms and decayed along that curve (node 63 after the 10-24 restart:
+ * about 1390 → 1046 → 798 → 612 → … → 65 ms by its 17th reading). Every fresh
+ * stats event from such a quiet node re-tripped rtt-degraded for hours: nine
+ * 5–8 min blips in the 5 h after that restart, against 1–7 symptom onsets a
+ * day before.
+ *
+ * No transmission yet in this lifetime (commandsTX 0, which is also what a node
+ * with no statistics reads) means no measurement for the seed to be in, so no
+ * allowance: a reading still held from before the restart is not this
+ * lifetime's.
  */
-export function rttRestartResidue(commandsTX: number, median: number): number {
-  if (!Number.isFinite(commandsTX)) return 0;
-  return 0.75 ** (Math.max(1, Math.floor(commandsTX)) - 1) * Math.max(0, RTT_SEED_MAX_MS - median);
+export function rttRestartResidue(commandsTX: number, median: number, seed?: RttSeed | null): number {
+  if (!Number.isFinite(commandsTX) || commandsTX < 1) return 0;
+  const k = Math.floor(commandsTX);
+  const ceiling = 0.75 ** (k - 1) * Math.max(0, RTT_SEED_MAX_MS - median);
+  if (!seed || seed.k0 > k) return ceiling;
+  return Math.min(ceiling, 0.75 ** (k - seed.k0) * Math.max(0, seed.a0 - median));
 }
 const WEAK_MARGIN_DB = 7; // direct-node weak-signal margin
 const WEAK_TIMEOUT_RATE = 0.05; // weak-signal corroboration on a MEASURED window (≥ MIN_WINDOW_TX sends)
@@ -718,7 +737,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       //
       // The reading is tested with the restart's seed taken out (v0.77.1): an
       // excess that seed alone could produce is the restart, not the link.
-      const residue = norm ? rttRestartResidue(node.stats.commandsTX, norm.median) : 0;
+      const residue = norm ? rttRestartResidue(node.stats.commandsTX, norm.median, input.rttSeed(id)) : 0;
       const b = !!(norm?.ready && obs != null && obs.rtt - residue > norm.median + RTT_Z * norm.scale);
       const since = dwell(state, key(id, 'rtt-degraded'), b, now);
       if (since != null) {

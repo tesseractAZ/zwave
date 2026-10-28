@@ -149,6 +149,8 @@ export interface ZwaveDataSource {
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
   /** REQUIRED — see ackEvent. Whether learning is PAUSED for this node. */
   baselineHold(nodeId: number): 'symptomatic' | 'arming' | null;
+  /** REQUIRED — see ackEvent. RTT learning paused by a recent driver restart (v0.77.1). */
+  rttSeedHold(nodeId: number): number | null;
   /** REQUIRED — see ackEvent. Epoch ms of the last STATISTICS event. A green
    *  feed badge proves a subscription exists, not that data is arriving. */
   lastStatsUpdated(): number | null;
@@ -285,6 +287,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     rttNormal: (n) => zd.rttNormal(n),
     timeoutNormal: (n) => zd.timeoutNormal(n),
     baselineHold: (n) => zd.baselineHold(n),
+    rttSeedHold: (n) => zd.rttSeedHold(n),
     // Read LIVE, never through the refresh cache: a cached value measures the
     // poller, not the feed, which is the very confusion this exists to end.
     lastStatsUpdated: () => zd.lastStatsUpdated(),
@@ -420,6 +423,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     rttNormal: (nodeId) => zwaveData.rttNormal(nodeId),
     timeoutNormal: (nodeId) => zwaveData.timeoutNormal(nodeId),
     baselineHold: (nodeId) => zwaveData.baselineHold(nodeId),
+    rttSeedHold: (nodeId) => zwaveData.rttSeedHold(nodeId),
     lastStatsUpdated: () => zwaveData.lastStatsUpdated(),
     scoreFor: (nodeId) => cachedScores.get(nodeId) ?? UNKNOWN_SCORE,
     noiseFloor: () => cachedNoiseFloor,

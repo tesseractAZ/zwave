@@ -547,6 +547,9 @@ export interface ZwaveData {
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
   /** Is this node's baseline learning currently PAUSED, and why (v0.48.0)? */
   baselineHold(nodeId: number): 'symptomatic' | 'arming' | null;
+  /** Transmissions since the driver restarted while that restart still holds
+   *  this node's RTT out of the baseline, as of the last engine tick (v0.77.1). */
+  rttSeedHold(nodeId: number): number | null;
   forgetNodeBaselines(nodeId: number): void;
   /** M6: interference view (noise floor, serial health, diurnal heatmap). */
   interference(): InterferenceView;
@@ -1435,6 +1438,7 @@ class ZwaveDataImpl implements ZwaveData {
         controllerSamples: () => ev.controllerSamples(),
         coverage: (id) => ev.coverage(id),
         rateRun: (id) => ev.rateRun(id),
+        rttSeed: (id) => ev.rttSeed(id),
         // The CONFIGURED sweep cadence (v0.63.0) — quiet-node's dwell derives
         // from it rather than from the default its constant was written
         // against. 0/absent when the sweep is off, which floors the dwell at
@@ -1475,15 +1479,18 @@ class ZwaveDataImpl implements ZwaveData {
     this.lastQuarantineArm = qArm;
     const quarantine = new Set(qSym);
     for (const id of qArm) quarantine.add(id);
+    this.lastRttSeedHold.clear();
     for (const n of this.lastNodes) {
       if (n.isController) continue;
       const ring = ev.forNode(n.nodeId);
       if (ring.length === 0) continue;
-      // Nor an RTT reading the driver's post-restart seed can still move by
-      // more than the RTT baseline resolves (v0.77.1). Quarantine used to hold
-      // those out because they tripped rtt-degraded; they no longer do.
+      // Nor an RTT reading the driver's post-restart measurements can still
+      // move by more than the RTT baseline resolves (v0.77.1). Quarantine used
+      // to hold those out because they tripped rtt-degraded; they no longer do.
       const s = ring[ring.length - 1];
-      const seeded = s.rtt != null && rttRestartResidue(n.stats.commandsTX, 0) > RTT_MAD_FLOOR;
+      const seeded = s.rtt != null &&
+        rttRestartResidue(n.stats.commandsTX, bl.rttNormal(n.nodeId, s.t)?.median ?? 0, ev.rttSeed(n.nodeId)) > RTT_MAD_FLOOR;
+      if (seeded) this.lastRttSeedHold.set(n.nodeId, n.stats.commandsTX);
       bl.observe(n.nodeId, seeded ? { ...s, rtt: null } : s, quarantine.has(n.nodeId));
     }
   }
@@ -2134,6 +2141,9 @@ class ZwaveDataImpl implements ZwaveData {
    *  per-node signal verdict is measured against, and until now unreadable. */
   private lastQuarantineSym = new Set<number>();
   private lastQuarantineArm = new Set<number>();
+  /** Nodes whose RTT reading the last engine tick held out of the baseline
+   *  because a driver restart can still move it, with their commandsTX (v0.77.1). */
+  private lastRttSeedHold = new Map<number, number>();
 
   /**
    * Is this node's baseline learning paused, and why (v0.48.0)?
@@ -2151,6 +2161,18 @@ class ZwaveDataImpl implements ZwaveData {
     if (this.lastQuarantineSym.has(nodeId)) return 'symptomatic';
     if (this.lastQuarantineArm.has(nodeId)) return 'arming';
     return null;
+  }
+
+  /**
+   * Is this node's RTT learning paused because the driver restarted recently
+   * (v0.77.1)? The transmissions since that restart, as of the last engine
+   * tick, or null. Without it the RTT row's "Nd so far" stops advancing with
+   * nothing on screen to say why, which is the misreport `baselineHold` ended
+   * for quarantine.
+   */
+  rttSeedHold(nodeId: number): number | null {
+    if (!this.baselines) return null;
+    return this.lastRttSeedHold.get(nodeId) ?? null;
   }
 
   rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null {
