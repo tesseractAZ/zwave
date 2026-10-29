@@ -1,7 +1,7 @@
 import type { SleeperWatch } from '../src/zwave/missedReport';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, RTT_SEED_MAX_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
+import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, rttFoldResidue, RTT_SEED_MAX_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
 import { planEpisodeLifecycle } from '../src/zwave/outcomes';
 import { diffSymptomLog } from '../src/zwave/zwaveData';
 import type { RateNormal, ContNormal, BaselineStore } from '../src/zwave/baselines';
@@ -690,6 +690,35 @@ test('rttRestartResidue: the first reading seen this lifetime bounds what came b
   assert.equal(rttRestartResidue(40, 30, { k0: 38, a0: 900 }), rttRestartResidue(40, 30),
     'a reading first seen mid-lifetime never widens the ceiling');
   assert.equal(rttRestartResidue(5, 30, { k0: 9, a0: 30 }), rttRestartResidue(5, 30), 'a seed from a later count is not this lifetime\'s');
+});
+
+test('rttFoldResidue: a band with a median is the yardstick, as for the detector (v0.77.3)', () => {
+  const seed = { k0: 3, a0: 900 };
+  assert.equal(rttFoldResidue(4, 900, { median: 25 }, seed), rttRestartResidue(4, 25, seed));
+  assert.equal(rttFoldResidue(4, 900, { median: 5 }, seed), rttRestartResidue(4, 5, seed), 'the first bin\'s centre is a median');
+});
+
+test('rttFoldResidue: an empty band measures the seed against what the driver averaged after it (v0.77.3)', () => {
+  // With r = 0.75^(k − k0) the average is r·a0 + (1 − r)·mean-since-seed, so
+  // the seed's share of the reading is reading − mean-since-seed.
+  for (const norm of [{ median: 0 }, null]) {
+    assert.equal(rttFoldResidue(4, 900, norm, { k0: 3, a0: 900 }), 0, 'steady since a normal seed: nothing');
+    assert.equal(rttFoldResidue(8, 40, norm, { k0: 3, a0: 40 }), 0, 'not 0.75^5 × 40 = 9.5 ms against a median of 0');
+    // Node 63's 1390 ms seed over ~25 ms, one transmission on: the mean since
+    // it is (1048.8 − 0.75 × 1390) / 0.25 = 25.2, and the seed's share 1023.6.
+    assert.ok(Math.abs(rttFoldResidue(2, 1048.8, norm, { k0: 1, a0: 1390 }) - 1023.6) < 1e-9);
+    assert.ok(Math.abs(rttFoldResidue(10, 127.5, norm, { k0: 1, a0: 1390 }) - (127.5 - (127.5 - 0.75 ** 9 * 1390) / (1 - 0.75 ** 9))) < 1e-9);
+  }
+});
+
+test('rttFoldResidue: the seed reading, and a node with no seed, are measured against 0 (v0.77.3)', () => {
+  // Nothing has been measured since the seed, so it cannot be told from the
+  // restart; held while the ceiling says the restart can still be in it.
+  assert.equal(rttFoldResidue(3, 40, { median: 0 }, { k0: 3, a0: 40 }), 40);
+  assert.equal(rttFoldResidue(25, 40, { median: 0 }, { k0: 25, a0: 40 }), rttRestartResidue(25, 0), 'capped by the ceiling');
+  assert.equal(rttFoldResidue(3, 40, null, null), rttRestartResidue(3, 0));
+  assert.equal(rttFoldResidue(2, 40, null, { k0: 3, a0: 40 }), rttRestartResidue(2, 0), 'a seed from a later count is no seed');
+  assert.equal(rttFoldResidue(0, 40, null, { k0: 1, a0: 40 }), 0, 'no transmission, no allowance');
 });
 
 test('rtt-degraded: a seed-sized reading right after a driver restart neither fires nor arms; the same reading on a settled average fires', () => {

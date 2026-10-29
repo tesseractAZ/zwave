@@ -226,8 +226,9 @@ export const RTT_SEED_MAX_MS = 2000;
  * exactly 0.75^(commandsTX − k0) × (a0 − median), and the smaller of the two is
  * used. Most nodes' first reading after a restart is already normal (27–33 of
  * 38 per restart on the reference mesh), so their allowance is gone within a
- * few transmissions. The fixed ceiling still caps a reading first seen
- * mid-lifetime, after an add-on restart, where `a0` is not the seed.
+ * few transmissions. The store carries the seed over an add-on restart
+ * (v0.77.3); when it cannot, `a0` is the first reading after that restart,
+ * whose whole excess this then allows for at that reading.
  *
  * On the reference mesh the large seeds were about 0.7–1.4 s on nodes that sit
  * at 20–60 ms and decayed along that curve (node 63 after the 10-24 restart:
@@ -247,6 +248,34 @@ export function rttRestartResidue(commandsTX: number, median: number, seed?: Rtt
   const ceiling = 0.75 ** (k - 1) * Math.max(0, RTT_SEED_MAX_MS - median);
   if (!seed || seed.k0 > k) return ceiling;
   return Math.min(ceiling, 0.75 ** (k - seed.k0) * Math.max(0, seed.a0 - median));
+}
+
+/**
+ * What the RTT baseline fold holds a reading `rtt` back on (v0.77.3): the
+ * restart residue against the band's median, or, when the band has learned
+ * nothing, against the node's own average since the seed.
+ *
+ * A band with any data has a median of at least 5 ms (the first bin's centre);
+ * an empty one reports 0. A route change empties every band of a node, so a
+ * re-routed node measured against 0 had its whole round trip counted as
+ * restart and a normal reading held until 0.75^(commandsTX − k0) × a0 fell
+ * under 8 ms (live 10-28: four of 38 nodes held for that alone). An empty band
+ * is never ready, so this only ever cost learning.
+ *
+ * Instead: with r = 0.75^(commandsTX − k0), the average is r × a0 plus (1 − r)
+ * × the weighted mean of what the driver measured after the seed, so that mean
+ * is (rtt − r × a0) / (1 − r), free of everything measured up to k0. Against it
+ * the seed's share of `rtt` is exactly rtt − mean: about zero for a node whose
+ * seed was normal, the decaying excess for one whose seed was not. At the seed
+ * reading itself nothing has been measured since, and a node with no seed has
+ * nothing to measure it against, so both are held against 0 while the restart
+ * can still be in them.
+ */
+export function rttFoldResidue(commandsTX: number, rtt: number, norm: { median: number } | null, seed: RttSeed | null): number {
+  if (norm != null && norm.median > 0) return rttRestartResidue(commandsTX, norm.median, seed);
+  if (!seed || Math.floor(commandsTX) <= seed.k0) return rttRestartResidue(commandsTX, 0, seed);
+  const r = 0.75 ** (Math.floor(commandsTX) - seed.k0);
+  return rttRestartResidue(commandsTX, (rtt - r * seed.a0) / (1 - r), seed);
 }
 const WEAK_MARGIN_DB = 7; // direct-node weak-signal margin
 const WEAK_TIMEOUT_RATE = 0.05; // weak-signal corroboration on a MEASURED window (≥ MIN_WINDOW_TX sends)
