@@ -1063,7 +1063,6 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     forNode: (nodeId) => fine.get(nodeId) ?? [],
     rateRun: (nodeId) => rateRuns.get(nodeId) ?? null,
     rttSeed: (nodeId) => rttSeeds.get(nodeId) ?? null,
-
     lastTx: (nodeId) => lastCounters.get(nodeId)?.tx ?? null,
     coarseForNode: (nodeId) => coarse.get(nodeId) ?? [],
     controllerSamples: () => ctrlRing,

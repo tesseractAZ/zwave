@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.77.3
+
+The RTT restart allowance now survives a deploy, and the RTT baseline's
+restart hold judges a re-routed node against its own readings.
+
+### Fixed — the restart seed across an add-on restart
+
+- v0.77.1 kept each node's first fresh RTT reading of a driver lifetime, the
+  seed the restart allowance is measured from, in memory only. After every
+  add-on restart the next fresh reading became the seed, so its whole excess
+  over the node's median counted as restart: a slowdown first measured on
+  that reading was masked and fired from a later one, about one liveness
+  sweep (~2 h) later on a sweep-only node. The 2 s ceiling did not cap this,
+  as the v0.77.1 comments and DOCS said it would; the morning after a host
+  restart on the reference mesh the re-taken seed was the smaller bound on 37
+  of 38 nodes.
+- The evidence store now saves each node's seed with the counters of its
+  newest sample, and carries the seeds over an add-on restart while the
+  driver can still be the one that measured them: the host has been up since
+  the save, the save is under an hour old, and no node's first sample after
+  the restart has a counter below its saved one. One driver keeps every
+  node's counters, so a single node showing a new driver drops every carried
+  seed. A seed that cannot be carried is re-taken from the next fresh
+  reading, as before.
+
+### Fixed — the RTT baseline's restart hold
+
+- A route change empties a node's RTT bands, and an empty band's median reads
+  0, so the hold counted a re-routed node's whole round trip as restart and
+  kept normal readings out of the new band (four of 38 nodes on 10-28). With
+  no learned median the seed is now measured against what the driver
+  averaged after it, `(rtt − 0.75^(k − k0) × a0) / (1 − 0.75^(k − k0))`: a
+  normal seed holds nothing past its own reading, and a large one is held
+  while it washes out. An empty band is never ready, so no alarm changes.
+- DETAIL's *RTT learning is PAUSED* showed on every node within ~21
+  transmissions of a driver restart after each add-on restart (38 of 38 on
+  10-28), though nothing was held until the next fresh reading. It now
+  reports the verdict on the node's newest RTT reading.
+- The hold judges a reading at the transmission count it was recorded with.
+  The roster's copy, polled apart from the statistics feed, could trail it,
+  and at the trailing count the 2 s ceiling held a reading the seed allowed.
+- A tick on which the settle rule deferred a node folded that node's previous
+  sample into its baselines a second time. Each sample is now folded once.
+
+Tests pin these — the seed carried over a restart and not over a host
+restart, an hour-old save or the boot grace, any node's lower counter
+dropping every carried seed (taken up or not, and after a live restart), a
+carried seed kept through a save before its node samples, a reset, reload
+or eviction forgetting it, the fold's yardstick for a band with a median and
+for an empty one (a steady node, a washing-out seed, the seed reading
+itself), the banner's set, standing and cleared verdicts, one fold per
+sample, and the recorded count — and 24 new mutants (eight existing ones
+re-anchored) show each guard is load-bearing.
+
 ## 0.77.2
 
 ### Security — dependency updates
@@ -485,69 +539,6 @@ The Engine screen had no screenshot. The generator now renders one from the
 synthetic demo mesh — auto-ping, the refresh trial mid-run with its eligible
 nodes, the live ledger, and LEARNED with the live-span count naming its nodes —
 and the README gallery shows it. The other ten frames regenerate unchanged.
-
-## 0.75.0
-
-### Added — the pre-registered refresh trial (off by default)
-
-No verb passes the admission rule, and DESIGN §3.5 pre-registered the only
-path by which one ever could: a randomized trial with one verdict. This release
-builds it for the one candidate kind whose live span supports it,
-`refreshValues` on `rtt-degraded` episodes, behind a new option,
-`refresh_trial_enabled` (default off). It also needs write actions and auto-ping
-running unsuppressed, and the owner's pause stops it at once. Running it admits
-nothing: `AutoVerb` stays `never` and refresh keeps all three failure rows.
-
-- **Only nodes whose refresh adds something.** The revisit condition's second
-  half — the verb must differ from what the verification lane already sends —
-  is checked per node. zwave-js's refresh queries every actuator and sensor CC
-  instance; the verification probe sends one Get on the node's switch/light
-  value. A node is eligible only when its refresh sends at least two Gets (one,
-  if the probe can only ping it), counted from the driver's state dump. On a
-  mesh of plain switches and dimmers no node qualifies, ENGINE says
-  `eligible nodes: 0 of N mains`, and the trial sends nothing; after 120 days it
-  retires as not measurable here.
-- **One decision per eligible episode, every limit before the coin.** A live
-  `rtt-degraded` episode on a mains node that is Alive, unconfounded, with
-  nothing yet acted on it, live 10 minutes from its dwell start and with a
-  before-window that can be scored, is eligible — at most one decision per node
-  per 24 h, 2 per hour, 6 per day, 09:00–20:00 local, one in flight until filed,
-  never while an operator action runs or within 10 minutes of one. A fair coin
-  then decides between one `zwave_js/refresh_node_values` and nothing. The
-  assignment is written to `/data/refresh_trial.json` before anything is sent.
-- **Scored at a fixed horizon, the same in both arms.** The before-window is
-  the episode's, frozen at the decision; both arms get a verification burst at
-  +20 minutes; the round trips of +20–30 minutes are scored against it by the
-  ledger's own rule and the decision is filed at +30. The detector's closure is
-  not used, because when an episode closes depends on traffic and the treatment
-  supplies traffic. A pause, a route rebuild or an operator action on the node
-  (or the whole mesh) inside the window makes a decision unscoreable, as does a
-  stall of more than 2 minutes in the engine's tick inside it; one in flight
-  across a restart, or whose node leaves, files as lost.
-- **Apart from the ledger.** The send carries a new origin, `trial`, through a
-  handle holding that one call, refused at send time when paused, when the
-  node is not Alive, or while the Home Assistant socket is not authenticated. Trial episodes file into no ledger arm, the send confounds
-  every other episode open on the node, and the trial keeps its own undecayed
-  counts.
-- **Harm, kills and the latch.** A death within 30 minutes of the decision is
-  harm in either arm. A death within 5 minutes of a send that may have left
-  excludes the node for 7 days, even if a restart in between filed the decision
-  as lost; a second within 7 days latches the trial off and raises
-  `binary_sensor.zwave_tui_degraded` until the add-on starts with the option
-  off. An unreadable trial file latches too, and is never overwritten; a kill
-  that cannot be saved latches the run until it is.
-- **One verdict**, when both arms reach 30 scoreable decisions, on the first 30
-  of each: pass only if the treated success rate's Wilson lower bound is at
-  least the held rate + 5 points and treated deaths are at most held deaths + 1.
-  Nothing more is sent after it.
-- **Where it shows:** a REFRESH TRIAL block on ENGINE (state, why it is waiting,
-  the eligible-node count, counts per arm), `refresh_trial` and six counts on
-  `sensor.zwave_tui_engine`, and every decision, filing, death, kill, latch and
-  verdict in the Log screen and the container log. DOCS §11.14 describes it in
-  full; DESIGN §3.5 records where the build sharpens the protocol.
-
-35 tests and 64 mutants pin the protocol, its isolation from the ledger and its
-wiring.
 
 ## Older releases
 

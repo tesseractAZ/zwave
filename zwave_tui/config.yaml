@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.77.2"
+version: "0.77.3"
 slug: zwave_tui
 description: "Z-Wave mesh observability and remediation engine — live link measurement, learned baselines, 14 fault detectors and ranked, outcome-scored fixes; SSH + sidebar console and HA entities"
 url: https://github.com/tesseractAZ/zwave
