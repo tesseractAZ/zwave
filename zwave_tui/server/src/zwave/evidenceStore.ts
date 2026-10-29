@@ -146,16 +146,18 @@ export const RATE_FALLBACK_MIN_GAP_MS = 30_000;
  *
  * Saved with the counters of each node's newest sample, and carried over an
  * add-on restart while the driver can still be the one that measured it
- * (v0.77.3): the host has been up since the save, the save is young enough
- * for the fine ring to load, and no node's first sample after the load has a
- * counter below its saved one — one driver keeps every node's counters, so one
- * node going backwards means none of the saved seeds is this driver's. v0.77.1
- * kept seeds in memory only, so the first reading after every deploy became
- * its own seed and its whole excess over the median counted as restart: a
- * slowdown first measured there was masked, and fired a reading late. The 2 s
- * ceiling did not cap that; on the reference mesh the re-taken seed was the
- * smaller bound on 37 of 38 nodes the morning after a host restart. A seed
- * that cannot be carried is re-taken that way, as before.
+ * (v0.77.3): the host is still on the boot that wrote the file, the save is
+ * young enough for the fine ring to load, and no node's first sample after
+ * the load has a counter below its saved one — one driver keeps every node's
+ * counters, so one node going backwards means none of the saved seeds is this
+ * driver's. v0.77.1 kept seeds in memory only, so after every deploy the first
+ * reading became its own seed and its excess over the median counted as
+ * restart, up to the 2 s ceiling. The ceiling is under 8 ms once the driver
+ * has made about 20 transmissions to the node, but on a quiet mesh that takes
+ * hours, and until then a slowdown first measured on that reading was masked
+ * and fired a reading late: the morning after a host restart the re-taken seed
+ * was the smaller bound on 37 of 38 reference-mesh nodes. A seed that cannot
+ * be carried is re-taken that way, as before.
  */
 export interface RttSeed {
   k0: number;
@@ -543,6 +545,9 @@ interface Persisted {
    *  (v0.77.3). OPTIONAL, no schema bump: absent in older files ⇒ no seed is
    *  carried, and each is re-taken from the next fresh reading. */
   lives?: Record<string, { tx: number; to: number; dr: number; rx: number; k0?: number; a0?: number }>;
+  /** When the host booted, by the clock at save time: now − uptime (v0.77.3).
+   *  Optional; absent ⇒ `lives` are not carried. */
+  bootAt?: number;
 }
 
 const SCHEMA_V = 2;
@@ -1354,10 +1359,15 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           }
         }
         // Driver lifetimes (v0.77.3) — only while the driver can still be the
-        // one the file describes: the host has been up since the save (a host
+        // one the file describes: the host is on the boot that wrote it (a host
         // restart restarts a driver on it) and the save is young enough for
-        // the fine ring. Each node's first sample then checks its counters.
-        if (!fineTooOld && uptimeMs() >= ageMs && obj.lives && typeof obj.lives === 'object') {
+        // the fine ring. The boot is told by its start, now − uptime, within a
+        // minute of the one saved: unlike the file's age against uptime, that
+        // does not pass a reboot whose clock was restored behind the save.
+        // Each node's first sample then checks its counters.
+        const bootAt = numOrNull(obj.bootAt);
+        const sameBoot = bootAt != null && Math.abs(now() - uptimeMs() - bootAt) <= 60_000;
+        if (!fineTooOld && sameBoot && obj.lives && typeof obj.lives === 'object') {
           for (const [k, v] of Object.entries(obj.lives)) {
             const id = Number(k);
             if (!Number.isInteger(id) || id <= 0 || !v || typeof v !== 'object') continue;
@@ -1517,6 +1527,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           meta: metaOut,
           rateRuns: runsOut,
           lives: livesOut,
+          bootAt: now() - uptimeMs(),
         };
         writeFileSync(tmp, JSON.stringify(payload), 'utf8');
         renameSync(tmp, path);

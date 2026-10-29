@@ -1585,6 +1585,28 @@ test('DETAIL reports an RTT hold only once a reading has been held, and until th
   }
 });
 
+test('a held verdict lapses with the driver lifetime it was judged in (v0.77.3)', async () => {
+  // Nothing re-judges it until the next fresh RTT reading, and after a new
+  // driver or a re-included device on the same id that can take hours.
+  const r = await seedFoldRig('zwtui-seedlapse-');
+  try {
+    r.tick(3, 900);                   // the seed reading, held
+    r.tick(1, 900, { fresh: false }); // a new driver: counters went backwards, no reading yet
+    assert.deepEqual(r.held, [3, null]);
+  } finally {
+    r.done();
+  }
+  const e = await seedFoldRig('zwtui-seedevict-');
+  try {
+    e.tick(3, 900);
+    (e.priv.evidenceStore as unknown as { evictNode: (id: number) => void }).evictNode(7);
+    e.idle();
+    assert.deepEqual(e.held, [3, null], 'nor does it outlive the node it was about');
+  } finally {
+    e.done();
+  }
+});
+
 test('a tick that recorded nothing for a node folds nothing for it (v0.77.3)', async () => {
   // The settle rule defers a node whose statistics just arrived; the tick then
   // folded the sample the previous tick had already folded.

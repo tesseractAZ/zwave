@@ -54,7 +54,7 @@ health endpoint.
 | --- | --- |
 | Server | about 32,000 lines of TypeScript; 9 screens; SSH, browser and Home Assistant entity interfaces |
 | Detection | 14 per-node detectors, 2 cross-node correlations, controller serial-link health |
-| Verification | 1,649 tests; a mutation-testing harness of 1,511 hand-written mutants (13 labelled equivalent), run on the code each release touches |
+| Verification | 1,650 tests; a mutation-testing harness of 1,515 hand-written mutants (13 labelled equivalent), run on the code each release touches |
 | Integration | Home Assistant Core WebSocket (roster, statistics, gated actions) plus a read-only Z-Wave JS driver WebSocket (noise floor, capabilities, log stream) |
 
 ![The Overview screen: a live node table sorted worst-health-first, with per-node health scores, SNR margin, RTT, timeout rate, hop count, data rate and triage flags](docs/screenshots/overview.svg)

@@ -63,6 +63,7 @@ import {
   isRouteChange,
   type ProbeClassLite,
   type ProbeFrameLite,
+  type RttSeed,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels, type DriverLogWatch } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore } from './baselines';
@@ -547,8 +548,8 @@ export interface ZwaveData {
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
   /** Is this node's baseline learning currently PAUSED, and why (v0.48.0)? */
   baselineHold(nodeId: number): 'symptomatic' | 'arming' | null;
-  /** Transmissions since the driver restarted while that restart still holds
-   *  this node's RTT out of the baseline, as of the last engine tick (v0.77.1). */
+  /** Transmissions since the driver restarted, when that restart held this
+   *  node's newest RTT reading out of the baseline in this lifetime (v0.77.1). */
   rttSeedHold(nodeId: number): number | null;
   forgetNodeBaselines(nodeId: number): void;
   /** M6: interference view (noise floor, serial health, diurnal heatmap). */
@@ -1500,7 +1501,7 @@ class ZwaveDataImpl implements ZwaveData {
       // DETAIL reports the verdict on the newest RTT reading (v0.77.3): a tick
       // with no new reading withholds nothing, and leaves that verdict standing.
       if (s.fresh && s.rtt != null) {
-        if (seeded) this.lastRttSeedHold.set(n.nodeId, k);
+        if (seeded) this.lastRttSeedHold.set(n.nodeId, { k, seed: ev.rttSeed(n.nodeId) });
         else this.lastRttSeedHold.delete(n.nodeId);
       }
       bl.observe(n.nodeId, seeded ? { ...s, rtt: null } : s, quarantine.has(n.nodeId));
@@ -2155,7 +2156,7 @@ class ZwaveDataImpl implements ZwaveData {
   private lastQuarantineArm = new Set<number>();
   /** Nodes whose RTT reading the last engine tick held out of the baseline
    *  because a driver restart can still move it, with their commandsTX (v0.77.1). */
-  private lastRttSeedHold = new Map<number, number>();
+  private lastRttSeedHold = new Map<number, { k: number; seed: RttSeed | null }>();
 
   /**
    * Is this node's baseline learning paused, and why (v0.48.0)?
@@ -2184,10 +2185,16 @@ class ZwaveDataImpl implements ZwaveData {
    * the bound as of the last tick, reading or not, so after every add-on
    * restart it showed on each node within its first ~21 transmissions before
    * any reading had been held.
+   *
+   * A verdict stands only for the lifetime it was judged in: a new driver, an
+   * evicted node and a store reset each drop the seed it was judged against,
+   * and with it the verdict, instead of leaving an old "N tx ago" up until the
+   * next reading — hours on a sleeping node.
    */
   rttSeedHold(nodeId: number): number | null {
-    if (!this.baselines) return null;
-    return this.lastRttSeedHold.get(nodeId) ?? null;
+    if (!this.baselines || !this.evidenceStore) return null;
+    const h = this.lastRttSeedHold.get(nodeId);
+    return h && h.seed === this.evidenceStore.rttSeed(nodeId) ? h.k : null;
   }
 
   rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null {

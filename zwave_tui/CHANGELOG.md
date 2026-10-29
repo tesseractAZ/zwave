@@ -9,18 +9,20 @@ restart hold judges a re-routed node against its own readings.
 
 - v0.77.1 kept each node's first fresh RTT reading of a driver lifetime, the
   seed the restart allowance is measured from, in memory only. After every
-  add-on restart the next fresh reading became the seed, so its whole excess
-  over the node's median counted as restart: a slowdown first measured on
-  that reading was masked and fired from a later one, about one liveness
-  sweep (~2 h) later on a sweep-only node. The 2 s ceiling did not cap this,
-  as the v0.77.1 comments and DOCS said it would; the morning after a host
-  restart on the reference mesh the re-taken seed was the smaller bound on 37
-  of 38 nodes.
+  add-on restart the next fresh reading became the seed, so its excess over
+  the node's median counted as restart. The 2 s ceiling caps that once the
+  driver has made about 20 transmissions to the node, but on a quiet mesh
+  that takes hours, and until then a slowdown first measured on that reading
+  was masked and fired from a later one, about one liveness sweep (~2 h)
+  later on a sweep-only node. The v0.77.1 comments and DOCS said the ceiling
+  always capped it; the morning after a host restart on the reference mesh
+  the re-taken seed was the smaller bound on 37 of 38 nodes.
 - The evidence store now saves each node's seed with the counters of its
   newest sample, and carries the seeds over an add-on restart while the
-  driver can still be the one that measured them: the host has been up since
-  the save, the save is under an hour old, and no node's first sample after
-  the restart has a counter below its saved one. One driver keeps every
+  driver can still be the one that measured them: the host is on the same
+  boot (told by when the boot began, which a clock restored behind the save
+  cannot fake), the save is under an hour old, and no node's first sample
+  after the restart has a counter below its saved one. One driver keeps every
   node's counters, so a single node showing a new driver drops every carried
   seed. A seed that cannot be carried is re-taken from the next fresh
   reading, as before.
@@ -37,7 +39,8 @@ restart hold judges a re-routed node against its own readings.
 - DETAIL's *RTT learning is PAUSED* showed on every node within ~21
   transmissions of a driver restart after each add-on restart (38 of 38 on
   10-28), though nothing was held until the next fresh reading. It now
-  reports the verdict on the node's newest RTT reading.
+  reports the verdict on the node's newest RTT reading, for as long as the
+  driver lifetime it was judged in lasts.
 - The hold judges a reading at the transmission count it was recorded with.
   The roster's copy, polled apart from the statistics feed, could trail it,
   and at the trailing count the 2 s ceiling held a reading the seed allowed.
@@ -45,13 +48,14 @@ restart hold judges a re-routed node against its own readings.
   sample into its baselines a second time. Each sample is now folded once.
 
 Tests pin these — the seed carried over a restart and not over a host
-restart, an hour-old save or the boot grace, any node's lower counter
+restart (also with a clock restored behind the save), an hour-old save or
+the boot grace, any node's lower counter
 dropping every carried seed (taken up or not, and after a live restart), a
 carried seed kept through a save before its node samples, a reset, reload
 or eviction forgetting it, the fold's yardstick for a band with a median and
 for an empty one (a steady node, a washing-out seed, the seed reading
-itself), the banner's set, standing and cleared verdicts, one fold per
-sample, and the recorded count — and 24 new mutants (eight existing ones
+itself), the banner's set, standing, cleared and lapsed verdicts, one fold
+per sample, and the recorded count — and 28 new mutants (eight existing ones
 re-anchored) show each guard is load-bearing.
 
 ## 0.77.2

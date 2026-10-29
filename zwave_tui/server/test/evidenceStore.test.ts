@@ -99,11 +99,12 @@ test('a reset discards the seeds, and a load keeps only what the file carries (v
   }
 });
 
-/** A store saved at FIXED with node 6 seeded at (1, 1390) and counters
- *  tx 9 / timeout 2 / dropped 1 / rx 40, plus `more` nodes the same way. */
-function savedLifetime(more: number[] = []): string {
+/** A store saved at FIXED, `up` into the host's boot, with node 6 seeded at
+ *  (1, 1390) and counters tx 9 / timeout 2 / dropped 1 / rx 40, plus `more`
+ *  nodes the same way. */
+function savedLifetime(more: number[] = [], up = UP): string {
   const path = freshPath();
-  const a = mkStore(path);
+  const a = mkStore(path, { uptimeMs: () => up });
   for (const id of [6, ...more]) {
     a.record(id, stats({ commandsTX: 1, rtt: 1390, timeoutResponse: 2, commandsDroppedTX: 1, commandsRX: 30 }), NodeStatus.Alive, FRESH, FIXED - 2 * TICK);
     a.record(id, stats({ commandsTX: 9, rtt: 640, timeoutResponse: 2, commandsDroppedTX: 1, commandsRX: 40 }), NodeStatus.Alive, FRESH, FIXED - TICK);
@@ -112,11 +113,13 @@ function savedLifetime(more: number[] = []): string {
   return path;
 }
 const SAME_DRIVER = { commandsTX: 12, rtt: 520, timeoutResponse: 2, commandsDroppedTX: 1, commandsRX: 44 };
+/** The same host boot, `ms` after the save: clock and uptime move together. */
+const later = (ms: number): Partial<EvidenceStoreOptions> => ({ now: () => FIXED + ms, uptimeMs: () => UP + ms });
 
 test('the RTT seed carries over an add-on restart while the driver keeps running (v0.77.3)', () => {
   // v0.77.1 kept seeds in memory, so the first reading after a deploy became
   // its own seed and its whole excess over the median counted as restart.
-  const b = mkStore(savedLifetime(), { now: () => FIXED + 90_000 });
+  const b = mkStore(savedLifetime(), later(90_000));
   b.load();
   assert.equal(b.rttSeed(6), null, 'not before the node\'s counters have been checked');
   // The first sample after a restart is a replay, never fresh.
@@ -129,7 +132,7 @@ test('the RTT seed carries over an add-on restart while the driver keeps running
 test('one node\'s counters below their saved ones mean a new driver: no saved seed is kept (v0.77.3)', () => {
   // One driver keeps every node's counters. A node whose new lifetime has
   // already outrun its saved counters cannot show the restart; another can.
-  const b = mkStore(savedLifetime([7, 8, 9]), { now: () => FIXED + 90_000 });
+  const b = mkStore(savedLifetime([7, 8, 9]), later(90_000));
   b.load();
   let t = FIXED + 90_000;
   b.record(6, stats(SAME_DRIVER), NodeStatus.Alive, { fresh: false }, t);
@@ -143,7 +146,7 @@ test('one node\'s counters below their saved ones mean a new driver: no saved se
   assert.deepEqual(b.rttSeed(8), { k0: 13, a0: 31 }, 'the next fresh reading is this driver\'s seed');
 
   // A restart seen live ends the carry too.
-  const c = mkStore(savedLifetime([7]), { now: () => FIXED + 90_000 });
+  const c = mkStore(savedLifetime([7]), later(90_000));
   c.load();
   t = FIXED + 90_000;
   c.record(6, stats(SAME_DRIVER), NodeStatus.Alive, { fresh: false }, t);
@@ -153,17 +156,20 @@ test('one node\'s counters below their saved ones mean a new driver: no saved se
 });
 
 test('no RTT seed is carried over a host restart, an hour-old save or a boot (v0.77.3)', () => {
-  const cases: [string, Partial<EvidenceStoreOptions>][] = [
+  const cases: [string, Partial<EvidenceStoreOptions>, number][] = [
     // The host restarted since the save (up 5 min, save 10 min old), and a
     // driver on it with it — whatever its counters read.
-    ['host restarted', { now: () => FIXED + 600_000, uptimeMs: () => 300_000 }],
+    ['host restarted', { now: () => FIXED + 600_000, uptimeMs: () => 300_000 }, UP],
+    // The same, on a host whose clock came back behind the save: the file
+    // reads 100 s old against 200 s of uptime, but the boot began 200 s ago.
+    ['clock restored behind the save', { now: () => FIXED + 100_000, uptimeMs: () => 200_000 }, UP],
     // Too long down for the counters alone to vouch for the driver.
-    ['save over an hour old', { now: () => FIXED + 2 * 3_600_000, uptimeMs: () => 10 * 3_600_000 }],
-    // Inside the boot grace the clock is not trusted.
-    ['boot grace', { now: () => FIXED + 60_000, uptimeMs: () => 100_000, bootGraceMs: 180_000 }],
+    ['save over an hour old', later(2 * 3_600_000), UP],
+    // Inside the boot grace the clock is not trusted, even on the same boot.
+    ['boot grace', { now: () => FIXED + 60_000, uptimeMs: () => 120_000, bootGraceMs: 180_000 }, 60_000],
   ];
-  for (const [what, opts] of cases) {
-    const b = mkStore(savedLifetime(), opts);
+  for (const [what, opts, savedUp] of cases) {
+    const b = mkStore(savedLifetime([], savedUp), opts);
     b.load();
     b.record(6, stats(SAME_DRIVER), NodeStatus.Alive, { fresh: false }, FIXED + 600_000);
     assert.equal(b.rttSeed(6), null, what);
@@ -171,11 +177,11 @@ test('no RTT seed is carried over a host restart, an hour-old save or a boot (v0
 });
 
 test('a node that has not sampled since the load keeps its carried seed through the next save (v0.77.3)', () => {
-  const b = mkStore(savedLifetime([7]), { now: () => FIXED + 90_000 });
+  const b = mkStore(savedLifetime([7]), later(90_000));
   b.load();
   b.record(7, stats(SAME_DRIVER), NodeStatus.Alive, { fresh: false }, FIXED + 90_000);
   b.save(); // node 6 has not sampled yet
-  const c = mkStore(b.path, { now: () => FIXED + 180_000 });
+  const c = mkStore(b.path, later(180_000));
   c.load();
   c.record(6, stats(SAME_DRIVER), NodeStatus.Alive, { fresh: false }, FIXED + 180_000);
   assert.deepEqual(c.rttSeed(6), { k0: 1, a0: 1390 });
@@ -186,10 +192,10 @@ test('a node that has not sampled since the load keeps its carried seed through 
 test('a carried lifetime with no transmission behind its seed carries the counters only (v0.77.3)', () => {
   const path = freshPath();
   writeFileSync(path, JSON.stringify({
-    v: 2, savedAt: FIXED, homeId: null, recordingSince: FIXED, nodes: {}, coarse: {}, controller: null, routeFails: {}, meta: {},
+    v: 2, savedAt: FIXED, bootAt: FIXED - UP, homeId: null, recordingSince: FIXED, nodes: {}, coarse: {}, controller: null, routeFails: {}, meta: {},
     lives: { 6: { tx: 9, to: 2, dr: 1, rx: 40, k0: 0, a0: 1390 }, 7: { tx: 9, to: 2, dr: 1, rx: 40 }, 8: { tx: 9, to: 2, dr: 1, rx: 40, k0: 1, a0: 1390 } },
   }));
-  const b = mkStore(path, { now: () => FIXED + 90_000 });
+  const b = mkStore(path, later(90_000));
   b.load();
   for (const id of [6, 7]) b.record(id, stats(SAME_DRIVER), NodeStatus.Alive, { fresh: false }, FIXED + 90_000);
   assert.equal(b.rttSeed(6), null, 'a seed at k0 0 is not a reading');
@@ -201,14 +207,14 @@ test('a carried lifetime with no transmission behind its seed carries the counte
 test('a reset or a second load forgets what the first load carried (v0.77.3)', () => {
   // A reset is a different network (home id change): its node ids are not
   // these nodes, whatever their counters read.
-  const b = mkStore(savedLifetime(), { now: () => FIXED + 90_000 });
+  const b = mkStore(savedLifetime(), later(90_000));
   b.load();
   b.reset();
   b.record(6, stats(SAME_DRIVER), NodeStatus.Alive, { fresh: false }, FIXED + 90_000);
   assert.equal(b.rttSeed(6), null, 'reset');
 
   const path = savedLifetime();
-  const c = mkStore(path, { now: () => FIXED + 90_000 });
+  const c = mkStore(path, later(90_000));
   c.load();
   const file = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
   delete file.lives;
@@ -221,7 +227,7 @@ test('a reset or a second load forgets what the first load carried (v0.77.3)', (
 test('an evicted node\'s carried lifetime goes with it, and its successor proves nothing (v0.77.3)', () => {
   // A device re-included on the same id starts its counters at zero; against
   // the departed node's saved counters that would read as a new driver.
-  const b = mkStore(savedLifetime([7]), { now: () => FIXED + 90_000 });
+  const b = mkStore(savedLifetime([7]), later(90_000));
   b.load();
   b.evictNode(6);
   b.record(6, stats({ commandsTX: 1, rtt: 30 }), NodeStatus.Alive, { fresh: false }, FIXED + 90_000);

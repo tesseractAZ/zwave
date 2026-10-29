@@ -228,7 +228,8 @@ export const RTT_SEED_MAX_MS = 2000;
  * 38 per restart on the reference mesh), so their allowance is gone within a
  * few transmissions. The store carries the seed over an add-on restart
  * (v0.77.3); when it cannot, `a0` is the first reading after that restart,
- * whose whole excess this then allows for at that reading.
+ * whose excess this then allows for at that reading, up to the ceiling — all
+ * of it while the lifetime is young.
  *
  * On the reference mesh the large seeds were about 0.7–1.4 s on nodes that sit
  * at 20–60 ms and decayed along that curve (node 63 after the 10-24 restart:
@@ -270,6 +271,12 @@ export function rttRestartResidue(commandsTX: number, median: number, seed?: Rtt
  * reading itself nothing has been measured since, and a node with no seed has
  * nothing to measure it against, so both are held against 0 while the restart
  * can still be in them.
+ *
+ * Like the bound itself, this takes the reading's count and average to be from
+ * the same statistics event, with one measurement per transmission. A sample
+ * that caught commandsTX moved ahead of the average (the settle rule keeps most
+ * out) reads the seed as the node's own average and lets one reading into an
+ * empty band; the old measure against 0 held it.
  */
 export function rttFoldResidue(commandsTX: number, rtt: number, norm: { median: number } | null, seed: RttSeed | null): number {
   if (norm != null && norm.median > 0) return rttRestartResidue(commandsTX, norm.median, seed);
