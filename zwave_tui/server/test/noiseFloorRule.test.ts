@@ -71,8 +71,18 @@ test('the screens, Interference and the shared rule agree on the floor AND on wh
 test('every floor in the add-on is computed by the one rule — none re-implements it (v0.75.2)', () => {
   const here = dirname(fileURLToPath(import.meta.url));
   const src = (p: string): string => readFileSync(resolve(here, '../src', p), 'utf8');
-  for (const p of ['telnet/dataProvider.ts', 'zwave/symptoms.ts', 'zwave/interference.ts', 'zwave/evidenceStore.ts']) {
-    assert.match(src(p), /medianNoiseFloor\(/, `${p} takes its floor from medianNoiseFloor`);
+  // One pin per call SITE, anchored at the start of its line. dataProvider.ts
+  // calls the rule twice, so one /medianNoiseFloor\(/ per file stayed green
+  // with either call replaced by a copy of the rule.
+  const SITES: { file: string; site: RegExp; what: string }[] = [
+    { file: 'telnet/dataProvider.ts', site: /^ *return medianNoiseFloor\(controller\?\.backgroundRSSI \?\? \[\]\)/m, what: "the screens' floor" },
+    { file: 'telnet/dataProvider.ts', site: /^ *cachedHasNoise = medianNoiseFloor\(controller\?\.backgroundRSSI \?\? \[\]\)/m, what: 'the screens\' "measured" tag' },
+    { file: 'zwave/symptoms.ts', site: /^ *const m = medianNoiseFloor\(input\.controller\?\.backgroundRSSI \?\? \[\]\)/m, what: "the detectors' floor" },
+    { file: 'zwave/interference.ts', site: /^ *return channels \? medianNoiseFloor\(channels\) : null;/m, what: "Interference's floor" },
+    { file: 'zwave/evidenceStore.ts', site: /^ *return medianNoiseFloor\(chs\);/m, what: "the evidence store's per-sample floor" },
+  ];
+  for (const { file, site, what } of SITES) {
+    assert.match(src(file), site, `${file}: ${what} comes from medianNoiseFloor`);
   }
   assert.match(src('zwave/health.ts'), /const nf = noiseReading\(noiseFloor\) \?\? DEFAULT_NOISE_FLOOR;/, 'the health score validates its floor by the same rule');
   const code = (t: string): string => t.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');

@@ -3469,6 +3469,17 @@ const MUTANTS = [
     find: "  return medianNoiseFloor(controller?.backgroundRSSI ?? []) ?? DEFAULT_NOISE_FLOOR;",
     repl: "  return medianNoiseFloor(controller?.backgroundRSSI ?? []) ?? -100;",
     what: "with no reading the screens show the same -95 fallback the detectors use" },
+  // dataProvider.ts calls the rule twice, and one file-wide /medianNoiseFloor\(/
+  // pin let either site copy the rule while the other kept it green. An exact
+  // copy computes the same values, so only a per-site pin can kill these two.
+  { id: "noiserule-screens-floor-inline", file: "src/telnet/dataProvider.ts", tests: ["noiseFloorRule"],
+    find: "  return medianNoiseFloor(controller?.backgroundRSSI ?? []) ?? DEFAULT_NOISE_FLOOR;",
+    repl: "  const v: number[] = [];\n  for (const ch of controller?.backgroundRSSI ?? []) { if (ch == null) break; if (Number.isFinite(ch) && ch < 0 && ch > -120) v.push(ch); }\n  v.sort((a, b) => a - b);\n  const m = v.length >> 1;\n  return v.length === 0 ? DEFAULT_NOISE_FLOOR : v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;",
+    what: "the screens' floor is the shared rule, not a copy of it" },
+  { id: "noiserule-screens-measured-inline", file: "src/telnet/dataProvider.ts", tests: ["noiseFloorRule"],
+    find: "    cachedHasNoise = medianNoiseFloor(controller?.backgroundRSSI ?? []) != null;",
+    repl: "    cachedHasNoise = (() => { for (const ch of controller?.backgroundRSSI ?? []) { if (ch == null) return false; if (Number.isFinite(ch) && ch < 0 && ch > -120) return true; } return false; })();",
+    what: "the screens' 'measured' tag is the shared rule, not a copy of it" },
   { id: "noiserule-detector-measured", file: "src/zwave/symptoms.ts", tests: ["weakSignal"],
     find: "  return { floor: m ?? DEFAULT_NOISE_FLOOR, measured: m != null };",
     repl: "  return { floor: m ?? DEFAULT_NOISE_FLOOR, measured: true };",
@@ -4317,6 +4328,17 @@ const MUTANTS = [
     find: "export SSH_PORT=2324",
     repl: "export SSH_PORT=2222",
     what: "the bound SSH port matches the published container port" },
+  // The env-var contract once found `process.env.SSH_HOST` inside
+  // `process.env.SSH_HOST_KEY`, and read only unindented exports, so the seven
+  // flags exported inside `if` blocks were never checked.
+  { id: "config-reads-ssh-host", file: "src/config.ts", tests: ["configContract"],
+    find: "    host: process.env.SSH_HOST ?? '::',",
+    repl: "    host: '::',",
+    what: "the server reads the SSH_HOST the run script exports" },
+  { id: "config-reads-ssh-enabled", file: "src/config.ts", tests: ["configContract"],
+    find: "    enabled: process.env.SSH_ENABLED !== '0',",
+    repl: "    enabled: (true as boolean),",
+    what: "the server reads the SSH_ENABLED flag the run script exports" },
   // ── v0.75.5: the shipped changelog stays small and well-formed.
   { id: "changelog-rotate-budget", file: "../../.github/scripts/rotate-changelog.mjs", tests: ["changelogContract"],
     find: "  while (versions.length > 1 && size(versions) > budget) moved.unshift(versions.pop());",
