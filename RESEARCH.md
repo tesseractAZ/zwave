@@ -357,7 +357,10 @@ normal and decayed along that curve (node 63 after the 10-24 restart: about
 1390 → 1046 → 798 → 612 → … → 65 ms by its 17th reading; the first two are
 rebuilt from a two-reading 30-min bucket). `rtt-degraded` takes the smaller
 of the two bounds out before testing a reading, and the RTT baseline does not learn a reading it can still move by
-more than 8 ms (DOCS §7.1.7).
+more than 8 ms (DOCS §7.1.7). The same recurrence gives the weighted mean of
+everything measured after `k0` as `(rtt − r·a0)/(1 − r)`, `r = 0.75^(commandsTX − k0)`,
+which the baseline fold uses as the node's normal when its band has none
+(v0.77.3).
 
 ---
 
