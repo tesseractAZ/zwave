@@ -71,7 +71,7 @@ import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, WEAK_EVENT_LOOKBACK_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -244,13 +244,15 @@ const VERIFY_SPACING_MS = 30_000;
  */
 const VERIFY_MAX_PER_TICK = 4;
 /**
- * At most one rtt-degraded confirmation probe per node per this long (v0.78.0).
- * It equals the detector's 10-minute lookback and is inclusive at the edge, as
- * the lookback is, so the slow round trip a probe was asked for has left the
- * window before another could be asked: one slow round trip buys at most one
- * probe, answered or not. Stamped when the probe is handed out, so one that is
- * refused, withdrawn, absorbed by a burst or dropped by the pause leaves no
- * cooldown behind: the cooldown counts probes sent, not probes asked for.
+ * After an rtt-degraded confirmation probe, no other for the node until the
+ * round trip it was asked about is this old (v0.78.0). It equals the
+ * detector's 10-minute lookback and is inclusive at the edge, as the lookback
+ * is, so that round trip has left the window before another probe could be
+ * asked: one slow round trip buys at most one probe, answered or not. Counted
+ * from the round trip, not the hand-out, so a probe handed out late cannot
+ * outlast it and refuse the next slow round trip, which is always newer.
+ * Stamped when the runner takes the probe: one refused, withdrawn, absorbed by
+ * a burst or cleared by the pause before then leaves no cooldown behind.
  */
 const RTT_CONFIRM_COOLDOWN_MS = 10 * 60_000;
 const CONFIG_RETRY_MS = 15_000;
@@ -889,9 +891,16 @@ class ZwaveDataImpl implements ZwaveData {
    * (write actions, boot window, rebuild, storm) so nothing here can probe a
    * mesh auto-ping itself would have left alone.
    */
-  private readonly verifyOwed = new Map<number, { left: number; nextAt: number; confirm?: true }>();
-  /** When each node's last rtt-degraded confirmation probe was handed out (v0.78.0). */
+  private readonly verifyOwed = new Map<number, { left: number; nextAt: number; confirm?: true; frameAt?: number }>();
+  /** The round trip each node's last handed-out rtt-degraded confirmation was
+   *  asked about (v0.78.0): its time, which the cooldown runs from. */
   private readonly rttConfirmAt = new Map<number, number>();
+  /** The engine tick each live symptom was first seen on (v0.78.0), so an
+   *  episode opened late (subsumed, or its node not a ping candidate, at
+   *  maturity) still counts the open-time confound from its dwell. A symptom
+   *  gone for a tick starts over: an episode re-opened on an old dwell start
+   *  counts from its return. */
+  private readonly symptomLiveAt = new Map<string, number>();
   /** Episode keys whose after-window burst has already been requested (v0.36.3),
    *  so the timed request fires once per confirmation window rather than every
    *  tick from the moment it comes due. */
@@ -1574,6 +1583,8 @@ class ZwaveDataImpl implements ZwaveData {
     // emission is the degraded period, so all of it is fair evidence.
     const sinceOf = new Map<string, number>();
     for (const s of symptoms) sinceOf.set(`${s.nodeId ?? 'mesh'}:${s.kind}`, s.sinceMs);
+    for (const k of this.symptomLiveAt.keys()) if (!sinceOf.has(k)) this.symptomLiveAt.delete(k);
+    for (const k of sinceOf.keys()) if (!this.symptomLiveAt.has(k)) this.symptomLiveAt.set(k, now);
     for (const s of toOpen) {
       // node-down opens NO episode (v0.37). The ledger cannot score it — see
       // outcomes.metricOf — and opening episodes that are unscoreable by
@@ -1610,12 +1621,17 @@ class ZwaveDataImpl implements ZwaveData {
       // a breach that failover helped start (a confirmation's answer pairing
       // with the slow round trip it was sent to check, a sweep read during the
       // dwell) was booked to the control arm. The reach is counted from the
-      // dwell's last DWELL_MS at most: a chronic dwell runs for days, and a
-      // failover that long before the open neither started the breach nor can
-      // end it.
+      // last DWELL_MS before the symptom was first seen at most: a chronic
+      // dwell runs for days, and a failover that long before it matured neither
+      // started the breach nor can end it. An open delayed past maturity keeps
+      // the whole dwell. weak-signal on a node too quiet for a rate reads its
+      // route, RSSI and failures over WEAK_EVENT_LOOKBACK_MS, so it reaches
+      // back that far.
       if (s.nodeId != null && MEASUREMENT_REROUTE_KINDS.has(s.kind)) {
         const rr = this.measurementRerouteAt.get(s.nodeId);
-        if (rr != null && rr >= Math.max(since, now - SYMPTOM_DWELL_MS) - SYMPTOM_WINDOW_MS) oc.markConfounded(s.nodeId, s.kind);
+        const liveAt = this.symptomLiveAt.get(`${s.nodeId}:${s.kind}`) ?? now;
+        const lookback = s.kind === 'weak-signal' ? WEAK_EVENT_LOOKBACK_MS : SYMPTOM_WINDOW_MS;
+        if (rr != null && rr >= Math.max(since, liveAt - SYMPTOM_DWELL_MS) - lookback) oc.markConfounded(s.nodeId, s.kind);
       }
       // Ask for verification probes while the symptom is LIVE, so the degraded
       // window can reach the verifier's evidence floor before it is scored.
@@ -2173,17 +2189,23 @@ class ZwaveDataImpl implements ZwaveData {
    * action, the post-kill hold) and requestVerification's own refusals (no
    * ledger, the owner's pause). A node already owed any probe is left alone:
    * that probe answers the same question, and a confirmation must never cut a
-   * burst short. One handed out per node per RTT_CONFIRM_COOLDOWN_MS. An owed confirmation
-   * the detector no longer asks for (the node's own traffic answered, the frame
-   * aged out, the breach started or ended) is withdrawn before it is sent.
+   * burst short. At most one is handed out per slow round trip
+   * (RTT_CONFIRM_COOLDOWN_MS); the owed entry carries the round trip's time.
+   * An owed confirmation the detector no longer asks for (the node's own
+   * traffic answered, the frame aged out, the breach started or ended) is
+   * withdrawn before it is sent.
    */
   private requestRttConfirms(suspects: Map<number, RttFrame>, now: number): void {
     for (const [id, st] of this.verifyOwed) if (st.confirm && !suspects.has(id)) this.verifyOwed.delete(id);
-    for (const id of suspects.keys()) {
-      if (this.verifyOwed.has(id)) continue;
-      const at = this.rttConfirmAt.get(id);
-      if (at != null && now - at <= RTT_CONFIRM_COOLDOWN_MS) continue;
-      this.requestVerification(id, 1);
+    for (const [id, f] of suspects) {
+      if (!this.verifyOwed.has(id)) {
+        const at = this.rttConfirmAt.get(id);
+        if (at != null && now - at <= RTT_CONFIRM_COOLDOWN_MS) continue;
+        this.requestVerification(id, 1);
+      }
+      // Owed now or still: it asks about the newest lone slow round trip.
+      const owed = this.verifyOwed.get(id);
+      if (owed?.confirm) owed.frameAt = f.t;
     }
   }
 
@@ -2226,7 +2248,7 @@ class ZwaveDataImpl implements ZwaveData {
       const left = st.left - 1;
       if (left <= 0) this.verifyOwed.delete(id);
       else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });
-      if (st.confirm) this.rttConfirmAt.set(id, now);
+      if (st.confirm) this.rttConfirmAt.set(id, st.frameAt ?? now);
       out.push(st.confirm ? { id, first, confirm: true } : { id, first });
     }
     return out;

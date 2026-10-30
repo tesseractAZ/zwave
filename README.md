@@ -54,7 +54,7 @@ health endpoint.
 | --- | --- |
 | Server | about 32,000 lines of TypeScript; 9 screens; SSH, browser and Home Assistant entity interfaces |
 | Detection | 14 per-node detectors, 2 cross-node correlations, controller serial-link health |
-| Verification | 1,676 tests; a mutation-testing harness of 1,584 hand-written mutants (13 labelled equivalent), run on the code each release touches |
+| Verification | 1,678 tests; a mutation-testing harness of 1,599 hand-written mutants (13 labelled equivalent), run on the code each release touches |
 | Integration | Home Assistant Core WebSocket (roster, statistics, gated actions) plus a read-only Z-Wave JS driver WebSocket (noise floor, capabilities, log stream) |
 
 ![The Overview screen: a live node table sorted worst-health-first, with per-node health scores, SNR margin, RTT, timeout rate, hop count, data rate and triage flags](docs/screenshots/overview.svg)
@@ -318,8 +318,8 @@ node not marked Dead **on a fixed per-node cadence** (default every 120 min, how
 marks Dead only reactively, so an unplugged device can read "Alive" for hours until
 something talks to it). The dead-node ladder and a manual `p` send Home
 Assistant's ping; the liveness sweep, the verification bursts and (v0.78.0) the
-single `rtt-degraded` confirmation (one probe, at most one per node per 10
-minutes, to check a lone slow round trip) send **one routed read** instead — `zwave_js.refresh_value` on the device's own
+single `rtt-degraded` confirmation (one probe per lone slow round trip, to
+check it) send **one routed read** instead — `zwave_js.refresh_value` on the device's own
 switch/light value, a single Get that changes nothing on the device (its Report
 can correct a stale Home Assistant state) — because a ping is one
 ACK-only attempt on the stored routes, and an unanswered one marks a working

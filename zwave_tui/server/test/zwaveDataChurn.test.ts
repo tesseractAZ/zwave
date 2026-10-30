@@ -2490,22 +2490,32 @@ test('our read\'s failover confounds the node\'s open rate, RTT, signal, return-
   } finally { R.stop(); }
 });
 
-test('our read\'s failover confounds a route-sensitive episode that opens AFTER it, from the detectors\' lookback before its dwell\'s last five minutes (v0.78.0)', async () => {
+test('our read\'s failover confounds a route-sensitive episode that opens AFTER it, from the detectors\' lookback before the dwell it was first seen with (v0.78.0)', async () => {
   // A confirmation's answer that failed over can be the second slow round trip
   // that starts rtt-degraded, and a sweep read can fail over during a dwell.
   // The failover's own engine pass consumes measurementReroutes with no
   // episode open yet, so the open itself must see it. A chronic dwell runs for
-  // days, and a failover that long before its open did not start it.
+  // days, and a failover that long before it matured did not start it; nor did
+  // one before an old dwell start an episode re-opens on. An open held past
+  // maturity (subsumed by a mesh event) still reaches back across its dwell.
   const H = 3_600_000;
-  // label, kind, dwell start and open relative to the failover, what is confounded
-  const cases: Array<[string, string, number, number, string[]]> = [
-    ['nine minutes before the dwell began', 'rtt-degraded', 9 * 60_000, 14 * 60_000, ['rtt-degraded']],
-    ['eleven minutes before it', 'rtt-degraded', 11 * 60_000, 16 * 60_000, []],
-    ['a sweep read during the dwell', 'route-churn', -2 * 60_000, 3 * 60_000, ['route-churn']],
-    ['40 hours before a chronic dwell matured', 'chronic-return-path', -8 * H, 40 * H, []],
-    ['in the quarter hour before one matured', 'chronic-return-path', 14 * 60_000 - 48 * H, 14 * 60_000, ['chronic-return-path']],
+  const M = 60_000;
+  // label, kind, lane, dwell start, first seen (subsumed) or null, open — all
+  // relative to the failover — what is confounded, and whether the symptom
+  // went for a tick after it was first seen
+  const cases: Array<[string, string, 'verify' | 'sweep', number, number | null, number, string[], boolean?]> = [
+    ['nine minutes before the dwell began', 'rtt-degraded', 'verify', 9 * M, null, 14 * M, ['rtt-degraded']],
+    ['eleven minutes before it', 'rtt-degraded', 'verify', 11 * M, null, 16 * M, []],
+    ['a sweep read during the dwell', 'route-churn', 'sweep', -2 * M, null, 3 * M, ['route-churn']],
+    ['the breach it started, opened late behind a mesh event', 'rtt-degraded', 'verify', 0, 5 * M, 20 * M, ['rtt-degraded']],
+    ['six hours into a dwell an episode re-opens on 30 hours later', 'return-path-degraded', 'verify', -6 * H, null, 30 * H, []],
+    ['the same, its dwell seen at the failover and gone a tick since', 'return-path-degraded', 'verify', -6 * H, 5 * M, 30 * H, [], true],
+    ['25 minutes before a weak-signal dwell, inside its event lookback', 'weak-signal', 'verify', 25 * M, null, 30 * M, ['weak-signal']],
+    ['35 minutes before one', 'weak-signal', 'verify', 35 * M, null, 40 * M, []],
+    ['40 hours before a chronic dwell matured', 'chronic-return-path', 'verify', -8 * H, null, 40 * H, []],
+    ['in the quarter hour before one matured', 'chronic-return-path', 'verify', 14 * M - 48 * H, null, 14 * M, ['chronic-return-path']],
   ];
-  for (const [label, kind, sinceOff, openOff, want] of cases) {
+  for (const [label, kind, lane, sinceOff, seenOff, openOff, want, gap] of cases) {
     const R = await rerouteZd('zwtui-reroute-open-');
     try {
       const asAlive = R.priv.snapshot().map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
@@ -2514,14 +2524,19 @@ test('our read\'s failover confounds a route-sensitive episode that opens AFTER 
       const orig = R.priv.outcomes.markConfounded.bind(R.priv.outcomes);
       R.priv.outcomes.markConfounded = (n, k) => { if (n === 7) marked.push(k); orig(n, k); };
       const at = Date.now();
-      R.zd.noteMeasurementProbe(7, at, 'verify', 'read');
+      R.zd.noteMeasurementProbe(7, at, lane, 'read');
       R.route(R.failedOver);
       R.priv.lastOkAt = Date.now();
       R.priv.sampleEvidence(); // the failover's own engine pass, with nothing open
       assert.equal(R.priv.measurementReroutes.size, 0, `${label}: fixture guard, that pass consumed the mark`);
       const since = at + sinceOff;
-      const syms = [kind, 'quiet-node'].map((k) => ({ kind: k, nodeId: 7, severity: 'watch', sinceMs: since, basis: 'measured', evidence: [], narrative: '' }));
-      R.priv.updateEpisodes(syms, at + openOff);
+      const syms = (subsumedBy?: string) => [kind, 'quiet-node'].map((k) => ({ kind: k, nodeId: 7, severity: 'watch', sinceMs: since, basis: 'measured', evidence: [], narrative: '', ...(subsumedBy ? { subsumedBy } : {}) }));
+      if (seenOff != null) {
+        R.priv.updateEpisodes(syms('ctrl'), at + seenOff);
+        assert.equal((R.zd.openEpisodes() ?? []).filter((e) => e.nodeId === 7).length, 0, `${label}: fixture guard, nothing opens while subsumed`);
+        if (gap) R.priv.updateEpisodes([], at + seenOff + 10_000);
+      }
+      R.priv.updateEpisodes(syms(), at + openOff);
       assert.deepEqual(new Set((R.zd.openEpisodes() ?? []).filter((e) => e.nodeId === 7).map((e) => e.kind)), new Set([kind, 'quiet-node']), `${label}: fixture guard`);
       assert.deepEqual([...new Set(marked)], want, `${label}: only a route-sensitive kind, only inside the reach`);
     } finally { R.stop(); }
@@ -3415,9 +3430,10 @@ test('one slow round trip owes ONE confirmation probe, flagged, and at most one 
     r.idle(460_000);
     assert.equal(r.zd.verifyOwedCount(), 0, 'one slow round trip buys at most one probe');
     assert.equal(r.rtt(), undefined);
-    // The cooldown runs from the probe handed out, 50 s after the round trip:
-    // once both have passed, a NEW slow round trip may ask again.
-    r.idle(170_000);
+    // The cooldown runs from the round trip asked about, not from the probe
+    // handed out 50 s after it: once it has left the window, a NEW slow round
+    // trip may ask again.
+    r.idle(100_000);
     r.trip(300);
     assert.equal(r.zd.verifyOwedCount(), 1, 'the next slow round trip after the window asks again');
   } finally { r.done(); }
@@ -3576,25 +3592,90 @@ test('the confirmation cooldown is per node, and a burst drains ahead of confirm
   const q = await confirmRig('zwtui-rttfifo-');
   try {
     const f = { t: q.now(), raw: 300 };
-    q.priv.requestRttConfirms(new Map([[21, f]]), q.now());
-    q.priv.requestRttConfirms(new Map([[22, f], [21, f]]), q.now() + 10_000);
+    q.priv.requestRttConfirms(new Map([[22, f]]), q.now());
+    q.priv.requestRttConfirms(new Map([[21, f], [22, f]]), q.now() + 10_000);
     for (const id of [31, 32, 33]) q.priv.requestVerification(id);
-    assert.deepEqual(q.zd.drainVerifyRequests(q.now() + 10_000).map((d) => d.id), [31, 32, 33, 21]);
+    assert.deepEqual(q.zd.drainVerifyRequests(q.now() + 10_000).map((d) => d.id), [31, 32, 33, 22], 'oldest first, not lowest id first');
   } finally { q.done(); }
 });
 
-test('the confirmation cooldown covers its round trip to the edge of the lookback, both inclusive (v0.78.0)', async () => {
-  // Handed out on the round trip's own tick, the cooldown and the lookback end
-  // together: at exactly 10 minutes the round trip is still in the window, and
-  // it must not buy a second probe there.
+test('the confirmation cooldown runs from its round trip and ends with it at the edge of the lookback, both inclusive (v0.78.0)', async () => {
+  // Handed out a minute after the round trip, the cooldown still ends with
+  // that round trip's lookback: at exactly 10 minutes the round trip is still
+  // in the window and still the detector's question, and it must not buy a
+  // second probe there.
   const r = await confirmRig('zwtui-rttedge-');
   try {
+    const asked: number[] = [];
+    const orig = r.priv.requestRttConfirms.bind(r.priv);
+    r.priv.requestRttConfirms = (sus, now) => { if (sus.has(7)) asked.push(now); orig(sus, now); };
     r.trip(300);
+    const t0 = r.now();
+    r.idle(60_000);
     assert.deepEqual(r.zd.drainVerifyRequests(r.now()), [{ id: 7, first: false, confirm: true }]);
-    r.idle(600_000);
-    assert.equal(r.zd.baselineHold(7), 'rtt-over-line', 'fixture guard: the round trip is still in the window');
+    r.idle(540_000);
+    assert.equal(asked.at(-1), t0 + 600_000, 'fixture guard: at exactly ten minutes the round trip is still asked about');
     assert.equal(r.zd.verifyOwedCount(), 0, 'no second probe at the edge');
   } finally { r.done(); }
+});
+
+test('a confirmation handed out late does not refuse the one its own slow answer needs (v0.78.0 review)', async () => {
+  // Held to the lookback's last runner tick (bursts in every slot, the
+  // post-kill hold), the probe's slow answer lands once the round trip it was
+  // for has left the window: alone, a new question. Counted from the hand-out,
+  // the cooldown would refuse it until it too had aged out, and a slow node
+  // would never start the breach.
+  const r = await confirmRig('zwtui-rttlate-');
+  try {
+    r.trip(300);
+    r.idle(580_000);
+    assert.deepEqual(r.zd.drainVerifyRequests(r.now()), [{ id: 7, first: false, confirm: true }], 'handed out on the last runner tick');
+    r.idle(20_000);
+    r.trip(300); // its answer, ten minutes and ten seconds after the first
+    assert.equal(r.priv.symptomState.has('7:rtt-degraded'), false, 'fixture guard: alone, it starts nothing');
+    assert.deepEqual(r.zd.drainVerifyRequests(r.now()), [{ id: 7, first: false, confirm: true }], 'it is asked about');
+    r.trip(280);
+    assert.equal(r.priv.symptomState.has('7:rtt-degraded'), true, 'and a slow answer starts the breach');
+  } finally { r.done(); }
+  // Still owed when its round trip ages out and a newer slow one lands alone,
+  // a confirmation is for the newer one, and its cooldown counts from that.
+  const c = await confirmRig('zwtui-rttcarry-');
+  try {
+    c.trip(300);
+    c.idle(600_000);
+    c.trip(300); // the first has left the window: alone, and the probe still owed
+    assert.equal(c.priv.symptomState.has('7:rtt-degraded'), false, 'fixture guard: alone');
+    assert.deepEqual(c.zd.drainVerifyRequests(c.now()), [{ id: 7, first: false, confirm: true }]);
+    c.idle(60_000); // its answer is lost
+    assert.equal(c.zd.verifyOwedCount(), 0, 'the newer round trip buys no second probe');
+  } finally { c.done(); }
+});
+
+test('only a confirmation the runner takes is stamped: not one starved of a slot or held, nor a burst probe (v0.78.0 review)', async () => {
+  // Each case ends on a lone slow round trip a minute or two after the first,
+  // well inside its window: it must be asked about.
+  for (const how of ['starved', 'held'] as const) {
+    const r = await confirmRig(`zwtui-rttstamp-${how}-`);
+    try {
+      r.trip(300);
+      if (how === 'starved') for (const id of [31, 32, 33, 34]) r.priv.requestVerification(id);
+      const out = r.zd.drainVerifyRequests(r.now(), how === 'held' ? (id) => id === 7 : undefined);
+      assert.equal(out.some((d) => d.id === 7), false, `${how}: fixture guard, not handed out`);
+      r.trip(27); // the node's own answer: withdrawn unsent
+      r.idle(60_000);
+      r.trip(300);
+      // The bursts are held here, so the slot is node 7's if it is owed.
+      assert.deepEqual(r.zd.drainVerifyRequests(r.now(), (id) => id !== 7), [{ id: 7, first: false, confirm: true }], `${how}: the next lone slow round trip is asked about`);
+    } finally { r.done(); }
+  }
+  const b = await confirmRig('zwtui-rttstamp-burst-');
+  try {
+    b.priv.requestVerification(7);
+    for (let i = 0; i < 5; i++) { assert.equal(b.zd.drainVerifyRequests(b.now()).length, 1, 'fixture guard: the burst goes out'); b.idle(30_000); }
+    assert.equal(b.zd.verifyOwedCount(), 0, 'fixture guard: all of it');
+    b.trip(300);
+    assert.deepEqual(b.zd.drainVerifyRequests(b.now()), [{ id: 7, first: false, confirm: true }], 'a burst leaves no confirmation cooldown');
+  } finally { b.done(); }
 });
 
 test('a confirmation never cuts a burst short, and a burst asked for after it is a burst (v0.78.0)', async () => {

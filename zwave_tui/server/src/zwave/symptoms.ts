@@ -301,7 +301,7 @@ const WEAK_MARGIN_DB = 7; // direct-node weak-signal margin
 const WEAK_TIMEOUT_RATE = 0.05; // weak-signal corroboration on a MEASURED window (≥ MIN_WINDOW_TX sends)
 // weak-signal corroboration on an UNMEASURED window: a delivery-failure EVENT this recent.
 // = MAX_DETECTOR_WINDOW_MS in evidenceStore, so the fine ring is guaranteed to hold it.
-const WEAK_EVENT_LOOKBACK_MS = 30 * 60_000;
+export const WEAK_EVENT_LOOKBACK_MS = 30 * 60_000;
 const FLAPS_WINDOW = 3; // ≥3 Alive↔Dead transitions in the window
 // Route churn: the mesh re-deciding how to reach a node. A single change is
 // normal (that IS the mesh healing); repeated changes inside one window mean it

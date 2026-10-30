@@ -3,6 +3,39 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.75.2
+
+### Fixed — every noise floor uses one rule for what a reading is
+
+Five places decided whether a background-RSSI value counts toward the noise
+floor, and they disagreed. The screens' floor and its "measured" tag, the
+Interference floor and the persisted trend kept any negative value; the
+weak-signal detector dropped values at or below −120 dBm per channel; the health
+score took the screens' floor and fell back to −95 only when that floor itself
+was at or below −120; and the detector's "measured" flag only asked whether a
+driver sample existed at all. zwave-js stands −128 dBm in for "no signal
+detected", so with every channel at that value the screens read
+`-128 dBm (measured)`, the health score used −95, and weak-signal labelled its
+−95 fallback `measured`. With channels `[-128, -104, -101, -93]` the screens
+used −102.5 and the detectors −101.
+
+- `health.ts` now holds the rule: `noiseReading` — finite, negative (0 is the
+  driver's "no value yet" seed and its stand-in for saturation) and above
+  `NOISE_FLOOR_MIN_DBM = -120` — and `medianNoiseFloor`, the median of the
+  readings in the leading run of channels. The screens, the health score, the
+  detectors, Interference and the persisted trend all take their floor from it.
+- "Measured" now means the floor came from a reading, everywhere: the screens'
+  tag, and weak-signal's `basis` and its `(vs assumed −95 floor)` evidence. The
+  detectors no longer take a separate `hasRealNoise` from the data layer.
+- Interference distinguishes a connected driver with no reading
+  (`median — no reading`, naming the stand-ins, whole at 80 columns) from no
+  connection at all; it had said the client was not connected.
+- Coarse noise-trend buckets folded under the old rule with a stand-in in them
+  are dropped on load — a folded sum cannot be un-folded — rather than shown as
+  `quietest -128 dBm` beside a live floor that excludes it.
+- No change on the reference controller: its four channels read −105 to −94
+  dBm, all readings by both the old rules and the new one.
+
 ## 0.75.1
 
 ### Changed — the live-span count names its nodes

@@ -33,10 +33,13 @@ single probe instead of a 10-probe episode.
 - When the average breaches on one slow round trip with nothing behind it,
   the node is owed one verification-lane probe, logged as
   `verification probe (rtt-degraded confirm, N nodes owed)`. A slow answer
-  starts the breach; a normal one ends the question. At most one goes out per
-  node per 10 minutes, so one slow round trip buys at most one probe; one that
-  never goes out (refused, withdrawn, absorbed by a burst or dropped by the
-  pause) leaves no cooldown. It passes every gate a burst probe does,
+  starts the breach; a normal one ends the question. One slow round trip buys
+  at most one probe: no other goes to the node until that round trip has left
+  the 10-minute lookback, counted from the round trip, so a probe sent late
+  does not hold back the next slow round trip. One the runner never takes
+  (refused, withdrawn, absorbed by a burst or dropped by the pause) leaves no
+  cooldown; one it takes and then drops (a node Dead at its tick) does. It
+  passes every gate a burst probe does,
   opens no episode, is withdrawn unsent when the node's own traffic answers
   first, never shortens an owed burst, drains after any burst owed on the
   same tick, and is not counted as episode evidence on DETAIL or REMEDY.
@@ -44,13 +47,17 @@ single probe instead of a 10-probe episode.
   without auto-ping running), the newest round trip alone starts the breach,
   as in 0.77.3, but never after a normal one.
 - An episode of a route-sensitive kind opens confounded when the add-on's own
-  routed read re-routed its node during its dwell or in the 10-minute lookback
-  before it, counting no more than the dwell's last five minutes (a
-  `chronic-return-path` dwell runs for two days). A confirmation's failed-over
-  answer can be the round trip that starts the breach, and the guard saw only
-  episodes already open, which also let a sweep read failing over during a
-  dwell through. REMEDY's confounded row now says `during or just before the
-  episode`.
+  routed read re-routed its node during its dwell or in the detector's
+  lookback before it (10 minutes; 30 for `weak-signal`, which reads that far
+  on a node too quiet for a rate). The dwell counts from no earlier than five
+  minutes before the symptom was first seen: a `chronic-return-path` dwell
+  runs for two days, an episode re-opened on an old dwell start counts from
+  the symptom's return, and one opened late behind a mesh event keeps its
+  whole dwell. A confirmation's failed-over answer can be the round trip that
+  starts the breach, and the guard saw only episodes already open, which also
+  let a sweep read failing over during a dwell through. REMEDY's confounded
+  row now leads with `credited to neither arm` and says `during or just
+  before the episode`.
 - The symptom card shows the newest round trips, after the baseline.
 - Known cost: slow frames that never land in consecutive pairs are never
   corroborated, strict alternation being the extreme (0.77.3 fired at
@@ -60,7 +67,8 @@ single probe instead of a 10-probe episode.
   10 minutes does not report a slowdown. An answer within 0.2 ms of the
   rounded average does not move it, counts as unanswered, and the node's
   next transmission decides. After a normal answer the average can stay over
-  the line until the node's own transmissions bring it under, and the node's
+  the line until transmissions to the node (its automations, polls or a
+  liveness sweep) bring it under, and the node's
   learning stays held until then: one to several 2-hour sweeps on a node
   nothing else addresses, where 0.77.3's false episode cleared it in minutes
   with 10 probes.
@@ -76,7 +84,7 @@ single probe instead of a 10-probe episode.
   caught 33 minutes later at 9.6k. Inside the 30 episodes, 11–12
   confirmations replace the 140 burst probes 0.77.3 spent on one-frame
   episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
-- 26 new tests; 69 new mutation entries, 7 re-anchored.
+- 28 new tests; 84 new mutation entries, 7 re-anchored.
 
 ## 0.77.3
 
@@ -537,39 +545,6 @@ and could mix images within one run. The move is made deliberately instead:
 The review found no regression from v0.75.0–v0.75.2: four clean restarts, no
 add-on warning or error in 42 h, 819 probes answered but one, and the only
 AppArmor denials the four deliberate probes of the v0.74.4 check.
-
-## 0.75.2
-
-### Fixed — every noise floor uses one rule for what a reading is
-
-Five places decided whether a background-RSSI value counts toward the noise
-floor, and they disagreed. The screens' floor and its "measured" tag, the
-Interference floor and the persisted trend kept any negative value; the
-weak-signal detector dropped values at or below −120 dBm per channel; the health
-score took the screens' floor and fell back to −95 only when that floor itself
-was at or below −120; and the detector's "measured" flag only asked whether a
-driver sample existed at all. zwave-js stands −128 dBm in for "no signal
-detected", so with every channel at that value the screens read
-`-128 dBm (measured)`, the health score used −95, and weak-signal labelled its
-−95 fallback `measured`. With channels `[-128, -104, -101, -93]` the screens
-used −102.5 and the detectors −101.
-
-- `health.ts` now holds the rule: `noiseReading` — finite, negative (0 is the
-  driver's "no value yet" seed and its stand-in for saturation) and above
-  `NOISE_FLOOR_MIN_DBM = -120` — and `medianNoiseFloor`, the median of the
-  readings in the leading run of channels. The screens, the health score, the
-  detectors, Interference and the persisted trend all take their floor from it.
-- "Measured" now means the floor came from a reading, everywhere: the screens'
-  tag, and weak-signal's `basis` and its `(vs assumed −95 floor)` evidence. The
-  detectors no longer take a separate `hasRealNoise` from the data layer.
-- Interference distinguishes a connected driver with no reading
-  (`median — no reading`, naming the stand-ins, whole at 80 columns) from no
-  connection at all; it had said the client was not connected.
-- Coarse noise-trend buckets folded under the old rule with a stand-in in them
-  are dropped on load — a folded sum cannot be un-folded — rather than shown as
-  `quietest -128 dBm` beside a live floor that excludes it.
-- No change on the reference controller: its four channels read −105 to −94
-  dBm, all readings by both the old rules and the new one.
 
 ## Older releases
 

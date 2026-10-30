@@ -363,7 +363,11 @@ test('the transient-blink line is silent at zero (v0.39)', () => {
 test('a confounded closure renders its own credited-to-neither-arm row (v0.40)', () => {
   const cx = ctx(140, 40, [sym()]);
   (cx.data as { confoundedCount?: (k: SymptomKind) => number }).confoundedCount = () => 2;
-  assert.match(plain(renderRemedy(cx)), /2 confounded by a death, remediation or probe re-route during or just before the episode — credited to neither arm/);
+  assert.match(plain(renderRemedy(cx)), /2 confounded — credited to neither arm \(a death, remediation or probe re-route during or just before the episode\)/);
+  // The verdict leads (v0.78.0): a narrower terminal cuts the causes, not it.
+  const narrow = ctx(60, 40, [sym()]);
+  (narrow.data as { confoundedCount?: (k: SymptomKind) => number }).confoundedCount = () => 2;
+  assert.match(plain(renderRemedy(narrow)), /2 confounded — credited to neither arm/);
 });
 
 test('the confounded line is silent at zero (v0.40)', () => {

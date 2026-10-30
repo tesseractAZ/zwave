@@ -362,8 +362,8 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     const conf = ledger.confounded(sym.kind);
     if (conf > 0) {
       rows.push(truncate(
-        '    ' + c.grey(`○ ${conf} confounded by a death, remediation or probe re-route during or just before the episode — ` +
-          'credited to neither arm'), W));
+        '    ' + c.grey(`○ ${conf} confounded — credited to neither arm (a death, remediation or probe re-route ` +
+          'during or just before the episode)'), W));
     }
   }
   // WHY there are no ledger rows at all, for kinds where that is permanent
