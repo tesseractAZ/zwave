@@ -1471,27 +1471,32 @@ async function seedFoldRig(prefix: string) {
   const roster = zd.snapshot();
   const base = roster.find((n) => n.nodeId === 7)!;
   let t = Date.now();
-  const tick = (tx: number, rtt: number) => {
+  // `fresh: false` is a sample whose counters did not move; `rosterTx` is the
+  // count the roster's copy shows, which can trail the recorded one by a poll.
+  const tick = (tx: number, rtt: number, o: { fresh?: boolean; rosterTx?: number } = {}) => {
     const stats = { ...base.stats, commandsTX: tx, rtt, rssi: -60 };
     t += 60_000;
-    priv.evidenceStore.record(7, stats, NodeStatus.Alive, { fresh: true }, t);
-    priv.lastNodes = roster.map((n) => (n.nodeId === 7 ? { ...n, stats } : n));
+    priv.evidenceStore.record(7, stats, NodeStatus.Alive, { fresh: o.fresh ?? true }, t);
+    priv.lastNodes = roster.map((n) => (n.nodeId === 7 ? { ...n, stats: { ...stats, commandsTX: o.rosterTx ?? tx } } : n));
     priv.runEngine(t);
     const ring = priv.evidenceStore.forNode(7);
     stored.push(ring[ring.length - 1].rtt);
     held.push(zd.rttSeedHold(7));
   };
+  /** An engine tick that recorded nothing for node 7 (the settle rule deferred it). */
+  const idle = () => { t += 10_000; priv.runEngine(t); held.push(zd.rttSeedHold(7)); };
   const done = () => { zd.stop(); rmSync(dir, { recursive: true, force: true }); };
-  return { priv, tick, folded, rssi, stored, held, done };
+  return { priv, tick, idle, folded, rssi, stored, held, done };
 }
 
 test('the baseline fold leaves out an RTT reading a driver restart can still move (v0.77.1)', async () => {
   // rtt-degraded no longer arms on the restart seed, so quarantine no longer
   // holds those readings out; the fold has to. The first fresh reading of the
-  // lifetime (900 ms at tx 3) bounds what the restart still adds:
-  // 0.75^16 × 900 = 9.02 ms > 8 at tx 19, 6.77 ms at tx 20.
+  // lifetime (900 ms at tx 3) bounds what the restart still adds over a 20 ms
+  // band median: 0.75^16 × 880 = 8.82 ms > 8 at tx 19, 6.61 ms at tx 20.
   const r = await seedFoldRig('zwtui-seed-');
   try {
+    r.priv.baselines.rttNormal = () => ({ median: 20, scale: 8, ready: true, days: 5 });
     for (const tx of [3, 19, 20, 400]) r.tick(tx, 900);
     assert.deepEqual(r.folded, [null, null, 900, 900], 'held out while the restart can still move it by more than 8 ms');
     assert.deepEqual(r.rssi, [-60, -60, -60, -60], 'only the RTT reading is held out');
@@ -1504,7 +1509,7 @@ test('the baseline fold leaves out an RTT reading a driver restart can still mov
 
 test('the fold measures the restart against the band\'s own median (v0.77.1)', async () => {
   // A first reading of 900 against a 890 ms normal is 10 ms of restart, 7.5 ms
-  // one transmission later. Against a median of 0 it would be held for 17 more.
+  // one transmission later.
   const r = await seedFoldRig('zwtui-seedmed-');
   try {
     r.priv.baselines.rttNormal = () => ({ median: 890, scale: 8, ready: true, days: 5 });
@@ -1515,6 +1520,122 @@ test('the fold measures the restart against the band\'s own median (v0.77.1)', a
   }
 });
 
+
+test('an empty band measures the restart against the node\'s own average since the seed (v0.77.3)', async () => {
+  // A route change empties every band, and an empty band reports a median of
+  // 0. Measured against 0 a steady 40 ms node was "restart" for six more
+  // transmissions (0.75^5 × 40 = 9.5 ms at tx 8). Against what the driver
+  // averaged since the seed, (rtt − 0.75^(k − k0) × a0) / (1 − 0.75^(k − k0)),
+  // it is none. The seed reading itself has nothing after it, so it is held.
+  const r = await seedFoldRig('zwtui-seedempty-');
+  try {
+    assert.equal(r.priv.baselines.rttNormal(7, Date.now())?.median ?? 0, 0, 'precondition: no learned median');
+    r.tick(3, 40);
+    r.tick(4, 40);
+    r.tick(5, 41);
+    assert.deepEqual(r.folded, [null, 40, 41], 'only the seed reading is held');
+    assert.deepEqual(r.held, [3, null, null]);
+  } finally {
+    r.done();
+  }
+});
+
+test('an empty band still holds a seed that is washing out (v0.77.3)', async () => {
+  // Node 63 after the 10-24 restart: a 1390 ms seed over a ~25 ms normal,
+  // 25 + 0.75^(k − 1) × 1365 at k transmissions. Its own average since the
+  // seed stays near 25, so the excess is held until 0.75^(k − 1) × 1365 < 8.
+  const r = await seedFoldRig('zwtui-seedwash-');
+  try {
+    const avg = (k: number) => Math.round((25 + 0.75 ** (k - 1) * 1365) * 10) / 10;
+    for (const k of [1, 2, 10, 18, 25]) r.tick(k, avg(k));
+    assert.deepEqual(r.folded, [null, null, null, null, avg(25)]);
+    assert.deepEqual(r.held, [1, 2, 10, 18, null]);
+  } finally {
+    r.done();
+  }
+});
+
+test('a band with a median measures the restart against it, not the node\'s own average (v0.77.3)', async () => {
+  // A steady 900 ms is no restart against the node's own average, and 656 ms
+  // of one against a 25 ms band: the band is the normal the detector uses.
+  const r = await seedFoldRig('zwtui-seedband-');
+  try {
+    r.priv.baselines.rttNormal = () => ({ median: 25, scale: 8, ready: true, days: 5 });
+    for (const tx of [3, 4]) r.tick(tx, 900);
+    assert.deepEqual(r.folded, [null, null]);
+  } finally {
+    r.done();
+  }
+});
+
+test('DETAIL reports an RTT hold only once a reading has been held, and until the next is judged (v0.77.3)', async () => {
+  // After an add-on restart nothing is withheld until the next fresh reading,
+  // but the bound before it (no seed yet: 0.75^(k − 1) × 2 s) showed PAUSED on
+  // every node within ~21 transmissions of a driver restart.
+  const r = await seedFoldRig('zwtui-seedbanner-');
+  try {
+    r.tick(3, 900, { fresh: false }); // the first sample after a restart is never fresh
+    r.tick(4, 900);                   // the seed reading: held against 0
+    r.tick(4, 900, { fresh: false }); // no new reading: the verdict stands
+    r.idle();                         // nor does a tick that recorded nothing change it
+    r.tick(5, 900);                   // steady since the seed: folded
+    assert.deepEqual(r.held, [null, 4, 4, 4, null]);
+  } finally {
+    r.done();
+  }
+});
+
+test('a held verdict lapses with the driver lifetime it was judged in (v0.77.3)', async () => {
+  // Nothing re-judges it until the next fresh RTT reading, and after a new
+  // driver or a re-included device on the same id that can take hours.
+  const r = await seedFoldRig('zwtui-seedlapse-');
+  try {
+    r.tick(3, 900);                   // the seed reading, held
+    r.tick(1, 900, { fresh: false }); // a new driver: counters went backwards, no reading yet
+    assert.deepEqual(r.held, [3, null]);
+  } finally {
+    r.done();
+  }
+  const e = await seedFoldRig('zwtui-seedevict-');
+  try {
+    e.tick(3, 900);
+    (e.priv.evidenceStore as unknown as { evictNode: (id: number) => void }).evictNode(7);
+    e.idle();
+    assert.deepEqual(e.held, [3, null], 'nor does it outlive the node it was about');
+  } finally {
+    e.done();
+  }
+});
+
+test('a tick that recorded nothing for a node folds nothing for it (v0.77.3)', async () => {
+  // The settle rule defers a node whose statistics just arrived; the tick then
+  // folded the sample the previous tick had already folded.
+  const r = await seedFoldRig('zwtui-seedidle-');
+  try {
+    r.priv.baselines.rttNormal = () => ({ median: 900, scale: 8, ready: true, days: 5 });
+    r.tick(3, 900);
+    r.idle();
+    r.idle();
+    assert.deepEqual(r.folded, [900], 'one reading, one fold');
+  } finally {
+    r.done();
+  }
+});
+
+test('the fold judges a reading at the count it was recorded with (v0.77.3)', async () => {
+  // The roster is polled apart from the statistics feed and can trail it. At
+  // tx 3 the seed taken at tx 4 is "from a later count" and the 2 s ceiling
+  // (0.75^2 × 1105 = 622 ms) held a reading the seed bounds to 5 ms.
+  const r = await seedFoldRig('zwtui-seedlag-');
+  try {
+    r.priv.baselines.rttNormal = () => ({ median: 895, scale: 8, ready: true, days: 5 });
+    r.tick(4, 900, { rosterTx: 3 });
+    assert.deepEqual(r.folded, [900]);
+    assert.deepEqual(r.held, [null]);
+  } finally {
+    r.done();
+  }
+});
 
 test('a departed node discarding its learning is visible IN THE TUI (v0.53.0)', async () => {
   // Eviction throws away weeks of learned baselines, the persisted evidence

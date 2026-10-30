@@ -142,9 +142,22 @@ export const RATE_FALLBACK_MIN_GAP_MS = 30_000;
  * (v0.77.1): the average `a0` as it stood at `commandsTX = k0`. It bounds what
  * the restart burst can still be adding to the average (symptoms
  * rttRestartResidue). Dropped when the node's counters go backwards (a new
- * driver), so the next fresh reading starts the new lifetime's. Memory only:
- * after an add-on restart the first reading is taken mid-lifetime, where the
- * fixed 2 s ceiling is the tighter bound anyway.
+ * driver), so the next fresh reading starts the new lifetime's.
+ *
+ * Saved with the counters of each node's newest sample, and carried over an
+ * add-on restart while the driver can still be the one that measured it
+ * (v0.77.3): the host is still on the boot that wrote the file, the save is
+ * young enough for the fine ring to load, and no node's first sample after
+ * the load has a counter below its saved one — one driver keeps every node's
+ * counters, so one node going backwards means none of the saved seeds is this
+ * driver's. v0.77.1 kept seeds in memory only, so after every deploy the first
+ * reading became its own seed and its excess over the median counted as
+ * restart, up to the 2 s ceiling. The ceiling is under 8 ms once the driver
+ * has made about 20 transmissions to the node, but on a quiet mesh that takes
+ * hours, and until then a slowdown first measured on that reading was masked
+ * and fired a reading late: the morning after a host restart the re-taken seed
+ * was the smaller bound on 37 of 38 reference-mesh nodes. A seed that cannot
+ * be carried is re-taken that way, as before.
  */
 export interface RttSeed {
   k0: number;
@@ -387,6 +400,9 @@ export interface EvidenceStore {
   rateRun(nodeId: number): RateRun | null;
   /** The first fresh RTT reading of the driver's current lifetime (v0.77.1). */
   rttSeed(nodeId: number): RttSeed | null;
+  /** commandsTX as recorded with the node's newest sample (v0.77.3), or null
+   *  before its first one here. */
+  lastTx(nodeId: number): number | null;
   coarseForNode(nodeId: number): CoarseBucket[];
   controllerSamples(): ControllerSample[];
   /** The long-horizon (multi-day) controller noise-floor tier (30-min buckets). */
@@ -525,6 +541,13 @@ interface Persisted {
    *  that kept only the ring forgot the regression and could never re-arm while
    *  it lasted. Absent in older files ⇒ re-folded from the restored ring. */
   rateRuns?: Record<string, { rk: string; sh: number; bt: number; lb: number | null; r: number | null }>;
+  /** Per node, the counters of its newest sample and its RTT seed, if any
+   *  (v0.77.3). OPTIONAL, no schema bump: absent in older files ⇒ no seed is
+   *  carried, and each is re-taken from the next fresh reading. */
+  lives?: Record<string, { tx: number; to: number; dr: number; rx: number; k0?: number; a0?: number }>;
+  /** When the host booted, by the clock at save time: now − uptime (v0.77.3).
+   *  Optional; absent ⇒ `lives` are not carried. */
+  bootAt?: number;
 }
 
 const SCHEMA_V = 2;
@@ -631,6 +654,11 @@ function routeKeyOf(stats: NodeStats): string | null {
 function numOrNull(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
+/** A driver counter (or an RTT average) as persisted: finite and not negative. */
+function countOrNull(v: unknown): number | null {
+  const n = numOrNull(v);
+  return n != null && n >= 0 ? n : null;
+}
 
 /** The per-sample noise floor: `medianNoiseFloor`, the one rule (health.ts,
  *  v0.75.2) — so the persisted coarse trend, the live fine trend and the
@@ -687,6 +715,10 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   const routeFails = new Map<number, RouteFailureEvent[]>();
   const rateRuns = new Map<number, RateRun>();
   const rttSeeds = new Map<number, RttSeed>();
+  /** What a load restored of the previous run's driver lifetime (v0.77.3):
+   *  per node, the counters its first sample here is held against and the seed
+   *  it takes up. Kept until any node proves a new driver. */
+  const carriedLives = new Map<number, { at: Omit<CounterSnapshot, 't'>; seed: RttSeed | null }>();
   const meta = new Map<number, NodeCoverage>();
   const lastCounters = new Map<number, CounterSnapshot>();
   let lastCtrl: CtrlSnapshot | null = null;
@@ -729,6 +761,13 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       return { dTx: null, dTimeout: null, dDropTx: null, dRx: null, invalid: true };
     }
     return { dTx, dTimeout, dDropTx, dRx, invalid: false };
+  }
+
+  /** A new driver (v0.77.3): no seed saved before the add-on restart is its
+   *  own, whether a node already took one up or has yet to sample. */
+  function dropCarried(): void {
+    for (const [id, c] of carriedLives) if (c.seed && rttSeeds.get(id) === c.seed) rttSeeds.delete(id);
+    carriedLives.clear();
   }
 
   /** Fold one sample into its node's 30-min coarse bucket. */
@@ -895,6 +934,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       routeFails.delete(nodeId);
       rateRuns.delete(nodeId);
       rttSeeds.delete(nodeId);
+      carriedLives.delete(nodeId);
       meta.delete(nodeId);
       lastCounters.delete(nodeId);
       if (had || hadC) dirty = true;
@@ -934,9 +974,16 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       };
       lastCounters.set(nodeId, cur);
       // A new driver (any counter backwards, the guardedDeltas rule) starts a
-      // new RTT average, so its first fresh reading is the one to keep.
-      if (prev && (cur.tx < prev.tx || cur.timeout < prev.timeout || cur.dropTx < prev.dropTx || cur.rx < prev.rx)) {
+      // new RTT average, so its first fresh reading is the one to keep. A
+      // node's first sample after a load has no `prev`, and is held against the
+      // counters saved with it instead (v0.77.3).
+      const life = prev ? undefined : carriedLives.get(nodeId);
+      const ref = prev ?? life?.at;
+      if (ref && (cur.tx < ref.tx || cur.timeout < ref.timeout || cur.dropTx < ref.dropTx || cur.rx < ref.rx)) {
         rttSeeds.delete(nodeId);
+        dropCarried();
+      } else if (life?.seed) {
+        rttSeeds.set(nodeId, life.seed);
       }
       if (fresh && sample.rtt != null && stats.commandsTX >= 1 && !rttSeeds.has(nodeId)) {
         rttSeeds.set(nodeId, { k0: stats.commandsTX, a0: sample.rtt });
@@ -1021,6 +1068,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     forNode: (nodeId) => fine.get(nodeId) ?? [],
     rateRun: (nodeId) => rateRuns.get(nodeId) ?? null,
     rttSeed: (nodeId) => rttSeeds.get(nodeId) ?? null,
+    lastTx: (nodeId) => lastCounters.get(nodeId)?.tx ?? null,
     coarseForNode: (nodeId) => coarse.get(nodeId) ?? [],
     controllerSamples: () => ctrlRing,
     controllerCoarse: () => ctrlCoarse,
@@ -1072,6 +1120,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       ctrlCoarse.length = 0;
       routeFails.clear();
       meta.clear();
+      carriedLives.clear();
       lastCounters.clear();
       rttSeeds.clear();
       lastCtrl = null;
@@ -1309,6 +1358,25 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             rateRuns.set(id, { routeKey: v.rk, sawHundred: v.sh === 1, belowTx: bt, lastBelowTxAt: numOrNull(v.lb), rateKbps: numOrNull(v.r) });
           }
         }
+        // Driver lifetimes (v0.77.3) — only while the driver can still be the
+        // one the file describes: the host is on the boot that wrote it (a host
+        // restart restarts a driver on it) and the save is young enough for
+        // the fine ring. The boot is told by its start, now − uptime, within a
+        // minute of the one saved: unlike the file's age against uptime, that
+        // does not pass a reboot whose clock was restored behind the save.
+        // Each node's first sample then checks its counters.
+        const bootAt = numOrNull(obj.bootAt);
+        const sameBoot = bootAt != null && Math.abs(now() - uptimeMs() - bootAt) <= 60_000;
+        if (!fineTooOld && sameBoot && obj.lives && typeof obj.lives === 'object') {
+          for (const [k, v] of Object.entries(obj.lives)) {
+            const id = Number(k);
+            if (!Number.isInteger(id) || id <= 0 || !v || typeof v !== 'object') continue;
+            const tx = countOrNull(v.tx), to = countOrNull(v.to), dr = countOrNull(v.dr), rx = countOrNull(v.rx);
+            if (tx == null || to == null || dr == null || rx == null) continue;
+            const k0 = countOrNull(v.k0), a0 = countOrNull(v.a0);
+            carriedLives.set(id, { at: { tx, timeout: to, dropTx: dr, rx }, seed: k0 != null && k0 >= 1 && a0 != null ? { k0, a0 } : null });
+          }
+        }
         log(`evidence: restored ${coarse.size} node(s) coarse${grace || fineTooOld ? '' : ` + ${fine.size} fine`} from ${path}`);
       } catch (e) {
         log(`evidence: load failed (${(e as Error).message}) — starting fresh`);
@@ -1428,6 +1496,17 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         for (const [id, run] of rateRuns) {
           runsOut[String(id)] = { rk: run.routeKey, sh: run.sawHundred ? 1 : 0, bt: run.belowTx, lb: run.lastBelowTxAt, r: run.rateKbps };
         }
+        // A node that has not sampled since the load keeps what was carried for
+        // it, so a second restart before its first sample does not lose it; one
+        // that has is written over with its own below.
+        const livesOut: NonNullable<Persisted['lives']> = {};
+        for (const [id, c] of carriedLives) {
+          livesOut[String(id)] = { tx: c.at.tx, to: c.at.timeout, dr: c.at.dropTx, rx: c.at.rx, ...(c.seed ? { k0: c.seed.k0, a0: c.seed.a0 } : {}) };
+        }
+        for (const [id, c] of lastCounters) {
+          const seed = rttSeeds.get(id);
+          livesOut[String(id)] = { tx: c.tx, to: c.timeout, dr: c.dropTx, rx: c.rx, ...(seed ? { k0: seed.k0, a0: seed.a0 } : {}) };
+        }
         const payload: Persisted = {
           v: SCHEMA_V,
           savedAt: now(),
@@ -1447,6 +1526,8 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           routeFails: rf,
           meta: metaOut,
           rateRuns: runsOut,
+          lives: livesOut,
+          bootAt: now() - uptimeMs(),
         };
         writeFileSync(tmp, JSON.stringify(payload), 'utf8');
         renameSync(tmp, path);
@@ -1463,6 +1544,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       ctrlCoarse.length = 0;
       routeFails.clear();
       meta.clear();
+      carriedLives.clear();
       lastCounters.clear();
       rttSeeds.clear();
       lastCtrl = null;

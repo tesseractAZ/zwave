@@ -63,13 +63,14 @@ import {
   isRouteChange,
   type ProbeClassLite,
   type ProbeFrameLite,
+  type RttSeed,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels, type DriverLogWatch } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttRestartResidue, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -547,8 +548,8 @@ export interface ZwaveData {
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
   /** Is this node's baseline learning currently PAUSED, and why (v0.48.0)? */
   baselineHold(nodeId: number): 'symptomatic' | 'arming' | null;
-  /** Transmissions since the driver restarted while that restart still holds
-   *  this node's RTT out of the baseline, as of the last engine tick (v0.77.1). */
+  /** Transmissions since the driver restarted, when that restart held this
+   *  node's newest RTT reading out of the baseline in this lifetime (v0.77.1). */
   rttSeedHold(nodeId: number): number | null;
   forgetNodeBaselines(nodeId: number): void;
   /** M6: interference view (noise floor, serial health, diurnal heatmap). */
@@ -1479,18 +1480,30 @@ class ZwaveDataImpl implements ZwaveData {
     this.lastQuarantineArm = qArm;
     const quarantine = new Set(qSym);
     for (const id of qArm) quarantine.add(id);
-    this.lastRttSeedHold.clear();
     for (const n of this.lastNodes) {
       if (n.isController) continue;
       const ring = ev.forNode(n.nodeId);
       if (ring.length === 0) continue;
+      // Only a sample this tick recorded (v0.77.3). A node the settle rule
+      // deferred, or one with no statistics yet, recorded none, and its newest
+      // sample was folded on the tick that took it: folding it again counted
+      // the same reading twice.
+      const s = ring[ring.length - 1];
+      if (s.t !== now) continue;
       // Nor an RTT reading the driver's post-restart measurements can still
       // move by more than the RTT baseline resolves (v0.77.1). Quarantine used
       // to hold those out because they tripped rtt-degraded; they no longer do.
-      const s = ring[ring.length - 1];
+      // Judged at the count the sample was recorded with, which the roster's
+      // copy can trail by a poll (v0.77.3).
+      const k = ev.lastTx(n.nodeId) ?? n.stats.commandsTX;
       const seeded = s.rtt != null &&
-        rttRestartResidue(n.stats.commandsTX, bl.rttNormal(n.nodeId, s.t)?.median ?? 0, ev.rttSeed(n.nodeId)) > RTT_MAD_FLOOR;
-      if (seeded) this.lastRttSeedHold.set(n.nodeId, n.stats.commandsTX);
+        rttFoldResidue(k, s.rtt, bl.rttNormal(n.nodeId, s.t), ev.rttSeed(n.nodeId)) > RTT_MAD_FLOOR;
+      // DETAIL reports the verdict on the newest RTT reading (v0.77.3): a tick
+      // with no new reading withholds nothing, and leaves that verdict standing.
+      if (s.fresh && s.rtt != null) {
+        if (seeded) this.lastRttSeedHold.set(n.nodeId, { k, seed: ev.rttSeed(n.nodeId) });
+        else this.lastRttSeedHold.delete(n.nodeId);
+      }
       bl.observe(n.nodeId, seeded ? { ...s, rtt: null } : s, quarantine.has(n.nodeId));
     }
   }
@@ -2143,7 +2156,7 @@ class ZwaveDataImpl implements ZwaveData {
   private lastQuarantineArm = new Set<number>();
   /** Nodes whose RTT reading the last engine tick held out of the baseline
    *  because a driver restart can still move it, with their commandsTX (v0.77.1). */
-  private lastRttSeedHold = new Map<number, number>();
+  private lastRttSeedHold = new Map<number, { k: number; seed: RttSeed | null }>();
 
   /**
    * Is this node's baseline learning paused, and why (v0.48.0)?
@@ -2165,14 +2178,23 @@ class ZwaveDataImpl implements ZwaveData {
 
   /**
    * Is this node's RTT learning paused because the driver restarted recently
-   * (v0.77.1)? The transmissions since that restart, as of the last engine
-   * tick, or null. Without it the RTT row's "Nd so far" stops advancing with
-   * nothing on screen to say why, which is the misreport `baselineHold` ended
-   * for quarantine.
+   * (v0.77.1)? The transmissions since that restart when the node's newest RTT
+   * reading was held out of its baseline for it, or null. Without it the RTT
+   * row's "Nd so far" stops advancing with nothing on screen to say why, which
+   * is the misreport `baselineHold` ended for quarantine. Until v0.77.3 it was
+   * the bound as of the last tick, reading or not, so after every add-on
+   * restart it showed on each node within its first ~21 transmissions before
+   * any reading had been held.
+   *
+   * A verdict stands only for the lifetime it was judged in: a new driver, an
+   * evicted node and a store reset each drop the seed it was judged against,
+   * and with it the verdict, instead of leaving an old "N tx ago" up until the
+   * next reading — hours on a sleeping node.
    */
   rttSeedHold(nodeId: number): number | null {
-    if (!this.baselines) return null;
-    return this.lastRttSeedHold.get(nodeId) ?? null;
+    if (!this.baselines || !this.evidenceStore) return null;
+    const h = this.lastRttSeedHold.get(nodeId);
+    return h && h.seed === this.evidenceStore.rttSeed(nodeId) ? h.k : null;
   }
 
   rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null {
