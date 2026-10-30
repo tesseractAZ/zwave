@@ -553,7 +553,7 @@ export interface AutoPingInput {
    * Worse, that is precisely when episodes cluster: a restart re-detects many
    * symptoms at once. Resolved below, after every gate has passed.
    */
-  verifyDue?: () => { id: number; first: boolean }[];
+  verifyDue?: () => { id: number; first: boolean; confirm?: true }[];
   /** How many nodes currently have an outstanding verification burst (v0.37.1).
    *  Reported in the probe line so the contention dividing the one-per-tick
    *  queue is visible rather than inferred. */
@@ -603,6 +603,9 @@ export interface AutoPingDecision {
   /** Of those, the nodes whose probe is the FIRST of its burst (v0.38.2) —
    *  from the queue's own bookkeeping, not a time heuristic. */
   verifyFirst: number[];
+  /** Of those, the single rtt-degraded confirmation probes (v0.78.0), from the
+   *  queue's own bookkeeping: they serve no episode, and say so in the log. */
+  verifyConfirm: number[];
   /** How many DISTINCT nodes were owed a verification probe when this tick was
    *  decided (v0.37.1) — the contention the one-per-tick queue is dividing. */
   verifyOwed: number;
@@ -707,7 +710,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   // the candidate set is empty BY CONSTRUCTION — not because there is nothing
   // to sweep. Counting the unknowns is what separates the two.
   const capabilityUnknown = nodes.filter((n) => !n.isController && n.isListening == null).length;
-  const base = { ping: [] as number[], read: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyOwed: 0, gaveUp: [] as number[], launchGaveUp: [] as number[], talkingWhileDead: [] as number[],
+  const base = { ping: [] as number[], read: [] as number[], stale: [] as number[], verify: [] as number[], verifyFirst: [] as number[], verifyConfirm: [] as number[], verifyOwed: 0, gaveUp: [] as number[], launchGaveUp: [] as number[], talkingWhileDead: [] as number[],
     deadListening: dead.length, capabilityUnknown,
     listening: listeningNodes.length, staleDue: 0, stalestMs: null as number | null };
 
@@ -933,6 +936,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const verifyEntries = (input.verifyDue?.() ?? []).filter((e) => candidates.has(e.id));
   const verify = verifyEntries.map((e) => e.id);
   const verifyFirst = verifyEntries.filter((e) => e.first).map((e) => e.id);
+  const verifyConfirm = verifyEntries.filter((e) => e.confirm === true).map((e) => e.id);
   base.verifyOwed = input.verifyOwedCount?.() ?? verify.length;
 
   // One measurement probe per node per tick (v0.40 review): a node owed a
@@ -946,7 +950,7 @@ export function decideAutoPings(input: AutoPingInput): AutoPingDecision {
   const verifySet = new Set(verify);
   const staleDeduped = stale.filter((id) => !verifySet.has(id));
 
-  return { ...base, ping, read, stale: staleDeduped, verify, verifyFirst, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'none' };
+  return { ...base, ping, read, stale: staleDeduped, verify, verifyFirst, verifyConfirm, gaveUp, launchGaveUp, talkingWhileDead, suppressed: 'none' };
 }
 
 /**
@@ -1297,7 +1301,7 @@ export interface AutoPingRunnerOptions {
    *  names nodes whose probes must stay OWED rather than be drained — the
    *  post-kill hold — so the ledger's burst budget is not spent on packets
    *  that are never sent (the v0.36.2 disease). */
-  verifyRequests?: (now: number, skip?: (nodeId: number) => boolean) => { id: number; first: boolean }[];
+  verifyRequests?: (now: number, skip?: (nodeId: number) => boolean) => { id: number; first: boolean; confirm?: true }[];
   /** Nodes with an outstanding verification burst, for the probe line (v0.37.1). */
   verifyOwedCount?: () => number;
   /** When the controller's receiver went off and has not come back (v0.65.0),
@@ -1861,7 +1865,10 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
         : `+${Math.round(sinceMs / 1000)}s`;
       // The count is the FLEET's queue, not this node's (v0.72.1: printed bare
       // beside one node it read as that node's own backlog).
-      const msg = `auto-ping: node ${nodeId} verification probe (episode evidence, ${gap}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t);
+      // A single rtt-degraded confirmation (v0.78.0) serves no episode; audits
+      // that count episode bursts from these lines tell it apart by its label.
+      const why = decision.verifyConfirm.includes(nodeId) ? 'rtt-degraded confirm' : `episode evidence, ${gap}`;
+      const msg = `auto-ping: node ${nodeId} verification probe (${why}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t);
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       // MEASUREMENT lane too (v0.38.1) — a verification probe exists to fill

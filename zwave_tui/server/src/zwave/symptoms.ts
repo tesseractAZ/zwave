@@ -21,7 +21,7 @@ import type { SleeperWatch } from './missedReport';
 import { repeatsFrames, type Burst } from './repeatedFrames';
 import type { NodeSnapshot, ControllerSnapshot, NodeStatus } from '../types';
 import { NodeStatus as NS } from '../types';
-import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage, RateRun, RttSeed } from './evidenceStore';
+import { rawRttFrames, type EvidenceSample, type CoarseBucket, type ControllerSample, type NodeCoverage, type RateRun, type RttSeed, type RttFrame } from './evidenceStore';
 import type { BaselineStore } from './baselines';
 import { medianNoiseFloor, DEFAULT_NOISE_FLOOR } from './health';
 
@@ -149,6 +149,14 @@ export interface DetectInput {
   /** The first fresh RTT reading of the driver's current lifetime (v0.77.1),
    *  which bounds what the restart burst can still add to the average. */
   rttSeed: (nodeId: number) => RttSeed | null;
+  /** Whether a one-probe confirmation can ever reach this node (v0.78.0): a
+   *  ping candidate on an install whose auto-ping runner exists. Where none can,
+   *  rtt-degraded starts on the newest round trip alone. Absent reads as no. */
+  rttConfirmable?: (node: NodeSnapshot) => boolean;
+  /** Told when the average breaches on ONE slow round trip that nothing backs
+   *  yet, on a node a confirmation can reach (v0.78.0). The caller decides
+   *  whether a probe may be owed for it; the detector only says so. */
+  rttSuspect?: (nodeId: number, frame: RttFrame) => void;
   /** The CONFIGURED liveness-sweep cadence in ms (v0.63.0), or undefined when
    *  the sweep is off. quiet-node's dwell is derived from this rather than from
    *  the default the constant was written against — on an install that
@@ -217,7 +225,7 @@ export const RTT_SEED_MAX_MS = 2000;
  * The average lives in driver memory only, so every restart re-seeds it with
  * one measurement taken inside the restart's own burst, and each acknowledged
  * transmission after that keeps 0.75 of it (the source is cited at
- * outcomes.rawRttOf). With `commandsTX` measurements in the average the seed
+ * evidenceStore.rawRttOf). With `commandsTX` measurements in the average the seed
  * still weighs 0.75^(commandsTX − 1), so a seed of at most RTT_SEED_MAX_MS adds
  * at most 0.75^(commandsTX − 1) × (RTT_SEED_MAX_MS − median).
  *
@@ -775,13 +783,34 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // excess that seed alone could produce is the restart, not the link.
       const residue = norm ? rttRestartResidue(node.stats.commandsTX, norm.median, input.rttSeed(id)) : 0;
       const b = !!(norm?.ready && obs != null && obs.rtt - residue > norm.median + RTT_Z * norm.scale);
-      const since = dwell(state, key(id, 'rtt-degraded'), b, now);
+      // ONE SLOW ROUND TRIP IS NOT A LEVEL (v0.78.0). The average keeps 0.75 of
+      // itself per transmission, so one frame above median + 16 scales lifts it
+      // over the line alone and holds it there for about six more transmissions.
+      // On the reference mesh 14 of 30 rtt-degraded episodes in 14 days were one
+      // such frame, and their verification bursts spent 140 probes on it.
+      // A breach therefore STARTS only when the two newest raw round trips in
+      // the window are both over the same line; one that nothing backs asks the
+      // caller for one confirmation probe. Where no probe can ever reach the
+      // node, the newest round trip alone starts it. Once started, the average
+      // alone holds it, as before: a level is not re-proven on every frame.
+      const rk = key(id, 'rtt-degraded');
+      const line = b ? norm!.median + RTT_Z * norm!.scale : Infinity;
+      const frames = b ? rawRttFrames(samples).filter((f) => now - f.t <= WINDOW_MS) : [];
+      const r1 = frames[frames.length - 1];
+      const r2 = frames[frames.length - 2];
+      const slow = r1 != null && r1.raw > line;
+      const pair = slow && r2 != null && r2.raw > line;
+      const confirmable = input.rttConfirmable?.(node) === true;
+      const armed = state.has(rk);
+      if (b && !armed && slow && !pair && confirmable) input.rttSuspect?.(id, r1);
+      const since = dwell(state, rk, b && (armed || pair || (slow && !confirmable)), now);
       if (since != null) {
         breaching = true;
         out.push({
           kind: 'rtt-degraded', nodeId: id, severity: 'watch', sinceMs: since, basis: 'measured',
           evidence: [
             { label: 'RTT', value: `${Math.round(rtt!)}ms` },
+            ...(r1 != null ? [{ label: 'newest round trips', value: `${frames.slice(-2).reverse().map((f) => Math.round(f.raw)).join(', ')}ms` }] : []),
             { label: 'baseline', value: `${Math.round(norm!.median)}±${Math.round(norm!.scale)}ms` },
             ...(residue >= 1 ? [{ label: 'restart allowance', value: `${Math.round(residue)}ms (${node.stats.commandsTX} tx since driver start)` }] : []),
           ],

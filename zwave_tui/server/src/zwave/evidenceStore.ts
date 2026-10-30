@@ -164,6 +164,70 @@ export interface RttSeed {
   a0: number;
 }
 
+/** The mean raw round-trip time of the k transmissions between two samples,
+ *  recovered from the driver's running average (v0.74.3). zwave-js updates
+ *  `rtt` once per acknowledged transmission, the same event that counts
+ *  `commandsTX` (Driver.ts handleSerialAPICommandResult), as
+ *  `0.75 * rtt + 0.25 * new` (Node.ts updateRTT). Scoring the average itself
+ *  let a verdict "improve" because more commands were sent — the average
+ *  forgets a slow command faster the more commands follow it — so an action
+ *  that sends many reads would look effective for its traffic alone. Null when
+ *  there is nothing new to recover (no previous average, no transmission) or
+ *  the counters disagree (a negative estimate). Lives here since v0.78.0, so the
+ *  detector and the ledger (outcomes.ts re-exports it) read one implementation
+ *  without an import cycle. */
+export function rawRttOf(prevAvg: number | null, avg: number, k: number | null): number | null {
+  if (prevAvg == null || k == null || !(k >= 1)) return null;
+  const keep = 0.75 ** k;
+  const raw = (avg - keep * prevAvg) / (1 - keep);
+  return Number.isFinite(raw) && raw >= 0 ? Math.round(raw * 10) / 10 : null;
+}
+
+/** One raw RTT reading (v0.78.0): the mean round trip of the transmissions one
+ *  sample carried, at that sample's time. */
+export interface RttFrame {
+  t: number;
+  raw: number;
+}
+
+/**
+ * The raw RTT readings a node's fine ring carries, oldest first (v0.78.0) —
+ * what rtt-degraded needs two of before one slow round trip may start a breach.
+ *
+ * One reading per FRESH sample whose transmissions MOVED the average, read
+ * against the average of the sample before it (`rawRttOf`); a sample with k > 1
+ * transmissions is ONE reading, their mean, so a slow frame inside a burst can
+ * never corroborate itself. Not readings:
+ *  - a sample whose transmissions are unknown (`dTx` null: a driver restart's
+ *    counter reset, the first sample after a load, an over-long or implausible
+ *    window). The chain restarts at that sample's own average, so a new
+ *    lifetime's seed is never read against the old lifetime's average, and the
+ *    reading after it is read against the seed. (windowMetrics carries the last
+ *    non-null average across such a sample instead; the ledger is unchanged.)
+ *  - a sample with no transmission (`dTx` 0: a receive-only statistics event);
+ *  - a non-fresh re-read of cached statistics;
+ *  - a sample whose average did not move although commandsTX did. zwave-js
+ *    counts the transmission and updates the average in two separate
+ *    statistics updates (Driver.ts handleSerialAPICommandResult, then Node.ts
+ *    updateRTT, which also does nothing without `sentMessage.rtt`), so a sample
+ *    that caught the first without the second would read the elevated average
+ *    itself as a round trip — one slow frame corroborating itself;
+ *  - a negative estimate (counters that disagree).
+ */
+export function rawRttFrames(samples: readonly EvidenceSample[]): RttFrame[] {
+  const out: RttFrame[] = [];
+  let prev: number | null = null;
+  for (const s of samples) {
+    if (s.dTx == null) { prev = s.rtt; continue; }
+    if (s.fresh && s.rtt != null && s.rtt !== prev) {
+      const raw = rawRttOf(prev, s.rtt, s.dTx);
+      if (raw != null) out.push({ t: s.t, raw });
+    }
+    if (s.rtt != null) prev = s.rtt;
+  }
+  return out;
+}
+
 /** Fold one sample into a node's rate run (pure, v0.64.6). Only reading ticks
  *  move it: a reading at >= 100 proves the route and clears the run; a reading
  *  below counts once when separate from the previous counted one; a reading on

@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.78.0
+
+`rtt-degraded` no longer fires on one slow round trip, and checks one with a
+single probe instead of a 10-probe episode.
+
+### Fixed — one slow round trip is not a slowdown
+
+- The driver's RTT average keeps 0.75 of itself per acknowledged
+  transmission, so one frame above the median plus 16 scales lifts it over
+  the detector's line (median plus 4 scales) on its own, and holds it there
+  for several more transmissions. On the reference mesh 14 of the 30
+  `rtt-degraded` episodes in 14 days were one such frame; their verification
+  bursts spent 140 probes measuring a normal node.
+- A breach now starts only when the average is over the line and the two
+  newest raw round trips in the 10-minute lookback are both over the same
+  line. Once started, the average alone holds it, as before. Raw round trips
+  are recovered per sample from the average and the transmit count, the
+  recovery the ledger has scored since 0.74.3; a sample with several
+  transmissions is one reading.
+- A driver restart's seed is never a round trip: the recovery starts over at
+  a sample whose counters reset. Neither is a sample whose transmit count
+  moved before its average did, nor a receive-only statistics event keeping
+  an old average fresh.
+
+### Added — one confirmation probe
+
+- When the average breaches on one slow round trip with nothing behind it,
+  the node is owed one verification-lane probe, logged as
+  `verification probe (rtt-degraded confirm, N nodes owed)`. A slow answer
+  starts the breach; a normal one ends the question. At most one per node per
+  10 minutes, so one slow round trip buys at most one probe. It passes every
+  gate a burst probe does, the pause included, opens no episode, is withdrawn
+  unsent when the node's own traffic answers first, never shortens an owed
+  burst, and is not counted as episode evidence on DETAIL or REMEDY.
+- Where no probe can reach the node (a FLiRS or battery node, or an install
+  without auto-ping running), the newest round trip alone starts the breach,
+  as in 0.77.3, but never after a normal one.
+- The reading that lifted the average is held out of the RTT baseline while
+  its second round trip is awaited, as an arming node's is. The symptom card
+  shows the newest round trips.
+- Known cost: slow and normal frames in strict alternation are never
+  corroborated (0.77.3 fired at 5 minutes); during the autonomy pause a node
+  addressed less than twice in 10 minutes reports a slowdown only from its
+  own traffic.
+
+### Replay
+
+- A tick-level port of the rule over the 13.1-day archive, the
+  confirmation's answer proxied by the frames the node produced next:
+  restart-seed episodes 0 of 9 fire, with no probe; one-frame episodes 0 of
+  14 fire, with 11–12 confirmations; real slowdowns 5–6 of 7 fire (by the
+  normal assumed), 30–40 s later than 0.77.3. The two that may not sat at
+  50–58 ms against a 57–58 ms line, and one of them was caught 33 minutes
+  later at 9.6k. Against 0.77.3, the 140 burst probes spent on one-frame
+  episodes become about 20 confirmations, plus 0.3–5.3 confirmations a day
+  elsewhere.
+- 18 new tests, 3 rewritten; 38 new mutation entries, 6 re-anchored.
+
 ## 0.77.3
 
 The RTT restart allowance now survives a deploy, and the RTT baseline's
@@ -492,57 +550,6 @@ used −102.5 and the detectors −101.
   `quietest -128 dBm` beside a live floor that excludes it.
 - No change on the reference controller: its four channels read −105 to −94
   dBm, all readings by both the old rules and the new one.
-
-## 0.75.1
-
-### Changed — the live-span count names its nodes
-
-ENGINE's `live ≥10m: a/b scored` bit — the revisit condition of DESIGN §3.5 —
-counts episodes, not nodes, and one chronic node whose episode re-arms every
-half hour can supply most of it: on the reference mesh one node made 8 of 12
-new closures, and the count read past its threshold on the strength of it.
-
-- The ledger's live-span ring now keeps the scored closures live ≥ 10 minutes
-  per node, per day, persisted with the ring and aged out with it.
-- The count moves to its own row (before the first attributed closure too) and
-  names them in the same breath:
-  `live ≥10m: 37/45 scored since 09-12 from 4 nodes (node 23: 22)` — how many
-  nodes, and the one with the most when it has more than one. Of four forms,
-  the longest that fits the width is shown, and every one keeps `from k nodes`,
-  so neither the count nor its nodes is ever dropped, down to the narrowest
-  session width of 60 columns.
-- Per-node counts begin with this release. Until they cover every closure in
-  the 30-day window, the bit says how many they cover and since when, to the
-  minute of the first closure it attributed
-  (`… · 5 since 10-12 14:03 from 2 nodes (node 23: 4)`); with no recorded
-  start none is guessed. A day from an older ledger file loads without them; a
-  malformed list is ignored, never fatal.
-
-### Fixed — background RSSI outside what a radio can report
-
-- `cleanDbm` had no lower bound. RSSI is a signed byte on the wire (zwave-js
-  `parseRSSI`), so a background-RSSI value below -128 dBm now reads as nothing
-  rather than as a noise floor.
-- An `average` of exactly 0 beside a `current` of NotAvailable is zwave-js's
-  "no value yet" seed (`averageRSSI`), not a 0 dBm floor. A trailing run of such
-  channels — a long-range channel the controller does not report — is now
-  absent and shows `—`, where Controller had drawn a red full-noise gauge. An
-  interior one keeps its 0, so the real channels after it survive, and every
-  floor already ignores it. A saturated receiver also averages as 0 dBm, but
-  its `current` says so (126), and that 0 still shows as a reading.
-- Known limitation, documented in DOCS: after a "not available" first poll the
-  driver's average decays from that 0 seed over about twenty polls, and those
-  negative readings still reach the floor.
-- Preventive: the reference controller's four channels read -105 to -94 dBm
-  throughout a 13.7-day history, with no value at or above -98 dBm in its
-  30-minute tier.
-
-### Docs — an ENGINE screenshot
-
-The Engine screen had no screenshot. The generator now renders one from the
-synthetic demo mesh — auto-ping, the refresh trial mid-run with its eligible
-nodes, the live ledger, and LEARNED with the live-span count naming its nodes —
-and the README gallery shows it. The other ten frames regenerate unchanged.
 
 ## Older releases
 

@@ -64,6 +64,7 @@ import {
   type ProbeClassLite,
   type ProbeFrameLite,
   type RttSeed,
+  type RttFrame,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels, type DriverLogWatch } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore } from './baselines';
@@ -242,6 +243,15 @@ const VERIFY_SPACING_MS = 30_000;
  * so the peak is a few extra pings for a few minutes, not a standing load.
  */
 const VERIFY_MAX_PER_TICK = 4;
+/**
+ * At most one rtt-degraded confirmation probe per node per this long (v0.78.0).
+ * It equals the detector's 10-minute lookback and is inclusive at the edge, as
+ * the lookback is, so the slow round trip a probe was asked for has left the
+ * window before another could be asked: one slow round trip buys at most one
+ * probe, answered or not. Stamped only when the
+ * request is accepted, so a refusal (the pause) leaves no cooldown behind.
+ */
+const RTT_CONFIRM_COOLDOWN_MS = 10 * 60_000;
 const CONFIG_RETRY_MS = 15_000;
 
 /* ─── raw HA response shapes (only the fields we read) ──────────────────── */
@@ -528,7 +538,7 @@ export interface ZwaveData {
    *  makes the open→confirm pause ~180s, under the 240s threshold, so a burst
    *  BOUNDARY printed as "+180s" and read as slow spacing in an audit. */
   /** `skip` (v0.71.0): nodes whose probes stay OWED this call, not drained. */
-  drainVerifyRequests(now?: number, skip?: (nodeId: number) => boolean): { id: number; first: boolean }[];
+  drainVerifyRequests(now?: number, skip?: (nodeId: number) => boolean): { id: number; first: boolean; confirm?: true }[];
   /** How many nodes have an outstanding verification burst (v0.37.1). */
   verifyOwedCount(): number;
   /** Record one liveness-probe outcome for the persisted reply rate (v0.37);
@@ -874,7 +884,9 @@ class ZwaveDataImpl implements ZwaveData {
    * (write actions, boot window, rebuild, storm) so nothing here can probe a
    * mesh auto-ping itself would have left alone.
    */
-  private readonly verifyOwed = new Map<number, { left: number; nextAt: number }>();
+  private readonly verifyOwed = new Map<number, { left: number; nextAt: number; confirm?: true }>();
+  /** When each node's last rtt-degraded confirmation probe was owed (v0.78.0). */
+  private readonly rttConfirmAt = new Map<number, number>();
   /** Episode keys whose after-window burst has already been requested (v0.36.3),
    *  so the timed request fires once per confirmation window rather than every
    *  tick from the moment it comes due. */
@@ -1427,6 +1439,8 @@ class ZwaveDataImpl implements ZwaveData {
     if (!this.evidenceStore || !this.baselines) return;
     const ev = this.evidenceStore;
     const bl = this.baselines;
+    // One slow round trip the detector wants a second look at (v0.78.0).
+    const suspects = new Map<number, RttFrame>();
     const symptoms = detectSymptoms(
       {
         now,
@@ -1440,6 +1454,11 @@ class ZwaveDataImpl implements ZwaveData {
         coverage: (id) => ev.coverage(id),
         rateRun: (id) => ev.rateRun(id),
         rttSeed: (id) => ev.rttSeed(id),
+        // A confirmation can reach a node only through auto-ping's verification
+        // lane, which exists only when the runner does (index.ts) and probes
+        // only ping candidates (v0.78.0).
+        rttConfirmable: (n) => this.autoPingSnapshotFn != null && isPingCandidate(n),
+        rttSuspect: (id, f) => { suspects.set(id, f); },
         // The CONFIGURED sweep cadence (v0.63.0) — quiet-node's dwell derives
         // from it rather than from the default its constant was written
         // against. 0/absent when the sweep is off, which floors the dwell at
@@ -1452,6 +1471,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.symptomState,
     );
     this.lastSymptoms = symptoms;
+    this.requestRttConfirms(suspects, now);
     // Held through a dark lane (v0.76.0): live for the log and the episodes.
     const held = heldSymptoms(this.symptomState);
     // Log NEW symptoms once (source 'net', kind 'symptom'); prune resolved keys.
@@ -1476,6 +1496,10 @@ class ZwaveDataImpl implements ZwaveData {
     // built exactly as before, so folding is bit-identical.
     const qSym = symptomaticNodes(symptoms);
     const qArm = new Set(armingNodes(this.symptomState));
+    // A reading that lifted the RTT average over the line on its own is held
+    // out like an arming one until its second round trip decides it (v0.78.0);
+    // it used to arm the dwell, which is what kept it out of the baseline.
+    for (const id of suspects.keys()) qArm.add(id);
     this.lastQuarantineSym = qSym;
     this.lastQuarantineArm = qArm;
     const quarantine = new Set(qSym);
@@ -1919,7 +1943,10 @@ class ZwaveDataImpl implements ZwaveData {
   }
 
   verifyOwedFor(nodeId: number): number {
-    return this.verifyOwed.get(nodeId)?.left ?? 0;
+    // An rtt-degraded confirmation serves no episode (v0.78.0), so it is not
+    // "episode evidence owed" on DETAIL or REMEDY; the fleet count keeps it.
+    const st = this.verifyOwed.get(nodeId);
+    return st == null || st.confirm ? 0 : st.left;
   }
 
   /** The sweep's OWN candidate predicate, published (v0.47.0) — imported, never
@@ -2095,16 +2122,44 @@ class ZwaveDataImpl implements ZwaveData {
    * count back up rather than queueing a second burst, so a symptom that
    * flaps cannot multiply the traffic it causes.
    */
-  private requestVerification(nodeId: number | null): boolean {
+  private requestVerification(nodeId: number | null, probes: number = VERIFY_BURST): boolean {
     if (nodeId == null || !this.outcomes) return false;
     // Paused (v0.72.0): nothing is owed from a paused period.
     if (this.autonomy.state() != null) return false;
     const cur = this.verifyOwed.get(nodeId);
     this.verifyOwed.set(nodeId, {
-      left: Math.max(cur?.left ?? 0, VERIFY_BURST),
+      left: Math.max(cur?.left ?? 0, probes),
       nextAt: cur?.nextAt ?? 0,
+      // Fewer than a burst is an rtt-degraded confirmation (v0.78.0). A burst
+      // asked for while one is owed rewrites it without the flag: its first
+      // probe answers the same question.
+      ...(probes < VERIFY_BURST ? { confirm: true as const } : {}),
     });
     return true;
+  }
+
+  /**
+   * Owe ONE verification probe to each node whose RTT average breaches on a
+   * single slow round trip (v0.78.0), so the next engine tick can see whether
+   * the round trip after it is slow too.
+   *
+   * It rides the verification lane, so it passes every gate a burst probe
+   * does (write actions, boot window, rebuild, radio off, storm, operator
+   * action, the post-kill hold) and requestVerification's own refusals (no
+   * ledger, the owner's pause). A node already owed any probe is left alone:
+   * that probe answers the same question, and a confirmation must never cut a
+   * burst short. One per node per RTT_CONFIRM_COOLDOWN_MS. An owed confirmation
+   * the detector no longer asks for (the node's own traffic answered, the frame
+   * aged out, the breach started or ended) is withdrawn before it is sent.
+   */
+  private requestRttConfirms(suspects: Map<number, RttFrame>, now: number): void {
+    for (const [id, st] of this.verifyOwed) if (st.confirm && !suspects.has(id)) this.verifyOwed.delete(id);
+    for (const id of suspects.keys()) {
+      if (this.verifyOwed.has(id)) continue;
+      const at = this.rttConfirmAt.get(id);
+      if (at != null && now - at <= RTT_CONFIRM_COOLDOWN_MS) continue;
+      if (this.requestVerification(id, 1)) this.rttConfirmAt.set(id, now);
+    }
   }
 
   /**
@@ -2115,7 +2170,7 @@ class ZwaveDataImpl implements ZwaveData {
    * packets in one second (which would be one observation's worth of
    * information and three times the airtime).
    */
-  drainVerifyRequests(now = Date.now(), skip?: (nodeId: number) => boolean): { id: number; first: boolean }[] {
+  drainVerifyRequests(now = Date.now(), skip?: (nodeId: number) => boolean): { id: number; first: boolean; confirm?: true }[] {
     const due: number[] = [];
     for (const [id, st] of this.verifyOwed) {
       if (st.left <= 0) { this.verifyOwed.delete(id); continue; }
@@ -2130,7 +2185,7 @@ class ZwaveDataImpl implements ZwaveData {
     // fills, and serialising nodes one-per-tick stretches each burst by the
     // number of nodes competing — which is how a 5-probe burst came to span
     // 480 s against a 300 s window on the live mesh.
-    const out: { id: number; first: boolean }[] = [];
+    const out: { id: number; first: boolean; confirm?: true }[] = [];
     for (const id of due.slice(0, VERIFY_MAX_PER_TICK)) {
       const st = this.verifyOwed.get(id)!;
       // Ground truth for the burst boundary: a full budget means nothing of
@@ -2140,7 +2195,7 @@ class ZwaveDataImpl implements ZwaveData {
       const left = st.left - 1;
       if (left <= 0) this.verifyOwed.delete(id);
       else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });
-      out.push({ id, first });
+      out.push(st.confirm ? { id, first, confirm: true } : { id, first });
     }
     return out;
   }

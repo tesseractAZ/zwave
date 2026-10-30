@@ -37,6 +37,13 @@ function window(now: number, spanMin: number, per: Partial<EvidenceSample>): Evi
   return out;
 }
 
+/** A window whose RTT average MOVES on every sample (v0.78.0), ending at `rtt`
+ *  0.1 ms a minute: every sample is a raw reading of about its average, which a
+ *  held value never is (evidenceStore.rawRttFrames). */
+function risingRtt(now: number, spanMin: number, rtt: number): EvidenceSample[] {
+  return window(now, spanMin, { fresh: true }).map((s, i, a) => ({ ...s, rtt: Math.round((rtt - 0.1 * (a.length - 1 - i)) * 10) / 10 }));
+}
+
 /** A baseline stub whose normals are fully controllable per test. */
 function baselineStub(over: Partial<Record<string, unknown>> = {}): BaselineStore {
   const timeout: RateNormal = { rate: 0.02, trials: 500, ready: true, days: 5 };
@@ -61,6 +68,10 @@ interface Fixture {
   sleeperWatch?: (n: NodeSnapshot) => SleeperWatch | null;
   duplicateBursts?: (id: number) => { at: number; n: number }[];
   rttSeed?: Map<number, RttSeed>;
+  /** Whether a confirmation probe can reach the node (v0.78.0); absent = no. */
+  confirmable?: boolean;
+  /** Collects what the detector asks a confirmation for (v0.78.0). */
+  suspects?: { id: number; raw: number }[];
 }
 function input(f: Fixture): DetectInput {
   return {
@@ -75,6 +86,8 @@ function input(f: Fixture): DetectInput {
     coverage: (id) => f.cov?.get(id) ?? null,
     rateRun: (id) => (f.recent.get(id) ?? []).reduce<RateRun | null>(foldRateRun, null),
     rttSeed: (id) => f.rttSeed?.get(id) ?? null,
+    ...(f.confirmable != null ? { rttConfirmable: () => f.confirmable === true } : {}),
+    ...(f.suspects ? { rttSuspect: (id: number, fr: { raw: number }) => { f.suspects!.push({ id, raw: fr.raw }); } } : {}),
     recordingSince: () => T - 30 * 86_400_000,
     sleeperWatch: (n) => f.sleeperWatch?.(n) ?? null,
     duplicateBursts: (id) => f.duplicateBursts?.(id) ?? [],
@@ -234,7 +247,7 @@ test('a non-fresh latest sample does NOT reset the rtt-degraded dwell (fresh-win
   // High RTT on FRESH samples, but the NEWEST sample each tick is non-fresh
   // (no new stats event). latestFresh must still find the fresh high-RTT sample.
   const win = (now: number): EvidenceSample[] => {
-    const w = window(now, 10, { rtt: 400, fresh: true });
+    const w = risingRtt(now, 10, 400);
     w.push(ev({ t: now, rtt: 400, fresh: false })); // newest = non-fresh
     return w;
   };
@@ -564,11 +577,13 @@ test('return-path-degraded: a rate whose bad half went quiet de-asserts (recency
   assert.equal(fired.filter((s) => s.kind === 'return-path-degraded').length, 0, 'cold timeout burst must not mature');
 });
 
-test('rtt-degraded: one old in-window outlier does not arm; a RECENT outlier does', () => {
+test('rtt-degraded: one old in-window outlier does not arm; a RECENT outlier does where no confirmation can reach the node', () => {
   const nodes = [node(1), node(6)];
   // Newest FRESH rtt reading is a 300ms outlier — but it is 7 minutes old.
+  // (v0.78.0: over a held 30 ms average, so it is a raw round trip, and the
+  // node is not confirmable, so one slow round trip may start the breach.)
   const stale = [
-    ...window(T, 12, { rtt: null, fresh: false }).slice(0, -1),
+    ...window(T, 12, { rtt: 30, fresh: false }).slice(0, -1),
     ev({ rtt: 300, fresh: true, t: T - 7 * MIN }),
   ];
   const staleInp = (now: number) => input({ nodes, recent: new Map([[6, stale]]), now });
@@ -576,7 +591,7 @@ test('rtt-degraded: one old in-window outlier does not arm; a RECENT outlier doe
   // The same outlier kept fresh within the dwell horizon fires.
   const liveInp = (now: number) => input({
     nodes,
-    recent: new Map([[6, [...window(now, 12, { rtt: null, fresh: false }).slice(0, -1), ev({ rtt: 300, fresh: true, t: now - MIN })]]]),
+    recent: new Map([[6, [...window(now, 12, { rtt: 30, fresh: false }).slice(0, -1), ev({ rtt: 300, fresh: true, t: now - MIN })]]]),
     now,
   });
   const state: SymptomState = new Map();
@@ -631,7 +646,9 @@ test('rtt-degraded still fires for a node that talks less often than the dwell (
   const norm = baselineStub({ rttNormal: () => ({ ready: true, median: 30, scale: 8 }) });
   // ONE fresh breaching observation, 8 minutes old — inside WINDOW_MS(10m),
   // older than DWELL_MS(5m). This is the ONLY reading a 10-min-cadence node has.
-  const sparse = [ev({ t: T2 - 8 * 60_000, rtt: 300, fresh: true })];
+  // (v0.78.0: one 300 ms round trip over a settled 30 ms average, on a node no
+  // confirmation can reach, so the newest round trip alone starts the breach.)
+  const sparse = [ev({ t: T2 - 40 * 60_000, rtt: 30, fresh: true }), ev({ t: T2 - 8 * 60_000, rtt: 97.5, dTx: 1, fresh: true })];
   const inp = (now: number): DetectInput =>
     input({ nodes: [node(9)], recent: new Map([[9, sparse]]), baselines: norm, now });
   detectSymptoms(inp(T2 - 7 * 60_000), new Map()); // arm
@@ -659,7 +676,7 @@ const rttRun = (tx: number, rtt: number, seed?: RttSeed, median = 30) => {
   const bl = baselineStub({ rtt: { median, scale: 8, ready: true, days: 5 } });
   const state: SymptomState = new Map();
   const inp = (now: number) => input({
-    nodes: [node(1), txNode(6, tx)], recent: new Map([[6, window(now, 10, { rtt, fresh: true })]]), baselines: bl, now,
+    nodes: [node(1), txNode(6, tx)], recent: new Map([[6, risingRtt(now, 10, rtt)]]), baselines: bl, now,
     rttSeed: seed ? new Map([[6, seed]]) : undefined,
   });
   const fired = settle(inp, state, T, 6).find((s) => s.kind === 'rtt-degraded');
@@ -761,6 +778,143 @@ test('rtt-degraded: the allowance is subtracted before the usual test, to the mi
   // threshold 30 + 4×8 = 62; allowance at 12 tx = 0.75^11 × 1970 = 83.20 ms.
   assert.equal(rttFires(12, 145), undefined, '145 − 83.20 = 61.80 is under 62');
   assert.ok(rttFires(12, 146), '146 − 83.20 = 62.80 is over 62');
+});
+
+/* ── rtt-degraded needs two slow round trips (v0.78.0) ─────────────────────
+ *
+ * The driver's average keeps 0.75 of itself per transmission, so ONE frame
+ * above median + 16 scales lifts it over median + 4 scales alone. 14 of 30
+ * episodes in 14 days on the reference mesh were that, each spending a burst.
+ */
+
+/** A sparse ring that follows the driver's rule: a settled `base` average 30
+ *  minutes before the first round trip, then each round trip as its own
+ *  sample (one transmission each), its average rounded as the driver does. */
+function trips(base: number, list: { t: number; raw: number }[]): EvidenceSample[] {
+  let avg = base;
+  const out = [ev({ t: list[0].t - 30 * MIN, rtt: base, dTx: 1 })];
+  for (const f of list) {
+    avg = Math.round((0.75 * avg + 0.25 * f.raw) * 10) / 10;
+    out.push(ev({ t: f.t, rtt: avg, dTx: 1 }));
+  }
+  return out;
+}
+/** Run the detector each minute over [from, to] against 30±8 (line 62) and
+ *  report what rtt-degraded did. `ring(now)` gives the samples seen at `now`. */
+function rttTicks(ring: (now: number) => EvidenceSample[], from: number, to: number, confirmable?: boolean) {
+  const state: SymptomState = new Map();
+  const suspects: { id: number; raw: number }[] = [];
+  const asked: number[] = [];
+  let fired: Symptom | undefined;
+  let firstAt: number | null = null;
+  let armedAt: number | null = null;
+  for (let now = from; now <= to; now += MIN) {
+    const before = suspects.length;
+    const out = detectSymptoms(input({ nodes: [node(1), node(6)], recent: new Map([[6, ring(now).filter((x) => x.t <= now)]]), now, confirmable, suspects }), state);
+    if (suspects.length > before) asked.push(now);
+    if (armedAt == null && state.has('6:rtt-degraded')) armedAt = now;
+    const f = out.find((x) => x.kind === 'rtt-degraded');
+    if (f && firstAt == null) { firstAt = now; fired = f; }
+  }
+  return { fired, firstAt, armedAt, suspects, asked, state };
+}
+
+test('rtt-degraded: one slow round trip asks for a confirmation and starts nothing (v0.78.0)', () => {
+  // 300 ms over 30: the average reads 97.5 against a line of 62 for ten minutes.
+  const r = rttTicks(() => trips(30, [{ t: T, raw: 300 }]), T, T + 9 * MIN, true);
+  assert.equal(r.firstAt, null, 'one slow round trip is not a slowdown');
+  assert.equal(r.armedAt, null, 'nor does it arm the dwell');
+  assert.ok(r.suspects.length > 0, 'the caller is asked for a second look');
+  assert.ok(r.suspects.every((x) => x.id === 6 && x.raw === 300), 'about that round trip');
+});
+
+test('rtt-degraded: a slow second round trip starts the dwell where it lands, and fires five minutes later (v0.78.0)', () => {
+  const ring = () => trips(30, [{ t: T, raw: 300 }, { t: T + MIN, raw: 280 }]);
+  const r = rttTicks(ring, T, T + 8 * MIN, true);
+  assert.equal(r.armedAt, T + MIN, 'the dwell starts on the second round trip, not before');
+  assert.equal(r.firstAt, T + 6 * MIN, 'and matures DWELL_MS after it');
+  assert.equal(r.fired!.sinceMs, T + MIN);
+  assert.deepEqual(r.asked, [T], 'a confirmation is asked only while one round trip stands alone');
+  assert.deepEqual(r.fired!.evidence.find((e) => e.label === 'newest round trips'), { label: 'newest round trips', value: '280, 300ms' });
+});
+
+test('rtt-degraded: a normal round trip after the slow one ends the question while the average is still high (v0.78.0)', () => {
+  // 696 then 27: the average still reads 154.1 > 62, the tail of one frame.
+  const r = rttTicks(() => trips(30, [{ t: T, raw: 696 }, { t: T + MIN, raw: 27 }]), T, T + 9 * MIN, true);
+  assert.equal(r.firstAt, null);
+  assert.equal(r.armedAt, null);
+  assert.deepEqual(r.asked, [T], 'nothing more is asked once the newest round trip is normal');
+});
+
+test('rtt-degraded: the two NEWEST round trips decide, and both must be over the line (v0.78.0)', () => {
+  // All three already in the ring at the first look: two slow ones, then a normal one.
+  const late = rttTicks(() => trips(30, [{ t: T - 3 * MIN, raw: 300 }, { t: T - 2 * MIN, raw: 300 }, { t: T - MIN, raw: 27 }]), T, T + 7 * MIN, true);
+  assert.equal(late.armedAt, null, 'two slow round trips behind a normal one start nothing');
+  const older = rttTicks(() => trips(30, [{ t: T - 2 * MIN, raw: 300 }, { t: T - MIN, raw: 60 }]), T, T + 7 * MIN, true);
+  assert.equal(older.armedAt, null, '300 then 60 (under 62): the newest is not slow');
+  assert.deepEqual(older.asked, [], 'and nothing is asked');
+  const newer = rttTicks(() => trips(30, [{ t: T - 2 * MIN, raw: 60 }, { t: T - MIN, raw: 300 }]), T, T + 7 * MIN, true);
+  assert.equal(newer.armedAt, null, '60 then 300: the one before it is not slow');
+  assert.ok(newer.asked.length > 0, 'so the slow one asks for a confirmation');
+});
+
+test('rtt-degraded: once started, the average alone holds the breach through a normal round trip, and asks nothing more (v0.78.0)', () => {
+  // 300, 280 start it at T+1; 27 at T+2 leaves the average at 114.1 > 62, and
+  // a lone slow 300 after it at T+3 is part of a breach already running.
+  const ring = (now: number) => trips(30, [{ t: T, raw: 300 }, { t: T + MIN, raw: 280 }, { t: T + 2 * MIN, raw: 27 }, { t: T + 3 * MIN, raw: 300 }]).filter((x) => x.t <= now);
+  const r = rttTicks(ring, T, T + 7 * MIN, true);
+  assert.equal(r.firstAt, T + 6 * MIN, 'a level is not re-proven on every frame');
+  assert.deepEqual(r.fired!.evidence.find((e) => e.label === 'newest round trips')!.value, '300, 27ms');
+  assert.deepEqual(r.asked, [T], 'a running breach asks for no confirmation');
+});
+
+test('rtt-degraded: where no confirmation can reach the node, the newest round trip alone starts it, never a normal one (v0.78.0)', () => {
+  const one = rttTicks(() => trips(30, [{ t: T, raw: 300 }]), T, T + 6 * MIN, false);
+  assert.equal(one.firstAt, T + 5 * MIN, 'one slow round trip fires, as it did before v0.78.0');
+  assert.deepEqual(one.asked, [], 'and nothing is asked for a node no probe can reach');
+  const refuted = rttTicks(() => trips(30, [{ t: T, raw: 696 }, { t: T + MIN, raw: 27 }]), T + MIN, T + 9 * MIN, false);
+  assert.equal(refuted.armedAt, null, 'but never on the tail of one after a normal round trip');
+});
+
+test('rtt-degraded: an average whose round trips have left the window starts nothing (v0.78.0)', () => {
+  // A 300 ms round trip 12 minutes ago, then receive-only statistics events
+  // (fresh, no transmission) keep the 97.5 average "fresh" inside the window.
+  const ring = (now: number) => [
+    ...trips(30, [{ t: T - 12 * MIN, raw: 300 }]),
+    ...[3, 2, 1, 0].map((m) => ev({ t: now - m * MIN, rtt: 97.5, dTx: 0 })),
+  ];
+  for (const confirmable of [false, true]) {
+    const r = rttTicks(ring, T, T + 7 * MIN, confirmable);
+    assert.equal(r.armedAt, null, `confirmable=${confirmable}: an old round trip held up by receive-only events is not a reading`);
+    assert.deepEqual(r.asked, []);
+  }
+});
+
+test('rtt-degraded: a restart seed is not a round trip, with or without the allowance (v0.78.0)', () => {
+  // A driver restart (counters reset: dTx null, no average yet), then a 900 ms
+  // seed. Node 6 carries no commandsTX, so the restart allowance is 0 here.
+  const ring = (now: number) => [
+    ev({ t: T - 40 * MIN, rtt: 25, dTx: 1 }),
+    ev({ t: T - 2 * MIN, rtt: null, dTx: null }),
+    ev({ t: T - MIN, rtt: 900, dTx: 1 }),
+    ...(now >= T + MIN ? [ev({ t: T + MIN, rtt: 681.3, dTx: 1 })] : []),
+  ];
+  for (const confirmable of [false, true]) {
+    const r = rttTicks(ring, T, T + 7 * MIN, confirmable);
+    assert.equal(r.armedAt, null, `confirmable=${confirmable}: neither the seed nor the 25 ms after it starts anything`);
+    assert.deepEqual(r.asked, []);
+  }
+});
+
+test('rtt-degraded: strictly alternating slow and normal round trips never start it, a known cost of the rule (v0.78.0)', () => {
+  // 200 / 25 every 30 s holds the average near 110, well over 62, but the two
+  // newest round trips are never both slow. v0.77.3 fired here at 5 minutes.
+  // Random intermittent slowness pairs within a few frames and is held by the
+  // average from there; only a strict alternation is never corroborated.
+  const list = Array.from({ length: 24 }, (_v, i) => ({ t: T + i * 30_000, raw: i % 2 ? 25 : 200 }));
+  const r = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 12 * MIN, true);
+  assert.equal(r.armedAt, null);
+  assert.ok(r.asked.length > 0, 'each slow one still asks; the confirmation is what can pair it');
 });
 
 /* ── route-churn: a SymptomKind that existed but was never emitted ────────

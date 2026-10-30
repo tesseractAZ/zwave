@@ -1255,3 +1255,43 @@ test('the read and reroute counters survive save/load, and a v0.70.0 file loads 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+/* ── raw RTT readings for rtt-degraded (v0.78.0) ──────────────────────────── */
+
+test('rawRttFrames: one reading per fresh sample whose transmissions moved the average, its k counted once (v0.78.0)', async () => {
+  const { rawRttFrames } = await import('../src/zwave/evidenceStore');
+  const s = (t: number, rtt: number | null, dTx: number | null, fresh = true) => ({
+    t, dTx, dTimeout: 0, dDropTx: 0, dRx: 0, dFlaps: 0, dRouteChanges: 0, dS2Resync: 0, fresh,
+    rtt, rssi: null, rateKbps: null, routeKey: null, status: NodeStatus.Alive, lastSeen: null, isListening: null, isFrequentListening: null,
+  });
+  const frames = rawRttFrames([
+    s(1, 30, 1), // the ring's oldest: nothing to read it against
+    s(2, 97.5, 1), // one 300 ms transmission
+    s(3, 97.5, 0), // a receive-only statistics event re-delivering it
+    s(4, 97.5, 0, false), // a non-fresh re-read of the cache
+    s(5, 87.4, 3), // three transmissions averaging 80 ms: ONE reading, their mean
+  ]);
+  assert.deepEqual(frames, [{ t: 2, raw: 300 }, { t: 5, raw: 80 }]);
+});
+
+test('rawRttFrames: a driver restart, a first sample after a load, an unmoved average and a re-read are not readings (v0.78.0)', async () => {
+  const { rawRttFrames } = await import('../src/zwave/evidenceStore');
+  const s = (t: number, rtt: number | null, dTx: number | null, fresh = true) => ({
+    t, dTx, dTimeout: 0, dDropTx: 0, dRx: 0, dFlaps: 0, dRouteChanges: 0, dS2Resync: 0, fresh,
+    rtt, rssi: null, rateKbps: null, routeKey: null, status: NodeStatus.Alive, lastSeen: null, isListening: null, isFrequentListening: null,
+  });
+  // A restart: counters reset (dTx null) with no average yet, a 900 ms seed,
+  // then 300 ms. Read against the old lifetime's 25 ms the seed would be a
+  // 3525 ms "round trip"; the chain restarts instead, and 300 is read against 900.
+  assert.deepEqual(rawRttFrames([s(1, 25, 1), s(2, 25, 1), s(3, null, null), s(4, 900, 1), s(5, 750, 1)]), [{ t: 5, raw: 300 }]);
+  // The first sample after a load has no counters to diff (dTx null): its
+  // average is where the next reading is read from.
+  assert.deepEqual(rawRttFrames([s(1, 25, 1), s(2, 97.5, null), s(3, 148.1, 1)]), [{ t: 3, raw: 299.9 }]);
+  // commandsTX moved but the average did not: the transmission's own update
+  // has not landed, and reading it would return the elevated average.
+  assert.deepEqual(rawRttFrames([s(1, 30, 1), s(2, 97.5, 1), s(3, 97.5, 1)]), [{ t: 2, raw: 300 }]);
+  // A non-fresh sample is never a reading, whatever its counters say.
+  assert.deepEqual(rawRttFrames([s(1, 30, 1), s(2, 97.5, 1, false)]), []);
+  // Counters that disagree with the average (a negative estimate) give none.
+  assert.deepEqual(rawRttFrames([s(1, 500, 1), s(2, 10, 1)]), []);
+});
