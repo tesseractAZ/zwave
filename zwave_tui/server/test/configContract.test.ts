@@ -100,9 +100,11 @@ test('every option is exported by the run script', () => {
 
 test('every env var the run script exports is consumed by the server', () => {
   const run = read('rootfs/etc/services.d/zwave-tui/run');
+  // Indented exports count too: every bool flag is exported inside an `if`.
   const exported = new Set(
-    [...run.matchAll(/^export ([A-Z_][A-Z0-9_]*)=/gm)].map((m) => m[1]),
+    [...run.matchAll(/^[ \t]*export ([A-Z_][A-Z0-9_]*)=/gm)].map((m) => m[1]),
   );
+  assert.ok(exported.has('SSH_ENABLED'), 'the scan sees the flags exported inside `if` blocks');
   // Read the whole src tree, not just config.ts: a few vars (NODE_ENV) are read
   // by libraries or by other modules directly.
   const src = [
@@ -111,9 +113,10 @@ test('every env var the run script exports is consumed by the server', () => {
     'server/src/logger.ts',
   ].map(read).join('\n');
   const known = new Set(['NODE_ENV']); // consumed by Node/Fastify, not by us
-  const orphans = [...exported].filter(
-    (v) => !known.has(v) && !src.includes(`process.env.${v}`),
-  );
+  // Whole names only: `process.env.SSH_HOST` is also the start of
+  // `process.env.SSH_HOST_KEY`, so a substring check passed with no SSH_HOST read.
+  const reads = (v: string): boolean => new RegExp(`process\\.env\\.${v}(?![A-Z0-9_])`).test(src);
+  const orphans = [...exported].filter((v) => !known.has(v) && !reads(v));
   assert.deepEqual(
     orphans,
     [],
