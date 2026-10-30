@@ -46,8 +46,10 @@ seriously.
   (`auto_ping_after_min`, skipped when the node went Dead with one of the add-on's
   own sweep or verification probes to it unanswered) is probed with no keypress,
   as is every non-Dead mains-powered node once per `auto_ping_stale_min` (the
-  liveness sweep) and a node an open outcome episode needs a verification
-  reading from. Two frames can go out this way: Home
+  liveness sweep), a node an open outcome episode needs a verification
+  reading from, and (since 0.78.0) one confirmation read, at most one per node
+  per 10 minutes, to a node whose RTT average was lifted over its line by one
+  slow round trip. Two frames can go out this way: Home
   Assistant's ping (the dead-node ladder), and one `zwave_js.refresh_value`
   routed read — a single Get on the node's own switch/light value — which
   follows an unanswered ladder ping (v0.70.0) and is what the liveness sweep and

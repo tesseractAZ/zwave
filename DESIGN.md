@@ -670,7 +670,8 @@ after-window without fresh evidence (wedge, no traffic) yields
 > the more commands follow it, so scoring it credited traffic. A sample with no
 > new transmission adds nothing, and tallies learned before v0.74.3 decay out
 > with use. The detector (§3.3) tests the average, and since v0.78.0 starts a
-> breach only when its two newest raw round trips are over the line too.
+> breach only when its two newest raw round trips are over the line too, or,
+> where no confirmation can reach the node, its newest one.
 
 The ledger records **every symptom episode**, action taken or not — the
 no-action episodes are the control arm the learned layer cannot be honest

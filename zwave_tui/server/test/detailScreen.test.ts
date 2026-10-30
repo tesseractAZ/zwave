@@ -586,6 +586,8 @@ test('a node whose learning is PAUSED says so — "3d so far" is not advancing',
   for (const [hold, want] of [
     ['symptomatic', /a symptom is live, so the baseline is not folding/],
     ['arming', /arming a symptom, so the baseline is held/],
+    // v0.78.0: one slow round trip lifts the RTT average but arms nothing.
+    ['rtt-over-line', /RTT average is over its line with no breach started/],
   ] as const) {
     const out = yardLines(withYard({ baselineHold: () => hold })).join('\n');
     assert.match(out, /Learning is PAUSED/, `${hold}: the hold must render`);

@@ -157,6 +157,11 @@ export interface DetectInput {
    *  yet, on a node a confirmation can reach (v0.78.0). The caller decides
    *  whether a probe may be owed for it; the detector only says so. */
   rttSuspect?: (nodeId: number, frame: RttFrame) => void;
+  /** Told on every tick a node's RTT average is over the line, started or not
+   *  (v0.78.0). Until then the average alone armed the dwell, and arming is
+   *  what kept such a reading out of the baseline; the caller now holds it out
+   *  on this. Absent, nothing is told. */
+  rttOverLine?: (nodeId: number) => void;
   /** The CONFIGURED liveness-sweep cadence in ms (v0.63.0), or undefined when
    *  the sweep is off. quiet-node's dwell is derived from this rather than from
    *  the default the constant was written against — on an install that
@@ -203,7 +208,7 @@ const QUIET_MS = 6 * 60 * 60_000;
  * existing install becomes MORE trigger-happy.
  */
 const QUIET_SWEEPS = 3;
-const WINDOW_MS = 10 * 60_000; // windowed-rate lookback
+export const WINDOW_MS = 10 * 60_000; // windowed-rate lookback
 const MIN_WINDOW_TX = 20; // minimum successful sends for a rate to be meaningful
 const TIMEOUT_RATE_ABS = 0.15; // chronic absolute threshold (health-check rubric)
 const TIMEOUT_RATE_MULT = 3; // relative: window rate ≫ this × baseline
@@ -785,8 +790,9 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       const b = !!(norm?.ready && obs != null && obs.rtt - residue > norm.median + RTT_Z * norm.scale);
       // ONE SLOW ROUND TRIP IS NOT A LEVEL (v0.78.0). The average keeps 0.75 of
       // itself per transmission, so one frame above median + 16 scales lifts it
-      // over the line alone and holds it there for about six more transmissions.
-      // On the reference mesh 14 of 30 rtt-degraded episodes in 14 days were one
+      // over the line alone, and a larger one keeps it there: a 700 ms frame on
+      // 25±8 ms holds it over for six readings, its own and five more.
+      // In the 13-day reference archive 14 of 30 rtt-degraded episodes were one
       // such frame, and their verification bursts spent 140 probes on it.
       // A breach therefore STARTS only when the two newest raw round trips in
       // the window are both over the same line; one that nothing backs asks the
@@ -802,6 +808,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       const pair = slow && r2 != null && r2.raw > line;
       const confirmable = input.rttConfirmable?.(node) === true;
       const armed = state.has(rk);
+      if (b) input.rttOverLine?.(id);
       if (b && !armed && slow && !pair && confirmable) input.rttSuspect?.(id, r1);
       const since = dwell(state, rk, b && (armed || pair || (slow && !confirmable)), now);
       if (since != null) {
@@ -810,9 +817,11 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
           kind: 'rtt-degraded', nodeId: id, severity: 'watch', sinceMs: since, basis: 'measured',
           evidence: [
             { label: 'RTT', value: `${Math.round(rtt!)}ms` },
-            ...(r1 != null ? [{ label: 'newest round trips', value: `${frames.slice(-2).reverse().map((f) => Math.round(f.raw)).join(', ')}ms` }] : []),
             { label: 'baseline', value: `${Math.round(norm!.median)}±${Math.round(norm!.scale)}ms` },
             ...(residue >= 1 ? [{ label: 'restart allowance', value: `${Math.round(residue)}ms (${node.stats.commandsTX} tx since driver start)` }] : []),
+            // Last (v0.78.0): REMEDY cuts the evidence row at the screen's width,
+            // and the yardstick must not be what falls off.
+            ...(r1 != null ? [{ label: 'newest round trips', value: `${frames.slice(-2).reverse().map((f) => Math.round(f.raw)).join(', ')}ms` }] : []),
           ],
           narrative: `${node.name}'s round-trip time is far above its normal for this route and time of day.`,
         });

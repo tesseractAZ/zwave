@@ -9,10 +9,11 @@ single probe instead of a 10-probe episode.
 
 - The driver's RTT average keeps 0.75 of itself per acknowledged
   transmission, so one frame above the median plus 16 scales lifts it over
-  the detector's line (median plus 4 scales) on its own, and holds it there
-  for several more transmissions. On the reference mesh 14 of the 30
-  `rtt-degraded` episodes in 14 days were one such frame; their verification
-  bursts spent 140 probes measuring a normal node.
+  the detector's line (median plus 4 scales) on its own, and a larger one
+  keeps it there: a 700 ms frame on 25±8 ms holds it over for six readings.
+  In the 13-day reference archive 14 of the 30 `rtt-degraded` episodes were
+  one such frame; their verification bursts spent 140 probes measuring a
+  normal node.
 - A breach now starts only when the average is over the line and the two
   newest raw round trips in the 10-minute lookback are both over the same
   line. Once started, the average alone holds it, as before. Raw round trips
@@ -23,6 +24,9 @@ single probe instead of a 10-probe episode.
   a sample whose counters reset. Neither is a sample whose transmit count
   moved before its average did, nor a receive-only statistics event keeping
   an old average fresh.
+- An average over the line stays out of the baselines whether or not its
+  breach has started, as in 0.77.3, when the average alone armed the dwell.
+  DETAIL says `the RTT average is over its line with no breach started`.
 
 ### Added — one confirmation probe
 
@@ -30,20 +34,27 @@ single probe instead of a 10-probe episode.
   the node is owed one verification-lane probe, logged as
   `verification probe (rtt-degraded confirm, N nodes owed)`. A slow answer
   starts the breach; a normal one ends the question. At most one per node per
-  10 minutes, so one slow round trip buys at most one probe. It passes every
-  gate a burst probe does, the pause included, opens no episode, is withdrawn
-  unsent when the node's own traffic answers first, never shortens an owed
-  burst, and is not counted as episode evidence on DETAIL or REMEDY.
+  10 minutes, so one slow round trip buys at most one probe; one the pause
+  drops unsent leaves no cooldown. It passes every gate a burst probe does,
+  opens no episode, is withdrawn unsent when the node's own traffic answers
+  first, never shortens an owed burst, drains after any burst owed on the
+  same tick, and is not counted as episode evidence on DETAIL or REMEDY.
 - Where no probe can reach the node (a FLiRS or battery node, or an install
   without auto-ping running), the newest round trip alone starts the breach,
   as in 0.77.3, but never after a normal one.
-- The reading that lifted the average is held out of the RTT baseline while
-  its second round trip is awaited, as an arming node's is. The symptom card
-  shows the newest round trips.
-- Known cost: slow and normal frames in strict alternation are never
-  corroborated (0.77.3 fired at 5 minutes); during the autonomy pause a node
-  addressed less than twice in 10 minutes reports a slowdown only from its
-  own traffic.
+- An episode of a route-sensitive kind opens confounded when the add-on's own
+  routed read re-routed its node within the 10-minute lookback before its
+  dwell began, or since. A confirmation's failed-over answer can be the round
+  trip that starts the breach, and the guard saw only episodes already open,
+  which also let a sweep read failing over during a dwell through.
+- The symptom card shows the newest round trips, after the baseline.
+- Known cost: slow frames that never land in consecutive pairs are never
+  corroborated, strict alternation being the extreme (0.77.3 fired at
+  5 minutes). While no probe can go out to a node that could take one (the
+  pause, a post-kill hold, a runner suppression), a node addressed less than
+  twice in 10 minutes does not report a slowdown. An answer within 0.2 ms of
+  the rounded average does not move it, counts as unanswered, and the node's
+  next transmission decides.
 
 ### Replay
 
@@ -51,12 +62,12 @@ single probe instead of a 10-probe episode.
   confirmation's answer proxied by the frames the node produced next:
   restart-seed episodes 0 of 9 fire, with no probe; one-frame episodes 0 of
   14 fire, with 11–12 confirmations; real slowdowns 5–6 of 7 fire (by the
-  normal assumed), 30–40 s later than 0.77.3. The two that may not sat at
-  50–58 ms against a 57–58 ms line, and one of them was caught 33 minutes
-  later at 9.6k. Against 0.77.3, the 140 burst probes spent on one-frame
-  episodes become about 20 confirmations, plus 0.3–5.3 confirmations a day
-  elsewhere.
-- 18 new tests, 3 rewritten; 38 new mutation entries, 6 re-anchored.
+  normal assumed), 30–40 s later than 0.77.3, with 8 confirmations. The two
+  that may not sat at 50–58 ms against a 57–58 ms line, and one of them was
+  caught 33 minutes later at 9.6k. Inside the 30 episodes, 19–20
+  confirmations replace the 140 burst probes 0.77.3 spent on one-frame
+  episodes; elsewhere, 0.3–5.3 confirmations a day.
+- 24 new tests; 58 new mutation entries, 8 re-anchored.
 
 ## 0.77.3
 

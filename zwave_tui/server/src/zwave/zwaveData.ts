@@ -71,7 +71,7 @@ import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, WINDOW_MS as SYMPTOM_WINDOW_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -557,7 +557,7 @@ export interface ZwaveData {
   /** The learned reply-timeout yardstick for this node's current band (v0.48.0). */
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
   /** Is this node's baseline learning currently PAUSED, and why (v0.48.0)? */
-  baselineHold(nodeId: number): 'symptomatic' | 'arming' | null;
+  baselineHold(nodeId: number): 'symptomatic' | 'arming' | 'rtt-over-line' | null;
   /** Transmissions since the driver restarted, when that restart held this
    *  node's newest RTT reading out of the baseline in this lifetime (v0.77.1). */
   rttSeedHold(nodeId: number): number | null;
@@ -795,6 +795,10 @@ class ZwaveDataImpl implements ZwaveData {
   /** Nodes whose route our own routed read changed since the last engine pass
    *  (v0.71.0) — consumed by the confound guard in updateEpisodes. */
   private readonly measurementReroutes = new Set<number>();
+  /** When our own routed read last re-routed each node (v0.78.0) — kept past
+   *  the engine pass that consumes measurementReroutes, so an episode that
+   *  opens AFTER the failover is still confounded by it (see updateEpisodes). */
+  private readonly measurementRerouteAt = new Map<number, number>();
   /** Alive→Dead transitions for the auto-ping runner (v0.71.0), from the same
    *  sources that count flaps: the status feed, or the roster diff for a node
    *  without one. `seen` is the node's lastSeen at the death (this feed's own
@@ -1025,7 +1029,13 @@ class ZwaveDataImpl implements ZwaveData {
       // Nothing is owed from a paused period: a burst requested before the
       // pause would otherwise drain the moment it lifts, against episodes whose
       // windows it no longer fits.
-      onChange: (st) => { if (st) this.verifyOwed.clear(); },
+      onChange: (st) => {
+        if (!st) return;
+        // A confirmation dropped here was never sent, so it leaves no cooldown
+        // behind (v0.78.0): after the pause the same slow round trip may ask.
+        for (const [id, o] of this.verifyOwed) if (o.confirm) this.rttConfirmAt.delete(id);
+        this.verifyOwed.clear();
+      },
     });
     this.autonomy.load();
     const seed = opts.entryId ?? process.env.ZWAVE_ENTRY_ID ?? '';
@@ -1439,8 +1449,10 @@ class ZwaveDataImpl implements ZwaveData {
     if (!this.evidenceStore || !this.baselines) return;
     const ev = this.evidenceStore;
     const bl = this.baselines;
-    // One slow round trip the detector wants a second look at (v0.78.0).
+    // One slow round trip the detector wants a second look at, and every node
+    // whose RTT average is over the line (v0.78.0).
     const suspects = new Map<number, RttFrame>();
+    const rttOver = new Set<number>();
     const symptoms = detectSymptoms(
       {
         now,
@@ -1459,6 +1471,7 @@ class ZwaveDataImpl implements ZwaveData {
         // only ping candidates (v0.78.0).
         rttConfirmable: (n) => this.autoPingSnapshotFn != null && isPingCandidate(n),
         rttSuspect: (id, f) => { suspects.set(id, f); },
+        rttOverLine: (id) => { rttOver.add(id); },
         // The CONFIGURED sweep cadence (v0.63.0) — quiet-node's dwell derives
         // from it rather than from the default its constant was written
         // against. 0/absent when the sweep is off, which floors the dwell at
@@ -1496,14 +1509,18 @@ class ZwaveDataImpl implements ZwaveData {
     // built exactly as before, so folding is bit-identical.
     const qSym = symptomaticNodes(symptoms);
     const qArm = new Set(armingNodes(this.symptomState));
-    // A reading that lifted the RTT average over the line on its own is held
-    // out like an arming one until its second round trip decides it (v0.78.0);
-    // it used to arm the dwell, which is what kept it out of the baseline.
-    for (const id of suspects.keys()) qArm.add(id);
+    // An RTT average over the line is held out whether or not its breach has
+    // started (v0.78.0). Until then the average alone armed the dwell, which is
+    // what kept it out; one slow round trip no longer arms it, and the tail it
+    // leaves (a normal answer after a 300 ms frame keeps a 30 ms node's average
+    // over the line for several readings) would pull the median toward it.
+    const qRtt = new Set([...rttOver].filter((id) => !qArm.has(id)));
     this.lastQuarantineSym = qSym;
     this.lastQuarantineArm = qArm;
+    this.lastQuarantineRtt = qRtt;
     const quarantine = new Set(qSym);
     for (const id of qArm) quarantine.add(id);
+    for (const id of qRtt) quarantine.add(id);
     for (const n of this.lastNodes) {
       if (n.isController) continue;
       const ring = ev.forNode(n.nodeId);
@@ -1592,6 +1609,16 @@ class ZwaveDataImpl implements ZwaveData {
       // measures how long the symptom was live FROM it, so a late open tick
       // cannot carry an aged-out reading back across the boundary.
       oc.open(s.nodeId, s.kind, now, this.degradedWindow(s.nodeId, since, now), { dwellStartMs: since });
+      // …confounded from the start when our own read re-routed the node inside
+      // the detectors' lookback before its dwell began, or since (v0.78.0). The
+      // guard below sees only episodes already open on the failover's pass, so
+      // a breach that failover helped start (a confirmation's answer pairing
+      // with the slow round trip it was sent to check, a sweep read during the
+      // dwell) was booked to the control arm.
+      if (s.nodeId != null && MEASUREMENT_REROUTE_KINDS.has(s.kind)) {
+        const rr = this.measurementRerouteAt.get(s.nodeId);
+        if (rr != null && rr >= since - SYMPTOM_WINDOW_MS) oc.markConfounded(s.nodeId, s.kind);
+      }
       // Ask for verification probes while the symptom is LIVE, so the degraded
       // window can reach the verifier's evidence floor before it is scored.
       this.requestVerification(s.nodeId);
@@ -2172,14 +2199,18 @@ class ZwaveDataImpl implements ZwaveData {
    */
   drainVerifyRequests(now = Date.now(), skip?: (nodeId: number) => boolean): { id: number; first: boolean; confirm?: true }[] {
     const due: number[] = [];
+    const confirms: number[] = [];
     for (const [id, st] of this.verifyOwed) {
       if (st.left <= 0) { this.verifyOwed.delete(id); continue; }
       if (now < st.nextAt) continue;
       // Held by the runner (v0.71.0): left OWED, not handed out — handing it
       // out would spend the burst on a probe the runner will not send.
       if (skip?.(id)) continue;
-      due.push(id);
+      (st.confirm ? confirms : due).push(id);
     }
+    // Bursts first (v0.78.0): a burst's probes are timed to land inside the
+    // window they fill, and a confirmation has no window to miss.
+    due.push(...confirms);
     if (due.length === 0) return [];
     // Several nodes per tick, not one. A burst must land INSIDE the window it
     // fills, and serialising nodes one-per-tick stretches each burst by the
@@ -2209,6 +2240,7 @@ class ZwaveDataImpl implements ZwaveData {
    *  per-node signal verdict is measured against, and until now unreadable. */
   private lastQuarantineSym = new Set<number>();
   private lastQuarantineArm = new Set<number>();
+  private lastQuarantineRtt = new Set<number>();
   /** Nodes whose RTT reading the last engine tick held out of the baseline
    *  because a driver restart can still move it, with their commandsTX (v0.77.1). */
   private lastRttSeedHold = new Map<number, { k: number; seed: RttSeed | null }>();
@@ -2224,10 +2256,12 @@ class ZwaveDataImpl implements ZwaveData {
    * Null when the engine is off, so DETAIL renders nothing at all — matching how
    * it treats an absent `rssiNormal` rather than claiming learning is running.
    */
-  baselineHold(nodeId: number): 'symptomatic' | 'arming' | null {
+  baselineHold(nodeId: number): 'symptomatic' | 'arming' | 'rtt-over-line' | null {
     if (!this.baselines) return null;
     if (this.lastQuarantineSym.has(nodeId)) return 'symptomatic';
     if (this.lastQuarantineArm.has(nodeId)) return 'arming';
+    // The RTT average is over the line with no breach started (v0.78.0).
+    if (this.lastQuarantineRtt.has(nodeId)) return 'rtt-over-line';
     return null;
   }
 
@@ -2718,6 +2752,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.flapAccum.delete(id);
           this.routeChangeAccum.delete(id);
           this.s2Accum.delete(id);
+          this.measurementRerouteAt.delete(id);
           this.measurementSent.delete(id);
           this.lastProbeAt.delete(id);
           this.ourTxReport.delete(id);
@@ -2837,6 +2872,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.flapAccum.clear();
         this.routeChangeAccum.clear();
         this.s2Accum.clear();
+        this.measurementRerouteAt.clear();
         this.measurementSent.clear();
         this.lastProbeAt.clear();
         this.ourTxReport.clear();
@@ -4020,6 +4056,7 @@ class ZwaveDataImpl implements ZwaveData {
         // routes would feed it by itself — an episode our probing opens and
         // then asks to verify with more probing.
         this.measurementReroutes.add(nodeId);
+        this.measurementRerouteAt.set(nodeId, Date.now());
         if (ourFrame!.lane === 'sweep') this.evidenceStore?.recordProbeReroute(nodeId);
         this.log(`auto-ping: node ${nodeId}'s stored route failed on our ${lane} routed read and the controller ` +
           `delivered it by another (${fmtRoute(stats.lwr)}) — its open rate, RTT, signal, return-path and route-churn episodes are confounded`);

@@ -211,7 +211,10 @@ export interface RttFrame {
  *    statistics updates (Driver.ts handleSerialAPICommandResult, then Node.ts
  *    updateRTT, which also does nothing without `sentMessage.rtt`), so a sample
  *    that caught the first without the second would read the elevated average
- *    itself as a round trip — one slow frame corroborating itself;
+ *    itself as a round trip — one slow frame corroborating itself. A round trip
+ *    within 0.2 ms of the rounded average looks the same and is lost with it:
+ *    that only delays a reading, and reading it would let one slow frame back
+ *    itself (v0.78.0);
  *  - a negative estimate (counters that disagree).
  */
 export function rawRttFrames(samples: readonly EvidenceSample[]): RttFrame[] {

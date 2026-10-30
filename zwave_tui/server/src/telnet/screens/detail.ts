@@ -671,7 +671,10 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       if (hold) {
         body.push(note(hold === 'symptomatic'
           ? 'Learning is PAUSED — a symptom is live, so the baseline is not folding (it must not chase the fault)'
-          : 'Learning is PAUSED — this node is arming a symptom, so the baseline is held until it settles',
+          : hold === 'arming'
+            ? 'Learning is PAUSED — this node is arming a symptom, so the baseline is held until it settles'
+            // v0.78.0: one slow round trip lifts the average but starts nothing.
+            : 'Learning is PAUSED — the RTT average is over its line with no breach started, so the baseline is held until it settles',
           inner, c.yellow));
       }
       // RTT learning alone can be paused too (v0.77.1): right after a driver
