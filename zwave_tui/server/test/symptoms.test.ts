@@ -933,38 +933,53 @@ test('rtt-degraded: every tick the average is over the line is reported for the 
 
 test('rtt-degraded: a real slowdown right after a driver restart starts on its second slow round trip, judged against the line without the allowance (v0.78.0)', () => {
   // The driver restarts, seeds the average at 900 ms, and the node then answers
-  // every minute at 200 ms against 30±8 (line 62). The allowance belongs to the
+  // every minute at `raw` ms against 30±8 (line 62). The allowance belongs to the
   // AVERAGE (it still carries the seed); a raw round trip is read against the
   // seed already, so a line raised by the allowance would hide every one of
   // them until the seed had decayed.
-  const list = [0, 1, 2, 3, 4, 5, 6].map((m) => ({ t: T + m * MIN, raw: 200 }));
-  const ring = (now: number) => {
-    let avg = 900;
-    const out = [
-      ev({ t: T - 40 * MIN, rtt: 25, dTx: 1 }),
-      ev({ t: T - 2 * MIN, rtt: null, dTx: null }),
-      ev({ t: T - MIN, rtt: 900, dTx: 1 }),
-    ];
-    for (const f of list) {
-      if (f.t > now) break;
-      avg = Math.round((0.75 * avg + 0.25 * f.raw) * 10) / 10;
-      out.push(ev({ t: f.t, rtt: avg, dTx: 1 }));
+  const run = (raw: number) => {
+    const list = [0, 1, 2, 3, 4, 5, 6].map((m) => ({ t: T + m * MIN, raw }));
+    const ring = (now: number) => {
+      let avg = 900;
+      const out = [
+        ev({ t: T - 40 * MIN, rtt: 25, dTx: 1 }),
+        ev({ t: T - 2 * MIN, rtt: null, dTx: null }),
+        ev({ t: T - MIN, rtt: 900, dTx: 1 }),
+      ];
+      for (const f of list) {
+        if (f.t > now) break;
+        avg = Math.round((0.75 * avg + 0.25 * f.raw) * 10) / 10;
+        out.push(ev({ t: f.t, rtt: avg, dTx: 1 }));
+      }
+      return out;
+    };
+    const state: SymptomState = new Map();
+    const suspects: { id: number; raw: number }[] = [];
+    const overLine: number[] = [];
+    let armedAt: number | null = null;
+    let fired: Symptom | undefined;
+    for (let now = T; now <= T + 6 * MIN; now += MIN) {
+      const tx = 2 + (now - T) / MIN; // the seed, then one per round trip
+      const out = detectSymptoms(input({
+        nodes: [node(1), txNode(6, tx)], recent: new Map([[6, ring(now)]]), now, confirmable: true, suspects, overLine,
+        rttSeed: new Map([[6, { k0: 1, a0: 900 }]]),
+      }), state);
+      if (armedAt == null && state.has('6:rtt-degraded')) armedAt = now;
+      fired ??= out.find((x) => x.kind === 'rtt-degraded');
     }
-    return out;
+    return { suspects, overLine, armedAt, fired };
   };
-  const state: SymptomState = new Map();
-  const suspects: { id: number; raw: number }[] = [];
-  let armedAt: number | null = null;
-  for (let now = T; now <= T + 6 * MIN; now += MIN) {
-    const tx = 2 + (now - T) / MIN; // the seed, then one per round trip
-    detectSymptoms(input({
-      nodes: [node(1), txNode(6, tx)], recent: new Map([[6, ring(now)]]), now, confirmable: true, suspects,
-      rttSeed: new Map([[6, { k0: 1, a0: 900 }]]),
-    }), state);
-    if (armedAt == null && state.has('6:rtt-degraded')) armedAt = now;
-  }
-  assert.deepEqual(suspects.map((x) => Math.round(x.raw)), [200], 'the first 200 ms round trip asks for a confirmation');
-  assert.equal(armedAt, T + MIN, 'and the second starts the dwell');
+  const slow = run(200);
+  assert.deepEqual(slow.suspects.map((x) => Math.round(x.raw)), [200], 'the first 200 ms round trip asks for a confirmation');
+  assert.equal(slow.armedAt, T + MIN, 'and the second starts the dwell');
+  assert.deepEqual(slow.fired?.evidence.map((e) => e.label), ['RTT', 'baseline', 'restart allowance', 'newest round trips'],
+    'the yardstick and the allowance before the round trips: REMEDY cuts the row at its width');
+  // The same seed decaying over a normal 30 ms link reads 682.5 and down, far
+  // over 62, but every ms of it is the seed: no hold, nothing asked.
+  const quiet = run(30);
+  assert.deepEqual(quiet.overLine, [], 'the seed is not reported over the line for the baseline hold');
+  assert.deepEqual(quiet.suspects, []);
+  assert.equal(quiet.armedAt, null);
 });
 
 test('rtt-degraded: strictly alternating slow and normal round trips never start it, a known cost of the rule (v0.78.0)', () => {

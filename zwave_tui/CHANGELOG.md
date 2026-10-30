@@ -33,9 +33,10 @@ single probe instead of a 10-probe episode.
 - When the average breaches on one slow round trip with nothing behind it,
   the node is owed one verification-lane probe, logged as
   `verification probe (rtt-degraded confirm, N nodes owed)`. A slow answer
-  starts the breach; a normal one ends the question. At most one per node per
-  10 minutes, so one slow round trip buys at most one probe; one the pause
-  drops unsent leaves no cooldown. It passes every gate a burst probe does,
+  starts the breach; a normal one ends the question. At most one goes out per
+  node per 10 minutes, so one slow round trip buys at most one probe; one that
+  never goes out (refused, withdrawn, absorbed by a burst or dropped by the
+  pause) leaves no cooldown. It passes every gate a burst probe does,
   opens no episode, is withdrawn unsent when the node's own traffic answers
   first, never shortens an owed burst, drains after any burst owed on the
   same tick, and is not counted as episode evidence on DETAIL or REMEDY.
@@ -43,18 +44,26 @@ single probe instead of a 10-probe episode.
   without auto-ping running), the newest round trip alone starts the breach,
   as in 0.77.3, but never after a normal one.
 - An episode of a route-sensitive kind opens confounded when the add-on's own
-  routed read re-routed its node within the 10-minute lookback before its
-  dwell began, or since. A confirmation's failed-over answer can be the round
-  trip that starts the breach, and the guard saw only episodes already open,
-  which also let a sweep read failing over during a dwell through.
+  routed read re-routed its node during its dwell or in the 10-minute lookback
+  before it, counting no more than the dwell's last five minutes (a
+  `chronic-return-path` dwell runs for two days). A confirmation's failed-over
+  answer can be the round trip that starts the breach, and the guard saw only
+  episodes already open, which also let a sweep read failing over during a
+  dwell through. REMEDY's confounded row now says `during or just before the
+  episode`.
 - The symptom card shows the newest round trips, after the baseline.
 - Known cost: slow frames that never land in consecutive pairs are never
   corroborated, strict alternation being the extreme (0.77.3 fired at
   5 minutes). While no probe can go out to a node that could take one (the
-  pause, a post-kill hold, a runner suppression), a node addressed less than
-  twice in 10 minutes does not report a slowdown. An answer within 0.2 ms of
-  the rounded average does not move it, counts as unanswered, and the node's
-  next transmission decides.
+  pause, a post-kill hold, a runner suppression, bursts filling every
+  verification slot for 10 minutes), a node addressed less than twice in
+  10 minutes does not report a slowdown. An answer within 0.2 ms of the
+  rounded average does not move it, counts as unanswered, and the node's
+  next transmission decides. After a normal answer the average can stay over
+  the line until the node's own transmissions bring it under, and the node's
+  learning stays held until then: one to several 2-hour sweeps on a node
+  nothing else addresses, where 0.77.3's false episode cleared it in minutes
+  with 10 probes.
 
 ### Replay
 
@@ -64,10 +73,10 @@ single probe instead of a 10-probe episode.
   14 fire, with 11–12 confirmations; real slowdowns 5–6 of 7 fire (by the
   normal assumed), 30–40 s later than 0.77.3, with 8 confirmations. The two
   that may not sat at 50–58 ms against a 57–58 ms line, and one of them was
-  caught 33 minutes later at 9.6k. Inside the 30 episodes, 19–20
+  caught 33 minutes later at 9.6k. Inside the 30 episodes, 11–12
   confirmations replace the 140 burst probes 0.77.3 spent on one-frame
-  episodes; elsewhere, 0.3–5.3 confirmations a day.
-- 24 new tests; 58 new mutation entries, 8 re-anchored.
+  episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
+- 26 new tests; 69 new mutation entries, 7 re-anchored.
 
 ## 0.77.3
 

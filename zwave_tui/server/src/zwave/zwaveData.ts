@@ -71,7 +71,7 @@ import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, WINDOW_MS as SYMPTOM_WINDOW_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -248,8 +248,9 @@ const VERIFY_MAX_PER_TICK = 4;
  * It equals the detector's 10-minute lookback and is inclusive at the edge, as
  * the lookback is, so the slow round trip a probe was asked for has left the
  * window before another could be asked: one slow round trip buys at most one
- * probe, answered or not. Stamped only when the
- * request is accepted, so a refusal (the pause) leaves no cooldown behind.
+ * probe, answered or not. Stamped when the probe is handed out, so one that is
+ * refused, withdrawn, absorbed by a burst or dropped by the pause leaves no
+ * cooldown behind: the cooldown counts probes sent, not probes asked for.
  */
 const RTT_CONFIRM_COOLDOWN_MS = 10 * 60_000;
 const CONFIG_RETRY_MS = 15_000;
@@ -889,7 +890,7 @@ class ZwaveDataImpl implements ZwaveData {
    * mesh auto-ping itself would have left alone.
    */
   private readonly verifyOwed = new Map<number, { left: number; nextAt: number; confirm?: true }>();
-  /** When each node's last rtt-degraded confirmation probe was owed (v0.78.0). */
+  /** When each node's last rtt-degraded confirmation probe was handed out (v0.78.0). */
   private readonly rttConfirmAt = new Map<number, number>();
   /** Episode keys whose after-window burst has already been requested (v0.36.3),
    *  so the timed request fires once per confirmation window rather than every
@@ -1029,13 +1030,7 @@ class ZwaveDataImpl implements ZwaveData {
       // Nothing is owed from a paused period: a burst requested before the
       // pause would otherwise drain the moment it lifts, against episodes whose
       // windows it no longer fits.
-      onChange: (st) => {
-        if (!st) return;
-        // A confirmation dropped here was never sent, so it leaves no cooldown
-        // behind (v0.78.0): after the pause the same slow round trip may ask.
-        for (const [id, o] of this.verifyOwed) if (o.confirm) this.rttConfirmAt.delete(id);
-        this.verifyOwed.clear();
-      },
+      onChange: (st) => { if (st) this.verifyOwed.clear(); },
     });
     this.autonomy.load();
     const seed = opts.entryId ?? process.env.ZWAVE_ENTRY_ID ?? '';
@@ -1614,10 +1609,13 @@ class ZwaveDataImpl implements ZwaveData {
       // guard below sees only episodes already open on the failover's pass, so
       // a breach that failover helped start (a confirmation's answer pairing
       // with the slow round trip it was sent to check, a sweep read during the
-      // dwell) was booked to the control arm.
+      // dwell) was booked to the control arm. The reach is counted from the
+      // dwell's last DWELL_MS at most: a chronic dwell runs for days, and a
+      // failover that long before the open neither started the breach nor can
+      // end it.
       if (s.nodeId != null && MEASUREMENT_REROUTE_KINDS.has(s.kind)) {
         const rr = this.measurementRerouteAt.get(s.nodeId);
-        if (rr != null && rr >= since - SYMPTOM_WINDOW_MS) oc.markConfounded(s.nodeId, s.kind);
+        if (rr != null && rr >= Math.max(since, now - SYMPTOM_DWELL_MS) - SYMPTOM_WINDOW_MS) oc.markConfounded(s.nodeId, s.kind);
       }
       // Ask for verification probes while the symptom is LIVE, so the degraded
       // window can reach the verifier's evidence floor before it is scored.
@@ -2175,7 +2173,7 @@ class ZwaveDataImpl implements ZwaveData {
    * action, the post-kill hold) and requestVerification's own refusals (no
    * ledger, the owner's pause). A node already owed any probe is left alone:
    * that probe answers the same question, and a confirmation must never cut a
-   * burst short. One per node per RTT_CONFIRM_COOLDOWN_MS. An owed confirmation
+   * burst short. One handed out per node per RTT_CONFIRM_COOLDOWN_MS. An owed confirmation
    * the detector no longer asks for (the node's own traffic answered, the frame
    * aged out, the breach started or ended) is withdrawn before it is sent.
    */
@@ -2185,7 +2183,7 @@ class ZwaveDataImpl implements ZwaveData {
       if (this.verifyOwed.has(id)) continue;
       const at = this.rttConfirmAt.get(id);
       if (at != null && now - at <= RTT_CONFIRM_COOLDOWN_MS) continue;
-      if (this.requestVerification(id, 1)) this.rttConfirmAt.set(id, now);
+      this.requestVerification(id, 1);
     }
   }
 
@@ -2209,7 +2207,9 @@ class ZwaveDataImpl implements ZwaveData {
       (st.confirm ? confirms : due).push(id);
     }
     // Bursts first (v0.78.0): a burst's probes are timed to land inside the
-    // window they fill, and a confirmation has no window to miss.
+    // window they fill. A confirmation can wait out the rest of its round
+    // trip's 10-minute lookback; bursts filling every slot for all of it
+    // withdraw it unsent.
     due.push(...confirms);
     if (due.length === 0) return [];
     // Several nodes per tick, not one. A burst must land INSIDE the window it
@@ -2226,6 +2226,7 @@ class ZwaveDataImpl implements ZwaveData {
       const left = st.left - 1;
       if (left <= 0) this.verifyOwed.delete(id);
       else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });
+      if (st.confirm) this.rttConfirmAt.set(id, now);
       out.push(st.confirm ? { id, first, confirm: true } : { id, first });
     }
     return out;
@@ -2753,6 +2754,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.routeChangeAccum.delete(id);
           this.s2Accum.delete(id);
           this.measurementRerouteAt.delete(id);
+          this.rttConfirmAt.delete(id);
           this.measurementSent.delete(id);
           this.lastProbeAt.delete(id);
           this.ourTxReport.delete(id);
@@ -2873,6 +2875,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.routeChangeAccum.clear();
         this.s2Accum.clear();
         this.measurementRerouteAt.clear();
+        this.rttConfirmAt.clear();
         this.measurementSent.clear();
         this.lastProbeAt.clear();
         this.ourTxReport.clear();

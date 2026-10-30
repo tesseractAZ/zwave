@@ -1302,6 +1302,9 @@ test('in-flight episodes discarded by a mesh-identity change are COUNTED, not dr
     // confound an episode the new network's node 8 opens inside the lookback.
     const rerouteAt = (zd as unknown as { measurementRerouteAt: Map<number, number> }).measurementRerouteAt;
     rerouteAt.set(8, Date.now());
+    // …and its confirmation cooldown, which would refuse the new node 8's.
+    const confirmAt = (zd as unknown as { rttConfirmAt: Map<number, number> }).rttConfirmAt;
+    confirmAt.set(8, Date.now());
 
     // Flip the network underneath it, through the real refresh path — the
     // canned controller now reports a different home_id, exactly as a stick
@@ -1315,6 +1318,7 @@ test('in-flight episodes discarded by a mesh-identity change are COUNTED, not dr
     assert.equal(notice.source, 'engine');
     assert.equal(notice.kind, 'system', 'a cache reset is a system event, not a symptom');
     assert.equal(rerouteAt.size, 0, "the old network's reroute stamps go with it");
+    assert.equal(confirmAt.size, 0, 'and its confirmation cooldowns');
   } finally {
     homeOverride = null;
     zd.stop();
@@ -1661,9 +1665,12 @@ test('a departed node discarding its learning is visible IN THE TUI (v0.53.0)', 
     // on the same id must not inherit.
     const rerouteAt = (zd as unknown as { measurementRerouteAt: Map<number, number> }).measurementRerouteAt;
     rerouteAt.set(8, Date.now());
+    const confirmAt = (zd as unknown as { rttConfirmAt: Map<number, number> }).rttConfirmAt;
+    confirmAt.set(8, Date.now());
     rosterNodes = [NODE7];
     await waitFor(() => zd.events().some((e) => /left the network/.test(e.text)), 4000);
     assert.equal(rerouteAt.has(8), false, 'the departed node takes its reroute stamp with it');
+    assert.equal(confirmAt.has(8), false, 'and its confirmation cooldown');
     const ev = zd.events().find((e) => /left the network/.test(e.text))!;
     assert.match(ev.text, /node 8/, `the id belongs in the TEXT, frozen at push time: ${ev.text}`);
     assert.match(ev.text, /baselines/, 'the event must name what was discarded');
@@ -2483,15 +2490,22 @@ test('our read\'s failover confounds the node\'s open rate, RTT, signal, return-
   } finally { R.stop(); }
 });
 
-test('our read\'s failover confounds a route-sensitive episode that opens AFTER it, inside the detectors\' lookback before its dwell (v0.78.0)', async () => {
+test('our read\'s failover confounds a route-sensitive episode that opens AFTER it, from the detectors\' lookback before its dwell\'s last five minutes (v0.78.0)', async () => {
   // A confirmation's answer that failed over can be the second slow round trip
-  // that starts rtt-degraded; its engine pass consumes measurementReroutes with
-  // no episode open yet, so the open itself must see it.
-  const cases: Array<[string, number, string[]]> = [
-    ['nine minutes before the dwell began', 9 * 60_000, ['rtt-degraded']],
-    ['eleven minutes before it', 11 * 60_000, []],
+  // that starts rtt-degraded, and a sweep read can fail over during a dwell.
+  // The failover's own engine pass consumes measurementReroutes with no
+  // episode open yet, so the open itself must see it. A chronic dwell runs for
+  // days, and a failover that long before its open did not start it.
+  const H = 3_600_000;
+  // label, kind, dwell start and open relative to the failover, what is confounded
+  const cases: Array<[string, string, number, number, string[]]> = [
+    ['nine minutes before the dwell began', 'rtt-degraded', 9 * 60_000, 14 * 60_000, ['rtt-degraded']],
+    ['eleven minutes before it', 'rtt-degraded', 11 * 60_000, 16 * 60_000, []],
+    ['a sweep read during the dwell', 'route-churn', -2 * 60_000, 3 * 60_000, ['route-churn']],
+    ['40 hours before a chronic dwell matured', 'chronic-return-path', -8 * H, 40 * H, []],
+    ['in the quarter hour before one matured', 'chronic-return-path', 14 * 60_000 - 48 * H, 14 * 60_000, ['chronic-return-path']],
   ];
-  for (const [label, age, want] of cases) {
+  for (const [label, kind, sinceOff, openOff, want] of cases) {
     const R = await rerouteZd('zwtui-reroute-open-');
     try {
       const asAlive = R.priv.snapshot().map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
@@ -2502,12 +2516,14 @@ test('our read\'s failover confounds a route-sensitive episode that opens AFTER 
       const at = Date.now();
       R.zd.noteMeasurementProbe(7, at, 'verify', 'read');
       R.route(R.failedOver);
-      R.priv.measurementReroutes.clear(); // the failover's own pass, with nothing open
-      const since = at + age;
-      const syms = ['rtt-degraded', 'quiet-node'].map((kind) => ({ kind, nodeId: 7, severity: 'watch', sinceMs: since, basis: 'measured', evidence: [], narrative: '' }));
-      R.priv.updateEpisodes(syms, since + 5 * 60_000);
-      assert.deepEqual(new Set((R.zd.openEpisodes() ?? []).filter((e) => e.nodeId === 7).map((e) => e.kind)), new Set(['rtt-degraded', 'quiet-node']), `${label}: fixture guard`);
-      assert.deepEqual([...new Set(marked)], want, `${label}: only a route-sensitive kind, only inside the lookback`);
+      R.priv.lastOkAt = Date.now();
+      R.priv.sampleEvidence(); // the failover's own engine pass, with nothing open
+      assert.equal(R.priv.measurementReroutes.size, 0, `${label}: fixture guard, that pass consumed the mark`);
+      const since = at + sinceOff;
+      const syms = [kind, 'quiet-node'].map((k) => ({ kind: k, nodeId: 7, severity: 'watch', sinceMs: since, basis: 'measured', evidence: [], narrative: '' }));
+      R.priv.updateEpisodes(syms, at + openOff);
+      assert.deepEqual(new Set((R.zd.openEpisodes() ?? []).filter((e) => e.nodeId === 7).map((e) => e.kind)), new Set([kind, 'quiet-node']), `${label}: fixture guard`);
+      assert.deepEqual([...new Set(marked)], want, `${label}: only a route-sensitive kind, only inside the reach`);
     } finally { R.stop(); }
   }
 });
@@ -3399,8 +3415,9 @@ test('one slow round trip owes ONE confirmation probe, flagged, and at most one 
     r.idle(460_000);
     assert.equal(r.zd.verifyOwedCount(), 0, 'one slow round trip buys at most one probe');
     assert.equal(r.rtt(), undefined);
-    // Past the window, a NEW slow round trip may ask again.
-    r.idle(120_000);
+    // The cooldown runs from the probe handed out, 50 s after the round trip:
+    // once both have passed, a NEW slow round trip may ask again.
+    r.idle(170_000);
     r.trip(300);
     assert.equal(r.zd.verifyOwedCount(), 1, 'the next slow round trip after the window asks again');
   } finally { r.done(); }
@@ -3427,6 +3444,7 @@ test('the confirmation landing slow starts rtt-degraded; it fires five minutes l
     r.trip(280); // the confirmation's answer
     const started = r.now();
     assert.equal(r.priv.symptomState.has('7:rtt-degraded'), true, 'two slow round trips start the dwell');
+    assert.equal(r.zd.baselineHold(7), 'arming', 'and DETAIL names the dwell, not the average');
     r.idle(290_000);
     assert.equal(r.rtt(), undefined, 'not before DWELL_MS');
     r.idle(20_000);
@@ -3507,15 +3525,42 @@ test('a confirmation the pause drops unsent leaves no cooldown; one already sent
   } finally { r.done(); }
 });
 
+test('a confirmation never handed out leaves no cooldown: withdrawn for the node\'s own answer, or absorbed by a burst the pause then drops (v0.78.0)', async () => {
+  // The cooldown counts probes sent. Withdrawn: the node's own 27 ms answered
+  // the first 300 before the runner drained, so the next lone 300 is a new
+  // question with nothing spent on it.
+  const r = await confirmRig('zwtui-rttwithdrawn-cool-');
+  try {
+    r.trip(300);
+    r.trip(27);
+    assert.equal(r.zd.verifyOwedCount(), 0, 'fixture guard: withdrawn unsent');
+    r.trip(300);
+    assert.deepEqual(r.zd.drainVerifyRequests(r.now()), [{ id: 7, first: false, confirm: true }], 'the next lone slow round trip is asked for');
+  } finally { r.done(); }
+  // Absorbed: an episode's burst rewrote the owed confirmation, and the pause
+  // cleared that burst before its first probe went out.
+  const a = await confirmRig('zwtui-rttabsorbed-cool-');
+  try {
+    a.trip(300);
+    a.priv.requestVerification(7);
+    assert.equal(a.zd.verifyOwedFor(7), 5, 'fixture guard: the burst absorbed it');
+    a.zd.pauseAutonomy('tui');
+    a.zd.resumeAutonomy();
+    a.idle(10_000);
+    assert.deepEqual(a.zd.drainVerifyRequests(a.now()), [{ id: 7, first: false, confirm: true }], 'the same slow round trip asks again');
+  } finally { a.done(); }
+});
+
 test('the confirmation cooldown is per node, and a burst drains ahead of confirmations owed before it (v0.78.0)', async () => {
   const r = await confirmRig('zwtui-rttpernode-');
   try {
     const f = { t: r.now(), raw: 300 };
     r.priv.requestRttConfirms(new Map([[7, f]]), r.now());
+    assert.deepEqual(r.zd.drainVerifyRequests(r.now()).map((d) => d.id), [7]);
     r.priv.requestRttConfirms(new Map([[7, f], [8, f]]), r.now() + 10_000);
-    assert.deepEqual(r.zd.drainVerifyRequests(r.now() + 10_000).map((d) => d.id).sort(), [7, 8], "node 8 is not in node 7's cooldown");
+    assert.deepEqual(r.zd.drainVerifyRequests(r.now() + 10_000).map((d) => d.id), [8], "node 8 is not in node 7's cooldown, and node 7 is in its own");
     r.priv.requestRttConfirms(new Map([[7, f], [8, f]]), r.now() + 20_000);
-    assert.equal(r.zd.verifyOwedCount(), 0, 'and each is in its own');
+    assert.equal(r.zd.verifyOwedCount(), 0, 'and node 8 now in its own');
   } finally { r.done(); }
   const o = await confirmRig('zwtui-rttorder-');
   try {
@@ -3526,6 +3571,30 @@ test('the confirmation cooldown is per node, and a burst drains ahead of confirm
     assert.deepEqual(out[0], { id: 15, first: true }, 'the burst is not held behind them');
     assert.deepEqual(out.slice(1).map((d) => d.id), [11, 12, 13], 'and they fill the rest of the tick in order');
   } finally { o.done(); }
+  // A confirmation still wanted keeps its place: the oldest, nearest the end
+  // of its round trip's lookback, takes the one slot three bursts leave.
+  const q = await confirmRig('zwtui-rttfifo-');
+  try {
+    const f = { t: q.now(), raw: 300 };
+    q.priv.requestRttConfirms(new Map([[21, f]]), q.now());
+    q.priv.requestRttConfirms(new Map([[22, f], [21, f]]), q.now() + 10_000);
+    for (const id of [31, 32, 33]) q.priv.requestVerification(id);
+    assert.deepEqual(q.zd.drainVerifyRequests(q.now() + 10_000).map((d) => d.id), [31, 32, 33, 21]);
+  } finally { q.done(); }
+});
+
+test('the confirmation cooldown covers its round trip to the edge of the lookback, both inclusive (v0.78.0)', async () => {
+  // Handed out on the round trip's own tick, the cooldown and the lookback end
+  // together: at exactly 10 minutes the round trip is still in the window, and
+  // it must not buy a second probe there.
+  const r = await confirmRig('zwtui-rttedge-');
+  try {
+    r.trip(300);
+    assert.deepEqual(r.zd.drainVerifyRequests(r.now()), [{ id: 7, first: false, confirm: true }]);
+    r.idle(600_000);
+    assert.equal(r.zd.baselineHold(7), 'rtt-over-line', 'fixture guard: the round trip is still in the window');
+    assert.equal(r.zd.verifyOwedCount(), 0, 'no second probe at the edge');
+  } finally { r.done(); }
 });
 
 test('a confirmation never cuts a burst short, and a burst asked for after it is a burst (v0.78.0)', async () => {
