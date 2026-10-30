@@ -50,10 +50,10 @@ single probe instead of a 10-probe episode.
   routed read re-routed its node during its dwell or in the detector's
   lookback before it (10 minutes; 30 for `weak-signal`, which reads that far
   on a node too quiet for a rate). The dwell counts from no earlier than five
-  minutes before the symptom was first seen: a `chronic-return-path` dwell
-  runs for two days, an episode re-opened on an old dwell start counts from
-  the symptom's return, and one opened late behind a mesh event keeps its
-  whole dwell. A confirmation's failed-over answer can be the round trip that
+  minutes before it could first mature: a `chronic-return-path` dwell runs
+  for two days. An open held past maturity (behind a mesh event, a thin
+  window, a missed pass) keeps the whole dwell, and an episode re-opened on a
+  dwell that already had one counts from the re-open. A confirmation's failed-over answer can be the round trip that
   starts the breach, and the guard saw only episodes already open, which also
   let a sweep read failing over during a dwell through. REMEDY's confounded
   row now leads with `credited to neither arm` and says `during or just
@@ -84,7 +84,7 @@ single probe instead of a 10-probe episode.
   caught 33 minutes later at 9.6k. Inside the 30 episodes, 11–12
   confirmations replace the 140 burst probes 0.77.3 spent on one-frame
   episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
-- 28 new tests; 84 new mutation entries, 7 re-anchored.
+- 29 new tests; 91 new mutation entries, 7 re-anchored.
 
 ## 0.77.3
 

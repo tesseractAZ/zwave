@@ -71,7 +71,7 @@ import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, WEAK_EVENT_LOOKBACK_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, WEAK_EVENT_LOOKBACK_MS, CHRONIC_DAYS_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -895,12 +895,10 @@ class ZwaveDataImpl implements ZwaveData {
   /** The round trip each node's last handed-out rtt-degraded confirmation was
    *  asked about (v0.78.0): its time, which the cooldown runs from. */
   private readonly rttConfirmAt = new Map<number, number>();
-  /** The engine tick each live symptom was first seen on (v0.78.0), so an
-   *  episode opened late (subsumed, or its node not a ping candidate, at
-   *  maturity) still counts the open-time confound from its dwell. A symptom
-   *  gone for a tick starts over: an episode re-opened on an old dwell start
-   *  counts from its return. */
-  private readonly symptomLiveAt = new Map<string, number>();
+  /** The dwell start of the last episode opened on each symptom key
+   *  (v0.78.0): an episode opened again on the same dwell counts the
+   *  open-time confound from its re-open, not from that dwell's start. */
+  private readonly episodeDwellStart = new Map<string, number>();
   /** Episode keys whose after-window burst has already been requested (v0.36.3),
    *  so the timed request fires once per confirmation window rather than every
    *  tick from the moment it comes due. */
@@ -1583,8 +1581,6 @@ class ZwaveDataImpl implements ZwaveData {
     // emission is the degraded period, so all of it is fair evidence.
     const sinceOf = new Map<string, number>();
     for (const s of symptoms) sinceOf.set(`${s.nodeId ?? 'mesh'}:${s.kind}`, s.sinceMs);
-    for (const k of this.symptomLiveAt.keys()) if (!sinceOf.has(k)) this.symptomLiveAt.delete(k);
-    for (const k of sinceOf.keys()) if (!this.symptomLiveAt.has(k)) this.symptomLiveAt.set(k, now);
     for (const s of toOpen) {
       // node-down opens NO episode (v0.37). The ledger cannot score it — see
       // outcomes.metricOf — and opening episodes that are unscoreable by
@@ -1620,18 +1616,24 @@ class ZwaveDataImpl implements ZwaveData {
       // guard below sees only episodes already open on the failover's pass, so
       // a breach that failover helped start (a confirmation's answer pairing
       // with the slow round trip it was sent to check, a sweep read during the
-      // dwell) was booked to the control arm. The reach is counted from the
-      // last DWELL_MS before the symptom was first seen at most: a chronic
-      // dwell runs for days, and a failover that long before it matured neither
-      // started the breach nor can end it. An open delayed past maturity keeps
-      // the whole dwell. weak-signal on a node too quiet for a rate reads its
-      // route, RSSI and failures over WEAK_EVENT_LOOKBACK_MS, so it reaches
-      // back that far.
+      // dwell) was booked to the control arm. The reach counts at most the
+      // last DWELL_MS of the dwell's own length: a chronic dwell runs for
+      // days, and a failover that long before it could mature neither started
+      // the breach nor can end it. It is anchored at that nominal maturity, not
+      // at the open, so an open held late (subsumed by a mesh event, a node
+      // not yet a ping candidate, a window too thin to evaluate, a missed pass)
+      // keeps the whole dwell. An episode re-opened on a dwell that already
+      // had one counts from the re-open. weak-signal on a node too quiet for a
+      // rate reads its route, RSSI and failures over WEAK_EVENT_LOOKBACK_MS,
+      // so it reaches back that far.
       if (s.nodeId != null && MEASUREMENT_REROUTE_KINDS.has(s.kind)) {
+        const key = `${s.nodeId}:${s.kind}`;
         const rr = this.measurementRerouteAt.get(s.nodeId);
-        const liveAt = this.symptomLiveAt.get(`${s.nodeId}:${s.kind}`) ?? now;
+        const matures = since + (s.kind === 'chronic-return-path' ? CHRONIC_DAYS_MS : SYMPTOM_DWELL_MS);
+        const anchor = this.episodeDwellStart.get(key) === since ? now : Math.min(now, matures);
         const lookback = s.kind === 'weak-signal' ? WEAK_EVENT_LOOKBACK_MS : SYMPTOM_WINDOW_MS;
-        if (rr != null && rr >= Math.max(since, liveAt - SYMPTOM_DWELL_MS) - lookback) oc.markConfounded(s.nodeId, s.kind);
+        if (rr != null && rr >= Math.max(since, anchor - SYMPTOM_DWELL_MS) - lookback) oc.markConfounded(s.nodeId, s.kind);
+        this.episodeDwellStart.set(key, since);
       }
       // Ask for verification probes while the symptom is LIVE, so the degraded
       // window can reach the verifier's evidence floor before it is scored.
@@ -2231,7 +2233,10 @@ class ZwaveDataImpl implements ZwaveData {
     // Bursts first (v0.78.0): a burst's probes are timed to land inside the
     // window they fill. A confirmation can wait out the rest of its round
     // trip's 10-minute lookback; bursts filling every slot for all of it
-    // withdraw it unsent.
+    // withdraw it unsent. Among confirmations the oldest round trip goes
+    // first, being nearest the end of its lookback (stable: owed order breaks
+    // a tie).
+    confirms.sort((a, b) => (this.verifyOwed.get(a)!.frameAt ?? now) - (this.verifyOwed.get(b)!.frameAt ?? now));
     due.push(...confirms);
     if (due.length === 0) return [];
     // Several nodes per tick, not one. A burst must land INSIDE the window it
@@ -2897,7 +2902,10 @@ class ZwaveDataImpl implements ZwaveData {
         this.routeChangeAccum.clear();
         this.s2Accum.clear();
         this.measurementRerouteAt.clear();
+        this.episodeDwellStart.clear();
         this.rttConfirmAt.clear();
+        // An owed confirmation asks about the old network's round trip.
+        for (const [id, st] of this.verifyOwed) if (st.confirm) this.verifyOwed.delete(id);
         this.measurementSent.clear();
         this.lastProbeAt.clear();
         this.ourTxReport.clear();

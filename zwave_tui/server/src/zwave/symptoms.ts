@@ -212,7 +212,7 @@ export const WINDOW_MS = 10 * 60_000; // windowed-rate lookback
 const MIN_WINDOW_TX = 20; // minimum successful sends for a rate to be meaningful
 const TIMEOUT_RATE_ABS = 0.15; // chronic absolute threshold (health-check rubric)
 const TIMEOUT_RATE_MULT = 3; // relative: window rate ≫ this × baseline
-const CHRONIC_DAYS_MS = 2 * 24 * 60_000 * 60; // 2 days sustained → chronic
+export const CHRONIC_DAYS_MS = 2 * 24 * 60_000 * 60; // 2 days sustained → chronic
 const RTT_Z = 4; // z-score over route-stratified baseline
 /**
  * The highest first-after-restart RTT the fixed half of `rttRestartResidue`
