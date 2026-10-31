@@ -899,6 +899,10 @@ class ZwaveDataImpl implements ZwaveData {
    *  (v0.78.0): an episode opened again on the same dwell counts the
    *  open-time confound from its re-open, not from that dwell's start. */
   private readonly episodeDwellStart = new Map<string, number>();
+  /** When this instance was built (v0.78.0). The evidence ring is restored
+   *  across an add-on restart and the confirmation cooldown is not, so a round
+   *  trip from before it may already have had its probe: it gets no other. */
+  private readonly createdAt = Date.now();
   /** Episode keys whose after-window burst has already been requested (v0.36.3),
    *  so the timed request fires once per confirmation window rather than every
    *  tick from the moment it comes due. */
@@ -2200,6 +2204,7 @@ class ZwaveDataImpl implements ZwaveData {
   private requestRttConfirms(suspects: Map<number, RttFrame>, now: number): void {
     for (const [id, st] of this.verifyOwed) if (st.confirm && !suspects.has(id)) this.verifyOwed.delete(id);
     for (const [id, f] of suspects) {
+      if (f.t < this.createdAt) continue;
       if (!this.verifyOwed.has(id)) {
         const at = this.rttConfirmAt.get(id);
         if (at != null && now - at <= RTT_CONFIRM_COOLDOWN_MS) continue;
@@ -2214,10 +2219,11 @@ class ZwaveDataImpl implements ZwaveData {
   /**
    * Node ids to probe for verification on this tick.
    *
-   * At most ONE per call, newest-deadline-first, with a per-node spacing so a
-   * burst lands as separate readings across the window rather than three
-   * packets in one second (which would be one observation's worth of
-   * information and three times the airtime).
+   * Up to VERIFY_MAX_PER_TICK per call: bursts first, in owed order, then
+   * rtt-degraded confirmations, oldest round trip first (v0.78.0). A per-node
+   * spacing makes a burst land as separate readings across the window rather
+   * than three packets in one second (which would be one observation's worth
+   * of information and three times the airtime).
    */
   drainVerifyRequests(now = Date.now(), skip?: (nodeId: number) => boolean): { id: number; first: boolean; confirm?: true }[] {
     const due: number[] = [];
@@ -2397,6 +2403,9 @@ class ZwaveDataImpl implements ZwaveData {
     // Every answer replaces the ledger's open episodes: the refresh trial's
     // open decision cannot be scored across it (v0.75.0 review).
     this.trial?.dropOpen(null, 'mesh identity decision', Date.now());
+    // …and an episode re-opened on a dwell whose earlier episode went with them
+    // is a first open again (v0.78.0): nothing scored that dwell's confound.
+    this.episodeDwellStart.clear();
     let ok = true;
     if (this.outcomes && !this.outcomes.resolveIdentity(choice)) ok = false;
     if (this.baselines && !this.baselines.resolveIdentity(choice)) ok = false;

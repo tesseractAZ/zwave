@@ -1305,7 +1305,7 @@ test('in-flight episodes discarded by a mesh-identity change are COUNTED, not dr
     // …and its confirmation cooldown, which would refuse the new node 8's.
     const confirmAt = (zd as unknown as { rttConfirmAt: Map<number, number> }).rttConfirmAt;
     confirmAt.set(8, Date.now());
-    // …an owed confirmation about the old node 8's round trip, and an episode
+    // …an owed confirmation about the old node 9's round trip, and an episode
     // dwell start that would make the new node 8's first episode a re-open.
     const priv = zd as unknown as { requestRttConfirms: (s: Map<number, { t: number; raw: number }>, now: number) => void; episodeDwellStart: Map<string, number> };
     zd.setAutoPingSnapshot(() => ({ suppressed: 'none', config: { staleMs: 0 } }) as never);
@@ -2512,7 +2512,7 @@ test('our read\'s failover confounds a route-sensitive episode that opens AFTER 
   const H = 3_600_000;
   const M = 60_000;
   type Case = [string, string, 'verify' | 'sweep', number, number | null, number, string[],
-    { gap?: boolean; prior?: { since: number; open: number } }?];
+    { gap?: boolean; prior?: { since: number; open: number; beforeFailover?: boolean } }?];
   // label, kind, lane, dwell start, first seen (subsumed) or null, open — all
   // relative to the failover — what is confounded, and: the symptom missing
   // for a pass after it was first seen; an episode opened and closed earlier
@@ -2526,6 +2526,7 @@ test('our read\'s failover confounds a route-sensitive episode that opens AFTER 
     ['the same, after an episode on an older dwell', 'rtt-degraded', 'verify', 0, 5 * M, 20 * M, ['rtt-degraded'], { prior: { since: -3 * H, open: -2 * H } }],
     ['a first open 36 hours into a dwell its window could not evaluate', 'return-path-degraded', 'verify', -6 * H, null, 30 * H, ['return-path-degraded']],
     ['an episode re-opened 30 hours on, on a dwell that began before it', 'return-path-degraded', 'verify', -6 * H, null, 30 * H, [], { prior: { since: -6 * H, open: M } }],
+    ['the same, its first episode opened and closed before the failover', 'return-path-degraded', 'verify', -6 * H, null, 30 * H, [], { prior: { since: -6 * H, open: -5 * H, beforeFailover: true } }],
     ['25 minutes before a weak-signal dwell, inside its event lookback', 'weak-signal', 'verify', 25 * M, null, 30 * M, ['weak-signal']],
     ['35 minutes before one', 'weak-signal', 'verify', 35 * M, null, 40 * M, []],
     ['40 hours before a chronic dwell matured', 'chronic-return-path', 'verify', -8 * H, null, 40 * H, []],
@@ -2540,21 +2541,23 @@ test('our read\'s failover confounds a route-sensitive episode that opens AFTER 
       const orig = R.priv.outcomes.markConfounded.bind(R.priv.outcomes);
       R.priv.outcomes.markConfounded = (n, k) => { if (n === 7) marked.push(k); orig(n, k); };
       const at = Date.now();
+      const open7 = () => (R.zd.openEpisodes() ?? []).filter((e) => e.nodeId === 7);
+      const syms = (since: number, subsumedBy?: string) => [kind, 'quiet-node'].map((k) => ({ kind: k, nodeId: 7, severity: 'watch', sinceMs: since, basis: 'measured', evidence: [], narrative: '', ...(subsumedBy ? { subsumedBy } : {}) }));
+      const prior = () => {
+        const t0 = at + o.prior!.open;
+        R.priv.updateEpisodes(syms(at + o.prior!.since), t0);
+        assert.equal(open7().length, 2, `${label}: fixture guard, the earlier episode opened`);
+        for (let t = t0 + M; t < t0 + 2 * H && open7().length > 0; t += M) R.priv.updateEpisodes([], t);
+        assert.equal(open7().length, 0, `${label}: fixture guard, and closed`);
+        marked.length = 0;
+      };
+      if (o.prior?.beforeFailover) prior();
       R.zd.noteMeasurementProbe(7, at, lane, 'read');
       R.route(R.failedOver);
       R.priv.lastOkAt = Date.now();
       R.priv.sampleEvidence(); // the failover's own engine pass, with nothing open
       assert.equal(R.priv.measurementReroutes.size, 0, `${label}: fixture guard, that pass consumed the mark`);
-      const open7 = () => (R.zd.openEpisodes() ?? []).filter((e) => e.nodeId === 7);
-      const syms = (since: number, subsumedBy?: string) => [kind, 'quiet-node'].map((k) => ({ kind: k, nodeId: 7, severity: 'watch', sinceMs: since, basis: 'measured', evidence: [], narrative: '', ...(subsumedBy ? { subsumedBy } : {}) }));
-      if (o.prior) {
-        const t0 = at + o.prior.open;
-        R.priv.updateEpisodes(syms(at + o.prior.since), t0);
-        assert.equal(open7().length, 2, `${label}: fixture guard, the earlier episode opened`);
-        for (let t = t0 + M; t < t0 + 2 * H && open7().length > 0; t += M) R.priv.updateEpisodes([], t);
-        assert.equal(open7().length, 0, `${label}: fixture guard, and closed`);
-        marked.length = 0;
-      }
+      if (o.prior && !o.prior.beforeFailover) prior();
       const since = at + sinceOff;
       if (seenOff != null) {
         R.priv.updateEpisodes(syms(since, 'ctrl'), at + seenOff);
@@ -3612,8 +3615,9 @@ test('the confirmation cooldown is per node, and a burst drains ahead of confirm
     assert.deepEqual(out[0], { id: 15, first: true }, 'the burst is not held behind them');
     assert.deepEqual(out.slice(1).map((d) => d.id), [11, 12, 13], 'and they fill the rest of the tick in order');
   } finally { o.done(); }
-  // A confirmation still wanted keeps its place: the oldest, nearest the end
-  // of its round trip's lookback, takes the one slot three bursts leave.
+  // A confirmation still wanted is not withdrawn and re-owed behind the
+  // others: owed for the same round trip, the one owed first takes the one
+  // slot three bursts leave.
   const q = await confirmRig('zwtui-rttfifo-');
   try {
     const f = { t: q.now(), raw: 300 };
@@ -3734,6 +3738,38 @@ test('only a confirmation the runner takes is stamped: not one starved of a slot
     b.trip(300);
     assert.deepEqual(b.zd.drainVerifyRequests(b.now()), [{ id: 7, first: false, confirm: true }], 'a burst leaves no confirmation cooldown');
   } finally { b.done(); }
+});
+
+test('a round trip from before this start gets no confirmation: the restored ring outlives the cooldown (v0.78.0 review)', async () => {
+  const r = await confirmRig('zwtui-rttrestart-');
+  try {
+    const created = (r.priv as unknown as { createdAt: number }).createdAt;
+    r.priv.requestRttConfirms(new Map([[7, { t: created - 1, raw: 300 }]]), r.now());
+    assert.equal(r.zd.verifyOwedCount(), 0, 'it may already have had its probe');
+    r.priv.requestRttConfirms(new Map([[7, { t: created, raw: 300 }]]), r.now());
+    assert.equal(r.zd.verifyOwedCount(), 1, 'one from this start is asked about');
+  } finally { r.done(); }
+});
+
+test('a mesh-identity answer forgets the episodes\' dwell starts: a re-open on one is a first open again (v0.78.0 review)', async () => {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-identity-dwell-'));
+  writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({ v: 1, homeId: 12345, control: [] }));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.pendingIdentity() != null);
+    const dwell = (zd as unknown as { episodeDwellStart: Map<string, number> }).episodeDwellStart;
+    dwell.set('7:route-churn', 1000);
+    zd.resolveIdentityDecision('fresh'); // only the ledger is parked here; it is reset
+    assert.equal(dwell.size, 0, 'the episode it remembered went with the ledger');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a confirmation never cuts a burst short, and a burst asked for after it is a burst (v0.78.0)', async () => {

@@ -38,8 +38,9 @@ single probe instead of a 10-probe episode.
   the 10-minute lookback, counted from the round trip, so a probe sent late
   does not hold back the next slow round trip. One the runner never takes
   (refused, withdrawn, absorbed by a burst or dropped by the pause) leaves no
-  cooldown; one it takes and then drops (a node Dead at its tick) does. It
-  passes every gate a burst probe does,
+  cooldown; one it takes and then drops (a node Dead at its tick) does. A
+  round trip from before an add-on restart gets none: the evidence ring is
+  restored, the cooldown is not. It passes every gate a burst probe does,
   opens no episode, is withdrawn unsent when the node's own traffic answers
   first, never shortens an owed burst, drains after any burst owed on the
   same tick, and is not counted as episode evidence on DETAIL or REMEDY.
@@ -50,11 +51,14 @@ single probe instead of a 10-probe episode.
   routed read re-routed its node during its dwell or in the detector's
   lookback before it (10 minutes; 30 for `weak-signal`, which reads that far
   on a node too quiet for a rate). The dwell counts from no earlier than five
-  minutes before it could first mature: a `chronic-return-path` dwell runs
-  for two days. An open held past maturity (behind a mesh event, a thin
-  window, a missed pass) keeps the whole dwell, and an episode re-opened on a
-  dwell that already had one counts from the re-open. A confirmation's failed-over answer can be the round trip that
-  starts the breach, and the guard saw only episodes already open, which also
+  minutes before its nominal maturity (its start plus its own dwell; two
+  days for `chronic-return-path`). An open held or emitted past that (a mesh
+  event, a thin window, a missed pass, a chronic dwell short of its hits)
+  keeps everything since, erring toward confounding. An episode re-opened on
+  a dwell that already had one counts from the re-open, even when a mesh
+  event holds the re-open; a mesh-identity answer forgets those dwells. A
+  confirmation's failed-over answer can be the round trip that starts the
+  breach, and the guard saw only episodes already open, which also
   let a sweep read failing over during a dwell through. REMEDY's confounded
   row now leads with `credited to neither arm` and says `during or just
   before the episode`.
@@ -84,7 +88,7 @@ single probe instead of a 10-probe episode.
   caught 33 minutes later at 9.6k. Inside the 30 episodes, 11–12
   confirmations replace the 140 burst probes 0.77.3 spent on one-frame
   episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
-- 29 new tests; 91 new mutation entries, 7 re-anchored.
+- 31 new tests; 94 new mutation entries, 7 re-anchored.
 
 ## 0.77.3
 
