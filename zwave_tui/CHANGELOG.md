@@ -90,7 +90,7 @@ single probe instead of a 10-probe episode.
   caught 33 minutes later at 9.6k. Inside the 30 episodes, 11–12
   confirmations replace the 140 burst probes 0.77.3 spent on one-frame
   episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
-- 31 new tests; 98 new mutation entries, 7 re-anchored.
+- 31 new tests; 99 new mutation entries, 7 re-anchored.
 
 ## 0.77.3
 

@@ -3779,8 +3779,10 @@ test('a round trip restored from before a restart gets no confirmation; a newer 
   }
 });
 
-test('every mesh-identity answer forgets the episodes\' dwell starts, keep as well as fresh (v0.78.0 review)', async () => {
-  for (const choice of ['fresh', 'keep'] as const) {
+test('every mesh-identity answer forgets the episodes\' dwell starts: fresh, keep and resume (v0.78.0 review)', async () => {
+  // The clear runs before any store answers, so a parked ledger reaches it
+  // for each choice; resume has no archive here and is refused after it.
+  for (const choice of ['fresh', 'keep', 'resume'] as const) {
     const ha = fakeHa();
     const dir = mkdtempSync(join(tmpdir(), `zwtui-identity-dwell-${choice}-`));
     writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({ v: 1, homeId: 12345, control: [] }));
