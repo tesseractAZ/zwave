@@ -54,7 +54,7 @@ health endpoint.
 | --- | --- |
 | Server | about 32,000 lines of TypeScript; 9 screens; SSH, browser and Home Assistant entity interfaces |
 | Detection | 14 per-node detectors, 2 cross-node correlations, controller serial-link health |
-| Verification | 1,650 tests; a mutation-testing harness of 1,519 hand-written mutants (13 labelled equivalent), run on the code each release touches |
+| Verification | 1,681 tests; a mutation-testing harness of 1,614 hand-written mutants (13 labelled equivalent), run on the code each release touches |
 | Integration | Home Assistant Core WebSocket (roster, statistics, gated actions) plus a read-only Z-Wave JS driver WebSocket (noise floor, capabilities, log stream) |
 
 ![The Overview screen: a live node table sorted worst-health-first, with per-node health scores, SNR margin, RTT, timeout rate, hop count, data rate and triage flags](docs/screenshots/overview.svg)
@@ -317,8 +317,9 @@ engine's own probes, since that skips the dwell), and asks every listening mains
 node not marked Dead **on a fixed per-node cadence** (default every 120 min, however chatty the node — Z-Wave JS
 marks Dead only reactively, so an unplugged device can read "Alive" for hours until
 something talks to it). The dead-node ladder and a manual `p` send Home
-Assistant's ping; the liveness sweep and the verification bursts send **one
-routed read** instead — `zwave_js.refresh_value` on the device's own
+Assistant's ping; the liveness sweep, the verification bursts and (v0.78.0) the
+single `rtt-degraded` confirmation (one probe per lone slow round trip, to
+check it) send **one routed read** instead — `zwave_js.refresh_value` on the device's own
 switch/light value, a single Get that changes nothing on the device (its Report
 can correct a stale Home Assistant state) — because a ping is one
 ACK-only attempt on the stored routes, and an unanswered one marks a working
@@ -328,7 +329,7 @@ the node is then retried at once and left alone by the sweep for 15 min.
 Battery/sleeping devices are never probed; a boot window, a rebuild suppressor,
 a controller RF-off hold (the nightly NVM backup turns the radio off for about
 ten seconds), and a mesh-storm guard (≥25 % dead ⇒ stand down) bound it.
-Off by default; every decision is traced to the log. Auto-ping's liveness probes and the ledger's verification probes are measurements, never recorded as a remediation (v0.38.1) — and because a read can re-route a node, an episode that re-route could clear by itself is credited to neither arm (v0.71.0); only its dead-node pings count as an action in the
+Off by default; every decision is traced to the log. Auto-ping's liveness probes and the ledger's verification probes are measurements, never recorded as a remediation (v0.38.1) — and because a read can re-route a node, an episode that re-route could clear by itself is credited to neither arm (v0.71.0), as is one it may have helped start (v0.78.0); only its dead-node pings count as an action in the
 learning ledger.
 
 **Swapping the controller — you are asked, nothing is discarded (v0.64.0).** The

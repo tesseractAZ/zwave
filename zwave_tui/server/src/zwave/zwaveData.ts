@@ -64,13 +64,14 @@ import {
   type ProbeClassLite,
   type ProbeFrameLite,
   type RttSeed,
+  type RttFrame,
 } from './evidenceStore';
 import { createDriverWsClient, type DriverWsClient, type BgRssiChannels, type DriverLogWatch } from './driverWsClient';
 import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore } from './baselines';
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, WEAK_EVENT_LOOKBACK_MS, CHRONIC_DAYS_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -242,6 +243,18 @@ const VERIFY_SPACING_MS = 30_000;
  * so the peak is a few extra pings for a few minutes, not a standing load.
  */
 const VERIFY_MAX_PER_TICK = 4;
+/**
+ * After an rtt-degraded confirmation probe, no other for the node until the
+ * round trip it was asked about is this old (v0.78.0). It equals the
+ * detector's 10-minute lookback and is inclusive at the edge, as the lookback
+ * is, so that round trip has left the window before another probe could be
+ * asked: one slow round trip buys at most one probe, answered or not. Counted
+ * from the round trip, not the hand-out, so a probe handed out late cannot
+ * outlast it and refuse the next slow round trip, which is always newer.
+ * Stamped when the runner takes the probe: one refused, withdrawn, absorbed by
+ * a burst or cleared by the pause before then leaves no cooldown behind.
+ */
+const RTT_CONFIRM_COOLDOWN_MS = 10 * 60_000;
 const CONFIG_RETRY_MS = 15_000;
 
 /* ─── raw HA response shapes (only the fields we read) ──────────────────── */
@@ -364,6 +377,9 @@ export interface ZwaveDataOptions {
   evidenceSampleMs?: number;
   /** How often to flush evidence to disk (ms). Falls back to env; default 30s. */
   evidenceFlushMs?: number;
+  /** The evidence store's boot-grace window (ms); default its own 180 s. Tests
+   *  that restore a ring set 0, so a freshly booted CI runner does not drop it. */
+  evidenceBootGraceMs?: number;
   /**
    * READ-ONLY zwave-js driver WS (v0.13, DESIGN §2.1) — feeds background RSSI
    * (real noise floor), node lastSeen, and listening/FLiRS flags. Empty/null ⇒
@@ -528,7 +544,7 @@ export interface ZwaveData {
    *  makes the open→confirm pause ~180s, under the 240s threshold, so a burst
    *  BOUNDARY printed as "+180s" and read as slow spacing in an audit. */
   /** `skip` (v0.71.0): nodes whose probes stay OWED this call, not drained. */
-  drainVerifyRequests(now?: number, skip?: (nodeId: number) => boolean): { id: number; first: boolean }[];
+  drainVerifyRequests(now?: number, skip?: (nodeId: number) => boolean): { id: number; first: boolean; confirm?: true }[];
   /** How many nodes have an outstanding verification burst (v0.37.1). */
   verifyOwedCount(): number;
   /** Record one liveness-probe outcome for the persisted reply rate (v0.37);
@@ -547,7 +563,7 @@ export interface ZwaveData {
   /** The learned reply-timeout yardstick for this node's current band (v0.48.0). */
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
   /** Is this node's baseline learning currently PAUSED, and why (v0.48.0)? */
-  baselineHold(nodeId: number): 'symptomatic' | 'arming' | null;
+  baselineHold(nodeId: number): 'symptomatic' | 'arming' | 'rtt-over-line' | null;
   /** Transmissions since the driver restarted, when that restart held this
    *  node's newest RTT reading out of the baseline in this lifetime (v0.77.1). */
   rttSeedHold(nodeId: number): number | null;
@@ -785,6 +801,10 @@ class ZwaveDataImpl implements ZwaveData {
   /** Nodes whose route our own routed read changed since the last engine pass
    *  (v0.71.0) — consumed by the confound guard in updateEpisodes. */
   private readonly measurementReroutes = new Set<number>();
+  /** When our own routed read last re-routed each node (v0.78.0) — kept past
+   *  the engine pass that consumes measurementReroutes, so an episode that
+   *  opens AFTER the failover is still confounded by it (see updateEpisodes). */
+  private readonly measurementRerouteAt = new Map<number, number>();
   /** Alive→Dead transitions for the auto-ping runner (v0.71.0), from the same
    *  sources that count flaps: the status feed, or the roster diff for a node
    *  without one. `seen` is the node's lastSeen at the death (this feed's own
@@ -874,7 +894,17 @@ class ZwaveDataImpl implements ZwaveData {
    * (write actions, boot window, rebuild, storm) so nothing here can probe a
    * mesh auto-ping itself would have left alone.
    */
-  private readonly verifyOwed = new Map<number, { left: number; nextAt: number }>();
+  private readonly verifyOwed = new Map<number, { left: number; nextAt: number; confirm?: true; frameAt?: number }>();
+  /** The round trip each node's last handed-out rtt-degraded confirmation was
+   *  asked about (v0.78.0): its time, which the cooldown runs from. */
+  private readonly rttConfirmAt = new Map<number, number>();
+  /** Each node's newest reading restored at load (v0.78.0): no confirmation
+   *  is asked about a round trip from then or before. */
+  private readonly restoredUntil = new Map<number, number>();
+  /** The dwell start of the last episode opened on each symptom key
+   *  (v0.78.0): an episode opened again on the same dwell counts the
+   *  open-time confound from its re-open, not from that dwell's start. */
+  private readonly episodeDwellStart = new Map<string, number>();
   /** Episode keys whose after-window burst has already been requested (v0.36.3),
    *  so the timed request fires once per confirmation window rather than every
    *  tick from the moment it comes due. */
@@ -1061,9 +1091,16 @@ class ZwaveDataImpl implements ZwaveData {
     const evFlush = opts.evidenceFlushMs ?? Number(process.env.EVIDENCE_FLUSH_MS ?? 900_000);
     this.evidenceFlushMs = Number.isFinite(evFlush) ? evFlush : 900_000;
     this.evidenceStore = evPath
-      ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log })
+      ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log, bootGraceMs: opts.evidenceBootGraceMs })
       : null;
-    this.evidenceStore?.load();
+    const restored = this.evidenceStore?.load();
+    // The ring is restored across an add-on restart and the confirmation
+    // cooldown is not (v0.78.0 review): a round trip restored from before this
+    // start may already have had its probe, so it gets no other.
+    for (const [id, samples] of restored ?? []) {
+      const last = samples.at(-1)?.t;
+      if (last != null) this.restoredUntil.set(id, last);
+    }
     // M3 engine: per-node learned baselines (persisted; boot-grace KEEPS them).
     const blPath = (opts.baselinesPath ?? process.env.BASELINES_PATH) || null;
     this.baselines = blPath ? createBaselineStore({ path: blPath, log: this.log }) : null;
@@ -1427,6 +1464,10 @@ class ZwaveDataImpl implements ZwaveData {
     if (!this.evidenceStore || !this.baselines) return;
     const ev = this.evidenceStore;
     const bl = this.baselines;
+    // One slow round trip the detector wants a second look at, and every node
+    // whose RTT average is over the line (v0.78.0).
+    const suspects = new Map<number, RttFrame>();
+    const rttOver = new Set<number>();
     const symptoms = detectSymptoms(
       {
         now,
@@ -1440,6 +1481,12 @@ class ZwaveDataImpl implements ZwaveData {
         coverage: (id) => ev.coverage(id),
         rateRun: (id) => ev.rateRun(id),
         rttSeed: (id) => ev.rttSeed(id),
+        // A confirmation can reach a node only through auto-ping's verification
+        // lane, which exists only when the runner does (index.ts) and probes
+        // only ping candidates (v0.78.0).
+        rttConfirmable: (n) => this.autoPingSnapshotFn != null && isPingCandidate(n),
+        rttSuspect: (id, f) => { suspects.set(id, f); },
+        rttOverLine: (id) => { rttOver.add(id); },
         // The CONFIGURED sweep cadence (v0.63.0) — quiet-node's dwell derives
         // from it rather than from the default its constant was written
         // against. 0/absent when the sweep is off, which floors the dwell at
@@ -1452,6 +1499,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.symptomState,
     );
     this.lastSymptoms = symptoms;
+    this.requestRttConfirms(suspects, now);
     // Held through a dark lane (v0.76.0): live for the log and the episodes.
     const held = heldSymptoms(this.symptomState);
     // Log NEW symptoms once (source 'net', kind 'symptom'); prune resolved keys.
@@ -1476,10 +1524,18 @@ class ZwaveDataImpl implements ZwaveData {
     // built exactly as before, so folding is bit-identical.
     const qSym = symptomaticNodes(symptoms);
     const qArm = new Set(armingNodes(this.symptomState));
+    // An RTT average over the line is held out whether or not its breach has
+    // started (v0.78.0). Until then the average alone armed the dwell, which is
+    // what kept it out; one slow round trip no longer arms it, and the tail it
+    // leaves (a normal answer after a 300 ms frame keeps a 30 ms node's average
+    // over the line for several readings) would pull the median toward it.
+    const qRtt = new Set([...rttOver].filter((id) => !qArm.has(id)));
     this.lastQuarantineSym = qSym;
     this.lastQuarantineArm = qArm;
+    this.lastQuarantineRtt = qRtt;
     const quarantine = new Set(qSym);
     for (const id of qArm) quarantine.add(id);
+    for (const id of qRtt) quarantine.add(id);
     for (const n of this.lastNodes) {
       if (n.isController) continue;
       const ring = ev.forNode(n.nodeId);
@@ -1568,6 +1624,30 @@ class ZwaveDataImpl implements ZwaveData {
       // measures how long the symptom was live FROM it, so a late open tick
       // cannot carry an aged-out reading back across the boundary.
       oc.open(s.nodeId, s.kind, now, this.degradedWindow(s.nodeId, since, now), { dwellStartMs: since });
+      // …confounded from the start when our own read re-routed the node inside
+      // the detectors' lookback before its dwell began, or since (v0.78.0). The
+      // guard below sees only episodes already open on the failover's pass, so
+      // a breach that failover helped start (a confirmation's answer pairing
+      // with the slow round trip it was sent to check, a sweep read during the
+      // dwell) was booked to the control arm. The reach counts at most the
+      // last DWELL_MS of the dwell's own length: a chronic dwell runs for
+      // days, and a failover that long before it could mature neither started
+      // the breach nor can end it. It is anchored at that nominal maturity, not
+      // at the open, so an open held late (subsumed by a mesh event, a node
+      // not yet a ping candidate, a window too thin to evaluate, a missed pass)
+      // keeps the whole dwell. An episode re-opened on a dwell that already
+      // had one counts from the re-open. weak-signal on a node too quiet for a
+      // rate reads its route, RSSI and failures over WEAK_EVENT_LOOKBACK_MS,
+      // so it reaches back that far.
+      if (s.nodeId != null && MEASUREMENT_REROUTE_KINDS.has(s.kind)) {
+        const key = `${s.nodeId}:${s.kind}`;
+        const rr = this.measurementRerouteAt.get(s.nodeId);
+        const matures = since + (s.kind === 'chronic-return-path' ? CHRONIC_DAYS_MS : SYMPTOM_DWELL_MS);
+        const anchor = this.episodeDwellStart.get(key) === since ? now : Math.min(now, matures);
+        const lookback = s.kind === 'weak-signal' ? WEAK_EVENT_LOOKBACK_MS : SYMPTOM_WINDOW_MS;
+        if (rr != null && rr >= Math.max(since, anchor - SYMPTOM_DWELL_MS) - lookback) oc.markConfounded(s.nodeId, s.kind);
+        this.episodeDwellStart.set(key, since);
+      }
       // Ask for verification probes while the symptom is LIVE, so the degraded
       // window can reach the verifier's evidence floor before it is scored.
       this.requestVerification(s.nodeId);
@@ -1919,7 +1999,10 @@ class ZwaveDataImpl implements ZwaveData {
   }
 
   verifyOwedFor(nodeId: number): number {
-    return this.verifyOwed.get(nodeId)?.left ?? 0;
+    // An rtt-degraded confirmation serves no episode (v0.78.0), so it is not
+    // "episode evidence owed" on DETAIL or REMEDY; the fleet count keeps it.
+    const st = this.verifyOwed.get(nodeId);
+    return st == null || st.confirm ? 0 : st.left;
   }
 
   /** The sweep's OWN candidate predicate, published (v0.47.0) — imported, never
@@ -2095,42 +2178,87 @@ class ZwaveDataImpl implements ZwaveData {
    * count back up rather than queueing a second burst, so a symptom that
    * flaps cannot multiply the traffic it causes.
    */
-  private requestVerification(nodeId: number | null): boolean {
+  private requestVerification(nodeId: number | null, probes: number = VERIFY_BURST): boolean {
     if (nodeId == null || !this.outcomes) return false;
     // Paused (v0.72.0): nothing is owed from a paused period.
     if (this.autonomy.state() != null) return false;
     const cur = this.verifyOwed.get(nodeId);
     this.verifyOwed.set(nodeId, {
-      left: Math.max(cur?.left ?? 0, VERIFY_BURST),
+      left: Math.max(cur?.left ?? 0, probes),
       nextAt: cur?.nextAt ?? 0,
+      // Fewer than a burst is an rtt-degraded confirmation (v0.78.0). A burst
+      // asked for while one is owed rewrites it without the flag: its first
+      // probe answers the same question.
+      ...(probes < VERIFY_BURST ? { confirm: true as const } : {}),
     });
     return true;
   }
 
   /**
+   * Owe ONE verification probe to each node whose RTT average breaches on a
+   * single slow round trip (v0.78.0), so the next engine tick can see whether
+   * the round trip after it is slow too.
+   *
+   * It rides the verification lane, so it passes every gate a burst probe
+   * does (write actions, boot window, rebuild, radio off, storm, operator
+   * action, the post-kill hold) and requestVerification's own refusals (no
+   * ledger, the owner's pause). A node already owed any probe is left alone:
+   * that probe answers the same question, and a confirmation must never cut a
+   * burst short. At most one is handed out per slow round trip
+   * (RTT_CONFIRM_COOLDOWN_MS); the owed entry carries the round trip's time.
+   * An owed confirmation the detector no longer asks for (the node's own
+   * traffic answered, the frame aged out, the breach started or ended) is
+   * withdrawn before it is sent.
+   */
+  private requestRttConfirms(suspects: Map<number, RttFrame>, now: number): void {
+    for (const [id, st] of this.verifyOwed) if (st.confirm && !suspects.has(id)) this.verifyOwed.delete(id);
+    for (const [id, f] of suspects) {
+      if (f.t <= (this.restoredUntil.get(id) ?? -Infinity)) continue;
+      if (!this.verifyOwed.has(id)) {
+        const at = this.rttConfirmAt.get(id);
+        if (at != null && now - at <= RTT_CONFIRM_COOLDOWN_MS) continue;
+        this.requestVerification(id, 1);
+      }
+      // Owed now or still: it asks about the newest lone slow round trip.
+      const owed = this.verifyOwed.get(id);
+      if (owed?.confirm) owed.frameAt = f.t;
+    }
+  }
+
+  /**
    * Node ids to probe for verification on this tick.
    *
-   * At most ONE per call, newest-deadline-first, with a per-node spacing so a
-   * burst lands as separate readings across the window rather than three
-   * packets in one second (which would be one observation's worth of
-   * information and three times the airtime).
+   * Up to VERIFY_MAX_PER_TICK per call: bursts first, in owed order, then
+   * rtt-degraded confirmations, oldest round trip first (v0.78.0). A per-node
+   * spacing makes a burst land as separate readings across the window rather
+   * than three packets in one second (which would be one observation's worth
+   * of information and three times the airtime).
    */
-  drainVerifyRequests(now = Date.now(), skip?: (nodeId: number) => boolean): { id: number; first: boolean }[] {
+  drainVerifyRequests(now = Date.now(), skip?: (nodeId: number) => boolean): { id: number; first: boolean; confirm?: true }[] {
     const due: number[] = [];
+    const confirms: number[] = [];
     for (const [id, st] of this.verifyOwed) {
       if (st.left <= 0) { this.verifyOwed.delete(id); continue; }
       if (now < st.nextAt) continue;
       // Held by the runner (v0.71.0): left OWED, not handed out — handing it
       // out would spend the burst on a probe the runner will not send.
       if (skip?.(id)) continue;
-      due.push(id);
+      (st.confirm ? confirms : due).push(id);
     }
+    // Bursts first (v0.78.0): a burst's probes are timed to land inside the
+    // window they fill. A confirmation can wait out the rest of its round
+    // trip's 10-minute lookback; bursts filling every slot for all of it
+    // withdraw it unsent. Among confirmations the oldest round trip goes
+    // first, being nearest the end of its lookback (stable: owed order breaks
+    // a tie).
+    confirms.sort((a, b) => (this.verifyOwed.get(a)!.frameAt ?? now) - (this.verifyOwed.get(b)!.frameAt ?? now));
+    due.push(...confirms);
     if (due.length === 0) return [];
     // Several nodes per tick, not one. A burst must land INSIDE the window it
     // fills, and serialising nodes one-per-tick stretches each burst by the
     // number of nodes competing — which is how a 5-probe burst came to span
     // 480 s against a 300 s window on the live mesh.
-    const out: { id: number; first: boolean }[] = [];
+    const out: { id: number; first: boolean; confirm?: true }[] = [];
     for (const id of due.slice(0, VERIFY_MAX_PER_TICK)) {
       const st = this.verifyOwed.get(id)!;
       // Ground truth for the burst boundary: a full budget means nothing of
@@ -2140,7 +2268,8 @@ class ZwaveDataImpl implements ZwaveData {
       const left = st.left - 1;
       if (left <= 0) this.verifyOwed.delete(id);
       else this.verifyOwed.set(id, { left, nextAt: now + VERIFY_SPACING_MS });
-      out.push({ id, first });
+      if (st.confirm) this.rttConfirmAt.set(id, st.frameAt ?? now);
+      out.push(st.confirm ? { id, first, confirm: true } : { id, first });
     }
     return out;
   }
@@ -2154,6 +2283,7 @@ class ZwaveDataImpl implements ZwaveData {
    *  per-node signal verdict is measured against, and until now unreadable. */
   private lastQuarantineSym = new Set<number>();
   private lastQuarantineArm = new Set<number>();
+  private lastQuarantineRtt = new Set<number>();
   /** Nodes whose RTT reading the last engine tick held out of the baseline
    *  because a driver restart can still move it, with their commandsTX (v0.77.1). */
   private lastRttSeedHold = new Map<number, { k: number; seed: RttSeed | null }>();
@@ -2169,10 +2299,12 @@ class ZwaveDataImpl implements ZwaveData {
    * Null when the engine is off, so DETAIL renders nothing at all — matching how
    * it treats an absent `rssiNormal` rather than claiming learning is running.
    */
-  baselineHold(nodeId: number): 'symptomatic' | 'arming' | null {
+  baselineHold(nodeId: number): 'symptomatic' | 'arming' | 'rtt-over-line' | null {
     if (!this.baselines) return null;
     if (this.lastQuarantineSym.has(nodeId)) return 'symptomatic';
     if (this.lastQuarantineArm.has(nodeId)) return 'arming';
+    // The RTT average is over the line with no breach started (v0.78.0).
+    if (this.lastQuarantineRtt.has(nodeId)) return 'rtt-over-line';
     return null;
   }
 
@@ -2280,6 +2412,11 @@ class ZwaveDataImpl implements ZwaveData {
     // Every answer replaces the ledger's open episodes: the refresh trial's
     // open decision cannot be scored across it (v0.75.0 review).
     this.trial?.dropOpen(null, 'mesh identity decision', Date.now());
+    // …and any answer forgets the episodes' dwell starts (v0.78.0): a fresh
+    // start discards the episodes, so a live symptom re-opening is a first
+    // open. After keep or resume a re-open on an old dwell is judged as a first
+    // open too, erring toward confounding.
+    this.episodeDwellStart.clear();
     let ok = true;
     if (this.outcomes && !this.outcomes.resolveIdentity(choice)) ok = false;
     if (this.baselines && !this.baselines.resolveIdentity(choice)) ok = false;
@@ -2663,6 +2800,8 @@ class ZwaveDataImpl implements ZwaveData {
           this.flapAccum.delete(id);
           this.routeChangeAccum.delete(id);
           this.s2Accum.delete(id);
+          this.measurementRerouteAt.delete(id);
+          this.rttConfirmAt.delete(id);
           this.measurementSent.delete(id);
           this.lastProbeAt.delete(id);
           this.ourTxReport.delete(id);
@@ -2782,6 +2921,11 @@ class ZwaveDataImpl implements ZwaveData {
         this.flapAccum.clear();
         this.routeChangeAccum.clear();
         this.s2Accum.clear();
+        this.measurementRerouteAt.clear();
+        this.episodeDwellStart.clear();
+        this.rttConfirmAt.clear();
+        // An owed confirmation asks about the old network's round trip.
+        for (const [id, st] of this.verifyOwed) if (st.confirm) this.verifyOwed.delete(id);
         this.measurementSent.clear();
         this.lastProbeAt.clear();
         this.ourTxReport.clear();
@@ -3965,6 +4109,7 @@ class ZwaveDataImpl implements ZwaveData {
         // routes would feed it by itself — an episode our probing opens and
         // then asks to verify with more probing.
         this.measurementReroutes.add(nodeId);
+        this.measurementRerouteAt.set(nodeId, Date.now());
         if (ourFrame!.lane === 'sweep') this.evidenceStore?.recordProbeReroute(nodeId);
         this.log(`auto-ping: node ${nodeId}'s stored route failed on our ${lane} routed read and the controller ` +
           `delivered it by another (${fmtRoute(stats.lwr)}) — its open rate, RTT, signal, return-path and route-churn episodes are confounded`);

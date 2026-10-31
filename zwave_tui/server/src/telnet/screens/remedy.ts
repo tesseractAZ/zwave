@@ -255,7 +255,8 @@ interface Ledger {
   /** Of those, undersampled by the node's own cadence (v0.41.2). */
   unverifiableUndersampled: (kind: SymptomKind) => number;
   /** No-action closures confounded by a mid-episode death/remediation (v0.40),
-   *  or a re-route by our own measurement read (v0.71.0). */
+   *  or a re-route by our own measurement read (v0.71.0), during the episode or,
+   *  since v0.78.0, just before it opened. */
   confounded: (kind: SymptomKind) => number;
   /** Can the liveness sweep probe this node at all (v0.47.0)? */
   probeable: (nodeId: number) => boolean | null;
@@ -361,8 +362,8 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     const conf = ledger.confounded(sym.kind);
     if (conf > 0) {
       rows.push(truncate(
-        '    ' + c.grey(`○ ${conf} confounded by a mid-episode death, remediation or probe re-route — ` +
-          'credited to neither arm'), W));
+        '    ' + c.grey(`○ ${conf} confounded — credited to neither arm (a death, remediation or probe re-route ` +
+          'during or just before the episode)'), W));
     }
   }
   // WHY there are no ledger rows at all, for kinds where that is permanent

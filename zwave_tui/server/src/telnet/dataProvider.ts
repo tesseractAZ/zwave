@@ -148,7 +148,7 @@ export interface ZwaveDataSource {
   rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
   /** REQUIRED — see ackEvent. Whether learning is PAUSED for this node. */
-  baselineHold(nodeId: number): 'symptomatic' | 'arming' | null;
+  baselineHold(nodeId: number): 'symptomatic' | 'arming' | 'rtt-over-line' | null;
   /** REQUIRED — see ackEvent. RTT learning paused by a recent driver restart (v0.77.1). */
   rttSeedHold(nodeId: number): number | null;
   /** REQUIRED — see ackEvent. Epoch ms of the last STATISTICS event. A green

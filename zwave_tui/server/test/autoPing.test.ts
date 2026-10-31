@@ -3524,3 +3524,47 @@ test('paused, a spent node is not given up while a probe to it still awaits its 
   const d = tick(s, nodes, T + 3 * 3_600_000, { canRead: () => true, paused: true });
   assert.deepEqual(d.gaveUp, [], 'its answer grace runs first');
 });
+
+/* ── v0.78.0: the single rtt-degraded confirmation rides the verification lane ── */
+
+test('an rtt-degraded confirmation is decided like any verification probe and carried apart from bursts (v0.78.0)', () => {
+  const nodes = mesh(20);
+  const s = createAutoPingState();
+  trackEpisodes(s, nodes, T);
+  const d = decideAutoPings({
+    now: T, state: s, nodes, controller: null, config: cfg(), booting: false,
+    verifyDue: () => [{ id: 100, first: false, confirm: true }, { id: 101, first: true }],
+  });
+  assert.deepEqual(d.verify, [100, 101], 'both go out on the verification lane');
+  assert.deepEqual(d.verifyConfirm, [100], 'the confirmation is marked as one');
+  assert.deepEqual(d.verifyFirst, [101], 'and is not a burst start');
+  const p = createAutoPingState();
+  trackEpisodes(p, nodes, T);
+  let drained = 0;
+  const paused = decideAutoPings({
+    now: T, state: p, nodes, controller: null, config: cfg(), booting: false, paused: true,
+    verifyDue: () => { drained++; return [{ id: 100, first: false, confirm: true }]; },
+  });
+  assert.deepEqual(paused.verify, [], 'the pause stops it like any other autonomous write');
+  assert.equal(drained, 0, 'and leaves it undrained');
+});
+
+test('an rtt-degraded confirmation says so in its probe line, not "episode evidence" (v0.78.0)', async () => {
+  const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const lines: string[] = [];
+  const server: string[] = [];
+  const h = startAutoPing({
+    nodes: () => mesh(20), controller: () => null, ready: () => true,
+    ping: async () => {}, log: (_s, _n, text) => { lines.push(text); }, log2: (text: string) => { server.push(text); },
+    verifyRequests: () => [{ id: 100, first: false, confirm: true }], verifyOwedCount: () => 1,
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  clock = T + BOOT_WINDOW_MS + MIN; h.tick();
+  const probe = lines.filter((l) => /verification probe/.test(l));
+  assert.equal(probe.length, 1);
+  assert.match(probe[0], /verification probe \(rtt-degraded confirm, 1 node owed\)/);
+  assert.doesNotMatch(probe[0], /episode evidence/);
+  assert.ok(server.some((l) => /rtt-degraded confirm/.test(l)), 'and it reaches the server log too');
+  h.stop();
+});

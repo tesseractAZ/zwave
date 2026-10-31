@@ -334,8 +334,8 @@ trailing event up to 250 ms later. Pairing a counter delta with the route rate
 therefore requires waiting out the window (DESIGN §3.1, settle deferral).
 
 **Raw round trips are recoverable** *(source — zwave-js `Node.ts` `updateRTT`
-and `Driver.ts` `handleSerialAPICommandResult`, as cited in `outcomes.ts`
-`rawRttOf`; added for v0.74.3; no empirical repro)*: `rtt` moves once per
+and `Driver.ts` `handleSerialAPICommandResult`, as cited in `evidenceStore.ts`
+`rawRttOf` (in `outcomes.ts` until v0.78.0); added for v0.74.3; no empirical repro)*: `rtt` moves once per
 acknowledged transmission, the same event that increments `commandsTX`, as
 `0.75·rtt + 0.25·new`. Across a window of k = ΔcommandsTX transmissions the
 mean raw round trip is therefore `(rtt − 0.75^k·rtt_prev)/(1 − 0.75^k)`.

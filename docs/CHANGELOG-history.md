@@ -3,6 +3,90 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.75.2
+
+### Fixed — every noise floor uses one rule for what a reading is
+
+Five places decided whether a background-RSSI value counts toward the noise
+floor, and they disagreed. The screens' floor and its "measured" tag, the
+Interference floor and the persisted trend kept any negative value; the
+weak-signal detector dropped values at or below −120 dBm per channel; the health
+score took the screens' floor and fell back to −95 only when that floor itself
+was at or below −120; and the detector's "measured" flag only asked whether a
+driver sample existed at all. zwave-js stands −128 dBm in for "no signal
+detected", so with every channel at that value the screens read
+`-128 dBm (measured)`, the health score used −95, and weak-signal labelled its
+−95 fallback `measured`. With channels `[-128, -104, -101, -93]` the screens
+used −102.5 and the detectors −101.
+
+- `health.ts` now holds the rule: `noiseReading` — finite, negative (0 is the
+  driver's "no value yet" seed and its stand-in for saturation) and above
+  `NOISE_FLOOR_MIN_DBM = -120` — and `medianNoiseFloor`, the median of the
+  readings in the leading run of channels. The screens, the health score, the
+  detectors, Interference and the persisted trend all take their floor from it.
+- "Measured" now means the floor came from a reading, everywhere: the screens'
+  tag, and weak-signal's `basis` and its `(vs assumed −95 floor)` evidence. The
+  detectors no longer take a separate `hasRealNoise` from the data layer.
+- Interference distinguishes a connected driver with no reading
+  (`median — no reading`, naming the stand-ins, whole at 80 columns) from no
+  connection at all; it had said the client was not connected.
+- Coarse noise-trend buckets folded under the old rule with a stand-in in them
+  are dropped on load — a folded sum cannot be un-folded — rather than shown as
+  `quietest -128 dBm` beside a live floor that excludes it.
+- No change on the reference controller: its four channels read −105 to −94
+  dBm, all readings by both the old rules and the new one.
+
+## 0.75.1
+
+### Changed — the live-span count names its nodes
+
+ENGINE's `live ≥10m: a/b scored` bit — the revisit condition of DESIGN §3.5 —
+counts episodes, not nodes, and one chronic node whose episode re-arms every
+half hour can supply most of it: on the reference mesh one node made 8 of 12
+new closures, and the count read past its threshold on the strength of it.
+
+- The ledger's live-span ring now keeps the scored closures live ≥ 10 minutes
+  per node, per day, persisted with the ring and aged out with it.
+- The count moves to its own row (before the first attributed closure too) and
+  names them in the same breath:
+  `live ≥10m: 37/45 scored since 09-12 from 4 nodes (node 23: 22)` — how many
+  nodes, and the one with the most when it has more than one. Of four forms,
+  the longest that fits the width is shown, and every one keeps `from k nodes`,
+  so neither the count nor its nodes is ever dropped, down to the narrowest
+  session width of 60 columns.
+- Per-node counts begin with this release. Until they cover every closure in
+  the 30-day window, the bit says how many they cover and since when, to the
+  minute of the first closure it attributed
+  (`… · 5 since 10-12 14:03 from 2 nodes (node 23: 4)`); with no recorded
+  start none is guessed. A day from an older ledger file loads without them; a
+  malformed list is ignored, never fatal.
+
+### Fixed — background RSSI outside what a radio can report
+
+- `cleanDbm` had no lower bound. RSSI is a signed byte on the wire (zwave-js
+  `parseRSSI`), so a background-RSSI value below -128 dBm now reads as nothing
+  rather than as a noise floor.
+- An `average` of exactly 0 beside a `current` of NotAvailable is zwave-js's
+  "no value yet" seed (`averageRSSI`), not a 0 dBm floor. A trailing run of such
+  channels — a long-range channel the controller does not report — is now
+  absent and shows `—`, where Controller had drawn a red full-noise gauge. An
+  interior one keeps its 0, so the real channels after it survive, and every
+  floor already ignores it. A saturated receiver also averages as 0 dBm, but
+  its `current` says so (126), and that 0 still shows as a reading.
+- Known limitation, documented in DOCS: after a "not available" first poll the
+  driver's average decays from that 0 seed over about twenty polls, and those
+  negative readings still reach the floor.
+- Preventive: the reference controller's four channels read -105 to -94 dBm
+  throughout a 13.7-day history, with no value at or above -98 dBm in its
+  30-minute tier.
+
+### Docs — an ENGINE screenshot
+
+The Engine screen had no screenshot. The generator now renders one from the
+synthetic demo mesh — auto-ping, the refresh trial mid-run with its eligible
+nodes, the live ledger, and LEARNED with the live-span count naming its nodes —
+and the README gallery shows it. The other ten frames regenerate unchanged.
+
 ## 0.75.0
 
 ### Added — the pre-registered refresh trial (off by default)
