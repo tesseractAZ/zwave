@@ -38,15 +38,17 @@ single probe instead of a 10-probe episode.
   the 10-minute lookback, counted from the round trip, so a probe sent late
   does not hold back the next slow round trip. One the runner never takes
   (refused, withdrawn, absorbed by a burst or dropped by the pause) leaves no
-  cooldown; one it takes and then drops (a node Dead at its tick) does. A
-  round trip from before an add-on restart gets none: the evidence ring is
-  restored, the cooldown is not. It passes every gate a burst probe does,
+  cooldown; one it takes and then drops (a node Dead at its tick) does. The
+  cooldown is not saved: after an add-on restart it counts from each node's
+  newest restored reading, so the rule holds across one. It passes every gate
+  a burst probe does,
   opens no episode, is withdrawn unsent when the node's own traffic answers
   first, never shortens an owed burst, drains after any burst owed on the
   same tick, and is not counted as episode evidence on DETAIL or REMEDY.
 - Where no probe can reach the node (a FLiRS or battery node, or an install
   without auto-ping running), the newest round trip alone starts the breach,
-  as in 0.77.3, but never after a normal one.
+  as in 0.77.3, but never after a normal one. That includes the start-up
+  window before the driver reports which nodes listen.
 - An episode of a route-sensitive kind opens confounded when the add-on's own
   routed read re-routed its node during its dwell or in the detector's
   lookback before it (10 minutes; 30 for `weak-signal`, which reads that far
@@ -88,7 +90,7 @@ single probe instead of a 10-probe episode.
   caught 33 minutes later at 9.6k. Inside the 30 episodes, 11–12
   confirmations replace the 140 burst probes 0.77.3 spent on one-frame
   episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
-- 31 new tests; 94 new mutation entries, 7 re-anchored.
+- 31 new tests; 95 new mutation entries, 7 re-anchored.
 
 ## 0.77.3
 

@@ -893,16 +893,13 @@ class ZwaveDataImpl implements ZwaveData {
    */
   private readonly verifyOwed = new Map<number, { left: number; nextAt: number; confirm?: true; frameAt?: number }>();
   /** The round trip each node's last handed-out rtt-degraded confirmation was
-   *  asked about (v0.78.0): its time, which the cooldown runs from. */
+   *  asked about (v0.78.0): its time, which the cooldown runs from. Seeded at
+   *  load from each node's newest restored reading. */
   private readonly rttConfirmAt = new Map<number, number>();
   /** The dwell start of the last episode opened on each symptom key
    *  (v0.78.0): an episode opened again on the same dwell counts the
    *  open-time confound from its re-open, not from that dwell's start. */
   private readonly episodeDwellStart = new Map<string, number>();
-  /** When this instance was built (v0.78.0). The evidence ring is restored
-   *  across an add-on restart and the confirmation cooldown is not, so a round
-   *  trip from before it may already have had its probe: it gets no other. */
-  private readonly createdAt = Date.now();
   /** Episode keys whose after-window burst has already been requested (v0.36.3),
    *  so the timed request fires once per confirmation window rather than every
    *  tick from the moment it comes due. */
@@ -1091,7 +1088,15 @@ class ZwaveDataImpl implements ZwaveData {
     this.evidenceStore = evPath
       ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log })
       : null;
-    this.evidenceStore?.load();
+    const restored = this.evidenceStore?.load();
+    // The confirmation cooldown is not saved and the ring is (v0.78.0 review):
+    // count each node's newest restored reading as asked about, so a round
+    // trip from before this start buys no second probe and a newer one waits
+    // out that reading's lookback, as it would have in one run.
+    for (const [id, samples] of restored ?? []) {
+      const last = samples.at(-1)?.t;
+      if (last != null) this.rttConfirmAt.set(id, last);
+    }
     // M3 engine: per-node learned baselines (persisted; boot-grace KEEPS them).
     const blPath = (opts.baselinesPath ?? process.env.BASELINES_PATH) || null;
     this.baselines = blPath ? createBaselineStore({ path: blPath, log: this.log }) : null;
@@ -2204,7 +2209,6 @@ class ZwaveDataImpl implements ZwaveData {
   private requestRttConfirms(suspects: Map<number, RttFrame>, now: number): void {
     for (const [id, st] of this.verifyOwed) if (st.confirm && !suspects.has(id)) this.verifyOwed.delete(id);
     for (const [id, f] of suspects) {
-      if (f.t < this.createdAt) continue;
       if (!this.verifyOwed.has(id)) {
         const at = this.rttConfirmAt.get(id);
         if (at != null && now - at <= RTT_CONFIRM_COOLDOWN_MS) continue;
@@ -2403,8 +2407,10 @@ class ZwaveDataImpl implements ZwaveData {
     // Every answer replaces the ledger's open episodes: the refresh trial's
     // open decision cannot be scored across it (v0.75.0 review).
     this.trial?.dropOpen(null, 'mesh identity decision', Date.now());
-    // …and an episode re-opened on a dwell whose earlier episode went with them
-    // is a first open again (v0.78.0): nothing scored that dwell's confound.
+    // …and any answer forgets the episodes' dwell starts (v0.78.0): a fresh
+    // start discards the episodes, so a live symptom re-opening is a first
+    // open. After keep or resume a re-open on an old dwell is judged as a first
+    // open too, erring toward confounding.
     this.episodeDwellStart.clear();
     let ok = true;
     if (this.outcomes && !this.outcomes.resolveIdentity(choice)) ok = false;

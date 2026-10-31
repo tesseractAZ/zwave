@@ -3740,15 +3740,45 @@ test('only a confirmation the runner takes is stamped: not one starved of a slot
   } finally { b.done(); }
 });
 
-test('a round trip from before this start gets no confirmation: the restored ring outlives the cooldown (v0.78.0 review)', async () => {
-  const r = await confirmRig('zwtui-rttrestart-');
+test('the confirmation cooldown restarts from the newest restored reading: no second probe for a round trip from before a restart, and a newer one waits out its lookback (v0.78.0 review)', async () => {
+  // The ring is saved and the cooldown is not, so the restored round trip
+  // could otherwise buy its probe twice, and a newer one a probe inside the
+  // window the last probe was for.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-rttrestart-'));
+  const opts = {
+    refreshMs: 60_000, routePollMs: 60_000, evidenceSampleMs: 10_000,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  };
+  type Priv = {
+    snapshot: () => NodeSnapshot[];
+    evidenceStore: { record: (id: number, stats: NodeSnapshot['stats'], status: NodeStatus, extras: { fresh: boolean }, at: number) => void };
+    rttConfirmAt: Map<number, number>;
+    requestRttConfirms: (s: Map<number, { t: number; raw: number }>, now: number) => void;
+  };
+  const zd1 = await bootedZwaveData(ha, opts);
+  const p1 = zd1 as unknown as Priv;
+  const base = p1.snapshot().find((n) => n.nodeId === 7)!;
+  const t0 = Date.now() + 60_000; // after anything the boot itself recorded
+  for (let i = 0; i < 3; i++) p1.evidenceStore.record(7, { ...base.stats, commandsTX: 100 + i, rtt: 30 }, NodeStatus.Alive, { fresh: true }, t0 + i * 10_000);
+  zd1.stop();
+  const last = t0 + 20_000;
+  const zd2 = await bootedZwaveData(ha, opts);
   try {
-    const created = (r.priv as unknown as { createdAt: number }).createdAt;
-    r.priv.requestRttConfirms(new Map([[7, { t: created - 1, raw: 300 }]]), r.now());
-    assert.equal(r.zd.verifyOwedCount(), 0, 'it may already have had its probe');
-    r.priv.requestRttConfirms(new Map([[7, { t: created, raw: 300 }]]), r.now());
-    assert.equal(r.zd.verifyOwedCount(), 1, 'one from this start is asked about');
-  } finally { r.done(); }
+    const p2 = zd2 as unknown as Priv;
+    assert.equal(p2.rttConfirmAt.get(7), last, 'seeded from the newest restored reading');
+    zd2.setAutoPingSnapshot(() => ({ suppressed: 'none', config: { staleMs: 0 } }) as never);
+    p2.requestRttConfirms(new Map([[7, { t: last, raw: 300 }]]), last + 590_000);
+    assert.equal(zd2.verifyOwedCount(), 0, 'a round trip from before the restart is not asked about again');
+    p2.requestRttConfirms(new Map([[7, { t: last + 30_000, raw: 300 }]]), last + 590_000);
+    assert.equal(zd2.verifyOwedCount(), 0, 'nor a newer one inside that reading\'s lookback');
+    p2.requestRttConfirms(new Map([[7, { t: last + 30_000, raw: 300 }]]), last + 610_000);
+    assert.equal(zd2.verifyOwedCount(), 1, 'which is asked about once it has gone, inside its own');
+  } finally {
+    zd2.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a mesh-identity answer forgets the episodes\' dwell starts: a re-open on one is a first open again (v0.78.0 review)', async () => {
