@@ -39,9 +39,9 @@ single probe instead of a 10-probe episode.
   does not hold back the next slow round trip. One the runner never takes
   (refused, withdrawn, absorbed by a burst or dropped by the pause) leaves no
   cooldown; one it takes and then drops (a node Dead at its tick) does. The
-  cooldown is not saved: after an add-on restart it counts from each node's
-  newest restored reading, so the rule holds across one. It passes every gate
-  a burst probe does,
+  cooldown is not saved, so a round trip restored with the evidence after an
+  add-on restart gets no probe (it may already have had one); a newer one is
+  asked about as usual. It passes every gate a burst probe does,
   opens no episode, is withdrawn unsent when the node's own traffic answers
   first, never shortens an owed burst, drains after any burst owed on the
   same tick, and is not counted as episode evidence on DETAIL or REMEDY.
@@ -90,7 +90,7 @@ single probe instead of a 10-probe episode.
   caught 33 minutes later at 9.6k. Inside the 30 episodes, 11–12
   confirmations replace the 140 burst probes 0.77.3 spent on one-frame
   episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
-- 31 new tests; 95 new mutation entries, 7 re-anchored.
+- 31 new tests; 98 new mutation entries, 7 re-anchored.
 
 ## 0.77.3
 

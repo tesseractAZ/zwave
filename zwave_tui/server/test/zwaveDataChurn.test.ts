@@ -3740,21 +3740,21 @@ test('only a confirmation the runner takes is stamped: not one starved of a slot
   } finally { b.done(); }
 });
 
-test('the confirmation cooldown restarts from the newest restored reading: no second probe for a round trip from before a restart, and a newer one waits out its lookback (v0.78.0 review)', async () => {
+test('a round trip restored from before a restart gets no confirmation; a newer one is asked about as usual (v0.78.0 review)', async () => {
   // The ring is saved and the cooldown is not, so the restored round trip
-  // could otherwise buy its probe twice, and a newer one a probe inside the
-  // window the last probe was for.
+  // could otherwise buy its probe twice. Boot grace is off: a freshly booted
+  // CI runner would otherwise drop the ring this test restores.
   const ha = fakeHa();
   const dir = mkdtempSync(join(tmpdir(), 'zwtui-rttrestart-'));
   const opts = {
-    refreshMs: 60_000, routePollMs: 60_000, evidenceSampleMs: 10_000,
+    refreshMs: 60_000, routePollMs: 60_000, evidenceSampleMs: 10_000, evidenceBootGraceMs: 0,
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   };
   type Priv = {
     snapshot: () => NodeSnapshot[];
     evidenceStore: { record: (id: number, stats: NodeSnapshot['stats'], status: NodeStatus, extras: { fresh: boolean }, at: number) => void };
-    rttConfirmAt: Map<number, number>;
+    restoredUntil: Map<number, number>;
     requestRttConfirms: (s: Map<number, { t: number; raw: number }>, now: number) => void;
   };
   const zd1 = await bootedZwaveData(ha, opts);
@@ -3767,38 +3767,38 @@ test('the confirmation cooldown restarts from the newest restored reading: no se
   const zd2 = await bootedZwaveData(ha, opts);
   try {
     const p2 = zd2 as unknown as Priv;
-    assert.equal(p2.rttConfirmAt.get(7), last, 'seeded from the newest restored reading');
+    assert.equal(p2.restoredUntil.get(7), last, 'fixture guard: the newest restored reading');
     zd2.setAutoPingSnapshot(() => ({ suppressed: 'none', config: { staleMs: 0 } }) as never);
-    p2.requestRttConfirms(new Map([[7, { t: last, raw: 300 }]]), last + 590_000);
-    assert.equal(zd2.verifyOwedCount(), 0, 'a round trip from before the restart is not asked about again');
-    p2.requestRttConfirms(new Map([[7, { t: last + 30_000, raw: 300 }]]), last + 590_000);
-    assert.equal(zd2.verifyOwedCount(), 0, 'nor a newer one inside that reading\'s lookback');
-    p2.requestRttConfirms(new Map([[7, { t: last + 30_000, raw: 300 }]]), last + 610_000);
-    assert.equal(zd2.verifyOwedCount(), 1, 'which is asked about once it has gone, inside its own');
+    p2.requestRttConfirms(new Map([[7, { t: last, raw: 300 }]]), last + 10_000);
+    assert.equal(zd2.verifyOwedCount(), 0, 'the restored round trip is not asked about again');
+    p2.requestRttConfirms(new Map([[7, { t: last + 30_000, raw: 300 }]]), last + 40_000);
+    assert.equal(zd2.verifyOwedCount(), 1, 'a newer one is, at once');
   } finally {
     zd2.stop();
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('a mesh-identity answer forgets the episodes\' dwell starts: a re-open on one is a first open again (v0.78.0 review)', async () => {
-  const ha = fakeHa();
-  const dir = mkdtempSync(join(tmpdir(), 'zwtui-identity-dwell-'));
-  writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({ v: 1, homeId: 12345, control: [] }));
-  const zd = await bootedZwaveData(ha, {
-    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
-    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
-    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
-  });
-  try {
-    await waitFor(() => zd.pendingIdentity() != null);
-    const dwell = (zd as unknown as { episodeDwellStart: Map<string, number> }).episodeDwellStart;
-    dwell.set('7:route-churn', 1000);
-    zd.resolveIdentityDecision('fresh'); // only the ledger is parked here; it is reset
-    assert.equal(dwell.size, 0, 'the episode it remembered went with the ledger');
-  } finally {
-    zd.stop();
-    rmSync(dir, { recursive: true, force: true });
+test('every mesh-identity answer forgets the episodes\' dwell starts, keep as well as fresh (v0.78.0 review)', async () => {
+  for (const choice of ['fresh', 'keep'] as const) {
+    const ha = fakeHa();
+    const dir = mkdtempSync(join(tmpdir(), `zwtui-identity-dwell-${choice}-`));
+    writeFileSync(join(dir, 'outcomes.json'), JSON.stringify({ v: 1, homeId: 12345, control: [] }));
+    const zd = await bootedZwaveData(ha, {
+      refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+      evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+      outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+    });
+    try {
+      await waitFor(() => zd.pendingIdentity() != null);
+      const dwell = (zd as unknown as { episodeDwellStart: Map<string, number> }).episodeDwellStart;
+      dwell.set('7:route-churn', 1000);
+      zd.resolveIdentityDecision(choice); // only the ledger is parked here
+      assert.equal(dwell.size, 0, `${choice}: the dwell starts are forgotten`);
+    } finally {
+      zd.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 

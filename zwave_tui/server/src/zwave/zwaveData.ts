@@ -377,6 +377,9 @@ export interface ZwaveDataOptions {
   evidenceSampleMs?: number;
   /** How often to flush evidence to disk (ms). Falls back to env; default 30s. */
   evidenceFlushMs?: number;
+  /** The evidence store's boot-grace window (ms); default its own 180 s. Tests
+   *  that restore a ring set 0, so a freshly booted CI runner does not drop it. */
+  evidenceBootGraceMs?: number;
   /**
    * READ-ONLY zwave-js driver WS (v0.13, DESIGN §2.1) — feeds background RSSI
    * (real noise floor), node lastSeen, and listening/FLiRS flags. Empty/null ⇒
@@ -893,9 +896,11 @@ class ZwaveDataImpl implements ZwaveData {
    */
   private readonly verifyOwed = new Map<number, { left: number; nextAt: number; confirm?: true; frameAt?: number }>();
   /** The round trip each node's last handed-out rtt-degraded confirmation was
-   *  asked about (v0.78.0): its time, which the cooldown runs from. Seeded at
-   *  load from each node's newest restored reading. */
+   *  asked about (v0.78.0): its time, which the cooldown runs from. */
   private readonly rttConfirmAt = new Map<number, number>();
+  /** Each node's newest reading restored at load (v0.78.0): no confirmation
+   *  is asked about a round trip from then or before. */
+  private readonly restoredUntil = new Map<number, number>();
   /** The dwell start of the last episode opened on each symptom key
    *  (v0.78.0): an episode opened again on the same dwell counts the
    *  open-time confound from its re-open, not from that dwell's start. */
@@ -1086,16 +1091,15 @@ class ZwaveDataImpl implements ZwaveData {
     const evFlush = opts.evidenceFlushMs ?? Number(process.env.EVIDENCE_FLUSH_MS ?? 900_000);
     this.evidenceFlushMs = Number.isFinite(evFlush) ? evFlush : 900_000;
     this.evidenceStore = evPath
-      ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log })
+      ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log, bootGraceMs: opts.evidenceBootGraceMs })
       : null;
     const restored = this.evidenceStore?.load();
-    // The confirmation cooldown is not saved and the ring is (v0.78.0 review):
-    // count each node's newest restored reading as asked about, so a round
-    // trip from before this start buys no second probe and a newer one waits
-    // out that reading's lookback, as it would have in one run.
+    // The ring is restored across an add-on restart and the confirmation
+    // cooldown is not (v0.78.0 review): a round trip restored from before this
+    // start may already have had its probe, so it gets no other.
     for (const [id, samples] of restored ?? []) {
       const last = samples.at(-1)?.t;
-      if (last != null) this.rttConfirmAt.set(id, last);
+      if (last != null) this.restoredUntil.set(id, last);
     }
     // M3 engine: per-node learned baselines (persisted; boot-grace KEEPS them).
     const blPath = (opts.baselinesPath ?? process.env.BASELINES_PATH) || null;
@@ -2209,6 +2213,7 @@ class ZwaveDataImpl implements ZwaveData {
   private requestRttConfirms(suspects: Map<number, RttFrame>, now: number): void {
     for (const [id, st] of this.verifyOwed) if (st.confirm && !suspects.has(id)) this.verifyOwed.delete(id);
     for (const [id, f] of suspects) {
+      if (f.t <= (this.restoredUntil.get(id) ?? -Infinity)) continue;
       if (!this.verifyOwed.has(id)) {
         const at = this.rttConfirmAt.get(id);
         if (at != null && now - at <= RTT_CONFIRM_COOLDOWN_MS) continue;
