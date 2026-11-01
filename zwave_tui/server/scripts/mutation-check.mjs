@@ -4818,6 +4818,22 @@ const MUTANTS = [
     find: "  writeFileSync(tmp, key, { mode: 0o600 });",
     repl: "  writeFileSync(tmp, key);",
     what: "the host key is written 0600" },
+  { id: "ssh-hostkey-retry", file: "src/telnet/server.ts", tests: ["sshServer"],
+    // One attempt is the v0.77.0 behaviour: ssh2 1.17.0 hands back an
+    // unparsable ed25519 key 1 time in 256, and that start died on it.
+    find: "const HOST_KEY_ATTEMPTS = 8;",
+    repl: "const HOST_KEY_ATTEMPTS = 1;",
+    what: "a generated host key that does not parse back is replaced by another" },
+  { id: "ssh-hostkey-write-after-parse", file: "src/telnet/server.ts", tests: ["sshServer"],
+    // Writing each candidate as it is drawn still ends on a good key when one
+    // parses, so only the give-up case shows the malformed key left in /data.
+    find: "  const { key, fingerprint } = generateHostKey(generate);\n  const tmp = `${path}.tmp`;",
+    repl: "  const tmp = `${path}.tmp`;\n  const { key, fingerprint } = generateHostKey(() => { const k = (generate ?? (() => sshUtils.generateKeyPairSync('ed25519').private))(); writeFileSync(tmp, k, { mode: 0o600 }); renameSync(tmp, path); return k; });",
+    what: "nothing is written until a generated host key parses back" },
+  { id: "ssh-hostkey-giveup-says-why", file: "src/telnet/server.ts", tests: ["sshServer"],
+    find: "  throw new Error(`ssh: none of ${HOST_KEY_ATTEMPTS} generated host keys parsed back (${last})`);",
+    repl: "  throw new Error(last);",
+    what: "giving up on host-key generation says how many keys were tried and why" },
   { id: "ssh-per-ip-cap", file: "src/telnet/server.ts", tests: ["ingressTrust"],
     find: "    if (sameIp >= MAX_CONNS_PER_IP) {",
     repl: "    if (sameIp >= MAX_CONNS_PER_IP + 100) {",

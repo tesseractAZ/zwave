@@ -324,7 +324,10 @@ and trust:
   printable ASCII), holding back an incomplete trailing sequence. The ed25519
   host key is generated on first start at `/data/ssh_host_ed25519_key` (0600,
   written through a rename), reused afterwards and replaced with a warning if
-  it does not parse; its SHA256 fingerprint is on the startup line. Both caps
+  it does not parse; its SHA256 fingerprint is on the startup line. A
+  generated key is parsed back before it is written, and another is drawn
+  when it does not parse, up to 8 (v0.78.1): ssh2 1.17.0 drops a leading zero
+  byte of the public key, so 1 generated key in 256 does not parse. Both caps
   refuse through `refuseSocket()`, which ends the socket and **destroys it
   after `REFUSE_LINGER_MS = 1000`** unless the peer closes first: `end()` alone
   is a half-close, and a peer that never closes pinned one descriptor per

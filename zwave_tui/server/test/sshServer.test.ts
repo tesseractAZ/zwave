@@ -5,15 +5,17 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import ssh2 from 'ssh2';
-import { startSshServer, loadOrCreateHostKey, hostKeyFingerprint, parseInput } from '../src/telnet/server';
+import { startSshServer, loadOrCreateHostKey, generateHostKey, hostKeyFingerprint, parseInput } from '../src/telnet/server';
 import { createAuthPolicy, hashPassword } from '../src/auth/loginPolicy';
 import { mkNode, mockData } from './_logHelpers';
 
-const KEY = ssh2.utils.generateKeyPairSync('ed25519').private;
+// Through generateHostKey, not ssh2's generator directly: 1 raw key in 256 does
+// not parse, which failed every test in this file that starts a server (v0.78.1).
+const KEY = generateHostKey().key;
 const USER = { username: 'operator', password: hashPassword('right-horse') };
 const policy = (o: Partial<Parameters<typeof createAuthPolicy>[0]> = {}) =>
   createAuthPolicy({ enabled: true, requireOnIngress: false, users: [USER], maxAttempts: 2, idleLockMin: 0, ...o });
@@ -122,6 +124,61 @@ test('the host key is generated once, kept 0600, reused, and a broken one is rep
     assert.notEqual(c.fingerprint, a.fingerprint);
     assert.ok(lines.some((l) => /^WARN ssh: the host key at .* could not be read/.test(l)));
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+/** A real key with its body cut short: ssh2 rejects it with the same message as
+ *  the 1 generated key in 256 whose public key lost its leading zero byte. */
+function malformedKey(): string {
+  const lines = generateHostKey().key.trim().split('\n');
+  return [lines[0], lines[1], lines[lines.length - 1]].join('\n') + '\n';
+}
+
+test('a generated host key that does not parse back is replaced before anything is written (v0.78.1)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-hostkey-'));
+  const path = join(dir, 'ssh_host_ed25519_key');
+  const bad = malformedKey();
+  const parsed = ssh2.utils.parseKey(bad);
+  assert.ok(parsed instanceof Error && parsed.message === 'Malformed OpenSSH private key', 'the stand-in fails as the real defect does');
+  const good = generateHostKey().key;
+  const queue = [bad, good];
+  const lines: string[] = [];
+  const log = Object.assign((m: string) => { lines.push(m); }, { warn: (m: string) => { lines.push(`WARN ${m}`); } });
+  try {
+    const k = loadOrCreateHostKey(path, log as never, () => queue.shift()!);
+    assert.equal(queue.length, 0, 'both keys were drawn');
+    assert.equal(k.key, good);
+    assert.equal(readFileSync(path, 'utf8'), good, 'only the key that parses is written');
+    assert.equal(hostKeyFingerprint(readFileSync(path, 'utf8')), k.fingerprint);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.equal(existsSync(`${path}.tmp`), false);
+    assert.deepEqual(lines, [`ssh: generated a new host key (${k.fingerprint})`]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('host-key generation gives up after 8 keys that do not parse, says why, and writes nothing (v0.78.1)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-hostkey-'));
+  const path = join(dir, 'ssh_host_ed25519_key');
+  const bad = malformedKey();
+  const lines: string[] = [];
+  let calls = 0;
+  try {
+    assert.throws(
+      () => loadOrCreateHostKey(path, ((m: string) => { lines.push(m); }) as never, () => { calls++; return bad; }),
+      { message: 'ssh: none of 8 generated host keys parsed back (Malformed OpenSSH private key)' },
+    );
+    assert.equal(calls, 8);
+    assert.equal(existsSync(path), false);
+    assert.equal(existsSync(`${path}.tmp`), false);
+    assert.deepEqual(lines, []);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('every key from the real generator parses back through generateHostKey (v0.78.1)', () => {
+  // About 4 of these 1,000 come out of ssh2 malformed; none may come out of here.
+  for (let i = 0; i < 1_000; i++) {
+    const { key, fingerprint } = generateHostKey();
+    assert.equal(hostKeyFingerprint(key), fingerprint);
+  }
 });
 
 test('parseInput decodes keys and passes 0xFF as nothing — no telnet IAC handling (v0.77.0)', () => {
