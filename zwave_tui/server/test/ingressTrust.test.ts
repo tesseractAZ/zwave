@@ -23,10 +23,11 @@ import { parseUsers, createAuthPolicy } from '../src/auth/loginPolicy';
 import { truncate, visLen } from '../src/telnet/ansi';
 import { errMsg } from '../src/zwave/zwaveData';
 import { readFileSync } from 'node:fs';
-import ssh2 from 'ssh2';
+import { generateHostKey } from '../src/telnet/server';
 
-/** One host key for every SSH-server test (v0.77.0). */
-const TEST_HOST_KEY = ssh2.utils.generateKeyPairSync('ed25519').private;
+/** One host key for every SSH-server test (v0.77.0), through generateHostKey:
+ *  1 raw ssh2 key in 256 does not parse (v0.78.1). */
+const TEST_HOST_KEY = generateHostKey().key;
 import { mkNode, mockData } from './_logHelpers';
 
 /** Fixed high port for the telnet cap probe (0 gives no discoverable port). */

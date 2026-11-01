@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.78.1
+
+A new SSH host key is checked to parse back before it is saved.
+
+### Fixed — a first start could fail on the host key it had just made
+
+- ssh2 1.17.0's ed25519 generator strips every leading zero byte from the
+  public key, where only the BIT STRING's unused-bits byte should go. The
+  1 key in 256 whose public half starts with 0x00 comes out 31 bytes long,
+  and ssh2's own parser rejects it (`Malformed OpenSSH private key`):
+  10 and 12 of 3,000 generated keys in two measured runs.
+- The key was written to `/data/ssh_host_ed25519_key` before its
+  fingerprint was taken. On such a start the add-on exited with a `FATAL`
+  line before its HTTP console came up, with the malformed key already
+  saved; s6 restarted it, and that start replaced the key with a warning
+  that clients would see a changed host key, though none had connected.
+  Replacing a host key that does not parse took the same 1-in-256 risk.
+- `generateHostKey()` parses each generated key back and draws another
+  when one does not parse, up to 8 keys. Only a key that parses is
+  written (0600, through a rename). Eight unparsable keys in a row stop
+  the start with `ssh: none of 8 generated host keys parsed back (…)` and
+  write nothing.
+- An existing host key that parses is read and kept as before, so an
+  installed add-on keeps its fingerprint.
+
+### Tests
+
+- The SSH test files took their host key straight from ssh2's generator,
+  so 1 run in 256 failed every test in the file that starts a server, and
+  once made the mutation harness report a spurious mapping miss. They now
+  take it through `generateHostKey()`.
+- New: a generator that returns a malformed key and then a good one
+  leaves only the good key on disk and one `generated` line in the log;
+  eight malformed keys throw the message above and leave no file; 1,000
+  keys from the real generator all parse back.
+- 3 new mutation-harness entries (1,617 in all): the retry, the write
+  after the parse-back, and the give-up message.
+
 ## 0.78.0
 
 `rtt-degraded` no longer fires on one slow round trip, and checks one with a
@@ -509,48 +547,6 @@ stops working.
 Four Dependabot updates merged after a fresh run on 26.04: the fastify
 plugin/type patch group, `actions/setup-node` 7.1.0, `actions/upload-artifact`
 7.0.2 and the CodeQL action group.
-
-## 0.75.3
-
-### Changed — every build and check on a pinned Ubuntu 26.04 image
-
-`ubuntu-latest` moves to Ubuntu 26.04 in a rollout from 2026-10-19 to
-2026-11-19. That would change python3, Docker, the docs job's pandoc and
-LibreOffice and the AppArmor job's `apparmor_parser` under every job at once,
-and could mix images within one run. The move is made deliberately instead:
-
-- Every job in CI, Release, Tag release and Publish release runs on
-  `ubuntu-26.04`; both image builds (the CI smoke build and the release images)
-  run natively, aarch64 on `ubuntu-26.04-arm`.
-- CodeQL stays on `ubuntu-24.04`: its system requirements list Ubuntu 22.04
-  and 24.04 only.
-- `test/workflowRunners.test.ts` holds the rule: every runner a pinned
-  `ubuntu-YY.MM[-arm]` label, CodeQL on a listed image, everything else on
-  26.04, the ARM builds native.
-- A trial run passed every check on image 20260927.149.1, including the
-  AppArmor profile under `apparmor_parser` 5.0.2 and the manual under pandoc
-  3.7.0.2.
-
-### Fixed — from the log review of 10-11 07:46Z to 10-13 02:04Z
-
-- **One entry discovery and one registry join per connect.** The boot tick and
-  the on-ready callback both asked the moment the socket authenticated, and
-  each check set its flag only after its own reply, so every connect fetched
-  the config entries and both registries twice. They now share the request in
-  flight. Redundant only; present since v0.25.0.
-- **An episode is not scored before its last probe settles.** A confirmation
-  burst's fifth read can go out a second before the window ends; its missing
-  reply reaches the evidence seconds later, so a timed-out read was scored as
-  0 of 5 (node 57: `tmo=0.0%`, the read timing out 0.58 s after the verdict).
-  An episode now closes only once its node's latest probe has had 30 s to land,
-  waiting at most two minutes past the window, and a close that waited keeps the
-  after-window's start where it was, so the burst's first read is not aged out
-  at slow evidence cadences. On a timeout-scored kind the old cut could turn a
-  failed recovery into `improved`.
-
-The review found no regression from v0.75.0–v0.75.2: four clean restarts, no
-add-on warning or error in 42 h, 819 probes answered but one, and the only
-AppArmor denials the four deliberate probes of the v0.74.4 check.
 
 ## Older releases
 
