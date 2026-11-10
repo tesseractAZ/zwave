@@ -4653,18 +4653,22 @@ export LOG_ARCHIVE_HOLD=/tmp/zwave-tui-backup.hold # v0.76.0 the backup hold (§
 ```
 
 `/config` is the add-on's `app_config` folder (mapped since v0.75.4;
-`/addon_configs/<slug>` on the host, which the SSH add-on can read). Supervisor
-2026.07.1 renamed the map type from `addon_config` to `app_config`, with the
-same folder and the same `/config`; since v0.78.2 the add-on uses the new name,
-because the old one logs a Supervisor warning at every store reload. A
-Supervisor older than 2026.07.1 skips the entry, and the archive then lands
-inside the container, out of backups and lost on the next update. Only the
-log archive lives there. Since v0.76.0 its finished days go into the add-on's
-backups; `backup_exclude: ["logs/*.log", "*.tmp"]` keeps today's file and every
-temp file out, here and in `/data` — the Supervisor applies an app's exclude
-patterns to both folders and matches each path before reading the file — and
-`backup_pre`/`backup_post` hold the archive's housekeeping while the copy runs
-(§12.9).
+`/addon_configs/<slug>` in the SSH add-on, which can read it). Only the log
+archive lives in `/config`. Since v0.76.0 its finished days go into the
+add-on's backups; `backup_exclude: ["logs/*.log", "*.tmp"]` keeps today's file
+and every temp file out, in `/config` and in `/data` — the Supervisor applies
+an app's exclude patterns to both folders and matches each path before reading
+the file — and `backup_pre`/`backup_post` hold the archive's housekeeping while
+the copy runs (§12.9).
+
+Supervisor 2026.07.1 renamed the map type from `addon_config` to `app_config`,
+with the same folder and the same `/config`; since v0.78.2 the add-on uses the
+new name, because the old one logs a Supervisor warning at every store reload.
+An older Supervisor does not know the new name. From 2023.12.1 it drops the
+entry (from 2025.08.3 with an "invalid map entry" warning), so there is no
+`/config` mount: the archive is written inside the container, which backups do
+not cover and the Supervisor removes at every stop. 2023.12.0 and earlier
+reject the add-on outright.
 
 `/data/autonomy.json` differs from the stores above in one respect: it is
 written only when the pause changes (TUI pause/resume, or a new reading of the

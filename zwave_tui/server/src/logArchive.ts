@@ -10,8 +10,8 @@
  * streams, independent of the journal.
  *
  * WHERE. `LOG_ARCHIVE_DIR` (the run script exports /config/logs: the add-on's
- * `app_config` folder, which the host shows as /addon_configs/<slug>/logs and
- * the SSH add-on can read without docker).
+ * `app_config` folder, which the SSH add-on shows as /addon_configs/<slug>/logs
+ * and can read without docker).
  *
  * BACKUPS (v0.76.0). Finished days (*.log.gz) go into the add-on's backups;
  * backup_exclude keeps out today's file (still being written, so a copy would

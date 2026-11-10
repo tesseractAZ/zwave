@@ -7,17 +7,18 @@ The add-on's config folder is mapped under the map type's current name.
 ### Fixed — a Supervisor warning at every store reload
 
 - Supervisor 2026.07.1 renamed the `addon_config` map type to
-  `app_config`. The old name still works, but the Supervisor logs
-  `App 'Z-Wave TUI' uses legacy map type 'addon_config'; use 'app_config'
-  instead.` each time it reloads the add-on store: 16 times in three days
-  on the reference host.
+  `app_config`. The old name still works, but the current Supervisor
+  logs `App 'Z-Wave TUI' uses legacy map type 'addon_config'; use
+  'app_config' instead.` each time it reloads the add-on store: 16 times
+  in three days on the reference host.
 - `config.yaml` now maps `app_config:rw`. The Supervisor mounts the same
   folder at the same `/config` for both names, so the log archive keeps
-  its files, its backups and its path on the host.
-- A Supervisor older than 2026.07.1 does not know the new name and skips
-  the entry with a warning. The archive then writes inside the container,
-  where backups miss it and the next update deletes it. The stable channel
-  is on 2026.10.5.
+  its files, its backups and its path.
+- A Supervisor older than 2026.07.1 does not know the new name. From
+  2023.12.1 it drops the entry (from 2025.08.3 with a warning), and the
+  archive is then written inside the container, which backups miss and
+  every stop removes. 2023.12.0 and earlier reject the add-on. The stable
+  channel is on 2026.10.5.
 
 ### Tests
 
