@@ -4652,8 +4652,13 @@ export LOG_ARCHIVE_DIR=/config/logs       # v0.75.4 the durable log archive (§1
 export LOG_ARCHIVE_HOLD=/tmp/zwave-tui-backup.hold # v0.76.0 the backup hold (§12.9)
 ```
 
-`/config` is the add-on's `addon_config` folder (mapped since v0.75.4;
-`/addon_configs/<slug>` on the host, which the SSH add-on can read). Only the
+`/config` is the add-on's `app_config` folder (mapped since v0.75.4;
+`/addon_configs/<slug>` on the host, which the SSH add-on can read). Supervisor
+2026.07.1 renamed the map type from `addon_config` to `app_config`, with the
+same folder and the same `/config`; since v0.78.2 the add-on uses the new name,
+because the old one logs a Supervisor warning at every store reload. A
+Supervisor older than 2026.07.1 skips the entry, and the archive then lands
+inside the container, out of backups and lost on the next update. Only the
 log archive lives there. Since v0.76.0 its finished days go into the add-on's
 backups; `backup_exclude: ["logs/*.log", "*.tmp"]` keeps today's file and every
 temp file out, here and in `/data` — the Supervisor applies an app's exclude

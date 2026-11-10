@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.78.1"
+version: "0.78.2"
 slug: zwave_tui
 description: "Z-Wave mesh observability and remediation engine — live link measurement, learned baselines, 14 fault detectors and ranked, outcome-scored fixes; SSH + sidebar console and HA entities"
 url: https://github.com/tesseractAZ/zwave
@@ -59,7 +59,10 @@ map:
   - data:rw
   # The durable log archive (v0.75.4) lives in the add-on's own config folder
   # (/config here; /addon_configs/<slug> on the host, readable over SSH).
-  - addon_config:rw
+  # `app_config` is Supervisor 2026.07.1's name for the old `addon_config`
+  # (same folder, same /config); an older Supervisor skips the entry, and the
+  # archive then lands in the container, lost on the next update (v0.78.2).
+  - app_config:rw
 # Backups (v0.76.0). The log archive's finished days (logs/*.log.gz) are
 # backed up; today's file and every temp file are not. Today's file is still
 # being written, so a backup would hold a cut-off copy; only finished days are
