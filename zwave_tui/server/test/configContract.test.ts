@@ -506,6 +506,8 @@ test('the log archive is wired end to end: options → run script → config →
   assert.match(yamlTxt, /^map:\n  - data:rw\n(?:  #.*\n)*  - app_config:rw$/m, 'the add-on config folder is mapped (at /config)');
   // Supervisor 2026.07.1 renamed these; the old names log a warning at every store reload (v0.78.2).
   assert.doesNotMatch(yamlTxt, /^  - (?:addon_config|all_addon_configs|addons)(?::r[ow])?$/m, 'no legacy map type');
+  // Any stage but stable puts a badge on the app info page (v0.78.3).
+  assert.match(yamlTxt, /^stage: stable$/m, 'the app is published as stable');
   const run = read('../../rootfs/etc/services.d/zwave-tui/run');
   assert.match(run, /^export LOG_ARCHIVE_DIR=\/config\/logs$/m);
   assert.match(run, /^export LOG_ARCHIVE_DAYS="\$\(bashio::config 'log_archive_days'\)"$/m);
