@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.78.2"
+version: "0.78.3"
 slug: zwave_tui
 description: "Z-Wave mesh observability and remediation engine — live link measurement, learned baselines, 14 fault detectors and ranked, outcome-scored fixes; SSH + sidebar console and HA entities"
 url: https://github.com/tesseractAZ/zwave
@@ -25,7 +25,11 @@ arch:
 image: ghcr.io/tesseractaz/{arch}-zwave-tui
 startup: services
 boot: auto
-stage: experimental
+# `stable` is the Supervisor's default. Any other stage puts a badge on the app
+# info page (`experimental` is a yellow "Experimental" chip), and the Supervisor
+# reads an installed app's stage from the copy it saved at install or update, so
+# a change here shows only after the update that ships it.
+stage: stable
 # HA's `init: true` default wraps the container with Docker's tini, making
 # tini PID 1. The HA base image already ships its own s6-overlay init at
 # /init; with tini in front, s6-overlay-suexec sees it isn't PID 1 and
