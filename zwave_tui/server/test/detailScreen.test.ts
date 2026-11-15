@@ -604,6 +604,28 @@ test('an un-graduated RTT normal says when the fixed ceiling judges the node mea
   assert.ok(!steady.some((l) => /restarts on every route change/.test(l)));
 });
 
+test('a node the store never folded still shows the ceiling it is held to, and the re-route span reads in hours under 48 h (v0.79.0)', () => {
+  // No band at all (rttNormal null), but the detector judges it against the
+  // ceiling: DETAIL must say so, or the engine's count names a node DETAIL hides.
+  const never = yardLines(withYard({
+    rttNormal: () => null,
+    rttYardstick: () => ({ line: 300, basis: 'ceiling' }),
+  }));
+  assert.match(never.find((l) => /Norm RTT/.test(l)) ?? '', /no normal yet — held to the 300 ms ceiling meanwhile/);
+  // Not judged either: no row, as before.
+  const unjudged = yardLines(withYard({ rttNormal: () => null, rttYardstick: () => null }));
+  assert.ok(!unjudged.some((l) => /Norm RTT/.test(l)));
+  // The span switches to days at 48 h and rounds, on both sides of the switch.
+  const span = (hours: number) => yardLines(withYard({
+    rttNormal: () => ({ median: 0, scale: 8, ready: false, days: 1 }),
+    rttYardstick: () => ({ line: 300, basis: 'ceiling' }),
+    routeStability: () => ({ changes: 2, hours }),
+  })).find((l) => /restarts on every route change/.test(l)) ?? '';
+  assert.match(span(47), /2 in the last 47h/);
+  assert.match(span(48), /2 in the last 2d/);
+  assert.match(span(60), /2 in the last 3d/, 'rounded, not floored');
+});
+
 test('a graduated RTT normal whose line is over the ceiling says it is capped, and a graduated one is not told about re-routes (v0.79.0)', () => {
   const out = yardLines(withYard({
     rttNormal: () => ({ median: 280, scale: 20, ready: true, days: 9 }),

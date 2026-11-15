@@ -1147,6 +1147,11 @@ test('engineStatus and rttYardstick hold a node with no RTT normal to the ceilin
     assert.ok(ctrl, 'fixture guard: the roster has its controller');
     assert.equal(zd.rttYardstick(ctrl.nodeId), null);
     assert.deepEqual(zd.rttYardstick(listening[0].nodeId), { line: 62, basis: 'learned' }, 'fixture guard: an end node is judged');
+    // A node the store never folded has a null normal, not an empty band. It is
+    // counted and held to the ceiling the same way.
+    inner.baselines = { ...(inner.baselines as object), rttNormal: () => null };
+    assert.equal(zd.engineStatus().rttCeiling, listening.length, 'a never-folded listening node is counted too');
+    assert.deepEqual(zd.rttYardstick(listening[0].nodeId), { line: 300, basis: 'ceiling' });
   } finally {
     inner.baselines = real;
     zd.setAutoPingSnapshot(null);

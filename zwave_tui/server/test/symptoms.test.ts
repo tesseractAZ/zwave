@@ -1037,12 +1037,21 @@ test('rtt-degraded: with no graduated band, five 400 ms round trips lift a 30 ms
   assert.deepEqual(r.asked, [], 'the pair was already there: nothing to confirm');
   assert.deepEqual(r.fired!.evidence.map((e) => e.label), ['RTT', 'ceiling', 'newest round trips'],
     'the yardstick names itself, before the round trips');
-  assert.equal(r.fired!.evidence.find((e) => e.label === 'ceiling')!.value, '300ms · no normal for this route yet');
-  assert.match(r.fired!.narrative, /over 300 ms, slow on any route\. Its current route has no learned normal yet/);
+  assert.equal(r.fired!.evidence.find((e) => e.label === 'ceiling')!.value, '300ms · no normal for this route and time of day yet');
+  assert.match(r.fired!.narrative, /over 300 ms, slow on any route\. Its current route has no learned normal for this time of day yet/);
   // The same round trips judged against a learned 30±8 start on the second.
   const learnedRun = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 10 * MIN, true);
   assert.equal(learnedRun.armedAt, T + MIN, 'fixture guard: the learned line is far lower');
   assert.deepEqual(learnedRun.fired!.evidence.map((e) => e.label), ['RTT', 'baseline', 'newest round trips']);
+  // The learned arm keeps its own wording: no cap suffix, no ceiling sentence.
+  assert.equal(learnedRun.fired!.evidence.find((e) => e.label === 'baseline')!.value, '30±8ms');
+  assert.match(learnedRun.fired!.narrative, /far above its normal for this route and time of day\.$/);
+  // A node the store has never folded has no normal at all (null, not an empty
+  // band). It is held to the ceiling the same way.
+  const neverSeen = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 10 * MIN, true,
+    baselineStub({ store: { rttNormal: () => null } }));
+  assert.equal(neverSeen.armedAt, T + 4 * MIN, 'a never-seen node crosses the ceiling on the same reading');
+  assert.equal(neverSeen.fired!.evidence.find((e) => e.label === 'ceiling')!.value, '300ms · no normal for this route and time of day yet');
 });
 
 test('rtt-degraded: with no graduated band, round trips under the ceiling start nothing, ask nothing and hold nothing (v0.79.0)', () => {
@@ -1093,7 +1102,7 @@ test('rtt-degraded: right after a driver restart, a slow node with no normal is 
   // decaying seed for one that is not. Against 0 the whole seed would be
   // allowed for, and a 450 ms node would sit under the ceiling for four
   // readings.
-  const run = (raw: number) => {
+  const run = (raw: number, baselines = unlearned()) => {
     const ring = (now: number) => {
       let avg = 900;
       const out = [ev({ t: T - 40 * MIN, rtt: 25, dTx: 1 }), ev({ t: T - 2 * MIN, rtt: null, dTx: null }), ev({ t: T - MIN, rtt: 900, dTx: 1 })];
@@ -1110,7 +1119,7 @@ test('rtt-degraded: right after a driver restart, a slow node with no normal is 
     for (let now = T; now <= T + 6 * MIN; now += MIN) {
       detectSymptoms(input({
         nodes: [node(1), txNode(6, 2 + (now - T) / MIN)], recent: new Map([[6, ring(now)]]), now, confirmable: true,
-        suspects, overLine, baselines: unlearned(), rttSeed: new Map([[6, { k0: 1, a0: 900 }]]),
+        suspects, overLine, baselines, rttSeed: new Map([[6, { k0: 1, a0: 900 }]]),
       }), state);
       if (armedAt == null && state.has('6:rtt-degraded')) armedAt = now;
     }
@@ -1123,6 +1132,15 @@ test('rtt-degraded: right after a driver restart, a slow node with no normal is 
   assert.deepEqual(quiet.overLine, [], 'a 900 ms seed decaying over a 30 ms link is not over the ceiling');
   assert.deepEqual(quiet.suspects, []);
   assert.equal(quiet.armedAt, null);
+  // A band that learned a few readings since the last route change has a
+  // median but no yardstick. Measuring the seed against that median allowed
+  // for nearly all of it, and the same 450 ms node sat under the ceiling until
+  // the fifth reading. It is measured like an empty band.
+  const partial = () => baselineStub({ rtt: { median: 25, scale: 8, ready: false, days: 2 } });
+  const slowPartial = run(450, partial());
+  assert.deepEqual(slowPartial.suspects.map((x) => Math.round(x.raw)), [450], 'a few-reading band asks at the same reading');
+  assert.equal(slowPartial.armedAt, T + MIN, 'and starts at the same reading');
+  assert.deepEqual(run(30, partial()).overLine, [], 'and a seed decaying over a healthy link is still not over the ceiling');
 });
 
 /* ── route-churn: a SymptomKind that existed but was never emitted ────────

@@ -666,6 +666,12 @@ export function renderDetail(ctx: ScreenCtx): string[] {
           const span = rs.hours >= 48 ? `${Math.round(rs.hours / 24)}d` : `${Math.round(rs.hours)}h`;
           body.push(note(`The RTT normal restarts on every route change: ${rs.changes} in the last ${span}`, inner));
         }
+      } else if (ry?.basis === 'ceiling') {
+        // A node the store has never folded has no band at all, and the
+        // detector still holds it to the ceiling (v0.79.0). Without this row
+        // DETAIL showed nothing where the engine and HA counted it as judged.
+        body.push(kv('Norm RTT', c.yellow('no normal yet') +
+          c.grey(` — held to the ${RTT_CEILING_MS} ms ceiling meanwhile`), inner));
       }
       const tn = data.timeoutNormal?.(n.nodeId) ?? null;
       if (tn) {

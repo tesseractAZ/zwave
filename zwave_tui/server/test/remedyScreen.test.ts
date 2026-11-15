@@ -889,6 +889,11 @@ test('rtt nodes held to the fixed ceiling are counted apart, and the screen stop
   const learning = plain(renderRemedy(engCtx(200, 40, { ...ENG, total: 3, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rttCeiling: 3, rssiReady: 0 })));
   assert.match(learning, /no detector has a learned yardstick yet/);
   assert.match(learning, /rtt: 3 with no learned normal are held to a fixed 300 ms/);
+  // With the ceiling judging, only the LEARNED detectors are still waiting.
+  assert.match(learning, /before its\s+learned detectors may fire\./);
+  const learningNoCeiling = plain(renderRemedy(engCtx(200, 40, { ...ENG, total: 3, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rttCeiling: 0, rssiReady: 0 })));
+  assert.match(learningNoCeiling, /before its\s+detectors may fire\./);
+  assert.doesNotMatch(learningNoCeiling, /learned detectors may fire/);
   // And the row contract holds at every size with the extra field and lines.
   for (const [cols, rows] of [[40, 12], [56, 20], [80, 24], [120, 40]] as const) {
     const lines = renderRemedy(engCtx(cols, rows, { ...ENG, total: 39, timeoutReady: 39, timeoutWindowBlind: 0, rttReady: 10, rttCeiling: 25, rssiReady: 12 }));

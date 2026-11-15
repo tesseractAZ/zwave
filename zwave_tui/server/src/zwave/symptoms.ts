@@ -225,8 +225,9 @@ const RTT_Z = 4; // z-score over route-stratified baseline
  * normal, and the routed nodes, the ones most likely to degrade, re-route
  * most. On the reference mesh (2026-11-13) 23 of 38 nodes had no graduated RTT
  * band at all, and the reroute that came with a degradation was what erased
- * the yardstick that would have judged it: one node held a graduated 22 ms
- * normal for 13 days, re-routed once, and read 396 ms the next day.
+ * the yardstick that would have judged it. In the days that followed, mains
+ * nodes with no graduated band ran 370–880 ms round trips with no verdict, one
+ * of them 880 and then 837 ms on consecutive readings.
  *
  * WHY 300 ms. Every graduated line on that mesh was 57–124 ms (median + 4
  * scales), so the ceiling sits more than twice over the highest. Over 14 days
@@ -240,8 +241,10 @@ const RTT_Z = 4; // z-score over route-stratified baseline
  *
  * The same start rule applies as against a learned line: the AVERAGE must be
  * over the ceiling, and the two newest raw round trips too. From a 30 ms
- * average that takes three to five slow round trips in a row (three at 525 ms,
- * five at 400 ms), so a lone slow frame never reaches it.
+ * average that takes several slow round trips in a row (two at 880 and 837 ms,
+ * three at 525 ms, five at 400 ms). One frame over about 1.1 s lifts the
+ * average over on its own, but it cannot start a breach: the pair rule asks
+ * for a confirmation probe, and the probe's answer must be slow too.
  *
  * It applies only where a confirmation probe can reach the node (a mains
  * ping candidate): a sleeping or FLiRS node's round trips can include its
@@ -861,12 +864,16 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       //
       // The reading is tested with the restart's seed taken out (v0.77.1): an
       // excess that seed alone could produce is the restart, not the link.
-      // Measured as the baseline fold measures it (v0.79.0): against the band's
-      // median where it has one, which for a graduated band is exactly the
-      // v0.77.1 allowance, and otherwise against what the driver averaged after
-      // the seed. Against 0, a slow node's own slow seed would be allowed for in
-      // full, and the ceiling would sleep through the day after every restart.
-      const residue = obs != null ? rttFoldResidue(node.stats.commandsTX, obs.rtt, norm, input.rttSeed(id)) : 0;
+      // Against a GRADUATED band's median (v0.79.0), which is exactly the
+      // v0.77.1 allowance. A band that has not graduated is measured against
+      // what the driver averaged after the seed instead, even when it holds a
+      // few readings: its median is not a yardstick, and the ceiling judges the
+      // node. Against 0, or against a few-reading median, a slow node's own
+      // slow seed would be allowed for nearly in full, and the ceiling would
+      // sleep through the hours after every restart. (The baseline fold still
+      // uses the median of a band with data; that is a learning question, not
+      // a verdict.)
+      const residue = obs != null ? rttFoldResidue(node.stats.commandsTX, obs.rtt, norm?.ready ? norm : null, input.rttSeed(id)) : 0;
       const b = !!(yard && obs != null && obs.rtt - residue > yard.line);
       // ONE SLOW ROUND TRIP IS NOT A LEVEL (v0.78.0). The average keeps 0.75 of
       // itself per transmission, so one frame above median + 16 scales lifts it
@@ -900,7 +907,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
             // has no baseline to show, and printing the empty band's 0±8 would
             // claim one.
             yard!.basis === 'ceiling'
-              ? { label: 'ceiling', value: `${RTT_CEILING_MS}ms · no normal for this route yet` }
+              ? { label: 'ceiling', value: `${RTT_CEILING_MS}ms · no normal for this route and time of day yet` }
               : { label: 'baseline', value: `${Math.round(norm!.median)}±${Math.round(norm!.scale)}ms${yard!.basis === 'capped' ? ` · capped at ${RTT_CEILING_MS}ms` : ''}` },
             ...(residue >= 1 ? [{ label: 'restart allowance', value: `${Math.round(residue)}ms (${node.stats.commandsTX} tx since driver start)` }] : []),
             // Last (v0.78.0): REMEDY cuts the evidence row at the screen's width,
@@ -911,7 +918,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
             ? `${node.name}'s round-trip time is far above its normal for this route and time of day.`
             : yard!.basis === 'capped'
               ? `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route, although the normal learned for this route and time of day is wide enough to allow them.`
-              : `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route. Its current route has no learned normal yet (the RTT normal restarts on every route change), so the fixed ceiling is the yardstick.`,
+              : `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route. Its current route has no learned normal for this time of day yet (the RTT normal restarts on every route change), so the fixed ceiling is the yardstick.`,
         });
       }
     }

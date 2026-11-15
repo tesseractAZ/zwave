@@ -713,7 +713,10 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       if (eng.timeoutReady === 0 && eng.rttReady === 0) {
         empty = 'learning';
         // NOTHING has graduated. Deliberately silent about symptoms: with no
-        // detector able to fire, "no symptoms" would describe the instrument.
+        // learned detector able to fire, "no symptoms" would describe the
+        // instrument. The fixed RTT ceiling (v0.79.0) still flags a severe
+        // slowdown, which ceilingNote() says, so the sentence below names the
+        // LEARNED detectors when the ceiling is judging anyone.
         body.push(c.cyan(pickHead([
           `    ◷ Learning — no detector has a learned yardstick yet for ${bandLabel(eng)}:`,
           `    ◷ Learning — no yardstick yet for ${bandLabel(eng, true)}:`,
@@ -724,7 +727,9 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         body.push('');
         body.push(c.grey('    Each node’s normal is learned per series and per time-of-day band,'));
         body.push(c.grey('    from the evidence stream across several distinct days, before its'));
-        body.push(c.grey('    detectors may fire. Nothing here is a health claim yet.'));
+        body.push(c.grey(eng.rttCeiling > 0
+          ? '    learned detectors may fire. Nothing here is a health claim yet.'
+          : '    detectors may fire. Nothing here is a health claim yet.'));
         body.push(...ceilingNote());
       } else if (blind.length > 0) {
         empty = 'partial';

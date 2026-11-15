@@ -288,7 +288,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     driverLogWatch: () => zd.driverLogWatch(),
     rssiNormal: (n) => zd.rssiNormal(n),
     rttNormal: (n) => zd.rttNormal(n),
-    rttYardstick: (n) => zd.rttYardstick?.(n) ?? null,
+    rttYardstick: (n) => zd.rttYardstick(n),
     timeoutNormal: (n) => zd.timeoutNormal(n),
     baselineHold: (n) => zd.baselineHold(n),
     rttSeedHold: (n) => zd.rttSeedHold(n),
