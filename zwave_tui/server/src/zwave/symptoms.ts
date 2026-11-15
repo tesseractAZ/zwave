@@ -224,8 +224,8 @@ const RTT_Z = 4; // z-score over route-stratified baseline
  * sweep talks to. A node that re-routes even once a week therefore never has a
  * normal, and the routed nodes, the ones most likely to degrade, re-route
  * most. On the reference mesh (2026-11-13) 23 of 38 nodes had no graduated RTT
- * band at all, and the reroute that came with a degradation was what erased
- * the yardstick that would have judged it. In the days that followed, mains
+ * band at all. The nodes that slow down are the ones that re-route, so a
+ * slowdown tends to arrive with no yardstick. In the days that followed, mains
  * nodes with no graduated band ran 370–880 ms round trips with no verdict, one
  * of them 880 and then 837 ms on consecutive readings.
  *
@@ -257,7 +257,8 @@ export const RTT_CEILING_MS = 300;
  *  - `learned`: the band's median + RTT_Z scales.
  *  - `capped`: that learned line was over RTT_CEILING_MS, so the ceiling is
  *    the line (a band can graduate while the node is already slow).
- *  - `ceiling`: no graduated band, so the ceiling alone is the line.
+ *  - `ceiling`: the current time-of-day band has not graduated, so the
+ *    ceiling alone is the line.
  */
 export interface RttYardstick {
   line: number;
@@ -339,9 +340,11 @@ export function rttRestartResidue(commandsTX: number, median: number, seed?: Rtt
 /**
  * What the RTT baseline fold holds a reading `rtt` back on (v0.77.3): the
  * restart residue against the band's median, or, when the band has learned
- * nothing, against the node's own average since the seed. The detector takes
- * the same allowance off the reading it tests (v0.79.0); for a graduated band
- * it is exactly `rttRestartResidue` against that band's median.
+ * nothing, against the node's own average since the seed. The detector
+ * (v0.79.0) takes this allowance for a graduated band, where it is exactly
+ * `rttRestartResidue` against that band's median, and for an empty one. For a
+ * band that has not graduated it passes no normal, so the seed is measured
+ * against the average since the seed even where this fold uses the median.
  *
  * A band with any data has a median of at least 5 ms (the first bin's centre);
  * an empty one reports 0. A route change empties every band of a node, so a
@@ -836,8 +839,8 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       }
     }
 
-    // rtt-degraded — route-stratified median ≫ baseline, or, where the route has
-    // no graduated band yet, a fixed ceiling (v0.79.0, `rttYardstick`). Uses the
+    // rtt-degraded — route-stratified median ≫ baseline, or, where the current
+    // time-of-day band has not graduated, a fixed ceiling (v0.79.0, `rttYardstick`). Uses the
     // newest FRESH RTT in the window (not `last`), so a non-fresh tick doesn't
     // reset the dwell.
     {
@@ -870,7 +873,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // few readings: its median is not a yardstick, and the ceiling judges the
       // node. Against 0, or against a few-reading median, a slow node's own
       // slow seed would be allowed for nearly in full, and the ceiling would
-      // sleep through the hours after every restart. (The baseline fold still
+      // sleep for hours after every restart. (The baseline fold still
       // uses the median of a band with data; that is a learning question, not
       // a verdict.)
       const residue = obs != null ? rttFoldResidue(node.stats.commandsTX, obs.rtt, norm?.ready ? norm : null, input.rttSeed(id)) : 0;
@@ -907,7 +910,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
             // has no baseline to show, and printing the empty band's 0±8 would
             // claim one.
             yard!.basis === 'ceiling'
-              ? { label: 'ceiling', value: `${RTT_CEILING_MS}ms · no normal for this route and time of day yet` }
+              ? { label: 'ceiling', value: `${RTT_CEILING_MS}ms · no normal for this band yet` }
               : { label: 'baseline', value: `${Math.round(norm!.median)}±${Math.round(norm!.scale)}ms${yard!.basis === 'capped' ? ` · capped at ${RTT_CEILING_MS}ms` : ''}` },
             ...(residue >= 1 ? [{ label: 'restart allowance', value: `${Math.round(residue)}ms (${node.stats.commandsTX} tx since driver start)` }] : []),
             // Last (v0.78.0): REMEDY cuts the evidence row at the screen's width,

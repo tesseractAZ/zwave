@@ -19,8 +19,8 @@
   with no graduated band ran 370–880 ms round trips, one of them 880 and then
   837 ms on consecutive readings, with no verdict.
 - Where a confirmation probe can reach the node (a mains ping candidate, with
-  the auto-ping runner on), `rtt-degraded` now judges a node with no graduated
-  band against `RTT_CEILING_MS = 300`. The v0.78.0 start rule is unchanged:
+  the auto-ping runner on), `rtt-degraded` now judges a node whose current
+  time-of-day band has not graduated against `RTT_CEILING_MS = 300`. The v0.78.0 start rule is unchanged:
   the average must be over the line and the two newest raw round trips too,
   and a lone slow one owes one confirmation probe. From a 30 ms average that
   takes two round trips at 880 and 837 ms, three at 525 ms or five at 400 ms.
@@ -51,7 +51,7 @@
 ### Changed — the screens and HA say which line a node is judged against
 
 - The symptom card's yardstick row reads `ceiling 300ms · no normal for this
-  route and time of day yet` for a ceiling breach, and a capped baseline ends `· capped at
+  band yet` for a ceiling breach, and a capped baseline ends `· capped at
   300ms`. The narrative names the line that was crossed.
 - DETAIL's `Norm RTT` row reads `still learning · Nd so far — held to the
   300 ms ceiling meanwhile` where the ceiling applies (`no normal yet — held

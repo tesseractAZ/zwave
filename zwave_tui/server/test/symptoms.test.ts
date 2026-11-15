@@ -712,7 +712,7 @@ test('rttRestartResidue: the first reading seen this lifetime bounds what came b
   assert.equal(rttRestartResidue(5, 30, { k0: 9, a0: 30 }), rttRestartResidue(5, 30), 'a seed from a later count is not this lifetime\'s');
 });
 
-test('rttFoldResidue: a band with a median is the yardstick, as for the detector (v0.77.3)', () => {
+test('rttFoldResidue: a band with a median is the yardstick the fold uses, as the detector does once the band graduates (v0.77.3)', () => {
   const seed = { k0: 3, a0: 900 };
   assert.equal(rttFoldResidue(4, 900, { median: 25 }, seed), rttRestartResidue(4, 25, seed));
   assert.equal(rttFoldResidue(4, 900, { median: 5 }, seed), rttRestartResidue(4, 5, seed), 'the first bin\'s centre is a median');
@@ -1037,7 +1037,7 @@ test('rtt-degraded: with no graduated band, five 400 ms round trips lift a 30 ms
   assert.deepEqual(r.asked, [], 'the pair was already there: nothing to confirm');
   assert.deepEqual(r.fired!.evidence.map((e) => e.label), ['RTT', 'ceiling', 'newest round trips'],
     'the yardstick names itself, before the round trips');
-  assert.equal(r.fired!.evidence.find((e) => e.label === 'ceiling')!.value, '300ms · no normal for this route and time of day yet');
+  assert.equal(r.fired!.evidence.find((e) => e.label === 'ceiling')!.value, '300ms · no normal for this band yet');
   assert.match(r.fired!.narrative, /over 300 ms, slow on any route\. Its current route has no learned normal for this time of day yet/);
   // The same round trips judged against a learned 30±8 start on the second.
   const learnedRun = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 10 * MIN, true);
@@ -1051,7 +1051,7 @@ test('rtt-degraded: with no graduated band, five 400 ms round trips lift a 30 ms
   const neverSeen = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 10 * MIN, true,
     baselineStub({ store: { rttNormal: () => null } }));
   assert.equal(neverSeen.armedAt, T + 4 * MIN, 'a never-seen node crosses the ceiling on the same reading');
-  assert.equal(neverSeen.fired!.evidence.find((e) => e.label === 'ceiling')!.value, '300ms · no normal for this route and time of day yet');
+  assert.equal(neverSeen.fired!.evidence.find((e) => e.label === 'ceiling')!.value, '300ms · no normal for this band yet');
 });
 
 test('rtt-degraded: with no graduated band, round trips under the ceiling start nothing, ask nothing and hold nothing (v0.79.0)', () => {

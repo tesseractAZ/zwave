@@ -596,7 +596,8 @@ export interface DataProvider {
   rttNormal?(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** The line rtt-degraded judges the node against right now (v0.79.0):
    *  the learned one, that line capped at the fixed ceiling, or the ceiling
-   *  alone where no band graduated. Null = not judged at all. */
+   *  alone where the current time-of-day band has not graduated. Null = not
+   *  judged at all. */
   rttYardstick?(nodeId: number): { line: number; basis: 'learned' | 'capped' | 'ceiling' } | null;
   /** The learned reply-timeout yardstick for this node's current band
    *  (v0.48.0). Same band caveat as `rssiNormal`. */

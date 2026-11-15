@@ -91,7 +91,8 @@ measured evidence:**
    plus a downsampled multi-day coarse tier), with fabrication guards so a counter
    reset or a quiet window never invents a reading. Survives restarts.
 2. **Baselines** — each node's "normal" is learned per time-of-day band across
-   several distinct days before its detectors may fire; symptomatic windows are
+   several distinct days before its learned detectors may fire (a fixed RTT
+   ceiling judges severe slowdowns meanwhile); symptomatic windows are
    quarantined so a fault can't teach the baseline to accept itself.
 3. **Symptom detectors** — degraded return path, dead-flapping, **node down**
    (a node the driver has marked Dead, past a short dwell), a **quiet node** (a
