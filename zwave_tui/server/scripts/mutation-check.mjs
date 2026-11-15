@@ -3092,7 +3092,7 @@ const MUTANTS = [
     // Back to the fixed-width string: at 40 cols `rssi 12/39` clipped to
     // `rssi 1` — a plausible, wrong measurement, which chrome.ts calls a bigger
     // lie than a disclosed drop.
-    find: "      const counts = (): string[] => [\n        c.grey(`      timeouts ${eng.timeoutReady}/${eng.total}`),\n        c.grey(`rtt ${eng.rttReady}/${eng.total}`),\n        c.grey(`rssi ${eng.rssiReady}/${eng.total}`),\n      ];",
+    find: "      const counts = (): string[] => [\n        c.grey(`      timeouts ${eng.timeoutReady}/${eng.total}`),\n        c.grey(`rtt ${eng.rttReady}/${eng.total}`),\n        // v0.79.0: rtt nodes with no learned band whom the fixed ceiling still\n        // judges. Its own field, so the rtt count keeps meaning \"learned\".\n        ...(eng.rttCeiling > 0 ? [c.grey(`ceiling-only ${eng.rttCeiling}`)] : []),\n        c.grey(`rssi ${eng.rssiReady}/${eng.total}`),\n      ];",
     repl: "      const counts = (): string[] => [\n        c.grey(`      timeouts ${eng.timeoutReady}/${eng.total}   rtt ${eng.rttReady}/${eng.total}   rssi ${eng.rssiReady}/${eng.total}`),\n      ];",
     what: 'a count that does not fit is DROPPED whole, never clipped mid-number' },
   { id: 'engine-band-is-measured-not-assumed', file: 'src/zwave/zwaveData.ts', tests: ['zwaveDataChurn'],
@@ -3397,8 +3397,8 @@ const MUTANTS = [
   { id: 'zero-coverage-claims-no-health', file: 'src/telnet/screens/remedy.ts', tests: ['remedyScreen'],
     // With nothing graduated, "No symptoms" describes the instrument, not the
     // mesh.
-    find: "          `    ◷ Learning — no detector has a yardstick yet for ${bandLabel(eng)}:`,",
-    repl: "          `    ◑ No symptoms — no detector has a yardstick yet for ${bandLabel(eng)}:`,",
+    find: "          `    ◷ Learning — no detector has a learned yardstick yet for ${bandLabel(eng)}:`,",
+    repl: "          `    ◑ No symptoms — no detector has a learned yardstick yet for ${bandLabel(eng)}:`,",
     what: 'a fleet with nothing graduated makes NO symptom claim' },
   { id: 'probes-zero-states-are-told-apart', file: 'src/telnet/screens/detail.ts', tests: ['detailScreen'],
     // Back to a blank row: "sweep off", "device can never be probed", "sweep
