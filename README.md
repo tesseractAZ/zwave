@@ -390,7 +390,7 @@ re-asserted every 30 seconds:
 | entity | state | notable attributes |
 | --- | --- | --- |
 | `binary_sensor.zwave_tui_degraded` | `on` / `off` | `reason`, `published_at` |
-| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `paused_by`, `paused_since`, `auto_remediation`, `sleepers_watched`, `sleepers_total`, `refresh_trial` and its six counts (`refresh_trial_treated`, `…_treated_improved`, `…_treated_deaths`, `refresh_trial_held`, `…_held_improved`, `…_held_deaths`), and since v0.76.1 the driver log lane: `driver_log_level`, `s2_lane`, `silence_watchdog` |
+| `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `rtt_ceiling_only`, `paused_by`, `paused_since`, `auto_remediation`, `sleepers_watched`, `sleepers_total`, `refresh_trial` and its six counts (`refresh_trial_treated`, `…_treated_improved`, `…_treated_deaths`, `refresh_trial_held`, `…_held_improved`, `…_held_deaths`), and since v0.76.1 the driver log lane: `driver_log_level`, `s2_lane`, `silence_watchdog` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
 | `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind or before the roster has loaded) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |

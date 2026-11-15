@@ -22,7 +22,7 @@ import { repeatsFrames, type Burst } from './repeatedFrames';
 import type { NodeSnapshot, ControllerSnapshot, NodeStatus } from '../types';
 import { NodeStatus as NS } from '../types';
 import { rawRttFrames, type EvidenceSample, type CoarseBucket, type ControllerSample, type NodeCoverage, type RateRun, type RttSeed, type RttFrame } from './evidenceStore';
-import type { BaselineStore } from './baselines';
+import type { BaselineStore, ContNormal } from './baselines';
 import { medianNoiseFloor, DEFAULT_NOISE_FLOOR } from './health';
 
 export type SymptomKind =
@@ -215,6 +215,75 @@ const TIMEOUT_RATE_MULT = 3; // relative: window rate ≫ this × baseline
 export const CHRONIC_DAYS_MS = 2 * 24 * 60_000 * 60; // 2 days sustained → chronic
 const RTT_Z = 4; // z-score over route-stratified baseline
 /**
+ * The fixed RTT ceiling (v0.79.0): a raw round trip over it is slow on any
+ * route, so it needs no learned normal to be called slow.
+ *
+ * WHY A CEILING AT ALL. The learned normal is route-stratified: `baselines.ts`
+ * empties a node's RTT bands on every route change, and a band needs about 23
+ * fresh readings to graduate — about 12 days for a node that only the 2-hourly
+ * sweep talks to. A node that re-routes even once a week therefore never has a
+ * normal, and the routed nodes, the ones most likely to degrade, re-route
+ * most. On the reference mesh (2026-11-13) 23 of 38 nodes had no graduated RTT
+ * band at all, and the reroute that came with a degradation was what erased
+ * the yardstick that would have judged it: one node held a graduated 22 ms
+ * normal for 13 days, re-routed once, and read 396 ms the next day.
+ *
+ * WHY 300 ms. Every graduated line on that mesh was 57–124 ms (median + 4
+ * scales), so the ceiling sits more than twice over the highest. Over 14 days
+ * of the coarse tier, none of the nine nodes that held one direct route and a
+ * graduated normal throughout had two consecutive round trips over 250 ms.
+ * Replayed over the same 14 days under the rule below (average over the line,
+ * two round trips over it), the ceiling starts 37 breaches on 10 mains nodes,
+ * among them a slowdown of 378–525 ms round trips on six consecutive sweeps
+ * that no learned line was there to see. A slowdown under the ceiling on a
+ * node with no normal is still not flagged: this catches the severe ones.
+ *
+ * The same start rule applies as against a learned line: the AVERAGE must be
+ * over the ceiling, and the two newest raw round trips too. From a 30 ms
+ * average that takes three to five slow round trips in a row (three at 525 ms,
+ * five at 400 ms), so a lone slow frame never reaches it.
+ *
+ * It applies only where a confirmation probe can reach the node (a mains
+ * ping candidate): a sleeping or FLiRS node's round trips can include its
+ * wake-up, and the two-round-trip start rule needs the probe to pair them.
+ */
+export const RTT_CEILING_MS = 300;
+
+/**
+ * The line an RTT reading is judged against (v0.79.0), and where it came from.
+ *  - `learned`: the band's median + RTT_Z scales.
+ *  - `capped`: that learned line was over RTT_CEILING_MS, so the ceiling is
+ *    the line (a band can graduate while the node is already slow).
+ *  - `ceiling`: no graduated band, so the ceiling alone is the line.
+ */
+export interface RttYardstick {
+  line: number;
+  basis: 'learned' | 'capped' | 'ceiling';
+}
+
+/**
+ * Pick the line for one node (v0.79.0). `norm` is the node's RTT normal for the
+ * current time-of-day band (null when the store has never seen the node), and
+ * `confirmable` whether a confirmation probe can reach it. Null means the node
+ * is not judged at all: no graduated band, and no probe to pair a ceiling
+ * breach with.
+ *
+ * One definition, used by the detector, the engine's coverage count and the
+ * DETAIL row, so the three cannot disagree about which nodes are judged.
+ */
+export function rttYardstick(norm: ContNormal | null, confirmable: boolean): RttYardstick | null {
+  if (norm?.ready) {
+    const learned = norm.median + RTT_Z * norm.scale;
+    // Equal is not over: only a line strictly above the ceiling is capped. A
+    // node no probe can reach keeps its learned line, since nothing could pair
+    // a ceiling breach for it.
+    return confirmable && learned > RTT_CEILING_MS
+      ? { line: RTT_CEILING_MS, basis: 'capped' }
+      : { line: learned, basis: 'learned' };
+  }
+  return confirmable ? { line: RTT_CEILING_MS, basis: 'ceiling' } : null;
+}
+/**
  * The highest first-after-restart RTT the fixed half of `rttRestartResidue`
  * allows for (v0.77.1). The highest restart-seeded reading in the reference
  * mesh's 14-day store, across four driver restarts (10-16..10-26), was about
@@ -267,7 +336,9 @@ export function rttRestartResidue(commandsTX: number, median: number, seed?: Rtt
 /**
  * What the RTT baseline fold holds a reading `rtt` back on (v0.77.3): the
  * restart residue against the band's median, or, when the band has learned
- * nothing, against the node's own average since the seed.
+ * nothing, against the node's own average since the seed. The detector takes
+ * the same allowance off the reading it tests (v0.79.0); for a graduated band
+ * it is exactly `rttRestartResidue` against that band's median.
  *
  * A band with any data has a median of at least 5 ms (the first bin's centre);
  * an empty one reports 0. A route change empties every band of a node, so a
@@ -762,10 +833,14 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       }
     }
 
-    // rtt-degraded — route-stratified median ≫ baseline. Uses the newest FRESH
-    // RTT in the window (not `last`), so a non-fresh tick doesn't reset the dwell.
+    // rtt-degraded — route-stratified median ≫ baseline, or, where the route has
+    // no graduated band yet, a fixed ceiling (v0.79.0, `rttYardstick`). Uses the
+    // newest FRESH RTT in the window (not `last`), so a non-fresh tick doesn't
+    // reset the dwell.
     {
       const norm = baselines.rttNormal(id, now);
+      const confirmable = input.rttConfirmable?.(node) === true;
+      const yard = rttYardstick(norm, confirmable);
       const obs = latestFresh(samples, now, (s) => (s.rtt != null && s.rtt >= 0 ? { rtt: s.rtt, t: s.t } : null));
       const rtt = obs?.rtt ?? null;
       // NO recency conjunct here — RTT is a LEVEL, not an event count.
@@ -786,8 +861,13 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       //
       // The reading is tested with the restart's seed taken out (v0.77.1): an
       // excess that seed alone could produce is the restart, not the link.
-      const residue = norm ? rttRestartResidue(node.stats.commandsTX, norm.median, input.rttSeed(id)) : 0;
-      const b = !!(norm?.ready && obs != null && obs.rtt - residue > norm.median + RTT_Z * norm.scale);
+      // Measured as the baseline fold measures it (v0.79.0): against the band's
+      // median where it has one, which for a graduated band is exactly the
+      // v0.77.1 allowance, and otherwise against what the driver averaged after
+      // the seed. Against 0, a slow node's own slow seed would be allowed for in
+      // full, and the ceiling would sleep through the day after every restart.
+      const residue = obs != null ? rttFoldResidue(node.stats.commandsTX, obs.rtt, norm, input.rttSeed(id)) : 0;
+      const b = !!(yard && obs != null && obs.rtt - residue > yard.line);
       // ONE SLOW ROUND TRIP IS NOT A LEVEL (v0.78.0). The average keeps 0.75 of
       // itself per transmission, so one frame above median + 16 scales lifts it
       // over the line alone, and a larger one keeps it there: a 700 ms frame on
@@ -800,13 +880,12 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // node, the newest round trip alone starts it. Once started, the average
       // alone holds it, as before: a level is not re-proven on every frame.
       const rk = key(id, 'rtt-degraded');
-      const line = b ? norm!.median + RTT_Z * norm!.scale : Infinity;
+      const line = b ? yard!.line : Infinity;
       const frames = b ? rawRttFrames(samples).filter((f) => now - f.t <= WINDOW_MS) : [];
       const r1 = frames[frames.length - 1];
       const r2 = frames[frames.length - 2];
       const slow = r1 != null && r1.raw > line;
       const pair = slow && r2 != null && r2.raw > line;
-      const confirmable = input.rttConfirmable?.(node) === true;
       const armed = state.has(rk);
       if (b) input.rttOverLine?.(id);
       if (b && !armed && slow && !pair && confirmable) input.rttSuspect?.(id, r1);
@@ -817,13 +896,22 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
           kind: 'rtt-degraded', nodeId: id, severity: 'watch', sinceMs: since, basis: 'measured',
           evidence: [
             { label: 'RTT', value: `${Math.round(rtt!)}ms` },
-            { label: 'baseline', value: `${Math.round(norm!.median)}±${Math.round(norm!.scale)}ms` },
+            // The yardstick it was judged against (v0.79.0): a ceiling breach
+            // has no baseline to show, and printing the empty band's 0±8 would
+            // claim one.
+            yard!.basis === 'ceiling'
+              ? { label: 'ceiling', value: `${RTT_CEILING_MS}ms · no normal for this route yet` }
+              : { label: 'baseline', value: `${Math.round(norm!.median)}±${Math.round(norm!.scale)}ms${yard!.basis === 'capped' ? ` · capped at ${RTT_CEILING_MS}ms` : ''}` },
             ...(residue >= 1 ? [{ label: 'restart allowance', value: `${Math.round(residue)}ms (${node.stats.commandsTX} tx since driver start)` }] : []),
             // Last (v0.78.0): REMEDY cuts the evidence row at the screen's width,
             // and the yardstick must not be what falls off.
             ...(r1 != null ? [{ label: 'newest round trips', value: `${frames.slice(-2).reverse().map((f) => Math.round(f.raw)).join(', ')}ms` }] : []),
           ],
-          narrative: `${node.name}'s round-trip time is far above its normal for this route and time of day.`,
+          narrative: yard!.basis === 'learned'
+            ? `${node.name}'s round-trip time is far above its normal for this route and time of day.`
+            : yard!.basis === 'capped'
+              ? `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route, although the normal learned for this route and time of day is wide enough to allow them.`
+              : `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route. Its current route has no learned normal yet (the RTT normal restarts on every route change), so the fixed ceiling is the yardstick.`,
         });
       }
     }

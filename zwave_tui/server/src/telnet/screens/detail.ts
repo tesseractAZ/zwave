@@ -42,6 +42,7 @@ import { downsampleMean } from './interference';
 import { frame, hstack, splitCols, type Keycap, type StackCol, shedLine } from '../chrome';
 import { responseTimeoutPct } from '../../zwave/health';
 import { isPingCandidate } from '../../zwave/autoPing';
+import { RTT_CEILING_MS } from '../../zwave/symptoms';
 import { rssiColor, marginColor, rttColor, timeoutPctColor, rssiReading } from '../bands';
 
 
@@ -643,13 +644,28 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       // "above its own normal" verdict is measured against were the two the
       // screen could not show, and the one it could show decides nothing.
       const rtn = data.rttNormal?.(n.nodeId) ?? null;
+      // The line the verdict is actually measured against (v0.79.0), which is
+      // not always the learned one: the detector's own rule, via the engine.
+      const ry = data.rttYardstick?.(n.nodeId) ?? null;
       if (rtn) {
         // 8-character labels: kv pads to 8, so a longer one overflows the cell
         // and pushes its value out of the column every other row lines up on.
         body.push(kv('Norm RTT', rtn.ready
           ? c.white(`${Math.round(rtn.median)} ms`) + c.grey(` ±${Math.round(rtn.scale)} ms`) +
-            c.grey(` · ${rtn.days}d · this time-of-day band`)
-          : c.yellow('still learning') + c.grey(` · ${rtn.days}d so far — not yet a yardstick`), inner));
+            c.grey(` · ${rtn.days}d · this time-of-day band`) +
+            (ry?.basis === 'capped' ? c.grey(` · line capped at ${RTT_CEILING_MS} ms`) : '')
+          : c.yellow('still learning') + c.grey(ry?.basis === 'ceiling'
+            ? ` · ${rtn.days}d so far — held to the ${RTT_CEILING_MS} ms ceiling meanwhile`
+            : ` · ${rtn.days}d so far — not yet a yardstick`), inner));
+        // WHY IT MAY NEVER GRADUATE (v0.79.0). The RTT bands are learned per
+        // route and emptied on every route change, so a node that re-routes
+        // more often than a band can fill stays "still learning" for good. The
+        // count is the coarse tier's, the same one TOPOLOGY ranks by.
+        const rs = rtn.ready ? null : data.routeStability?.(n.nodeId) ?? null;
+        if (rs && rs.changes > 0) {
+          const span = rs.hours >= 48 ? `${Math.round(rs.hours / 24)}d` : `${Math.round(rs.hours)}h`;
+          body.push(note(`The RTT normal restarts on every route change: ${rs.changes} in the last ${span}`, inner));
+        }
       }
       const tn = data.timeoutNormal?.(n.nodeId) ?? null;
       if (tn) {

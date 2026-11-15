@@ -3,6 +3,28 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.75.5
+
+### Fixed — the Changelog dialog in Home Assistant opens quickly
+
+Home Assistant renders an add-on's whole `CHANGELOG.md` whenever the add-on is
+up to date: one blocking markdown pass, with nothing on screen until it
+finishes. At 384 KB and 140 releases that meant about 4,300 elements, and a long
+wait on slower devices. The shipped changelog now keeps only the newest
+releases, under 32 KiB. Everything older is in `docs/CHANGELOG-history.md` on
+GitHub, linked at the end of the file, and is never shipped with the add-on.
+
+- `.github/scripts/rotate-changelog.mjs` moves the oldest sections into the
+  history until the shipped file fits. The release workflow runs it after
+  adding a section, and a contract test fails CI when the files are not
+  rotated or a release section goes missing from both.
+- Release headings are plain `## X.Y.Z`. Home Assistant's update dialog shows
+  the notes from the new release down to the installed one when the heading is
+  exactly that, and falls back to the whole file otherwise. The documented
+  `## X.Y.Z — DATE` form, which `release.yml` also wrote, triggered that
+  fallback. Both now use the plain form, the contract test enforces it, and
+  `release.yml` demotes a `## ` heading inside its notes to `###`.
+
 ## 0.75.4
 
 ### Added — a durable log archive, past the host journal

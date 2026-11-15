@@ -18,7 +18,7 @@ const sym = (over: Partial<Symptom> = {}): Symptom =>
 const data = (over: Partial<DataProvider> = {}): DataProvider => ({
   ready: () => true,
   symptoms: () => [],
-  engineStatus: () => ({ enabled: true, ready: 3, total: 38, timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 22, rssiReady: 22, band: 0, bands: 6 }),
+  engineStatus: () => ({ enabled: true, ready: 3, total: 38, timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 22, rttCeiling: 0, rssiReady: 22, band: 0, bands: 6 }),
   autoPingState: () => AP() as never,
   autonomyPause: () => null,
   sleeperWatches: () => [],
@@ -207,9 +207,18 @@ test('the engine sensor publishes how many nodes are UNMEASURED (v0.67.0)', () =
   // A skipped timeout window read as clear. detectors_ready said 38/38 while
   // three detectors were silently skipping quiet nodes.
   const s = buildStates(data({ engineStatus: () => ({ enabled: true, ready: 35, total: 38,
-    timeoutReady: 35, timeoutWindowBlind: 7, rttReady: 20, rssiReady: 20, band: 0, bands: 6 }) } as never));
+    timeoutReady: 35, timeoutWindowBlind: 7, rttReady: 20, rttCeiling: 0, rssiReady: 20, band: 0, bands: 6 }) } as never));
   assert.equal(by(s, ENTITY_ENGINE).attrs.detectors_unmeasured, 7,
     'the unmeasured count reaches HA, or a quiet node reads as a healthy one');
+});
+
+test('the engine sensor publishes how many nodes the RTT ceiling alone judges (v0.79.0)', () => {
+  // rtt_ready counts graduated bands only. Without this, 10 of 38 read as "the
+  // rest are blind" while most of them are held to the ceiling.
+  const s = buildStates(data({ engineStatus: () => ({ enabled: true, ready: 38, total: 38,
+    timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 10, rttCeiling: 25, rssiReady: 10, band: 0, bands: 6 }) } as never));
+  assert.equal(by(s, ENTITY_ENGINE).attrs.rtt_ready, 10);
+  assert.equal(by(s, ENTITY_ENGINE).attrs.rtt_ceiling_only, 25);
 });
 
 test('one entity HA rejects does not stop the other three publishing (v0.68.0)', async () => {
@@ -390,7 +399,9 @@ test('the recommendation is the sixth entity; the other five keep their ids and 
   const s = buildStates(data(), 1_800_000_000_000, { writeActions: true, startedAt: 1_799_999_000_000 });
   assert.deepEqual(s.map((x) => x.entity), [ENTITY_DEGRADED, ENTITY_SUMMONS, 'sensor.zwave_tui_symptoms', ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ENTITY_RECOMMENDATION]);
   assert.deepEqual(Object.keys(by(s, ENTITY_ENGINE).attrs),
-    ['friendly_name', 'detectors_ready', 'detectors_unmeasured', 'detectors_total', 'rtt_ready', 'paused_by', 'paused_since', 'auto_remediation',
+    ['friendly_name', 'detectors_ready', 'detectors_unmeasured', 'detectors_total', 'rtt_ready',
+      // v0.79.0: the nodes judged against the fixed RTT ceiling alone.
+      'rtt_ceiling_only', 'paused_by', 'paused_since', 'auto_remediation',
       // v0.73.0: the missed-report watch's two counts.
       'sleepers_watched', 'sleepers_total',
       // v0.75.0: the refresh trial's phase and counts.

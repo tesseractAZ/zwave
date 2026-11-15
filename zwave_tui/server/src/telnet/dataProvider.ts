@@ -146,6 +146,9 @@ export interface ZwaveDataSource {
    *  at all, so the verdicts measured against them were unfalsifiable on screen:
    *  the accusation was visible and the baseline behind it was not. */
   rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  /** REQUIRED (v0.79.0) — the line the RTT verdict is measured against, which
+   *  is not always the learned one. */
+  rttYardstick(nodeId: number): { line: number; basis: 'learned' | 'capped' | 'ceiling' } | null;
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
   /** REQUIRED — see ackEvent. Whether learning is PAUSED for this node. */
   baselineHold(nodeId: number): 'symptomatic' | 'arming' | 'rtt-over-line' | null;
@@ -242,7 +245,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     history: (n) => zd.history?.(n) ?? { rssi: [], rtt: [] },
     historyLong: (n) => zd.historyLong?.(n) ?? { rssi: [], rtt: [] },
     symptoms: () => zd.symptoms?.() ?? [],
-    engineStatus: () => zd.engineStatus?.() ?? { enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 0, bands: 0 },
+    engineStatus: () => zd.engineStatus?.() ?? { enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rttCeiling: 0, rssiReady: 0, band: 0, bands: 0 },
     efficacyFor: (k, a) => zd.efficacyFor?.(k, a) ?? null,
     interference: () => zd.interference?.() ?? null,
     entityStates: (n) => zd.entityStates?.(n) ?? [],
@@ -285,6 +288,7 @@ export function buildZwaveDataSource(zd: ZwaveDataSource): ZwaveDataSource {
     driverLogWatch: () => zd.driverLogWatch(),
     rssiNormal: (n) => zd.rssiNormal(n),
     rttNormal: (n) => zd.rttNormal(n),
+    rttYardstick: (n) => zd.rttYardstick?.(n) ?? null,
     timeoutNormal: (n) => zd.timeoutNormal(n),
     baselineHold: (n) => zd.baselineHold(n),
     rttSeedHold: (n) => zd.rttSeedHold(n),
@@ -421,6 +425,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     driverLogWatch: () => zwaveData.driverLogWatch(),
     rssiNormal: (nodeId) => zwaveData.rssiNormal(nodeId),
     rttNormal: (nodeId) => zwaveData.rttNormal(nodeId),
+    rttYardstick: (nodeId) => zwaveData.rttYardstick(nodeId),
     timeoutNormal: (nodeId) => zwaveData.timeoutNormal(nodeId),
     baselineHold: (nodeId) => zwaveData.baselineHold(nodeId),
     rttSeedHold: (nodeId) => zwaveData.rttSeedHold(nodeId),
@@ -434,7 +439,7 @@ export function createTuiDataProvider(opts: CreateTuiDataProviderOptions): {
     ready: () => cachedReady,
     lastError: () => cachedError,
     symptoms: () => zwaveData.symptoms?.() ?? [],
-    engineStatus: () => zwaveData.engineStatus?.() ?? { enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0, band: 0, bands: 0 },
+    engineStatus: () => zwaveData.engineStatus?.() ?? { enabled: false, ready: 0, total: 0, timeoutReady: 0, rttReady: 0, rttCeiling: 0, rssiReady: 0, band: 0, bands: 0 },
     efficacyFor: (kind, action) => zwaveData.efficacyFor?.(kind, action) ?? null,
     interference: () => zwaveData.interference(),
     entityStates: (n) => zwaveData.entityStates(n),

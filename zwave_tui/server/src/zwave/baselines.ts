@@ -32,10 +32,18 @@
  * pre-emission arming window) are QUARANTINED from updates (the baseline must
  * not chase the pathology); aggregates DECAY slowly so genuine improvements are
  * eventually absorbed; and a home-id change (everything) or a node leaving the
- * mesh (that node) forces a reset. A route change or a re-interview does not:
- * the decay absorbs a lasting shift. A permanently-symptomatic node's baseline
- * therefore FREEZES at its
- * last-healthy normal — accepted (v0.14 review): that keeps a genuinely-broken
+ * mesh (that node) forces a reset. A route change empties that node's rssi and
+ * rtt bands, all six (see Bands above), and leaves its timeout rate alone; a
+ * re-interview resets nothing, and the decay absorbs a lasting shift.
+ *
+ * The route reset has a cost: a band needs ~23 fresh readings to graduate,
+ * about 12 days at sweep cadence, so a node that re-routes even weekly never
+ * has a learned RTT normal (23 of 38 nodes on the reference mesh, 2026-11-13).
+ * rtt-degraded judges such a node against a fixed ceiling instead
+ * (symptoms.ts `RTT_CEILING_MS`, v0.79.0).
+ *
+ * Because of the quarantine, a permanently-symptomatic node's baseline FREEZES at
+ * its last-healthy normal — accepted (v0.14 review): that keeps a genuinely-broken
  * node flagged against its own healthy history rather than normalizing the
  * fault. DESIGN's bounded-quarantine/forced-re-baseline-after-K-weeks is a
  * future refinement, not needed for correctness.

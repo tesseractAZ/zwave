@@ -1,5 +1,76 @@
 # Changelog
 
+## 0.79.0
+
+`rtt-degraded` judges a node with no learned RTT normal against a fixed
+300 ms ceiling.
+
+### Fixed — re-routing nodes were never judged on round-trip time
+
+- The RTT normal is learned per route. A route change empties the node's six
+  time-of-day bands, and a band graduates after about 23 fresh readings:
+  about 12 days for a node that only the 2-hourly liveness sweep talks to. A
+  node that re-routes even once a week never graduates, and the routed nodes
+  re-route the most.
+- On the reference mesh (2026-11-13) 23 of 38 nodes had no graduated RTT band,
+  17 of the 20 routed ones among them. One node's round trips ran at
+  378–525 ms on six consecutive sweeps; it had re-routed 19 times in 14 days
+  and was never judged. Another held a graduated 22 ms normal for 13 days,
+  re-routed once, and read 396 ms the next day.
+- Where a confirmation probe can reach the node (a mains ping candidate, with
+  the auto-ping runner on), `rtt-degraded` now judges a node with no graduated
+  band against `RTT_CEILING_MS = 300`. The v0.78.0 start rule is unchanged:
+  the average must be over the line and the two newest raw round trips too,
+  and a lone slow one owes one confirmation probe. From a 30 ms average that
+  takes three to five slow round trips in a row.
+- For the same nodes a graduated line above 300 ms is capped at it. No learned
+  line on the reference mesh is above 124 ms.
+- Learning per route is unchanged, and so is every verdict against a learned
+  line under the ceiling.
+- After a driver restart, a node with no normal is judged net of its restart
+  seed as the baseline fold measures it: against what the driver averaged
+  after the seed. A slow node's own slow seed therefore does not hide it for a
+  day, and a seed decaying over a healthy link does not put a node over the
+  ceiling. For a graduated band the allowance is the v0.77.1 one, unchanged.
+- Replayed over 14 days of the reference mesh's coarse tier, the ceiling starts
+  37 breaches on 10 mains nodes, and none on the nine nodes that held one
+  direct route and a graduated normal throughout. Their bursts and
+  confirmations come to about 17 probes a day, about 3.5 % of the sweep's
+  fresh readings.
+- Not covered: a slowdown under 300 ms on a node with no normal, and FLiRS or
+  sleeping nodes, which keep the learned-only rule.
+- `rtt-degraded` episodes feed the refresh trial, so ceiling breaches on mains
+  nodes join its randomized arms from this release.
+
+### Changed — the screens and HA say which line a node is judged against
+
+- The symptom card's yardstick row reads `ceiling 300ms · no normal for this
+  route yet` for a ceiling breach, and a capped baseline ends `· capped at
+  300ms`. The narrative names the line that was crossed.
+- DETAIL's `Norm RTT` row reads `still learning · Nd so far — held to the
+  300 ms ceiling meanwhile` where the ceiling applies, and a capped line ends
+  `· line capped at 300 ms`. Under an ungraduated band, a note gives the
+  coarse tier's route-change count: `The RTT normal restarts on every route
+  change: 12 in the last 7d`.
+- REMEDY's coverage counts gain `ceiling-only N`. With any such node, the
+  partial-coverage text says a degradation *may go unflagged* (it said
+  *would not be flagged*) and names how many the ceiling holds; the learning
+  headline reads *no detector has a learned yardstick yet*.
+- `sensor.zwave_tui_engine` gains `rtt_ceiling_only`. `rtt_ready` is
+  unchanged; `detectors_total − rtt_ready − rtt_ceiling_only` nodes are not
+  judged on RTT.
+- `baselines.ts` said a route change resets nothing. It empties the node's
+  rssi and rtt bands and keeps its timeout rate; the comment now says so.
+
+### Tests
+
+- symptoms: `rttYardstick` for every basis, the ceiling's start, its
+  confirmation, its cap, a FLiRS node outside it, and the restart seed both
+  ways.
+- zwaveDataChurn: the coverage count and DETAIL's accessor use the
+  detector's own reachability rule.
+- detailScreen, remedyScreen and haStates for the rows, counts and attribute.
+
 ## 0.78.3
 
 The app is published as stable.
@@ -501,28 +572,6 @@ go into backups.
   title is set off by a blank line.
 - The mutation harness's `--only` takes a comma-separated list, and fails on
   any token that matches nothing.
-
-## 0.75.5
-
-### Fixed — the Changelog dialog in Home Assistant opens quickly
-
-Home Assistant renders an add-on's whole `CHANGELOG.md` whenever the add-on is
-up to date: one blocking markdown pass, with nothing on screen until it
-finishes. At 384 KB and 140 releases that meant about 4,300 elements, and a long
-wait on slower devices. The shipped changelog now keeps only the newest
-releases, under 32 KiB. Everything older is in `docs/CHANGELOG-history.md` on
-GitHub, linked at the end of the file, and is never shipped with the add-on.
-
-- `.github/scripts/rotate-changelog.mjs` moves the oldest sections into the
-  history until the shipped file fits. The release workflow runs it after
-  adding a section, and a contract test fails CI when the files are not
-  rotated or a release section goes missing from both.
-- Release headings are plain `## X.Y.Z`. Home Assistant's update dialog shows
-  the notes from the new release down to the installed one when the heading is
-  exactly that, and falls back to the whole file otherwise. The documented
-  `## X.Y.Z — DATE` form, which `release.yml` also wrote, triggered that
-  fallback. Both now use the plain form, the contract test enforces it, and
-  `release.yml` demotes a `## ` heading inside its notes to `###`.
 
 ## Older releases
 
