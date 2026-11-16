@@ -1098,6 +1098,68 @@ test('engineStatus counts EACH baseline series from its own store, not from time
   }
 });
 
+test('engineStatus and rttYardstick hold a node with no RTT normal to the ceiling only where a probe can reach it (v0.79.0)', async () => {
+  // One rule — rttYardstick over the same "can a confirmation reach it" test
+  // the detector is given — feeds the count, the accessor DETAIL reads and the
+  // detector, so the three cannot disagree about who is judged.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-engceil-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  const inner = zd as unknown as { baselines: unknown };
+  const real = inner.baselines;
+  try {
+    inner.baselines = {
+      timeoutNormal: () => ({ ready: true }),
+      rttNormal: () => ({ median: 0, scale: 8, ready: false, days: 0 }),
+      rssiNormal: () => ({ ready: false }),
+    };
+    // The fixture has one end node and no controller. Make the node a sleeper,
+    // add a listening twin and a controller for these synchronous asserts (no refresh can replace the roster between
+    // them).
+    const roster = zd.snapshot();
+    const firstEnd = roster.findIndex((n) => !n.isController);
+    roster.push({ ...roster[firstEnd], nodeId: 99, isListening: true });
+    roster.push({ ...roster[firstEnd], nodeId: 1, isListening: true, isController: true });
+    roster[firstEnd] = { ...roster[firstEnd], isListening: false };
+    const nodes = roster.filter((n) => !n.isController);
+    const listening = nodes.filter((n) => n.isListening === true);
+    const other = nodes.filter((n) => n.isListening !== true);
+    assert.ok(listening.length > 0 && other.length === 1, `fixture guard: both kinds of node ${JSON.stringify(nodes.map((n) => [n.nodeId, n.isListening]))}`);
+    // No auto-ping runner: no probe can reach anyone, so nobody is judged.
+    assert.equal(zd.engineStatus().rttCeiling, 0);
+    assert.equal(zd.rttYardstick(listening[0].nodeId), null);
+    zd.setAutoPingSnapshot(() => ({}) as never);
+    const eng = zd.engineStatus();
+    assert.equal(eng.rttReady, 0);
+    assert.equal(eng.rttCeiling, listening.length, 'every listening node, and only those');
+    assert.deepEqual(zd.rttYardstick(listening[0].nodeId), { line: 300, basis: 'ceiling' });
+    assert.equal(zd.rttYardstick(other[0].nodeId), null, 'a sleeping or FLiRS node is not held to it');
+    // A graduated band is counted as learned, never as ceiling-only.
+    inner.baselines = { ...(inner.baselines as object), rttNormal: () => ({ median: 30, scale: 8, ready: true, days: 5 }) };
+    assert.equal(zd.engineStatus().rttCeiling, 0);
+    assert.equal(zd.engineStatus().rttReady, nodes.length);
+    // The controller is never judged on RTT, even with a graduated band to read.
+    const ctrl = roster.find((n) => n.isController);
+    assert.ok(ctrl, 'fixture guard: the roster has its controller');
+    assert.equal(zd.rttYardstick(ctrl.nodeId), null);
+    assert.deepEqual(zd.rttYardstick(listening[0].nodeId), { line: 62, basis: 'learned' }, 'fixture guard: an end node is judged');
+    // A node the store never folded has a null normal, not an empty band. It is
+    // counted and held to the ceiling the same way.
+    inner.baselines = { ...(inner.baselines as object), rttNormal: () => null };
+    assert.equal(zd.engineStatus().rttCeiling, listening.length, 'a never-folded listening node is counted too');
+    assert.deepEqual(zd.rttYardstick(listening[0].nodeId), { line: 300, basis: 'ceiling' });
+  } finally {
+    inner.baselines = real;
+    zd.setAutoPingSnapshot(null);
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('the data layer applies the refusal SCOPE it computes, and only to refusals', async () => {
   // Three wiring facts the ledger-level tests cannot see, because they call the
   // store directly and the bug would live in the caller:

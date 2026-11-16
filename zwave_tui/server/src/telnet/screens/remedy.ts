@@ -14,6 +14,7 @@ import { c, clipWords, truncate, visLen } from '../ansi';
 import { frame, fieldStrip, shedLine } from '../chrome';
 import { planFor, type PlanCandidate } from '../../zwave/planner';
 import { wilsonLower } from '../../zwave/outcomes';
+import { RTT_CEILING_MS } from '../../zwave/symptoms';
 
 /** One-line learned-efficacy note for an executable candidate (M5): a green
  *  "beat self-healing" when it clears the control arm, a grey "not
@@ -658,8 +659,19 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       const counts = (): string[] => [
         c.grey(`      timeouts ${eng.timeoutReady}/${eng.total}`),
         c.grey(`rtt ${eng.rttReady}/${eng.total}`),
+        // v0.79.0: rtt nodes with no learned band whom the fixed ceiling still
+        // judges. Its own field, so the rtt count keeps meaning "learned".
+        ...(eng.rttCeiling > 0 ? [c.grey(`ceiling-only ${eng.rttCeiling}`)] : []),
         c.grey(`rssi ${eng.rssiReady}/${eng.total}`),
       ];
+      // NOT BLIND, NOT LEARNED (v0.79.0). An rtt node with no graduated band is
+      // still judged where a probe can reach it, against a fixed ceiling, so
+      // "would not be flagged" stopped being true of it — but only a severe
+      // slowdown clears that ceiling, so it is not covered either.
+      const ceilingNote = (): string[] => (eng.rttCeiling > 0
+        ? [c.grey(clipWords(`    rtt: ${eng.rttCeiling} with no learned normal are held to a fixed ${RTT_CEILING_MS} ms`, W)),
+          c.grey(clipWords('    ceiling meanwhile, so only a severe slowdown is flagged there.', W))]
+        : []);
       // The ledger's open episodes belong to EVERY no-symptom state, not just
       // the green one (v0.46.0). An episode in its confirmation window has no
       // live symptom by construction, so any empty state can be hiding one.
@@ -701,9 +713,12 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       if (eng.timeoutReady === 0 && eng.rttReady === 0) {
         empty = 'learning';
         // NOTHING has graduated. Deliberately silent about symptoms: with no
-        // detector able to fire, "no symptoms" would describe the instrument.
+        // learned detector able to fire, "no symptoms" would describe the
+        // instrument. The fixed RTT ceiling (v0.79.0) still flags a severe
+        // slowdown, which ceilingNote() says, so the sentence below names the
+        // LEARNED detectors when the ceiling is judging anyone.
         body.push(c.cyan(pickHead([
-          `    ◷ Learning — no detector has a yardstick yet for ${bandLabel(eng)}:`,
+          `    ◷ Learning — no detector has a learned yardstick yet for ${bandLabel(eng)}:`,
           `    ◷ Learning — no yardstick yet for ${bandLabel(eng, true)}:`,
           `    ◷ Learning — none yet, ${bandLabel(eng, true)}:`,
         ])));
@@ -712,7 +727,10 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         body.push('');
         body.push(c.grey('    Each node’s normal is learned per series and per time-of-day band,'));
         body.push(c.grey('    from the evidence stream across several distinct days, before its'));
-        body.push(c.grey('    detectors may fire. Nothing here is a health claim yet.'));
+        body.push(c.grey(eng.rttCeiling > 0
+          ? '    learned detectors may fire. Nothing here is a health claim yet.'
+          : '    detectors may fire. Nothing here is a health claim yet.'));
+        body.push(...ceilingNote());
       } else if (blind.length > 0) {
         empty = 'partial';
         // PARTIAL COVERAGE (v0.46.0) — the steady state on any mesh with routed
@@ -740,10 +758,13 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         body.push(fieldStrip(view, counts()));
         body.push('');
         const which = blind.map(([name, n]) => `${name} (${n})`).join(', ');
-        body.push(truncate(c.grey(`    No detector yardstick in this band: ${which} of ${eng.total} nodes.`), W));
-        body.push(c.grey('    A degradation on those nodes would not be flagged, so this is a'));
+        body.push(truncate(c.grey(`    No learned yardstick in this band: ${which} of ${eng.total} nodes.`), W));
+        body.push(c.grey(eng.rttCeiling > 0
+          ? '    A degradation on those nodes may go unflagged, so this is a'
+          : '    A degradation on those nodes would not be flagged, so this is a'));
         body.push(c.grey('    statement about COVERAGE, not health. Baselines reset on a route'));
         body.push(c.grey('    change, so routed nodes may never graduate.'));
+        body.push(...ceilingNote());
         body.push(...rssiNote());
         body.push(...episodeLine());
       } else {

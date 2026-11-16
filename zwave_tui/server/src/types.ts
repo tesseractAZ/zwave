@@ -246,6 +246,10 @@ export interface EngineStatus {
   timeoutWindowBlind: number;
   /** Nodes whose RTT baseline has graduated in `band`. */
   rttReady: number;
+  /** Of the rest, nodes rtt-degraded still judges against the fixed ceiling
+   *  (v0.79.0): no graduated band, but a probe can reach them. The remainder,
+   *  `total − rttReady − rttCeiling`, are not judged on RTT at all. */
+  rttCeiling: number;
   /** Nodes whose RSSI baseline has graduated in `band`. */
   rssiReady: number;
   /** The time-of-day band these counts were measured in (0-indexed). */
@@ -590,6 +594,11 @@ export interface DataProvider {
    *  normal per 4-hour band, so the same call at 03:00 and 15:00 legitimately
    *  differs — any rendering must say which band it is quoting. */
   rttNormal?(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  /** The line rtt-degraded judges the node against right now (v0.79.0):
+   *  the learned one, that line capped at the fixed ceiling, or the ceiling
+   *  alone where the current time-of-day band has not graduated. Null = not
+   *  judged at all. */
+  rttYardstick?(nodeId: number): { line: number; basis: 'learned' | 'capped' | 'ceiling' } | null;
   /** The learned reply-timeout yardstick for this node's current band
    *  (v0.48.0). Same band caveat as `rssiNormal`. */
   timeoutNormal?(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;

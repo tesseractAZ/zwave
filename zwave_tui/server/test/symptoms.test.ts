@@ -1,7 +1,7 @@
 import type { SleeperWatch } from '../src/zwave/missedReport';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, rttFoldResidue, RTT_SEED_MAX_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
+import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, rttFoldResidue, rttYardstick, RTT_SEED_MAX_MS, RTT_CEILING_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
 import { planEpisodeLifecycle } from '../src/zwave/outcomes';
 import { diffSymptomLog } from '../src/zwave/zwaveData';
 import type { RateNormal, ContNormal, BaselineStore } from '../src/zwave/baselines';
@@ -712,7 +712,7 @@ test('rttRestartResidue: the first reading seen this lifetime bounds what came b
   assert.equal(rttRestartResidue(5, 30, { k0: 9, a0: 30 }), rttRestartResidue(5, 30), 'a seed from a later count is not this lifetime\'s');
 });
 
-test('rttFoldResidue: a band with a median is the yardstick, as for the detector (v0.77.3)', () => {
+test('rttFoldResidue: a band with a median is the yardstick the fold uses, as the detector does once the band graduates (v0.77.3)', () => {
   const seed = { k0: 3, a0: 900 };
   assert.equal(rttFoldResidue(4, 900, { median: 25 }, seed), rttRestartResidue(4, 25, seed));
   assert.equal(rttFoldResidue(4, 900, { median: 5 }, seed), rttRestartResidue(4, 5, seed), 'the first bin\'s centre is a median');
@@ -804,7 +804,7 @@ function trips(base: number, list: { t: number; raw: number }[]): EvidenceSample
 }
 /** Run the detector each minute over [from, to] against 30±8 (line 62) and
  *  report what rtt-degraded did. `ring(now)` gives the samples seen at `now`. */
-function rttTicks(ring: (now: number) => EvidenceSample[], from: number, to: number, confirmable?: boolean) {
+function rttTicks(ring: (now: number) => EvidenceSample[], from: number, to: number, confirmable?: boolean, baselines?: BaselineStore) {
   const state: SymptomState = new Map();
   const suspects: { id: number; raw: number }[] = [];
   const asked: number[] = [];
@@ -816,7 +816,7 @@ function rttTicks(ring: (now: number) => EvidenceSample[], from: number, to: num
   for (let now = from; now <= to; now += MIN) {
     const before = suspects.length;
     const ob = overLine.length;
-    const out = detectSymptoms(input({ nodes: [node(1), node(6)], recent: new Map([[6, ring(now).filter((x) => x.t <= now)]]), now, confirmable, suspects, overLine }), state);
+    const out = detectSymptoms(input({ nodes: [node(1), node(6)], recent: new Map([[6, ring(now).filter((x) => x.t <= now)]]), now, confirmable, suspects, overLine, baselines }), state);
     if (suspects.length > before) asked.push(now);
     if (overLine.length > ob) over.push(now);
     if (armedAt == null && state.has('6:rtt-degraded')) armedAt = now;
@@ -991,6 +991,156 @@ test('rtt-degraded: strictly alternating slow and normal round trips never start
   const r = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 12 * MIN, true);
   assert.equal(r.armedAt, null);
   assert.ok(r.asked.length > 0, 'each slow one still asks; the confirmation is what can pair it');
+});
+
+/* ── v0.79.0: the fixed RTT ceiling ─────────────────────────────────────────
+ *
+ * A route change empties a node's RTT bands, and a band needs ~23 fresh
+ * readings (~12 days at sweep cadence) to graduate, so a node that re-routes
+ * weekly never has a learned line. On the reference mesh 23 of 38 nodes had
+ * none, and a 378–525 ms slowdown went unflagged for days. Where a probe can
+ * reach the node, a fixed ceiling now stands in for the missing line, and caps
+ * a learned line that grew past it.
+ */
+
+const UNLEARNED: ContNormal = { median: 0, scale: 8, ready: false, days: 0 };
+const unlearned = () => baselineStub({ rtt: UNLEARNED });
+
+test('rttYardstick: a learned line where one graduated, the ceiling where none did, nothing where no probe can pair a breach (v0.79.0)', () => {
+  const learned: ContNormal = { median: 30, scale: 8, ready: true, days: 5 };
+  assert.equal(RTT_CEILING_MS, 300);
+  assert.deepEqual(rttYardstick(learned, true), { line: 62, basis: 'learned' });
+  assert.deepEqual(rttYardstick(learned, false), { line: 62, basis: 'learned' }, 'a learned line needs no probe');
+  assert.deepEqual(rttYardstick(UNLEARNED, true), { line: 300, basis: 'ceiling' });
+  assert.deepEqual(rttYardstick(null, true), { line: 300, basis: 'ceiling' }, 'a node the store never saw has no normal either');
+  assert.equal(rttYardstick(UNLEARNED, false), null, 'no normal and no probe: not judged');
+  assert.equal(rttYardstick(null, false), null);
+  // A partly-learned band is not a yardstick, whatever its median says.
+  assert.deepEqual(rttYardstick({ median: 25, scale: 8, ready: false, days: 2 }, true), { line: 300, basis: 'ceiling' });
+});
+
+test('rttYardstick: a learned line over the ceiling is capped at it, only where a probe can reach the node; one AT it is not (v0.79.0)', () => {
+  const wide: ContNormal = { median: 280, scale: 20, ready: true, days: 5 }; // 360
+  assert.deepEqual(rttYardstick(wide, true), { line: 300, basis: 'capped' });
+  assert.deepEqual(rttYardstick(wide, false), { line: 360, basis: 'learned' }, 'a FLiRS or sleeping node keeps its own line');
+  const at: ContNormal = { median: 268, scale: 8, ready: true, days: 5 }; // exactly 300
+  assert.deepEqual(rttYardstick(at, true), { line: 300, basis: 'learned' }, 'equal is not over');
+});
+
+test('rtt-degraded: with no graduated band, five 400 ms round trips lift a 30 ms average over the 300 ms ceiling and start it (v0.79.0)', () => {
+  // Averages 122.5, 191.9, 243.9, 282.9, 312.2: over the ceiling on the fifth,
+  // whose round trip and the one before it are both over it too.
+  const list = [0, 1, 2, 3, 4].map((m) => ({ t: T + m * MIN, raw: 400 }));
+  const r = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 10 * MIN, true, unlearned());
+  assert.equal(r.armedAt, T + 4 * MIN, 'the average crosses on the fifth');
+  assert.equal(r.firstAt, T + 9 * MIN, 'and the breach matures DWELL_MS later');
+  assert.deepEqual(r.asked, [], 'the pair was already there: nothing to confirm');
+  assert.deepEqual(r.fired!.evidence.map((e) => e.label), ['RTT', 'ceiling', 'newest round trips'],
+    'the yardstick names itself, before the round trips');
+  assert.equal(r.fired!.evidence.find((e) => e.label === 'ceiling')!.value, '300ms · no normal for this band yet');
+  assert.match(r.fired!.narrative, /over 300 ms, slow on any route\. Its current route has no learned normal for this time of day yet/);
+  // The same round trips judged against a learned 30±8 start on the second.
+  const learnedRun = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 10 * MIN, true);
+  assert.equal(learnedRun.armedAt, T + MIN, 'fixture guard: the learned line is far lower');
+  assert.deepEqual(learnedRun.fired!.evidence.map((e) => e.label), ['RTT', 'baseline', 'newest round trips']);
+  // The learned arm keeps its own wording: no cap suffix, no ceiling sentence.
+  assert.equal(learnedRun.fired!.evidence.find((e) => e.label === 'baseline')!.value, '30±8ms');
+  assert.match(learnedRun.fired!.narrative, /far above its normal for this route and time of day\.$/);
+  // A node the store has never folded has no normal at all (null, not an empty
+  // band). It is held to the ceiling the same way.
+  const neverSeen = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 10 * MIN, true,
+    baselineStub({ store: { rttNormal: () => null } }));
+  assert.equal(neverSeen.armedAt, T + 4 * MIN, 'a never-seen node crosses the ceiling on the same reading');
+  assert.equal(neverSeen.fired!.evidence.find((e) => e.label === 'ceiling')!.value, '300ms · no normal for this band yet');
+});
+
+test('rtt-degraded: with no graduated band, round trips under the ceiling start nothing, ask nothing and hold nothing (v0.79.0)', () => {
+  const list = Array.from({ length: 10 }, (_v, m) => ({ t: T + m * MIN, raw: 290 }));
+  const r = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 12 * MIN, true, unlearned());
+  assert.equal(r.armedAt, null);
+  assert.deepEqual(r.asked, []);
+  assert.deepEqual(r.over, [], 'an average under the ceiling is not over the line');
+});
+
+test('rtt-degraded: with no graduated band and no probe to reach the node, nothing is judged (v0.79.0)', () => {
+  const list = [0, 1, 2, 3, 4, 5].map((m) => ({ t: T + m * MIN, raw: 900 }));
+  const r = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 12 * MIN, false, unlearned());
+  assert.equal(r.armedAt, null, 'a FLiRS or sleeping node keeps its learned-only rule');
+  assert.deepEqual(r.over, []);
+});
+
+test('rtt-degraded: over the ceiling, a lone slow round trip asks for a confirmation and starts nothing (v0.79.0)', () => {
+  // 600, 600, 250, 600: averages 172.5, 279.4, 272.0, 354.0. Over the ceiling
+  // on the fourth, whose predecessor (250) is not.
+  const list = [600, 600, 250, 600].map((raw, m) => ({ t: T + m * MIN, raw }));
+  const r = rttTicks((now) => trips(30, list).filter((x) => x.t <= now), T, T + 9 * MIN, true, unlearned());
+  assert.equal(r.armedAt, null);
+  // Asked on every tick it stands alone; the caller's cooldown keeps that to
+  // one probe (zwaveData.rttConfirmAt).
+  assert.equal(r.asked[0], T + 3 * MIN, 'first asked once the average is over the ceiling');
+  assert.ok(r.suspects.length > 0 && r.suspects.every((x) => Math.round(x.raw) === 600), 'and only ever about the lone slow one');
+});
+
+test('rtt-degraded: a learned line over the ceiling is capped at it, and says so (v0.79.0)', () => {
+  // A band that graduated while the node was already slow: 280±20, line 360.
+  // 330 then 340 lift the average to 292.5 and 304.4: over 300, under 360.
+  const wide = baselineStub({ rtt: { median: 280, scale: 20, ready: true, days: 5 } });
+  const ring = (now: number) => trips(280, [{ t: T, raw: 330 }, { t: T + MIN, raw: 340 }]).filter((x) => x.t <= now);
+  const r = rttTicks(ring, T, T + 7 * MIN, true, wide);
+  assert.equal(r.armedAt, T + MIN);
+  assert.equal(r.fired!.evidence.find((e) => e.label === 'baseline')!.value, '280±20ms · capped at 300ms');
+  assert.match(r.fired!.narrative, /over 300 ms, slow on any route, although the normal learned for this route and time of day is wide enough to allow them/);
+  const flirs = rttTicks(ring, T, T + 7 * MIN, false, wide);
+  assert.equal(flirs.armedAt, null, 'no probe, no cap: its own line of 360 holds');
+});
+
+test('rtt-degraded: right after a driver restart, a slow node with no normal is judged net of its seed, not of all of it (v0.79.0)', () => {
+  // The driver restarts and seeds the average at 900 ms; the node then answers
+  // every minute at `raw` ms. With no band to measure the seed against, the
+  // allowance is measured against what the driver averaged after it, as the
+  // baseline fold does: about 0 for a node that is really that slow, the
+  // decaying seed for one that is not. Against 0 the whole seed would be
+  // allowed for, and a 450 ms node would sit under the ceiling for four
+  // readings.
+  const run = (raw: number, baselines = unlearned()) => {
+    const ring = (now: number) => {
+      let avg = 900;
+      const out = [ev({ t: T - 40 * MIN, rtt: 25, dTx: 1 }), ev({ t: T - 2 * MIN, rtt: null, dTx: null }), ev({ t: T - MIN, rtt: 900, dTx: 1 })];
+      for (let m = 0; m <= 6 && T + m * MIN <= now; m++) {
+        avg = Math.round((0.75 * avg + 0.25 * raw) * 10) / 10;
+        out.push(ev({ t: T + m * MIN, rtt: avg, dTx: 1 }));
+      }
+      return out;
+    };
+    const state: SymptomState = new Map();
+    const suspects: { id: number; raw: number }[] = [];
+    const overLine: number[] = [];
+    let armedAt: number | null = null;
+    for (let now = T; now <= T + 6 * MIN; now += MIN) {
+      detectSymptoms(input({
+        nodes: [node(1), txNode(6, 2 + (now - T) / MIN)], recent: new Map([[6, ring(now)]]), now, confirmable: true,
+        suspects, overLine, baselines, rttSeed: new Map([[6, { k0: 1, a0: 900 }]]),
+      }), state);
+      if (armedAt == null && state.has('6:rtt-degraded')) armedAt = now;
+    }
+    return { suspects, overLine, armedAt };
+  };
+  const slow = run(450);
+  assert.deepEqual(slow.suspects.map((x) => Math.round(x.raw)), [450], 'the first 450 ms round trip after the seed asks');
+  assert.equal(slow.armedAt, T + MIN, 'and the second starts it');
+  const quiet = run(30);
+  assert.deepEqual(quiet.overLine, [], 'a 900 ms seed decaying over a 30 ms link is not over the ceiling');
+  assert.deepEqual(quiet.suspects, []);
+  assert.equal(quiet.armedAt, null);
+  // A band that learned a few readings since the last route change has a
+  // median but no yardstick. Measuring the seed against that median allowed
+  // for nearly all of it, and the same 450 ms node sat under the ceiling until
+  // the fifth reading. It is measured like an empty band.
+  const partial = () => baselineStub({ rtt: { median: 25, scale: 8, ready: false, days: 2 } });
+  const slowPartial = run(450, partial());
+  assert.deepEqual(slowPartial.suspects.map((x) => Math.round(x.raw)), [450], 'a few-reading band asks at the same reading');
+  assert.equal(slowPartial.armedAt, T + MIN, 'and starts at the same reading');
+  assert.deepEqual(run(30, partial()).overLine, [], 'and a seed decaying over a healthy link is still not over the ceiling');
 });
 
 /* ── route-churn: a SymptomKind that existed but was never emitted ────────

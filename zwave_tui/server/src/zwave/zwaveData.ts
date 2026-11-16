@@ -71,7 +71,7 @@ import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, WEAK_EVENT_LOOKBACK_MS, CHRONIC_DAYS_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, rttYardstick, type RttYardstick, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, WEAK_EVENT_LOOKBACK_MS, CHRONIC_DAYS_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -560,6 +560,8 @@ export interface ZwaveData {
   rssiNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
   /** The learned RTT yardstick for this node's CURRENT time-of-day band (v0.48.0). */
   rttNormal(nodeId: number): { median: number; scale: number; ready: boolean; days: number } | null;
+  /** The line rtt-degraded judges the node against now, and its basis (v0.79.0). */
+  rttYardstick(nodeId: number): RttYardstick | null;
   /** The learned reply-timeout yardstick for this node's current band (v0.48.0). */
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null;
   /** Is this node's baseline learning currently PAUSED, and why (v0.48.0)? */
@@ -1481,10 +1483,7 @@ class ZwaveDataImpl implements ZwaveData {
         coverage: (id) => ev.coverage(id),
         rateRun: (id) => ev.rateRun(id),
         rttSeed: (id) => ev.rttSeed(id),
-        // A confirmation can reach a node only through auto-ping's verification
-        // lane, which exists only when the runner does (index.ts) and probes
-        // only ping candidates (v0.78.0).
-        rttConfirmable: (n) => this.autoPingSnapshotFn != null && isPingCandidate(n),
+        rttConfirmable: (n) => this.rttConfirmable(n),
         rttSuspect: (id, f) => { suspects.set(id, f); },
         rttOverLine: (id) => { rttOver.add(id); },
         // The CONFIGURED sweep cadence (v0.63.0) — quiet-node's dwell derives
@@ -2333,6 +2332,23 @@ class ZwaveDataImpl implements ZwaveData {
     return this.baselines ? this.baselines.rttNormal(nodeId, Date.now()) : null;
   }
 
+  /** The line rtt-degraded judges this node against right now, and its basis
+   *  (v0.79.0) — the detector's own rule, so DETAIL cannot disagree with it. */
+  rttYardstick(nodeId: number): RttYardstick | null {
+    if (!this.baselines) return null;
+    const n = this.lastNodes.find((x) => x.nodeId === nodeId);
+    if (!n || n.isController) return null;
+    return rttYardstick(this.baselines.rttNormal(nodeId, Date.now()), this.rttConfirmable(n));
+  }
+
+  /** A confirmation can reach a node only through auto-ping's verification
+   *  lane, which exists only when the runner does (index.ts) and probes only
+   *  ping candidates (v0.78.0). One definition for the detector, the coverage
+   *  count and DETAIL (v0.79.0). */
+  private rttConfirmable(n: NodeSnapshot): boolean {
+    return this.autoPingSnapshotFn != null && isPingCandidate(n);
+  }
+
   timeoutNormal(nodeId: number): { rate: number; trials: number; ready: boolean; days: number } | null {
     return this.baselines ? this.baselines.timeoutNormal(nodeId, Date.now()) : null;
   }
@@ -2446,13 +2462,16 @@ class ZwaveDataImpl implements ZwaveData {
     const now = Date.now();
     const band = bandOf(now);
     if (!this.baselines) {
-      return { enabled: false, ready: 0, total: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0, band, bands: N_BANDS };
+      return { enabled: false, ready: 0, total: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rttCeiling: 0, rssiReady: 0, band, bands: N_BANDS };
     }
     // Three series, not one (v0.43.1). The single timeout count was rendered as
     // a universal "every node has a graduated baseline"; RSSI in particular can
     // be empty across the whole fleet while this reads 39/39.
     let timeoutReady = 0;
     let rttReady = 0;
+    // Judged against the fixed ceiling alone (v0.79.0): no graduated band, but
+    // a probe can reach the node. Not blind, and not learned either.
+    let rttCeiling = 0;
     let rssiReady = 0;
     // A node too quiet to evaluate reads as CLEAR everywhere else (v0.67.0):
     // `windowTimeoutRate` returns null under MIN_WINDOW_TX and its consumers
@@ -2467,11 +2486,13 @@ class ZwaveDataImpl implements ZwaveData {
       if (n.isController) continue;
       total += 1;
       if (this.baselines.timeoutNormal(n.nodeId, now)?.ready) timeoutReady += 1;
-      if (this.baselines.rttNormal(n.nodeId, now)?.ready) rttReady += 1;
+      const rn = this.baselines.rttNormal(n.nodeId, now);
+      if (rn?.ready) rttReady += 1;
+      else if (rttYardstick(rn, this.rttConfirmable(n))?.basis === 'ceiling') rttCeiling += 1;
       if (this.baselines.rssiNormal(n.nodeId, now)?.ready) rssiReady += 1;
       if (windowTimeoutRate(this.evidence(n.nodeId), now) == null) timeoutWindowBlind += 1;
     }
-    return { enabled: true, ready: timeoutReady, total, timeoutReady, timeoutWindowBlind, rttReady, rssiReady, band, bands: N_BANDS };
+    return { enabled: true, ready: timeoutReady, total, timeoutReady, timeoutWindowBlind, rttReady, rttCeiling, rssiReady, band, bands: N_BANDS };
   }
 
   /** Fold each node's since-last-tick interval mean into its coarse ring. */

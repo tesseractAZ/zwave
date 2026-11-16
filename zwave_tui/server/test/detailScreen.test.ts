@@ -56,7 +56,7 @@ function mkData(o: DataOver = {}): { data: DataProvider; nodes: NodeSnapshot[] }
     ready: () => true,
     lastError: () => null,
     symptoms: () => [],
-    engineStatus: () => ({ enabled: false, ready: 0, total: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rssiReady: 0, band: 0, bands: 6 }),
+    engineStatus: () => ({ enabled: false, ready: 0, total: 0, timeoutReady: 0, timeoutWindowBlind: 0, rttReady: 0, rttCeiling: 0, rssiReady: 0, band: 0, bands: 6 }),
     efficacyFor: () => null,
     interference: () => ({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' }, serial: { nakPerH: null, canPerH: null, tmoAckPerH: null, tmoRespPerH: null, band: 'unknown', spanH: 0 }, diurnal: [], coverageDays: 0, correlated: { active: false, degradedNodes: 0, activeNodes: 0, narrative: '' } }),
     entityStates: () => o.entityStates ?? [],
@@ -576,6 +576,69 @@ test('an un-graduated yardstick says so instead of quoting a median', () => {
   const row = out.find((l) => /Norm RTT/.test(l)) ?? '';
   assert.match(row, /still learning · 2d so far — not yet a yardstick/);
   assert.doesNotMatch(row, /41 ms/, 'a median nobody should act on yet is not quoted');
+});
+
+test('an un-graduated RTT normal says when the fixed ceiling judges the node meanwhile, and why it may not graduate (v0.79.0)', () => {
+  const out = yardLines(withYard({
+    rttNormal: () => ({ median: 0, scale: 8, ready: false, days: 1 }),
+    rttYardstick: () => ({ line: 300, basis: 'ceiling' }),
+    routeStability: () => ({ changes: 12, hours: 168 }),
+  }));
+  const row = out.find((l) => /Norm RTT/.test(l)) ?? '';
+  assert.match(row, /still learning · 1d so far — held to the 300 ms ceiling meanwhile/);
+  assert.ok(out.some((l) => /The RTT normal restarts on every route change: 12 in the last 7d/.test(l)), JSON.stringify(out));
+  // Not judged at all (no probe can reach it): the old wording, still with the reason.
+  const blind = yardLines(withYard({
+    rttNormal: () => ({ median: 0, scale: 8, ready: false, days: 1 }),
+    rttYardstick: () => null,
+    routeStability: () => ({ changes: 3, hours: 30 }),
+  }));
+  assert.match(blind.find((l) => /Norm RTT/.test(l)) ?? '', /still learning · 1d so far — not yet a yardstick/);
+  assert.ok(blind.some((l) => /restarts on every route change: 3 in the last 30h/.test(l)));
+  // A node that never re-routed is not told it did.
+  const steady = yardLines(withYard({
+    rttNormal: () => ({ median: 0, scale: 8, ready: false, days: 1 }),
+    rttYardstick: () => ({ line: 300, basis: 'ceiling' }),
+    routeStability: () => ({ changes: 0, hours: 168 }),
+  }));
+  assert.ok(!steady.some((l) => /restarts on every route change/.test(l)));
+});
+
+test('a node the store never folded still shows the ceiling it is held to, and the re-route span reads in hours under 48 h (v0.79.0)', () => {
+  // No band at all (rttNormal null), but the detector judges it against the
+  // ceiling: DETAIL must say so, or the engine's count names a node DETAIL hides.
+  const never = yardLines(withYard({
+    rttNormal: () => null,
+    rttYardstick: () => ({ line: 300, basis: 'ceiling' }),
+  }));
+  assert.match(never.find((l) => /Norm RTT/.test(l)) ?? '', /no normal yet — held to the 300 ms ceiling meanwhile/);
+  // Not judged either: no row, as before.
+  const unjudged = yardLines(withYard({ rttNormal: () => null, rttYardstick: () => null }));
+  assert.ok(!unjudged.some((l) => /Norm RTT/.test(l)));
+  // The span switches to days at 48 h and rounds, on both sides of the switch.
+  const span = (hours: number) => yardLines(withYard({
+    rttNormal: () => ({ median: 0, scale: 8, ready: false, days: 1 }),
+    rttYardstick: () => ({ line: 300, basis: 'ceiling' }),
+    routeStability: () => ({ changes: 2, hours }),
+  })).find((l) => /restarts on every route change/.test(l)) ?? '';
+  assert.match(span(47), /2 in the last 47h/);
+  assert.match(span(48), /2 in the last 2d/);
+  assert.match(span(60), /2 in the last 3d/, 'rounded, not floored');
+});
+
+test('a graduated RTT normal whose line is over the ceiling says it is capped, and a graduated one is not told about re-routes (v0.79.0)', () => {
+  const out = yardLines(withYard({
+    rttNormal: () => ({ median: 280, scale: 20, ready: true, days: 9 }),
+    rttYardstick: () => ({ line: 300, basis: 'capped' }),
+    routeStability: () => ({ changes: 5, hours: 168 }),
+  }));
+  assert.match(out.find((l) => /Norm RTT/.test(l)) ?? '', /280 ms ±20 ms · 9d · this time-of-day band · line capped at 300 ms/);
+  assert.ok(!out.some((l) => /restarts on every route change/.test(l)), 'a graduated band is not explained away');
+  const learned = yardLines(withYard({
+    rttNormal: () => ({ median: 41, scale: 7, ready: true, days: 9 }),
+    rttYardstick: () => ({ line: 69, basis: 'learned' }),
+  }));
+  assert.doesNotMatch(learned.find((l) => /Norm RTT/.test(l)) ?? '', /capped/);
 });
 
 test('a node whose learning is PAUSED says so — "3d so far" is not advancing', () => {

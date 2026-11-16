@@ -1,5 +1,87 @@
 # Changelog
 
+## 0.79.0
+
+`rtt-degraded` judges a node with no learned RTT normal against a fixed
+300 ms ceiling.
+
+### Fixed — re-routing nodes were never judged on round-trip time
+
+- The RTT normal is learned per route. A route change empties the node's six
+  time-of-day bands, and a band graduates after about 23 fresh readings:
+  about 12 days for a node that only the 2-hourly liveness sweep talks to. A
+  node that re-routes even once a week never graduates, and the routed nodes
+  re-route the most.
+- On the reference mesh (2026-11-13) 23 of 38 nodes had no graduated RTT band,
+  17 of the 20 routed ones among them. One node's round trips ran at
+  378–525 ms on six consecutive sweeps; it had re-routed 19 times in 14 days
+  and was never judged. Between 2026-11-13 and 2026-11-15 more mains nodes
+  with no graduated band ran 370–880 ms round trips, one of them 880 and then
+  837 ms on consecutive readings, with no verdict.
+- Where a confirmation probe can reach the node (a mains ping candidate, with
+  the auto-ping runner on), `rtt-degraded` now judges a node whose current
+  time-of-day band has not graduated against `RTT_CEILING_MS = 300`. The v0.78.0 start rule is unchanged:
+  the average must be over the line and the two newest raw round trips too,
+  and a lone slow one owes one confirmation probe. From a 30 ms average that
+  takes two round trips at 880 and 837 ms, three at 525 ms or five at 400 ms.
+  One frame over about 1.1 s lifts the average over on its own, but a breach
+  still needs the confirmation's answer to be slow too.
+- For the same nodes a graduated line above 300 ms is capped at it. No learned
+  line on the reference mesh is above 124 ms.
+- Per-route stratification and the route-change reset are unchanged, and so
+  is every verdict against a learned line under the ceiling. A node whose
+  average is over the ceiling is held out of its baselines, as a node over a
+  learned line already was (v0.78.0).
+- After a driver restart, a node whose band has not graduated is judged net
+  of its restart seed measured against what the driver averaged after the
+  seed, even when the band holds a few readings: their median is not a
+  yardstick. A slow node's own slow seed therefore does not hide it for hours,
+  and a seed decaying over a healthy link does not put a node over the
+  ceiling. For a graduated band the allowance is the v0.77.1 one, unchanged.
+- Replayed over 14 days of the reference mesh's coarse tier, the ceiling starts
+  37 breaches on 10 mains nodes, and none on the nine nodes that held one
+  direct route and a graduated normal throughout. Their bursts and
+  confirmations come to about 17 probes a day, about 3.5 % of the sweep's
+  fresh readings.
+- Not covered: a slowdown under 300 ms on a node with no normal, and FLiRS or
+  sleeping nodes, which keep the learned-only rule.
+- `rtt-degraded` episodes feed the refresh trial, so ceiling breaches on mains
+  nodes join its randomized arms from this release.
+
+### Changed — the screens and HA say which line a node is judged against
+
+- The symptom card's yardstick row reads `ceiling 300ms · no normal for this
+  band yet` for a ceiling breach, and a capped baseline ends `· capped at
+  300ms`. The narrative names the line that was crossed.
+- DETAIL's `Norm RTT` row reads `still learning · Nd so far — held to the
+  300 ms ceiling meanwhile` where the ceiling applies (`no normal yet — held
+  to the 300 ms ceiling meanwhile` for a node the store has never folded), and
+  a capped line ends `· line capped at 300 ms`. Under an ungraduated band, a note gives the
+  coarse tier's route-change count: `The RTT normal restarts on every route
+  change: 12 in the last 7d`.
+- REMEDY's coverage counts gain `ceiling-only N`. With any such node, the
+  partial-coverage text says a degradation *may go unflagged* (it said
+  *would not be flagged*) and names how many the ceiling holds; the learning
+  headline reads *no detector has a learned yardstick yet*, and its text says
+  the *learned* detectors wait while the ceiling judges anyone.
+- `sensor.zwave_tui_engine` gains `rtt_ceiling_only`. `rtt_ready` is
+  unchanged; `detectors_total − rtt_ready − rtt_ceiling_only` nodes are not
+  judged on RTT.
+- `baselines.ts` said a route change resets nothing. It empties the node's
+  rssi and rtt bands and keeps its timeout rate; the comment now says so.
+
+### Tests
+
+- symptoms: `rttYardstick` for every basis, the ceiling's start, its
+  confirmation, its cap, a FLiRS node outside it, a node the store never
+  folded, the learned card's own wording, and the restart seed both ways,
+  for an empty band and for one with a few readings.
+- zwaveDataChurn: the coverage count and DETAIL's accessor use the
+  detector's own reachability rule, for a never-folded node too.
+- driverWsClient: both data-provider bridges forward `rttYardstick`.
+- detailScreen, remedyScreen and haStates for the rows, counts and attribute,
+  and the re-route span either side of 48 h.
+
 ## 0.78.3
 
 The app is published as stable.
@@ -361,168 +443,6 @@ blind, and the engine sensor no longer reads 0 of 0 at boot.
   backup was 1,335 entries (5,271 lines) in its busiest 60 s, 44.5 % of the
   limit. Restart, re-interview, heal, inclusion and reconnect bursts are
   still unmeasured at `verbose`.
-
-## 0.76.0
-
-Ready for the Z-Wave JS driver logging at `verbose`: the driver log stream
-pauses and resumes on its own, the S2 count no longer depends on the log level,
-the archive keeps what `verbose` adds and cuts raw frames, and finished log days
-go into backups.
-
-### Changed — the driver log stream pauses and resumes on its own
-
-- The storm guard used to stop the log subscription until the next reconnect,
-  which could be days away. The archive's driver stream and the S2,
-  duplicate-frame and RF-off watches then stayed dark, silently. Above 3,000
-  lines in a 60 s window it now pauses for 5 min, doubling per consecutive pause
-  to an hour, and resumes on its own. A stream that runs an hour without
-  tripping starts the ladder again.
-- A burst carrying `debug` or `silly` lines takes the full hour at once. A pause
-  is judged on the levels the lines carry, and on the reported level only when
-  they carry none. A reported change to a quieter level resumes early; a louder
-  one never does.
-- Lines that arrive while paused are counted, never matched or archived. S2
-  samples read unknown, and ENGINE shows `S2 lane storm-paused` with the time it
-  resumes. A resume that meets a socket already closing leaves the pause in
-  place instead of reading as a refused subscription.
-- A radio-off reading taken before a pause keeps its own 2-minute deadline
-  instead of being dropped, and a pause never creates one by itself. At
-  `verbose` the busiest minute is likeliest inside the nightly NVM backup, the
-  very blackout that gate exists for.
-
-### Added — the driver's log level is recorded; a detached feed is noticed
-
-- The level is read from the state dump and from the server's `log config
-  updated` event and recorded on the startup line, in the archive and on each
-  change. The level actually received is tracked too: the server's log
-  forwarder keeps the level it started at, and Z-Wave JS UI changes the
-  driver's level without an event.
-- A Z-Wave JS UI debug capture detaches the server's log forwarder with no
-  event. While lines at `verbose` or finer are arriving, ten minutes without
-  any line re-subscribes once, and the lane reads `silent` until a line
-  arrives; its watch starts again at that line. The first `info` line more
-  than a minute after the last verbose one disarms it. A drop to `info` with no
-  event, followed by no line at all, looks the same as a detach and costs one
-  re-subscribe.
-- An unresolved silence, or an armed watchdog, carries over a reconnect to the
-  same network. Home Assistant keeps its log subscription after its debug
-  logging is turned off, so a detached forwarder stays detached across the
-  reconnect.
-- A node the driver log's node filter leaves out records unknown S2, not 0, and
-  an empty filter logs no node. The filter follows `log config updated`, and a
-  change starts a new S2 window.
-- Below `info` the outgoing S2 retry is never written: ENGINE shows
-  `S2 lane level` and S2 samples read unknown, and so does the window that
-  spans a return to `info`.
-
-### Changed — the S2 count does not move when the driver logs at verbose
-
-- `s2-desync` counted two families. The incoming one ("cannot decode command")
-  streams only at `verbose` and finer, after each driver restart and for every
-  out-of-step inbound frame, so raising the level would have raised the count
-  against the same absolute threshold and read as a new S2 fault. The detector
-  now counts the outgoing retry alone, at `info` and finer. History and the
-  evidence file keep their meaning; the incoming lines stay in the archive.
-- An S2 sample counts only when the lane was watched since before its window
-  began, so a window that spans a pause, a re-subscribe or a reconnect reads
-  unknown instead of a partial count.
-- A lane that goes dark holds a matured `s2-desync` instead of clearing it,
-  from the first 5-min slice it partly cannot see, for up to a whole window
-  after it last breached; its episode stays open and the activity log does not
-  call it cleared. An armed one is dropped. After the hold, while the window is
-  still partly unseen, the symptom is judged on recency alone, so a storm still
-  under way is not read as cured by a partial count.
-
-### Fixed — log matching at verbose and finer
-
-- Matching no longer depends on where zwave-js's 80-column cut falls; a
-  production duplicate-frame line had been split mid-phrase.
-- The radio watch reads only the controller's own lines, starting with the
-  phrase. At `verbose` and finer a DRIVER dump or a value line could carry a
-  node name into it. No miscount was possible at the stock `info` level.
-- ENGINE no longer suggests raising the log level when the subscription is
-  refused; the server never refuses it for its level.
-
-### Changed — the log archive at verbose and debug
-
-- At `verbose` the archive blanked two public S2 values as if they were keys:
-  a Nonce Report's receiver entropy and a SPAN extension's sender EI. Both go
-  over the air in clear, and the SPAN is derived from them together with the
-  network key, so they are kept, only in place and in the form zwave-js
-  writes. Every other 128-bit hex string is still replaced, and so is a
-  32-byte S2 public key, which carries the DSK.
-- At `debug` zwave-js logs every byte exchanged with the controller; a
-  non-secure frame's payload is plaintext, a lock's user code included, and
-  during an S0 inclusion the network key travels under a published temporary
-  key. A SERIAL entry now keeps only its direction, its length and its first
-  four bytes. The frame dump zwave-js writes at `warn` (so at `info` too) when
-  it cannot parse a frame, and a raw `payload:`, `event parameters:` or
-  `parameters:` value, get the same cut, wraps under the tree's gutter
-  included. The controller's `[Notification]` line writes raw parameters at
-  `info` for an event with no definition. The live archive held none of these.
-- With the Z-Wave JS server in a development or test build, zwave-js also
-  prints decrypted S0/S2 plaintext, ciphertext, IVs and auth tags; each is cut
-  to its length. The official images run in production mode.
-- Control characters other than tab and newline are written as U+FFFD: a
-  node's name is decoded as raw bytes and could carry terminal escapes.
-- Every gap in the driver stream is marked with an `[archive]` line: the
-  subscription and the level, each pause and resume, a silence re-subscribe, a
-  level or node-filter change, a refusal, the end.
-
-### Changed — finished log days are backed up
-
-- The archive's finished days (`logs/*.log.gz`) now go into the add-on's
-  backups; today's file, still being written, and every temp file stay out
-  (`backup_exclude: ["logs/*.log", "*.tmp"]`, was `logs/*`).
-- The Supervisor copies a folder file by file, and a file renamed or deleted
-  mid-copy leaves the whole add-on, `/data` included, out of that backup;
-  Home Assistant 2026.10's backup screen does not report it. New
-  `backup_pre`/`backup_post` hooks set and clear a hold in `/tmp`, and while it
-  is fresh the archive's housekeeping compresses and deletes nothing. A hold
-  60 min or more away from now is ignored and reported once.
-- The hooks exit 0 on every path, record `backup started` / `backup finished`
-  in the day's archive file while the archive is on, and the image build runs
-  both once.
-- With `log_archive_days: 0` the files the archive wrote earlier are deleted at
-  start and hourly until none is left; otherwise an archive turned off would
-  ride along in every later backup.
-- A restore brings back the finished days up to the backup and loses
-  everything logged after it.
-- Expected size: an estimated 2 MB a backup with the driver at `verbose`, from
-  earlier Z-Wave JS UI logs, and a few hundred KB at `info`.
-
-### Changed — CI judges a pull request on the whole codebase
-
-- codeql-action v4 makes a pull request's analysis "diff-informed" by default,
-  keeping a result only when its source or sink sits on a changed line, so a
-  PR could pass while `main`'s full scan found the same flaw. `codeql.yml`
-  turns that off, and `check-sarif.mjs` refuses a SARIF marked diff-informed.
-- `rotate-changelog.mjs`: a release moved under a history holding only its
-  title is set off by a blank line.
-- The mutation harness's `--only` takes a comma-separated list, and fails on
-  any token that matches nothing.
-
-## 0.75.5
-
-### Fixed — the Changelog dialog in Home Assistant opens quickly
-
-Home Assistant renders an add-on's whole `CHANGELOG.md` whenever the add-on is
-up to date: one blocking markdown pass, with nothing on screen until it
-finishes. At 384 KB and 140 releases that meant about 4,300 elements, and a long
-wait on slower devices. The shipped changelog now keeps only the newest
-releases, under 32 KiB. Everything older is in `docs/CHANGELOG-history.md` on
-GitHub, linked at the end of the file, and is never shipped with the add-on.
-
-- `.github/scripts/rotate-changelog.mjs` moves the oldest sections into the
-  history until the shipped file fits. The release workflow runs it after
-  adding a section, and a contract test fails CI when the files are not
-  rotated or a release section goes missing from both.
-- Release headings are plain `## X.Y.Z`. Home Assistant's update dialog shows
-  the notes from the new release down to the installed one when the heading is
-  exactly that, and falls back to the whole file otherwise. The documented
-  `## X.Y.Z — DATE` form, which `release.yml` also wrote, triggered that
-  fallback. Both now use the plain form, the contract test enforces it, and
-  `release.yml` demotes a `## ` heading inside its notes to `###`.
 
 ## Older releases
 

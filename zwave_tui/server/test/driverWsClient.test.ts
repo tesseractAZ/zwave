@@ -1222,6 +1222,8 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
       driverLogWatch: () => ({ level: 'verbose', laneLive: false, watchdogArmed: true }),
       autoPingState: () => ({ lastTickMs: 42, suppressed: 'storm', listening: 35, deadListening: 1, staleDue: 2, stalestMs: 60, verifyOwed: 3, config: { enabled: true, writeActions: true, afterMs: 1, maxAttempts: 3, staleMs: 1 }, nodes: [] }),
       rssiNormal: (n: number) => ({ median: -n, scale: 3, ready: true, days: 7 }),
+      // v0.79.0: an n-dependent answer, so a bridge that drops or stubs the member fails.
+      rttYardstick: (n: number) => ({ line: 300 + n, basis: 'capped' as const }),
   } as never);
   const provider = src.createTuiDataProvider({
     zwaveData: bridged, refreshMs: 60_000, routePollMs: 60_000, log: () => {},
@@ -1261,6 +1263,7 @@ test('ZwaveDataSource forwards EVERY capability the data layer implements', asyn
     assert.equal(provider.provider.driverWsState?.(), 'backoff', 'driverWsState crosses the bridge');
     assert.equal(provider.provider.confoundedCount?.('dead-flap'), 0);
     assert.deepEqual(provider.provider.rssiNormal?.(62), { median: -62, scale: 3, ready: true, days: 7 });
+    assert.deepEqual(provider.provider.rttYardstick?.(7), { line: 307, basis: 'capped' }, 'rttYardstick crosses both bridges (v0.79.0)');
   } finally {
     provider.stop();
   }

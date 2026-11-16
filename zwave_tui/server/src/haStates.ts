@@ -314,6 +314,10 @@ export function buildStates(data: DataProvider, now: number = Date.now(), bo: Bu
         detectors_unmeasured: eng.timeoutWindowBlind,
         detectors_total: eng.total,
         rtt_ready: eng.rttReady,
+        // v0.79.0: of the rest, the nodes rtt-degraded still judges against the
+        // fixed 300 ms ceiling. total − rtt_ready − rtt_ceiling_only are not
+        // judged on RTT at all.
+        rtt_ceiling_only: eng.rttCeiling,
         // v0.72.0: who paused the autonomous writes, and since when.
         paused_by: pause?.by ?? null,
         paused_since: pause == null ? null : new Date(pause.since).toISOString(),
