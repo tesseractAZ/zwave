@@ -444,6 +444,19 @@ test("index.ts carries the runner's launch stamp to the manual probe (v0.64.5)",
   );
 });
 
+test('index.ts leaves auto-ping\'s probe spacing at its default, on real timers (v0.79.1)', () => {
+  // The runner spaces one tick's probes PROBE_SPACING_MS apart unless told
+  // otherwise, and the tests that predate it opt out with 0. A 0 or a stub
+  // timer here would quietly put production back on same-millisecond sends.
+  const index = read('server/src/index.ts');
+  const apStart = index.indexOf('autoPing = startAutoPing({');
+  const apEnd = index.indexOf('zwaveData.setAutoPingSnapshot(', apStart);
+  assert.ok(apStart > -1 && apEnd > apStart, 'the auto-ping options block is found');
+  const block = index.slice(apStart, apEnd);
+  assert.doesNotMatch(block, /probeSpacingMs/, 'no spacing override in production');
+  assert.doesNotMatch(block, /setTimer/, 'and no timer override');
+});
+
 test('index.ts hands auto-ping the two driver-WS readings (v0.65.0)', () => {
   // Source assertions for the same reason as the launch stamp above: these are
   // the only hops between the data layer and the engine that no unit test can

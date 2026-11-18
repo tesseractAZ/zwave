@@ -1695,7 +1695,10 @@ class ZwaveDataImpl implements ZwaveData {
         if (this.measurementReroutes.has(ep.nodeId) && MEASUREMENT_REROUTE_KINDS.has(ep.kind)) oc.markConfounded(ep.nodeId, ep.kind);
       }
     }
-    this.trialTick(now, sinceOf);
+    // The refresh trial decides on live evidence only (v0.79.1): a held
+    // rtt-degraded breach stands on a reading up to the sweep's cadence old.
+    const heldKeys = new Set(symptoms.filter((s) => s.held === true).map((s) => `${s.nodeId ?? 'mesh'}:${s.kind}`));
+    this.trialTick(now, heldKeys.size === 0 ? sinceOf : new Map([...sinceOf].filter(([k]) => !heldKeys.has(k))));
     // Keep improving each LIVE episode's before-window as probe evidence lands
     // (v0.36). Refining on the ping's own resolution would be too early — the
     // service call returns when HA accepts it, while the node's statistics push

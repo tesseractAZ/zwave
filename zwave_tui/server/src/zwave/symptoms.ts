@@ -112,6 +112,10 @@ export interface Symptom {
   /** For a multi-node symptom (edge-cluster): the affected member node ids.
    *  `nodeId` is then the SHARED node they depend on (the suspect), not a member. */
   members?: number[];
+  /** Emitted from a HELD reading (v0.79.1: an rtt-degraded breach between
+   *  sweeps). It keeps an episode that is already open alive and is shown, but
+   *  never opens one: there is no new evidence to open it on. */
+  held?: true;
 }
 
 /** Caller-owned dwell state — one entry per (nodeId,kind) currently breaching.
@@ -127,6 +131,12 @@ export interface DwellEntry {
    *  activity log, and its 30-min window is judged on recency alone until no
    *  unseen sample is left in it. */
   held?: true;
+  /** rtt-degraded (v0.79.1): the newest fresh reading of a MATURED breach —
+   *  the average, what was judged against the line after the restart
+   *  allowance, its time, and the two newest raw round trips — kept so the
+   *  breach can be held and shown through the silence between sweeps, which
+   *  outlasts the fine ring. */
+  rtt?: { avg: number; judged: number; residue: number; t: number; raw: number[] };
 }
 export type SymptomState = Map<string, DwellEntry>;
 
@@ -251,6 +261,28 @@ const RTT_Z = 4; // z-score over route-stratified baseline
  * wake-up, and the two-round-trip start rule needs the probe to pair them.
  */
 export const RTT_CEILING_MS = 300;
+
+/**
+ * How far past the sweep's cadence a MATURED rtt-degraded breach is held when
+ * no fresh reading is left in the window (v0.79.1).
+ *
+ * RTT is a level, read only when something talks to the node. On a node only
+ * the sweep talks to, the breach's last reading leaves the 10-minute window
+ * long before the next one arrives. Until v0.79.1 that cleared the symptom as
+ * if the node had recovered: the episode's confirmation burst then found it
+ * still slow, a new breach started, and one slowdown became an episode about
+ * every 27 minutes, 10 probes each. On the reference mesh one 4.75-hour
+ * slowdown became 10 episodes and 113 probes, and the symptom read absent for
+ * 43 % of it.
+ *
+ * Held, the breach stands on its last slow round trip. The hold ends at the
+ * configured sweep cadence plus this margin after that round trip; a newer
+ * round trip decides it sooner, and the breach lets go as before. A read that
+ * comes after the deadline (a pause, a probe hold, a long sweep queue) finds it
+ * let go, and the pair rule starts it again. With the sweep off, or on a node
+ * no probe can reach, nothing is held.
+ */
+export const RTT_HOLD_MARGIN_MS = 30 * 60_000;
 
 /**
  * The line an RTT reading is judged against (v0.79.0), and where it came from.
@@ -848,7 +880,6 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       const confirmable = input.rttConfirmable?.(node) === true;
       const yard = rttYardstick(norm, confirmable);
       const obs = latestFresh(samples, now, (s) => (s.rtt != null && s.rtt >= 0 ? { rtt: s.rtt, t: s.t } : null));
-      const rtt = obs?.rtt ?? null;
       // NO recency conjunct here — RTT is a LEVEL, not an event count.
       //
       // v0.26 briefly added `now - obs.t <= DWELL_MS`, which silently disabled
@@ -864,6 +895,9 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // is at most 10 min old, and for a level signal the newest reading IS
       // the current best estimate — unlike flaps/timeouts/resyncs, where a
       // count from a burst that has stopped is stale evidence of a past event.
+      // That bound applies to STARTING a breach. A matured one outlives the
+      // window on its last slow round trip for a bounded time (v0.79.1, the
+      // hold below): silence is not a reading, so it cannot end a level.
       //
       // The reading is tested with the restart's seed taken out (v0.77.1): an
       // excess that seed alone could produce is the restart, not the link.
@@ -890,6 +924,22 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // node, the newest round trip alone starts it. Once started, the average
       // alone holds it, as before: a level is not re-proven on every frame.
       const rk = key(id, 'rtt-degraded');
+      // HELD THROUGH SILENCE (v0.79.1, RTT_HOLD_MARGIN_MS). A matured breach
+      // with no fresh reading left in the window stands on its last SLOW round
+      // trip, judged against the yardstick of now, for at most the sweep's
+      // cadence plus the margin after it, and not on a Dead node (node-down
+      // owns that one, and the sweep does not read a Dead node). It is shown,
+      // marked held: it keeps its episode open and can open none.
+      // Only a slow round trip carries a breach into the hold. The driver's
+      // average keeps 0.75 of itself per transmission, so a sweep-only node that
+      // has recovered still reads over the line for several sweeps on its
+      // average alone, and a hold kept on the average showed such a node as
+      // degraded for hours. A newer round trip under the line drops the kept
+      // reading, so the next silence clears the breach as before v0.79.1 and its
+      // closing burst measures the node. An armed breach keeps nothing.
+      const kept = state.get(rk)?.rtt;
+      const holdMs = confirmable && input.sweepMs ? input.sweepMs + RTT_HOLD_MARGIN_MS : 0;
+      const held = obs == null && kept != null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;
       const line = b ? yard!.line : Infinity;
       const frames = b ? rawRttFrames(samples).filter((f) => now - f.t <= WINDOW_MS) : [];
       const r1 = frames[frames.length - 1];
@@ -899,29 +949,41 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       const armed = state.has(rk);
       if (b) input.rttOverLine?.(id);
       if (b && !armed && slow && !pair && confirmable) input.rttSuspect?.(id, r1);
-      const since = dwell(state, rk, b && (armed || pair || (slow && !confirmable)), now);
+      const since = held ? state.get(rk)!.since : dwell(state, rk, b && (armed || pair || (slow && !confirmable)), now);
       if (since != null) {
+        const e = state.get(rk)!;
+        // Live, the reading shown is timed from its newest round trip, and it is
+        // kept for a hold only while that round trip is slow (above).
+        const live = held ? null : { avg: obs!.rtt, judged: obs!.rtt - residue, residue, t: r1?.t ?? obs!.t, raw: frames.slice(-2).reverse().map((f) => f.raw) };
+        if (live != null) {
+          if (slow) e.rtt = live;
+          else if (r1 != null) delete e.rtt;
+        }
+        const shown = held ? e.rtt! : live!;
+        const ageMin = Math.round((now - shown.t) / 60_000);
         breaching = true;
         out.push({
           kind: 'rtt-degraded', nodeId: id, severity: 'watch', sinceMs: since, basis: 'measured',
+          ...(held ? { held: true as const } : {}),
           evidence: [
-            { label: 'RTT', value: `${Math.round(rtt!)}ms` },
+            { label: 'RTT', value: held ? `${Math.round(shown.avg)}ms · ${ageMin}m ago` : `${Math.round(shown.avg)}ms` },
             // The yardstick it was judged against (v0.79.0): a ceiling breach
             // has no baseline to show, and printing the empty band's 0±8 would
             // claim one.
             yard!.basis === 'ceiling'
               ? { label: 'ceiling', value: `${RTT_CEILING_MS}ms · no normal for this band yet` }
               : { label: 'baseline', value: `${Math.round(norm!.median)}±${Math.round(norm!.scale)}ms${yard!.basis === 'capped' ? ` · capped at ${RTT_CEILING_MS}ms` : ''}` },
-            ...(residue >= 1 ? [{ label: 'restart allowance', value: `${Math.round(residue)}ms (${node.stats.commandsTX} tx since driver start)` }] : []),
+            ...(shown.residue >= 1 ? [{ label: 'restart allowance', value: `${Math.round(shown.residue)}ms (${node.stats.commandsTX} tx since driver start)` }] : []),
             // Last (v0.78.0): REMEDY cuts the evidence row at the screen's width,
             // and the yardstick must not be what falls off.
-            ...(r1 != null ? [{ label: 'newest round trips', value: `${frames.slice(-2).reverse().map((f) => Math.round(f.raw)).join(', ')}ms` }] : []),
+            ...(shown.raw.length > 0 ? [{ label: 'newest round trips', value: `${shown.raw.map((x) => Math.round(x)).join(', ')}ms` }] : []),
           ],
-          narrative: yard!.basis === 'learned'
+          narrative: (yard!.basis === 'learned'
             ? `${node.name}'s round-trip time is far above its normal for this route and time of day.`
             : yard!.basis === 'capped'
               ? `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route, although the normal learned for this route and time of day is wide enough to allow them.`
-              : `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route. Its current route has no learned normal for this time of day yet (the RTT normal restarts on every route change), so the fixed ceiling is the yardstick.`,
+              : `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route. Its current route has no learned normal for this time of day yet (the RTT normal restarts on every route change), so the fixed ceiling is the yardstick.`)
+            + (held ? ` No round trip has been measured for ${ageMin} min; the breach is held on the last slow one.` : ''),
         });
       }
     }
