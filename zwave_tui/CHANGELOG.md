@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.79.1
+
+One slowdown on a node only the sweep talks to is one `rtt-degraded`
+episode, not one every 27 minutes, and one tick's probes no longer go out in
+the same millisecond.
+
+### Fixed — one slowdown re-opened an episode about every 27 minutes
+
+- RTT is read only when something talks to the node, and a breach was judged
+  on its newest reading in a 10-minute window. On a node only the 2-hourly
+  liveness sweep talks to, that reading left the window long before the next
+  one came, and the symptom cleared as if the node had recovered. The
+  episode's confirmation burst then found the node still slow, and a new
+  breach started: one slowdown became an episode about every 27 minutes,
+  10 probes each.
+- In the first 47 hours of 0.79.0 on the reference mesh, 15 of the 22
+  `rtt-degraded` episodes were re-opened this way. One 4.75-hour slowdown on
+  one node became 10 episodes and 113 probes, and Home Assistant's symptom
+  count read 0 for 43 % of it.
+- A matured breach with no fresh reading left in the window is now held on
+  its last reading, judged against the line of now, until a newer reading
+  decides it: still over the line continues the same breach and episode,
+  under it clears it as before. The hold lasts at most the configured sweep
+  cadence plus `RTT_HOLD_MARGIN_MS` (30 min) past that reading. Nothing is held
+  with the sweep off, or on a node no confirmation probe can reach, and a
+  breach still arming clears on silence as before.
+- While held, the symptom stays shown, with the reading's age
+  (`RTT 378ms · 40m ago`) and a sentence saying it is held. It keeps its
+  episode open and can open none. A slowdown therefore spends its opening and
+  closing bursts, 10 probes, plus any confirmations, however long it lasts.
+
+### Fixed — a probe sent right behind another node's read measured that node
+
+- A tick sent every probe it owed in the same millisecond. Measured on the
+  reference mesh with read-only routed reads: a node that reads about 25 ms
+  alone or first read 589–1,214 ms (median about 660, 9 trials) when its read
+  went out right behind a 9.6 kbps node's, and 24.7–25.6 ms when it went 10 s
+  after (5 of 5 trials). On 2026-11-17 that booked a direct 100 kbps node as
+  `rtt-degraded` twice, on readings taken right behind a 9.6 kbps node's.
+- One tick's sends now leave `PROBE_SPACING_MS` (10 s) apart, the step
+  shrinking so they all leave within three quarters of the tick. Each probe is
+  pended, noted and judged from its own slot, and the log line of one that
+  waited says so (`— sent 10 s after this tick's first probe`).
+- A slot that finds a gate shut — the autonomy pause, the controller's
+  receiver off, an operator action, Home Assistant not ready — sends nothing.
+  It is withdrawn with an info line, and it is not counted as a failed launch:
+  a ladder ping gives its attempt back, and a routed read does not fall back
+  to the NoOp ping.
+
+### Corrected
+
+- 0.79.0's cost figure was wrong. Its replay charged each ceiling breach one
+  5-probe burst, but every episode sends two, and the re-opening above
+  multiplied them. Live, the first 47 hours spent 211 probes on 5 ceiling
+  breaches: about 109 a day, a quarter of the sweep's probes, not 17 a day
+  and 3.5 %.
+- DOCS: the controller's 30-minute background-noise tier has gone above
+  −98 dBm (to −95.4) since a rise that began on 2026-11-12; the sentence
+  that said it never had is corrected.
+
+### Tests
+
+- 16 new tests: the hold in the detector (8), the hold through the real
+  engine pass (one slowdown, one episode: held for 100 minutes with no
+  closure and no burst, then one closure), probe spacing (slots, each gate,
+  stop, a transport failure at a later slot, the step, a ladder ping's
+  attempt given back), and a contract pin that production keeps the default
+  spacing.
+- 30 new mutation-harness entries, one of them declared equivalent.
+
 ## 0.79.0
 
 `rtt-degraded` judges a node with no learned RTT normal against a fixed
@@ -40,9 +110,8 @@
   ceiling. For a graduated band the allowance is the v0.77.1 one, unchanged.
 - Replayed over 14 days of the reference mesh's coarse tier, the ceiling starts
   37 breaches on 10 mains nodes, and none on the nine nodes that held one
-  direct route and a graduated normal throughout. Their bursts and
-  confirmations come to about 17 probes a day, about 3.5 % of the sweep's
-  fresh readings.
+  direct route and a graduated normal throughout. The replay put their cost
+  at about 17 probes a day; live it was about 109 a day (corrected in 0.79.1).
 - Not covered: a slowdown under 300 ms on a node with no normal, and FLiRS or
   sleeping nodes, which keep the learned-only rule.
 - `rtt-degraded` episodes feed the refresh trial, so ceiling breaches on mains
