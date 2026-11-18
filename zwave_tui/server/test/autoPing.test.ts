@@ -3660,11 +3660,13 @@ test('stop() before a slot comes withdraws its probe (v0.79.1)', async () => {
 
 test('a transport failure at a later slot is still a launch failure (v0.79.1)', async () => {
   const R = await rig({ ...spacedFixture(), spacing: 10_000, readResult: (id) => (id === 100 ? { ok: false } : undefined) });
+  const t0 = R.at();
   await R.step();
   await R.fire();
   assert.ok(R.lines.includes('auto-ping: node 100 could not be probed (write refused or transport error) — not judged'));
   assert.ok(R.warns.some((l) => /node 100 could not be probed/.test(l)), 'a real failure stays a warning');
   assert.ok(R.lines.some((l) => /^auto-ping: node 100: a routed read could not be sent/.test(l)), 'and moves the node to the NoOp for a while');
+  assert.deepEqual(R.of('withdrawn').map((c) => [c.id, c.at - t0]), [[100, 10_000]], 'its note is withdrawn at its own slot (v0.79.1 review)');
 });
 
 test('probeStep: PROBE_SPACING_MS apart, shrunk so a tick\'s sends leave inside PROBE_SPREAD_OF_TICK of it (v0.79.1)', async () => {
@@ -3777,4 +3779,17 @@ test('production\'s default path: no spacing or timer given, the later probes wa
   t.mock.timers.tick(PROBE_SPACING_MS);
   assert.deepEqual(sent, [50, 100, 101]);
   h.stop();
+});
+
+test('a verification burst\'s +Ns gap is measured between the slots its probes leave in, not between ticks (v0.79.1 review)', async () => {
+  // Tick 1: sweep 50 (slot 0), verify 100 (slot 1), verify 101 (slot 2, +20 s).
+  // Tick 2, a minute on: no sweep, so 100 takes slot 0 and 101 slot 1 (+10 s).
+  const fx = spacedFixture();
+  let n = 0;
+  const R = await rig({ ...fx, spacing: 10_000, verify: () => (n++ < 2 ? [{ id: 100, first: n === 1 }, { id: 101, first: n === 1 }] : []) });
+  await R.step(); await R.fire();
+  await R.step(); await R.fire();
+  assert.ok(R.lines.some((l) => /^auto-ping: node 101 verification probe \(episode evidence, \+50s, /.test(l)),
+    `101 left 20 s into tick 1 and 10 s into tick 2: ${JSON.stringify(R.lines.filter((l) => /node 10[01] verification/.test(l)))}`);
+  R.h.stop();
 });

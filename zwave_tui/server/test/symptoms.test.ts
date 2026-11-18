@@ -1680,9 +1680,10 @@ test('rtt-degraded: a Dead node is not held — node-down owns it, and the sweep
 
 test('rtt-degraded: a held breach is timed from its last slow ROUND TRIP — a receive-only report does not refresh it (v0.79.1 review)', () => {
   // Receive-only reports (fresh, no transmission) carry the cached average at
-  // T+45 and T+90. They keep the breach live while in the window, but a held
-  // breach's age, and its deadline, run from the round trip of T+1.
-  const reports = [45, 90].map((m) => ev({ t: T + m * MIN, rtt: 378.1, dTx: 0, dRx: 1 }));
+  // T+5 (inside the round trip's window), T+45 and T+90. They keep the breach
+  // live while in the window, but a held breach's age, and its deadline, run
+  // from the round trip of T+1.
+  const reports = [5, 45, 90].map((m) => ev({ t: T + m * MIN, rtt: 378.1, dTx: 0, dRx: 1 }));
   const ring = (now: number) => [...trips(350, [{ t: T, raw: 420 }, { t: T + MIN, raw: 410 }]), ...reports].filter((x) => x.t <= now).sort((a, b) => a.t - b.t);
   const r = holdRun(ring, T, T + 152 * MIN, { confirmable: true, sweepMs: SWEEP });
   assert.ok(r.at(T + 95 * MIN) && r.at(T + 95 * MIN)!.held === undefined, 'fixture guard: live on the report while it is in the window');
