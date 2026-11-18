@@ -3907,14 +3907,72 @@ test('through the real engine pass: one slowdown on a sweep-only node is ONE epi
     assert.equal(open().length, 1, 'the same episode, still open');
     assert.equal(r.zd.verifyOwedCount(), 0, 'no confirmation-window burst: nothing is resolving');
     assert.deepEqual(closed(), [], 'and nothing closed');
-    // The sweep reads it normal; the average falls under the line over a few.
-    for (let i = 0; i < 12 && r.rtt(); i++) r.trip(25);
-    assert.equal(r.rtt(), undefined, 'a reading under the line decides it');
-    for (let i = 0; i < 180 && closed().length === 0; i++) {
+    // The next sweep reads it slow: the same breach, live again, and no burst.
+    r.trip(400);
+    assert.ok(r.rtt() && !held(), 'a slow sweep read: live again');
+    assert.equal(open().length, 1, 'the same episode');
+    assert.equal(r.zd.verifyOwedCount(), 0, 'and nothing owed');
+    r.idle(115 * 60_000);
+    assert.ok(held(), 'held again until the next sweep');
+    assert.deepEqual(closed(), []);
+    // The node recovers. The sweep reads it once, normal: the average (about
+    // 300) is still over the line, but no slow round trip carries the breach
+    // into another hold, so it clears and its episode closes before the next
+    // sweep would read it.
+    r.trip(25);
+    let waited = 0;
+    for (; waited < 60 * 60_000 && closed().length === 0; waited += 10_000) {
       if (r.zd.verifyOwedCount() > 0 && r.zd.drainVerifyRequests(r.now()).length > 0) r.trip(25);
       else r.idle(10_000);
     }
-    assert.equal(closed().length, 1, `ONE episode for the whole slowdown: ${JSON.stringify(closed().map((e) => e.text))}`);
+    assert.equal(closed().length, 1, `ONE episode for the whole slowdown, closed within the hour: ${JSON.stringify(closed().map((e) => e.text))}`);
     assert.equal(open().length, 0);
   } finally { r.done(); }
+});
+
+test('the refresh trial decides only on LIVE rtt-degraded evidence: a held breach is no candidate (v0.79.1 review)', async () => {
+  for (const held of [true, false]) {
+    const ha = fakeHa();
+    const dir = mkdtempSync(join(tmpdir(), 'zwtui-trial-held-'));
+    const zd = await bootedZwaveData(ha, {
+      refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+      evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+      outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+    });
+    try {
+      await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+      const MIN = 60_000;
+      const w = (rttMedian: number): WindowMetrics => ({
+        samples: 6, freshN: 6, tx: 50, rx: 50, timeouts: 0, rate: 0, flaps: 0, s2: 0, s2Known: 6, routeChanges: 0, routeKnown: 6,
+        rssiMedian: -80, rssiN: 6, rttMedian, rttN: 6, rateKbpsMin: 40,
+      });
+      const listening = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true, status: NodeStatus.Alive } : n));
+      const shadow = zd as unknown as {
+        snapshot: () => NodeSnapshot[]; updateEpisodes: (s: unknown[], now: number) => void; lastHomeId: number | null;
+        degradedWindow: () => WindowMetrics; driverRefreshQueries: Map<number, number>;
+      };
+      shadow.snapshot = () => listening;
+      shadow.degradedWindow = () => w(300);
+      shadow.lastHomeId = 4242;
+      shadow.driverRefreshQueries.set(7, 2);
+      const t0 = 1_800_000_000_000;
+      let tickNow = t0;
+      zd.setAutoPingSnapshot(() => ({ lastTickMs: tickNow, suppressed: 'none' }) as never);
+      const trial = createRefreshTrial({
+        enabled: true, path: join(dir, 'refresh_trial.json'),
+        handle: trialHandle(async () => ({ ok: true, message: 'ok' }), () => null),
+        log: () => {}, warn: () => {}, rand: () => 0.9, hourOf: () => 12, now: () => tickNow,
+      });
+      zd.attachRefreshTrial(trial, { writeActions: true });
+      const live = { kind: 'rtt-degraded', nodeId: 7, severity: 'watch', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+      const at = (ms: number, sym: object): void => { tickNow = ms; shadow.updateEpisodes([sym], ms); };
+      at(t0 + 5 * MIN, live); // the episode opens on live evidence
+      at(t0 + 30 * MIN, held ? { ...live, held: true } : live);
+      if (held) assert.equal(zd.refreshTrial()?.idle, 'no rtt-degraded episode', 'a held breach is not offered to the trial');
+      else assert.notEqual(zd.refreshTrial()?.idle, 'no rtt-degraded episode', 'positive control: the same episode live is a candidate');
+    } finally {
+      zd.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });

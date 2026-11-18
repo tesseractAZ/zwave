@@ -1245,10 +1245,11 @@ export const TRACE_HEARTBEAT_MS = 30 * 60_000;
  * that follows another node's routed read is timed across that node's whole
  * exchange. Measured on the reference mesh (read-only routed reads, each node's
  * own switch value, clean single-transmission readings): a node that reads
- * about 25 ms alone or first read 589–1,214 ms (median about 660, 9 trials)
- * when its read went out in the same millisecond right after a 9.6 kbps
- * node's. Sent 10 s after, it read 24.7–25.6 ms in 5 of 5 trials; 2 s after,
- * only 2 of 5 trials gave a clean reading. The driver times a round trip from
+ * about 25 ms alone or first read 589–1,214 ms (median about 660; 9 clean
+ * trials of 11) when its read went out in the same millisecond right after a
+ * 9.6 kbps node's. Sent 10 s after, it read 24.7–25.6 ms in 5 of 5 trials; at
+ * 2 s only 2 of 5 gave a clean reading, both about 25 ms, too few to judge.
+ * The driver times a round trip from
  * its serial write (zwave-js Message.markAsSent) and runs one transaction at a
  * time, so the wait is not in its queue; it is in the controller or on the
  * air, behind the end of the first node's routed exchange (inferred, not
@@ -1665,22 +1666,43 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     let slot = 0;
     /** The moment this send's slot comes: now for the first, k steps on for the k-th. */
     const nextSlot = (): number => t + slot++ * step;
-    /** Send at its slot — after the probe is pended and noted, as before (v0.71.0). */
-    const launch = (at: number, send: () => Promise<unknown>): Promise<unknown> => {
+    /** Why a send waiting for its slot must not go (v0.79.1), or null: the gates
+     *  the decision applied, read again at the slot — the runner's own, the
+     *  mesh's (a rebuild, a storm) and, for a measurement lane, the node's (gone,
+     *  Dead, inside a post-kill hold). */
+    const slotShut = (lane: ProbeLane, nodeId: number): string | null => {
+      if (stopped) return 'the runner stopped before its slot';
+      if (o.paused?.() ?? false) return 'paused before its slot';
+      if ((o.rfOffSince?.() ?? null) != null) return 'the controller\'s receiver was off at its slot';
+      if (o.operatorBusy?.() ?? false) return 'an operator action was in flight at its slot';
+      if (!o.ready()) return 'Home Assistant was not ready at its slot';
+      if (o.controller()?.isRebuildingRoutes === true) return 'a route rebuild was running at its slot';
+      const nodes = o.nodes();
+      const listening = nodes.filter(isPingCandidate);
+      const deadNow = listening.filter((n) => n.status === NodeStatus.Dead).length;
+      if (deadNow >= Math.max(STORM_MIN_NODES, Math.ceil(listening.length * STORM_FRACTION))) return 'a dead-node storm was under way at its slot';
+      if (lane === 'sweep' || lane === 'verify') {
+        const n = nodes.find((x) => x.nodeId === nodeId);
+        if (n == null) return 'the node was gone at its slot';
+        if (n.status === NodeStatus.Dead) return 'the node was Dead at its slot';
+        if (inProbeHold(state, nodeId, now())) return 'the node was in a post-kill hold at its slot';
+      }
+      return null;
+    };
+    /** Send at its slot: now for the first, after a timer for the rest, each
+     *  only if no gate shut in between. `send` notes a measurement probe right
+     *  before it goes, so the note is taken when the frame leaves (pend, note,
+     *  send, as v0.71.0 orders them). */
+    const launch = (at: number, lane: ProbeLane, nodeId: number, send: () => Promise<unknown>): Promise<unknown> => {
       if (at <= t) return send();
       return new Promise((resolve, reject) => later(() => {
-        const shut = stopped ? 'the runner stopped before its slot'
-          : (o.paused?.() ?? false) ? 'paused before its slot'
-          : (o.rfOffSince?.() ?? null) != null ? 'the controller\'s receiver was off at its slot'
-          : (o.operatorBusy?.() ?? false) ? 'an operator action was in flight at its slot'
-          : !o.ready() ? 'Home Assistant was not ready at its slot'
-          : null;
+        const shut = slotShut(lane, nodeId);
         if (shut != null) { reject(new SlotShut(shut)); return; }
         try { send().then(resolve, reject); } catch (e) { reject(e); }
       }, at - t));
     };
     /** Said on a probe that waited for its slot, so the log shows the spacing. */
-    const slotNote = (at: number): string => (at > t ? ` — sent ${Math.round((at - t) / 1000)} s after this tick's first probe` : '');
+    const slotNote = (at: number): string => (at > t ? ` — waits ${Math.round((at - t) / 1000)} s for its slot` : '');
 
     for (const nodeId of decision.stale) {
       // Captured BEFORE noteStale books the cadence clock, or the refund below
@@ -1832,11 +1854,14 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // must give it back too, or the node waits a full staleMs having never
       // been asked (v0.40.2).
       pendProbe(state, nodeId, at, 'sweep', cls, frame);
-      o.onMeasurementSent?.(nodeId, at, 'sweep', frame);
-      settleProbe(o, state, nodeId, at, launch(at, () => measure(frame, nodeId)), (shut) => {
+      settleProbe(o, state, nodeId, at, launch(at, 'sweep', nodeId, () => {
+        o.onMeasurementSent?.(nodeId, at, 'sweep', frame);
+        return measure(frame, nodeId);
+      }), (shut) => {
         if (priorStale == null) state.lastStaleAt.delete(nodeId);
         else state.lastStaleAt.set(nodeId, priorStale);
-        o.onMeasurementWithdrawn?.(nodeId, at);
+        // A slot a gate shut was never noted: nothing to withdraw (v0.79.1).
+        if (!shut) o.onMeasurementWithdrawn?.(nodeId, at);
         if (frame === 'read' && !shut) readLaunchFailed(nodeId, at);
       }, frame === 'read' ? READ_REJECT_WHY : undefined);
     }
@@ -1844,10 +1869,13 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     for (const nodeId of decision.ping) {
       // Captured BEFORE noteAttempt so a refund restores the PRE-attempt
       // count — reading it afterwards would hand back the value the attempt
-      // had just spent (v0.40.2). `lastPingAt` is deliberately NOT refunded:
-      // it is the backoff clock, and giving it back turns a persistent launch
-      // failure into a once-per-tick ping loop.
+      // had just spent (v0.40.2). `lastPingAt` is deliberately NOT refunded on
+      // a failed launch: it is the backoff clock, and giving it back turns a
+      // persistent launch failure into a once-per-tick ping loop. A slot a gate
+      // shut gives it back (v0.79.1): that gate suppresses the ladder until it
+      // reopens, so no loop can form.
       const priorTries = state.attempts.get(nodeId);
+      const priorPingAt = state.lastPingAt.get(nodeId);
       const attempt = (state.attempts.get(nodeId) ?? 0) + 1;
       noteAttempt(state, nodeId, t);
       // v0.64.4: a sweep kill skips the dwell, so do not claim the dwell ran —
@@ -1878,11 +1906,15 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // were never transmitted, and the ladder gives up on a node it never
       // actually probed.
       pendProbe(state, nodeId, at, 'dead');
-      settleProbe(o, state, nodeId, at, launch(at, () => o.ping(nodeId)), (shut) => {
+      settleProbe(o, state, nodeId, at, launch(at, 'dead', nodeId, () => o.ping(nodeId)), (shut) => {
         if (priorTries == null) state.attempts.delete(nodeId);
         else state.attempts.set(nodeId, priorTries);
-        // A slot a gate shut was never a launch (v0.79.1).
+        // A slot a gate shut was never a launch (v0.79.1): no launch failure,
+        // and the backoff clock goes back too. The gate that shut it suppresses
+        // the ladder until it reopens, so this cannot loop.
         if (!shut) state.launchFailures.set(nodeId, (state.launchFailures.get(nodeId) ?? 0) + 1);
+        else if (priorPingAt == null) state.lastPingAt.delete(nodeId);
+        else state.lastPingAt.set(nodeId, priorPingAt);
       });
     }
 
@@ -1905,8 +1937,11 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       o.log('info', nodeId, m);
       o.log2?.(m);
       pendProbe(state, nodeId, at, 'read', 'unheard', 'read');
-      settleProbe(o, state, nodeId, at, launch(at, () => o.read!(nodeId)), () => {
+      settleProbe(o, state, nodeId, at, launch(at, 'read', nodeId, () => o.read!(nodeId)), (shut) => {
         state.reads.set(nodeId, Math.max(0, (state.reads.get(nodeId) ?? 1) - 1));
+        // A slot a gate shut never left, so the read is owed again, as one a
+        // blackout swallowed is (v0.79.1).
+        if (shut) state.readOwed.add(nodeId);
       }, 'no switch/light value to read, or transport error');
     }
 
@@ -1941,8 +1976,10 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // a burst; the label now comes from its bookkeeping and cannot drift.
       const prevVerify = state.lastVerifyAt.get(nodeId);
       const frame = frameOf(nodeId, t);
-      const sinceMs = prevVerify == null ? null : t - prevVerify;
-      state.lastVerifyAt.set(nodeId, t);
+      // Its slot first (v0.79.1): the gap is between the times probes leave.
+      const at = nextSlot();
+      const sinceMs = prevVerify == null ? null : at - prevVerify;
+      state.lastVerifyAt.set(nodeId, at);
       const gap = decision.verifyFirst.includes(nodeId) || sinceMs == null
         ? 'burst start'
         : `+${Math.round(sinceMs / 1000)}s`;
@@ -1951,7 +1988,6 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // A single rtt-degraded confirmation (v0.78.0) serves no episode; audits
       // that count episode bursts from these lines tell it apart by its label.
       const why = decision.verifyConfirm.includes(nodeId) ? 'rtt-degraded confirm' : `episode evidence, ${gap}`;
-      const at = nextSlot();
       const msg = `auto-ping: node ${nodeId} verification probe (${why}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t) + slotNote(at);
       o.log('info', nodeId, msg);
       o.log2?.(msg);
@@ -1963,11 +1999,14 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // the next burst gap was measured from a probe that never left — the
       // capture-order trap the sweep and ladder refunds document.
       pendProbe(state, nodeId, at, 'verify', 'unheard', frame);
-      o.onMeasurementSent?.(nodeId, at, 'verify', frame);
-      settleProbe(o, state, nodeId, at, launch(at, () => measure(frame, nodeId)), (shut) => {
+      settleProbe(o, state, nodeId, at, launch(at, 'verify', nodeId, () => {
+        o.onMeasurementSent?.(nodeId, at, 'verify', frame);
+        return measure(frame, nodeId);
+      }), (shut) => {
         if (prevVerify == null) state.lastVerifyAt.delete(nodeId);
         else state.lastVerifyAt.set(nodeId, prevVerify);
-        o.onMeasurementWithdrawn?.(nodeId, at);
+        // A slot a gate shut was never noted: nothing to withdraw (v0.79.1).
+        if (!shut) o.onMeasurementWithdrawn?.(nodeId, at);
         if (frame === 'read' && !shut) readLaunchFailed(nodeId, at);
       }, frame === 'read' ? READ_REJECT_WHY : undefined);
     }

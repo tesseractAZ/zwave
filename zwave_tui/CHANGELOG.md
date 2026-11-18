@@ -20,55 +20,66 @@ the same millisecond.
   one node became 10 episodes and 113 probes, and Home Assistant's symptom
   count read 0 for 43 % of it.
 - A matured breach with no fresh reading left in the window is now held on
-  its last reading, judged against the line of now, until a newer reading
-  decides it: still over the line continues the same breach and episode,
-  under it clears it as before. The hold lasts at most the configured sweep
-  cadence plus `RTT_HOLD_MARGIN_MS` (30 min) past that reading. Nothing is held
-  with the sweep off, or on a node no confirmation probe can reach, and a
-  breach still arming clears on silence as before.
-- While held, the symptom stays shown, with the reading's age
+  its last slow round trip, judged against the line of now, for at most the
+  configured sweep cadence plus `RTT_HOLD_MARGIN_MS` (30 min) after it. A newer
+  slow round trip continues the same breach and episode. A newer normal one
+  ends the hold, so the breach clears on the next silence as before and its
+  closing burst measures the node.
+- Only a slow round trip carries the hold. The driver's average falls by a
+  quarter per transmission, so a recovered sweep-only node still reads over
+  the line for several sweeps on its average alone, and holding on the
+  average would show it degraded for hours.
+- Nothing is held with the sweep off, on a node no confirmation probe can
+  reach, or on a Dead node, and a breach still arming clears on silence as
+  before. A read that comes after the deadline finds the breach let go, and
+  the pair rule starts it again.
+- While held, the symptom stays shown, with its round trip's age
   (`RTT 378ms · 40m ago`) and a sentence saying it is held. It keeps its
-  episode open and can open none. A slowdown therefore spends its opening and
-  closing bursts, 10 probes, plus any confirmations, however long it lasts.
+  episode open and can open none, and the refresh trial does not decide on
+  it. A slowdown the sweep reads within the hold spends its opening and
+  closing bursts, 10 probes, plus any confirmations.
 
 ### Fixed — a probe sent right behind another node's read measured that node
 
 - A tick sent every probe it owed in the same millisecond. Measured on the
   reference mesh with read-only routed reads: a node that reads about 25 ms
-  alone or first read 589–1,214 ms (median about 660, 9 trials) when its read
-  went out right behind a 9.6 kbps node's, and 24.7–25.6 ms when it went 10 s
-  after (5 of 5 trials). On 2026-11-17 that booked a direct 100 kbps node as
-  `rtt-degraded` twice, on readings taken right behind a 9.6 kbps node's.
+  alone or first read 589–1,214 ms (median about 660; 9 clean trials of 11)
+  when its read went out right behind a 9.6 kbps node's, and 24.7–25.6 ms
+  when it went 10 s after (5 of 5). At 2 s only 2 of 5 trials gave a clean
+  reading, both about 25 ms: too few to judge.
+- On 2026-11-17 a direct 100 kbps node was booked `rtt-degraded` twice that
+  way: first on a slow frame of its own traffic paired with a confirmation
+  sent right behind a 9.6 kbps node's read, then on burst readings taken the
+  same way.
 - One tick's sends now leave `PROBE_SPACING_MS` (10 s) apart, the step
-  shrinking so they all leave within three quarters of the tick. Each probe is
-  pended, noted and judged from its own slot, and the log line of one that
-  waited says so (`— sent 10 s after this tick's first probe`).
-- A slot that finds a gate shut — the autonomy pause, the controller's
-  receiver off, an operator action, Home Assistant not ready — sends nothing.
-  It is withdrawn with an info line, and it is not counted as a failed launch:
-  a ladder ping gives its attempt back, and a routed read does not fall back
-  to the NoOp ping.
+  shrinking so they all leave within three quarters of the tick. Each probe
+  is pended at its slot and noted when it leaves, so its answer is judged
+  from then, and the line of one that waits says so (`— waits 10 s for its
+  slot`).
+- A slot re-checks the gates the decision applied: the autonomy pause, the
+  controller's receiver off, an operator action, Home Assistant not ready, a
+  route rebuild, a dead-node storm and, for a measurement probe, its node
+  gone, Dead or in a post-kill hold. If one is shut the slot sends nothing.
+  It is withdrawn with an info line and is not a failed launch: a ladder ping
+  gives back its attempt and its backoff, a dead-lane routed read is owed
+  again, and no read falls back to the NoOp ping. A verification probe
+  withdrawn this way counts as taken, like one dropped at its tick.
 
 ### Corrected
 
 - 0.79.0's cost figure was wrong. Its replay charged each ceiling breach one
   5-probe burst, but every episode sends two, and the re-opening above
-  multiplied them. Live, the first 47 hours spent 211 probes on 5 ceiling
-  breaches: about 109 a day, a quarter of the sweep's probes, not 17 a day
-  and 3.5 %.
+  multiplied them. Live, the ceiling spent 211 probes in the first 47 hours,
+  206 on 5 breaches and 5 confirmations that started none: about 109 a day,
+  a quarter of the sweep's probes, not 17 a day and 3.5 %.
 - DOCS: the controller's 30-minute background-noise tier has gone above
   −98 dBm (to −95.4) since a rise that began on 2026-11-12; the sentence
   that said it never had is corrected.
 
 ### Tests
 
-- 16 new tests: the hold in the detector (8), the hold through the real
-  engine pass (one slowdown, one episode: held for 100 minutes with no
-  closure and no burst, then one closure), probe spacing (slots, each gate,
-  stop, a transport failure at a later slot, the step, a ladder ping's
-  attempt given back), and a contract pin that production keeps the default
-  spacing.
-- 30 new mutation-harness entries, one of them declared equivalent.
+- TESTS_PLACEHOLDER
+- HARNESS_PLACEHOLDER
 
 ## 0.79.0
 

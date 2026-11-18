@@ -275,11 +275,12 @@ export const RTT_CEILING_MS = 300;
  * slowdown became 10 episodes and 113 probes, and the symptom read absent for
  * 43 % of it.
  *
- * Held, the breach stands on its last reading until a newer one decides it.
- * The deadline is the configured sweep cadence plus this margin, so it always
- * spans the sweep's next read; past it, the breach lets go as before. With the
- * sweep off, or on a node no probe can reach, nothing is held: no newer
- * reading is guaranteed to come.
+ * Held, the breach stands on its last slow round trip. The hold ends at the
+ * configured sweep cadence plus this margin after that round trip; a newer
+ * round trip decides it sooner, and the breach lets go as before. A read that
+ * comes after the deadline (a pause, a probe hold, a long sweep queue) finds it
+ * let go, and the pair rule starts it again. With the sweep off, or on a node
+ * no probe can reach, nothing is held.
  */
 export const RTT_HOLD_MARGIN_MS = 30 * 60_000;
 
@@ -895,7 +896,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // the current best estimate — unlike flaps/timeouts/resyncs, where a
       // count from a burst that has stopped is stale evidence of a past event.
       // That bound applies to STARTING a breach. A matured one outlives the
-      // window on its last reading until a newer one arrives (v0.79.1, the
+      // window on its last slow round trip for a bounded time (v0.79.1, the
       // hold below): silence is not a reading, so it cannot end a level.
       //
       // The reading is tested with the restart's seed taken out (v0.77.1): an
@@ -924,14 +925,21 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // alone holds it, as before: a level is not re-proven on every frame.
       const rk = key(id, 'rtt-degraded');
       // HELD THROUGH SILENCE (v0.79.1, RTT_HOLD_MARGIN_MS). A matured breach
-      // with no fresh reading left in the window stands on its last one, judged
-      // against the yardstick of now, until a newer reading decides it or the
-      // sweep's next read is overdue. It is shown, marked held: it keeps its
-      // episode open and can open none. Only a matured breach keeps a reading,
-      // so an armed one still clears on silence and must start again on a pair.
+      // with no fresh reading left in the window stands on its last SLOW round
+      // trip, judged against the yardstick of now, for at most the sweep's
+      // cadence plus the margin after it, and not on a Dead node (node-down
+      // owns that one, and the sweep does not read a Dead node). It is shown,
+      // marked held: it keeps its episode open and can open none.
+      // Only a slow round trip carries a breach into the hold. The driver's
+      // average keeps 0.75 of itself per transmission, so a sweep-only node that
+      // has recovered still reads over the line for several sweeps on its
+      // average alone, and a hold kept on the average showed such a node as
+      // degraded for hours. A newer round trip under the line drops the kept
+      // reading, so the next silence clears the breach as before v0.79.1 and its
+      // closing burst measures the node. An armed breach keeps nothing.
       const kept = state.get(rk)?.rtt;
       const holdMs = confirmable && input.sweepMs ? input.sweepMs + RTT_HOLD_MARGIN_MS : 0;
-      const held = obs == null && kept != null && yard != null && now - kept.t <= holdMs && kept.judged > yard.line;
+      const held = obs == null && kept != null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;
       const line = b ? yard!.line : Infinity;
       const frames = b ? rawRttFrames(samples).filter((f) => now - f.t <= WINDOW_MS) : [];
       const r1 = frames[frames.length - 1];
@@ -944,8 +952,14 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       const since = held ? state.get(rk)!.since : dwell(state, rk, b && (armed || pair || (slow && !confirmable)), now);
       if (since != null) {
         const e = state.get(rk)!;
-        if (!held) e.rtt = { avg: obs!.rtt, judged: obs!.rtt - residue, residue, t: obs!.t, raw: frames.slice(-2).reverse().map((f) => f.raw) };
-        const shown = e.rtt!;
+        // Live, the reading shown is timed from its newest round trip, and it is
+        // kept for a hold only while that round trip is slow (above).
+        const live = held ? null : { avg: obs!.rtt, judged: obs!.rtt - residue, residue, t: r1?.t ?? obs!.t, raw: frames.slice(-2).reverse().map((f) => f.raw) };
+        if (live != null) {
+          if (slow) e.rtt = live;
+          else if (r1 != null) delete e.rtt;
+        }
+        const shown = held ? e.rtt! : live!;
         const ageMin = Math.round((now - shown.t) / 60_000);
         breaching = true;
         out.push({
@@ -969,7 +983,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
             : yard!.basis === 'capped'
               ? `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route, although the normal learned for this route and time of day is wide enough to allow them.`
               : `${node.name}'s round trips are over ${RTT_CEILING_MS} ms, slow on any route. Its current route has no learned normal for this time of day yet (the RTT normal restarts on every route change), so the fixed ceiling is the yardstick.`)
-            + (held ? ` Nothing has read it for ${ageMin} min, so the breach is held on that last reading until a newer one decides it.` : ''),
+            + (held ? ` No round trip has been measured for ${ageMin} min; the breach is held on the last slow one.` : ''),
         });
       }
     }

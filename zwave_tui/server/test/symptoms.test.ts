@@ -1578,7 +1578,7 @@ test('rtt-degraded: a held breach shows the reading it stands on, how old it is,
   // had left the window, so live and held both show the newest alone.
   assert.equal(h.evidence[2].value, '410ms');
   assert.match(h.narrative, /over 300 ms/);
-  assert.match(h.narrative, /Nothing has read it for 40 min, so the breach is held on that last reading until a newer one decides it\.$/);
+  assert.match(h.narrative, /No round trip has been measured for 40 min; the breach is held on the last slow one\.$/);
 });
 
 test('rtt-degraded: the next reading decides a held breach — still slow continues the SAME breach live, normal clears it (v0.79.1)', () => {
@@ -1636,9 +1636,77 @@ test('rtt-degraded: a held breach keeps its episode open and opens none (v0.79.1
     [{ nodeId: 6, kind: 'rtt-degraded' }], 'a live one would');
 });
 
-test('RTT_HOLD_MARGIN_MS: the hold spans the sweep\'s next read with half an hour to spare (v0.79.1)', () => {
+test('RTT_HOLD_MARGIN_MS: the hold lasts the sweep cadence plus half an hour after the last slow round trip (v0.79.1)', () => {
   assert.equal(RTT_HOLD_MARGIN_MS, 30 * MIN);
   const r = holdRun(slowPair(), T, T + 92 * MIN, { confirmable: true, sweepMs: 60 * MIN });
   assert.equal(r.at(T + 91 * MIN)!.held, true, 'a 60-minute sweep: held through 1 + 60 + 30');
   assert.equal(r.at(T + 92 * MIN), undefined);
+});
+
+test('rtt-degraded: a node that has RECOVERED is not held on its lagging average — a normal round trip drops the kept reading, and silence clears it (v0.79.1 review)', () => {
+  // Learned 30±8 (line 62). Held on 120/110, then the sweep reads 25 ms at
+  // T+120: the average (~85) is still over the line, so the breach runs on
+  // live, but its newest round trip is normal.
+  const ring = (now: number) => trips(100, [{ t: T, raw: 120 }, { t: T + MIN, raw: 110 }, { t: T + 120 * MIN, raw: 25 }]).filter((x) => x.t <= now);
+  const r = holdRun(ring, T, T + 135 * MIN, { confirmable: true, sweepMs: SWEEP, baselines: () => baselineStub() });
+  assert.equal(r.at(T + 119 * MIN)!.held, true, 'fixture guard: held before the sweep');
+  const live = r.at(T + 125 * MIN)!;
+  assert.ok(live && live.held === undefined, 'the average alone keeps it live while that round trip is in the window');
+  assert.equal(r.at(T + 131 * MIN), undefined, 'then it clears, as before v0.79.1: no slow round trip carries it');
+  assert.ok(!r.state.has('6:rtt-degraded'));
+});
+
+test('rtt-degraded: on the ceiling a recovered node lets go one window after its first normal round trip, whatever its average (v0.79.1 review)', () => {
+  // Average ~640 over 300; one 25 ms sweep read leaves it at ~487, still over.
+  const ring = (now: number) => trips(600, [{ t: T, raw: 700 }, { t: T + MIN, raw: 690 }, { t: T + 120 * MIN, raw: 25 }]).filter((x) => x.t <= now);
+  const r = holdRun(ring, T, T + 135 * MIN, { confirmable: true, sweepMs: SWEEP });
+  assert.equal(r.at(T + 119 * MIN)!.held, true);
+  assert.ok(r.at(T + 130 * MIN), 'live on the average while the 25 is in the window');
+  assert.equal(r.at(T + 131 * MIN), undefined, 'not held again on the average');
+});
+
+test('rtt-degraded: a Dead node is not held — node-down owns it, and the sweep does not read a Dead node (v0.79.1 review)', () => {
+  const dead = node(6, { status: NodeStatus.Dead });
+  const state: SymptomState = new Map();
+  let seen: Symptom | undefined;
+  for (let now = T; now <= T + 30 * MIN; now += MIN) {
+    const n = now >= T + 15 * MIN ? dead : node(6);
+    const out = detectSymptoms(input({ nodes: [node(1), n], recent: new Map([[6, slowPair()(now)]]), now, confirmable: true, sweepMs: SWEEP, baselines: unlearned() }), state);
+    seen = out.find((x) => x.kind === 'rtt-degraded');
+    if (now === T + 11 * MIN) assert.ok(seen, 'fixture guard: live before it went Dead');
+  }
+  assert.equal(seen, undefined, 'not held once Dead');
+});
+
+test('rtt-degraded: a held breach is timed from its last slow ROUND TRIP — a receive-only report does not refresh it (v0.79.1 review)', () => {
+  // Receive-only reports (fresh, no transmission) carry the cached average at
+  // T+45 and T+90. They keep the breach live while in the window, but a held
+  // breach's age, and its deadline, run from the round trip of T+1.
+  const reports = [45, 90].map((m) => ev({ t: T + m * MIN, rtt: 378.1, dTx: 0, dRx: 1 }));
+  const ring = (now: number) => [...trips(350, [{ t: T, raw: 420 }, { t: T + MIN, raw: 410 }]), ...reports].filter((x) => x.t <= now).sort((a, b) => a.t - b.t);
+  const r = holdRun(ring, T, T + 152 * MIN, { confirmable: true, sweepMs: SWEEP });
+  assert.ok(r.at(T + 95 * MIN) && r.at(T + 95 * MIN)!.held === undefined, 'fixture guard: live on the report while it is in the window');
+  const h = r.at(T + 101 * MIN)!;
+  assert.equal(h.held, true);
+  assert.equal(h.evidence[0].value, '378ms · 100m ago', 'aged from the round trip, not the report');
+  assert.equal(r.at(T + 152 * MIN), undefined, 'and let go at cadence + margin after that round trip');
+});
+
+test('rtt-degraded: a held breach keeps the restart allowance it was judged with (v0.79.1 review)', () => {
+  // A seed of 450 ms taken at 2 transmissions, read at 10: a small allowance
+  // (0.75^8 of the seed's excess) that leaves the breach over the ceiling.
+  const seed: RttSeed = { k0: 2, a0: 450 };
+  const ring = (now: number) => trips(350, [{ t: T, raw: 420 }, { t: T + MIN, raw: 410 }]).filter((x) => x.t <= now);
+  const state: SymptomState = new Map();
+  let live: Symptom | undefined; let held: Symptom | undefined;
+  for (let now = T; now <= T + 20 * MIN; now += MIN) {
+    const out = detectSymptoms(input({ nodes: [node(1), node(6, { stats: { commandsTX: 10 } as never })], recent: new Map([[6, ring(now)]]), now, confirmable: true, sweepMs: SWEEP, baselines: unlearned(), rttSeed: new Map([[6, seed]]) }), state);
+    const f = out.find((x) => x.kind === 'rtt-degraded');
+    if (now === T + 11 * MIN) live = f;
+    if (now === T + 20 * MIN) held = f;
+  }
+  const allowance = (x: Symptom | undefined) => x?.evidence.find((e) => e.label === 'restart allowance')?.value;
+  assert.ok(live && allowance(live), `fixture guard: an allowance while live: ${JSON.stringify(live?.evidence)}`);
+  assert.equal(held?.held, true);
+  assert.equal(allowance(held), allowance(live), 'the same allowance while held');
 });
