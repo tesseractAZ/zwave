@@ -3447,7 +3447,7 @@ test('the trial\'s live gates reach it from the data layer: the refresh profile,
 /** A booted ZwaveData whose engine is driven by hand at the 10 s sampling
  *  cadence, node 7 listening at 30±8 ms (line 62). `runner: false` is an
  *  install without auto-ping's runner; `listening: false` a FLiRS/battery node. */
-async function confirmRig(prefix: string, o: { runner?: boolean; listening?: boolean } = {}) {
+async function confirmRig(prefix: string, o: { runner?: boolean; listening?: boolean; staleMs?: number } = {}) {
   const ha = fakeHa();
   const dir = mkdtempSync(join(tmpdir(), prefix));
   const zd = await bootedZwaveData(ha, {
@@ -3476,7 +3476,7 @@ async function confirmRig(prefix: string, o: { runner?: boolean; listening?: boo
   priv.baselines.observe = (id, smp, q) => { if (id === 7) folds.push({ rtt: smp.rtt, q, fresh: smp.fresh }); observe(id, smp, q); };
   const roster = priv.snapshot().map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: o.listening ?? true } : n));
   priv.snapshot = () => roster;
-  if (o.runner ?? true) zd.setAutoPingSnapshot(() => ({ suppressed: 'none', config: { staleMs: 0 } }) as never);
+  if (o.runner ?? true) zd.setAutoPingSnapshot(() => ({ suppressed: 'none', config: { staleMs: o.staleMs ?? 0 } }) as never);
   const base = roster.find((n) => n.nodeId === 7)!;
   let t = 1_800_000_000_000;
   let tx = 100;
@@ -3881,4 +3881,40 @@ test('a confirmation never cuts a burst short, and a burst asked for after it is
     assert.equal(r2.zd.verifyOwedFor(7), 5, 'a burst rewrites an owed confirmation');
     assert.deepEqual(r2.zd.drainVerifyRequests(r2.now()), [{ id: 7, first: true }], 'whose first probe starts the burst');
   } finally { r2.done(); }
+});
+
+test('through the real engine pass: one slowdown on a sweep-only node is ONE episode — held between sweeps, nothing re-opened, no after-burst until a reading decides it (v0.79.1)', async () => {
+  const r = await confirmRig('zwtui-rtthold-', { staleMs: 120 * 60_000 });
+  try {
+    r.trip(300);
+    r.zd.drainVerifyRequests(r.now());
+    r.idle(60_000);
+    r.trip(280); // the confirmation answers slow: the breach starts
+    r.idle(310_000); // it matures, and its episode opens
+    const open = () => r.zd.openEpisodes()?.filter((e) => e.nodeId === 7 && e.kind === 'rtt-degraded') ?? [];
+    const closed = () => r.zd.events().filter((e) => /closed/.test(e.text) && /rtt-degraded/.test(e.text));
+    const held = () => (r.rtt() as { held?: true } | undefined)?.held === true;
+    assert.equal(open().length, 1, 'precondition: one episode open');
+    assert.equal(r.zd.verifyOwedFor(7), 5, 'precondition: its opening burst is owed');
+    for (let i = 0; i < 5; i++) { r.zd.drainVerifyRequests(r.now()); r.trip(400); r.idle(50_000); } // the burst, answered slow
+    assert.equal(r.zd.verifyOwedFor(7), 0, 'fixture guard: the burst is spent');
+    // Nothing reads the node until the sweep: 100 minutes of silence. Until
+    // v0.79.1 the symptom cleared 10 minutes in, the episode closed, its
+    // confirmation burst found the node still slow, and a new breach started.
+    r.idle(100 * 60_000);
+    assert.ok(r.rtt(), 'still shown');
+    assert.ok(held(), 'held on its last reading');
+    assert.equal(open().length, 1, 'the same episode, still open');
+    assert.equal(r.zd.verifyOwedCount(), 0, 'no confirmation-window burst: nothing is resolving');
+    assert.deepEqual(closed(), [], 'and nothing closed');
+    // The sweep reads it normal; the average falls under the line over a few.
+    for (let i = 0; i < 12 && r.rtt(); i++) r.trip(25);
+    assert.equal(r.rtt(), undefined, 'a reading under the line decides it');
+    for (let i = 0; i < 180 && closed().length === 0; i++) {
+      if (r.zd.verifyOwedCount() > 0 && r.zd.drainVerifyRequests(r.now()).length > 0) r.trip(25);
+      else r.idle(10_000);
+    }
+    assert.equal(closed().length, 1, `ONE episode for the whole slowdown: ${JSON.stringify(closed().map((e) => e.text))}`);
+    assert.equal(open().length, 0);
+  } finally { r.done(); }
 });

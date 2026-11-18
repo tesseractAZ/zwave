@@ -1086,6 +1086,7 @@ test('the SWEEP and VERIFY lanes use probe(); only the DEAD ladder uses the lear
     verifyRequests: () => (due ? [{ id: 100, first: false }] : []),
     log: () => {},
     config: cfg({ staleMs: 240 * MIN }), tickMs: 1_000_000, now: () => clock,
+    probeSpacingMs: 0, // which verb each lane calls, not when (v0.79.1)
   });
   clock = T + BOOT_WINDOW_MS + MIN; h.tick();       // observe dead; sweep fires for stalest
   clock += 11 * MIN; due = true; h.tick();          // dead ladder due + a verification probe
@@ -2748,8 +2749,18 @@ async function rig(over: {
   ladderReadResult?: (id: number) => unknown;
   verify?: (now: number, skip?: (id: number) => boolean) => { id: number; first: boolean }[];
   deaths?: () => { nodeId: number; at: number; seen?: number | null; clearedAt?: number | null; feedLive?: boolean }[];
+  /** v0.79.1: probe spacing. 0 (the rig's default) sends a tick's probes
+   *  together, as these tests were written for; 'default' leaves the option
+   *  unset, as production does. Spaced sends wait in `timers` until fired. */
+  spacing?: number | 'default';
+  paused?: () => boolean;
+  ready?: () => boolean;
+  rfOffSince?: () => number | null;
+  operatorBusy?: () => boolean;
 }) {
   const { startAutoPing, BOOT_WINDOW_MS } = await import('../src/zwave/autoPing');
+  const timers: { fn: () => void; ms: number }[] = [];
+  const logs: { sev: string; id: number | null; text: string }[] = [];
   let clock = T;
   const calls: RigCall[] = [];
   const lines: string[] = [];
@@ -2758,7 +2769,7 @@ async function rig(over: {
   const log2 = Object.assign((m: string) => { lines.push(m); },
     { warn: (m: string) => { warns.push(m); lines.push(m); }, error: (m: string) => { lines.push(m); }, debug: () => {} });
   const h = startAutoPing({
-    nodes: () => over.nodes, controller: () => null, ready: () => true,
+    nodes: () => over.nodes, controller: () => null, ready: over.ready ?? (() => true),
     ping: async (id) => { calls.push({ verb: 'ping', id, at: clock }); },
     probe: async (id) => { calls.push({ verb: 'probe', id, at: clock }); },
     read: async (id) => { calls.push({ verb: 'read', id, at: clock }); return over.ladderReadResult?.(id); },
@@ -2770,14 +2781,21 @@ async function rig(over: {
     onMeasurementWithdrawn: (id, at) => { calls.push({ verb: 'withdrawn', id, at }); },
     verifyRequests: over.verify,
     deaths: over.deaths,
-    log: () => {}, log2,
+    log: (sev, id, text) => { logs.push({ sev, id, text }); }, log2,
     onProbeResult: (...a: unknown[]) => { results.push(a); },
     config: cfg({ staleMs: over.staleMs ?? 0 }), tickMs: 1_000_000, now: () => clock,
+    ...(over.spacing === 'default' ? {} : { probeSpacingMs: over.spacing ?? 0 }),
+    setTimer: (fn, ms) => { timers.push({ fn, ms }); },
+    ...(over.paused ? { paused: over.paused } : {}),
+    ...(over.rfOffSince ? { rfOffSince: over.rfOffSince } : {}),
+    ...(over.operatorBusy ? { operatorBusy: over.operatorBusy } : {}),
   });
   clock = T + BOOT_WINDOW_MS;
   const flush = () => new Promise((r) => setImmediate(r));
   return {
-    h, calls, lines, warns, results,
+    h, calls, lines, warns, results, timers, logs,
+    /** Fire every waiting spaced send, oldest first, then let them settle. */
+    async fire() { for (const x of timers.splice(0)) x.fn(); await flush(); await flush(); },
     at: () => clock,
     set: (t: number) => { clock = t; },
     async step(mins = 1) { for (let i = 0; i < mins; i++) { h.tick(); await flush(); clock += MIN; } },
@@ -3567,4 +3585,110 @@ test('an rtt-degraded confirmation says so in its probe line, not "episode evide
   assert.doesNotMatch(probe[0], /episode evidence/);
   assert.ok(server.some((l) => /rtt-degraded confirm/.test(l)), 'and it reaches the server log too');
   h.stop();
+});
+
+/* ── v0.79.1: one tick's probes go out spaced ─────────────────────────────── */
+
+/** A sweep for node 50 and verification probes for 100 and 101, all owed on the first tick. */
+function spacedFixture() {
+  const nodes = [node(1, { isController: true }), node(50, { stats: { lastSeen: T - 300 * MIN } as never }),
+    ...Array.from({ length: 18 }, (_v, i) => node(100 + i, { stats: { lastSeen: T + 30 * MIN } as never }))];
+  let once = true;
+  const verify = () => (once ? ((once = false), [{ id: 100, first: true }, { id: 101, first: true }]) : []);
+  return { nodes, verify, staleMs: 240 * MIN };
+}
+
+test('one tick\'s probes go out PROBE_SPACING_MS apart — the first at once, each later one pended, noted and logged at its own slot (v0.79.1)', async () => {
+  const { PROBE_SPACING_MS } = await import('../src/zwave/autoPing');
+  const R = await rig({ ...spacedFixture(), spacing: 'default' });
+  const t0 = R.at();
+  await R.step();
+  assert.deepEqual(R.of('probeRead').map((c) => c.id), [50], 'only the first leaves at once (production default)');
+  assert.deepEqual(R.timers.map((x) => x.ms), [PROBE_SPACING_MS, 2 * PROBE_SPACING_MS]);
+  assert.deepEqual(R.of('sent').map((c) => [c.id, c.at - t0]), [[50, 0], [100, PROBE_SPACING_MS], [101, 2 * PROBE_SPACING_MS]],
+    'each is noted at its slot, so an answer is judged from when its frame left');
+  assert.equal(R.snap(101)?.pending, 1, 'pended already, at its slot');
+  assert.ok(R.lines.some((l) => /^auto-ping: node 101 verification probe \(episode evidence, burst start, \d+ nodes? owed\) — routed read — sent 20 s after this tick's first probe$/.test(l)));
+  assert.ok(R.lines.some((l) => /^auto-ping: node 50 liveness sweep .* — routed read$/.test(l)), 'the first says nothing about a slot');
+  await R.fire();
+  assert.deepEqual(R.of('probeRead').map((c) => c.id), [50, 100, 101], 'the rest leave at their slots');
+  assert.deepEqual(R.of('withdrawn'), []);
+  R.h.stop();
+});
+
+test('a slot that finds a gate shut sends nothing — withdrawn and refunded, said at info, and never booked as a failed read (v0.79.1)', async () => {
+  const gates: { why: string; over: Partial<Parameters<typeof rig>[0]>; shut: () => void }[] = [];
+  let paused = false, rf: number | null = null, busy = false, ready = true;
+  gates.push({ why: 'paused before its slot', over: { paused: () => paused }, shut: () => { paused = true; } });
+  gates.push({ why: "the controller's receiver was off at its slot", over: { rfOffSince: () => rf }, shut: () => { rf = T; } });
+  gates.push({ why: 'an operator action was in flight at its slot', over: { operatorBusy: () => busy }, shut: () => { busy = true; } });
+  gates.push({ why: 'Home Assistant was not ready at its slot', over: { ready: () => ready }, shut: () => { ready = false; } });
+  for (const g of gates) {
+    paused = false; rf = null; busy = false; ready = true;
+    const R = await rig({ ...spacedFixture(), spacing: 10_000, ...g.over });
+    await R.step();
+    g.shut();
+    await R.fire();
+    assert.deepEqual(R.of('probeRead').map((c) => c.id), [50], `${g.why}: only the first went`);
+    assert.deepEqual(R.of('withdrawn').map((c) => c.id), [100, 101], `${g.why}: both measurement notes withdrawn`);
+    assert.equal(R.snap(100)?.pending ?? 0, 0, `${g.why}: nothing left pending`);
+    assert.ok(R.lines.includes(`auto-ping: node 100 could not be probed (${g.why}) — not judged`), g.why);
+    assert.deepEqual(R.warns, [], `${g.why}: a gate working is not a warning`);
+    assert.equal(R.logs.find((l) => l.text === `auto-ping: node 100 could not be probed (${g.why}) — not judged`)?.sev, 'info', `${g.why}: on the TUI's ring too`);
+    assert.ok(!R.lines.some((l) => /a routed read could not be sent/.test(l)), `${g.why}: the node keeps its routed read`);
+    R.h.stop();
+  }
+});
+
+test('stop() before a slot comes withdraws its probe (v0.79.1)', async () => {
+  const R = await rig({ ...spacedFixture(), spacing: 10_000 });
+  await R.step();
+  R.h.stop();
+  await R.fire();
+  assert.deepEqual(R.of('probeRead').map((c) => c.id), [50]);
+  assert.ok(R.lines.includes('auto-ping: node 101 could not be probed (the runner stopped before its slot) — not judged'));
+});
+
+test('a transport failure at a later slot is still a launch failure (v0.79.1)', async () => {
+  const R = await rig({ ...spacedFixture(), spacing: 10_000, readResult: (id) => (id === 100 ? { ok: false } : undefined) });
+  await R.step();
+  await R.fire();
+  assert.ok(R.lines.includes('auto-ping: node 100 could not be probed (write refused or transport error) — not judged'));
+  assert.ok(R.warns.some((l) => /node 100 could not be probed/.test(l)), 'a real failure stays a warning');
+  assert.ok(R.lines.some((l) => /^auto-ping: node 100: a routed read could not be sent/.test(l)), 'and moves the node to the NoOp for a while');
+});
+
+test('probeStep: PROBE_SPACING_MS apart, shrunk so a tick\'s sends leave inside PROBE_SPREAD_OF_TICK of it (v0.79.1)', async () => {
+  const { probeStep, PROBE_SPACING_MS, PROBE_SPREAD_OF_TICK } = await import('../src/zwave/autoPing');
+  assert.equal(PROBE_SPACING_MS, 10_000);
+  assert.equal(PROBE_SPREAD_OF_TICK, 0.75);
+  const spread = 60_000 * PROBE_SPREAD_OF_TICK;
+  assert.equal(probeStep(0, PROBE_SPACING_MS, spread), 0);
+  assert.equal(probeStep(1, PROBE_SPACING_MS, spread), 0, 'a lone send waits for nothing');
+  assert.equal(probeStep(2, PROBE_SPACING_MS, spread), 10_000);
+  assert.equal(probeStep(5, PROBE_SPACING_MS, spread), 10_000, 'four steps of 10 s fit in 45 s');
+  assert.equal(probeStep(6, PROBE_SPACING_MS, spread), 9_000, 'five do not: 45 s / 5');
+  assert.equal(probeStep(11, PROBE_SPACING_MS, spread), 4_500);
+  assert.equal(probeStep(3, 0, spread), 0, 'spacing 0 sends together, as before');
+});
+
+test('a ladder ping whose slot finds the pause on gives its attempt back and is not a launch failure (v0.79.1)', async () => {
+  let paused = false;
+  const deadNode = dead(7);
+  const nodes = [node(1, { isController: true }), deadNode,
+    node(50, { stats: { lastSeen: T - 300 * MIN } as never }), node(51, { stats: { lastSeen: T - 280 * MIN } as never }),
+    ...Array.from({ length: 18 }, (_v, i) => node(100 + i, { stats: { lastSeen: T + 30 * MIN } as never }))];
+  const R = await rig({ nodes, staleMs: 240 * MIN, spacing: 10_000, paused: () => paused });
+  await R.step(); // observe the dead node; the sweep asks 50
+  R.set(R.at() + 10 * MIN);
+  await R.step(); // the sweep asks 51 at once; the ladder's ping for 7 waits its slot
+  assert.deepEqual(R.of('probeRead').map((c) => c.id), [50, 51], 'fixture guard: a sweep took the first slot');
+  assert.deepEqual(R.of('ping', 7), [], 'fixture guard: the ladder ping is waiting');
+  assert.equal(R.snap(7)?.attempts, 1, 'fixture guard: the attempt is booked');
+  paused = true;
+  await R.fire();
+  assert.deepEqual(R.of('ping', 7), [], 'not sent');
+  assert.equal(R.snap(7)?.attempts ?? 0, 0, 'its attempt is given back');
+  assert.equal(R.snap(7)?.launchFailures ?? 0, 0, 'and it is not counted as a launch that failed');
+  R.h.stop();
 });

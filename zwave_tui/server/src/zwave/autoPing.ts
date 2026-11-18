@@ -421,16 +421,19 @@ function settleProbe(
   nodeId: number,
   t: number,
   launched: Promise<unknown>,
-  onFailed?: () => void,
+  /** `shut` (v0.79.1): withdrawn at its slot by a gate, so nothing failed to
+   *  send — a refund must not book it as a launch failure. */
+  onFailed?: (shut: boolean) => void,
   rejectWhy = 'no ping entity or transport error',
 ): void {
-  const failed = (why: string): void => {
+  const failed = (why: string, shut = false): void => {
     unpendProbe(state, nodeId, t);
-    onFailed?.();
+    onFailed?.(shut);
     const m = `auto-ping: node ${nodeId} could not be probed (${why}) — not judged`;
-    o.log('warn', nodeId, m);
+    // A gate shutting a slot is the gate working, not a fault (v0.79.1).
+    o.log(shut ? 'info' : 'warn', nodeId, m);
     // v0.50.0: raise it in the CONTAINER log too, not just the TUI ring.
-    (o.log2?.warn ?? o.log2)?.(m);
+    (shut ? o.log2 : (o.log2?.warn ?? o.log2))?.(m);
   };
   void launched.then(
     (res) => {
@@ -438,9 +441,13 @@ function settleProbe(
       // `undefined` (the plain-void runners the tests use) is not a failure.
       if ((res as { ok?: unknown } | null | undefined)?.ok === false) failed('write refused or transport error');
     },
-    () => failed(rejectWhy),
+    // A spaced send whose slot found a gate shut says which (v0.79.1).
+    (e) => (e instanceof SlotShut ? failed(e.message, true) : failed(rejectWhy)),
   );
 }
+
+/** Why a spaced probe was withdrawn at its slot without being sent (v0.79.1). */
+export class SlotShut extends Error {}
 
 /** Withdraw ONE pending probe after a transport failure — the packet never
  *  left, so there is nothing to judge; the node's other probes stay judged. */
@@ -1231,6 +1238,34 @@ export const BOOT_WINDOW_MS = 5 * 60_000;
  *  still visible without the log becoming a per-minute drumbeat. */
 export const TRACE_HEARTBEAT_MS = 30 * 60_000;
 
+/**
+ * Spacing between the probes one tick sends (v0.79.1).
+ *
+ * A tick used to send every probe it owed in the same millisecond, and a probe
+ * that follows another node's routed read is timed across that node's whole
+ * exchange. Measured on the reference mesh (read-only routed reads, each node's
+ * own switch value, clean single-transmission readings): a node that reads
+ * about 25 ms alone or first read 589–1,214 ms (median about 660, 9 trials)
+ * when its read went out in the same millisecond right after a 9.6 kbps
+ * node's. Sent 10 s after, it read 24.7–25.6 ms in 5 of 5 trials; 2 s after,
+ * only 2 of 5 trials gave a clean reading. The driver times a round trip from
+ * its serial write (zwave-js Message.markAsSent) and runs one transaction at a
+ * time, so the wait is not in its queue; it is in the controller or on the
+ * air, behind the end of the first node's routed exchange (inferred, not
+ * traced). Co-probing is how the TUI booked a fast node as rtt-degraded on its
+ * own verification bursts.
+ */
+export const PROBE_SPACING_MS = 10_000;
+/** The share of the tick one tick's probes may spread across (v0.79.1). With
+ *  more sends than fit at PROBE_SPACING_MS, the step shrinks so the last
+ *  leaves well before the next tick's first. */
+export const PROBE_SPREAD_OF_TICK = 0.75;
+/** The step between one tick's sends (v0.79.1): PROBE_SPACING_MS, or less when
+ *  that many would not leave inside the spread; 0 for a lone send. */
+export function probeStep(sends: number, spacingMs: number, spreadMaxMs: number): number {
+  return sends > 1 ? Math.min(spacingMs, Math.floor(spreadMaxMs / (sends - 1))) : 0;
+}
+
 export interface AutoPingRunnerOptions {
   nodes: () => NodeSnapshot[];
   controller: () => ControllerSnapshot | null;
@@ -1296,6 +1331,13 @@ export interface AutoPingRunnerOptions {
   config: AutoPingConfig;
   tickMs?: number;
   now?: () => number;
+  /** Spacing between the probes ONE tick sends (v0.79.1, `PROBE_SPACING_MS`):
+   *  the k-th goes out k × this after the first. 0 sends them together, as
+   *  before. Defaults to `PROBE_SPACING_MS`. */
+  probeSpacingMs?: number;
+  /** The timer a spaced probe waits on (v0.79.1). Defaults to an unref'd
+   *  `setTimeout`; a test passes its own to keep a tick deterministic. */
+  setTimer?: (fn: () => void, ms: number) => void;
   /** Drain the outcome ledger's pending verification probes (v0.36). Optional:
    *  without it the runner behaves exactly as it did before. `skip` (v0.71.0)
    *  names nodes whose probes must stay OWED rather than be drained — the
@@ -1407,6 +1449,11 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
 } {
   const now = o.now ?? (() => Date.now());
   const startedAt = now();
+  // v0.79.1: one tick's probes go out spaced (PROBE_SPACING_MS).
+  const spacingMs = Math.max(0, o.probeSpacingMs ?? PROBE_SPACING_MS);
+  const spreadMaxMs = Math.floor((o.tickMs ?? 60_000) * PROBE_SPREAD_OF_TICK);
+  const later = o.setTimer ?? ((fn: () => void, ms: number): void => { setTimeout(fn, ms).unref?.(); });
+  let stopped = false;
   const state = createAutoPingState();
   // Kept for `snapshot()` — the runtime state an operator cannot otherwise see.
   let lastDecision: AutoPingDecision | null = null;
@@ -1603,6 +1650,38 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     }
     lastSuppression = decision.suppressed;
 
+    // ONE TICK'S PROBES GO OUT SPACED (v0.79.1, PROBE_SPACING_MS). Every lane
+    // below takes a slot from `nextSlot` and sends through `launch`: the first
+    // leaves now, the k-th k steps later, and its probe is pended, noted and
+    // settled at its slot, so an answer is still judged from when its frame
+    // left. The step shrinks
+    // when a tick sends many, so they all leave inside PROBE_SPREAD_OF_TICK of
+    // it. A slot that finds a gate shut — the owner's pause, the receiver
+    // off, an operator action, Home Assistant not ready, the runner stopped —
+    // sends nothing; the lane's refund withdraws it, as for any launch that
+    // never left.
+    const sends = decision.stale.length + decision.ping.length + decision.read.length + decision.verify.length;
+    const step = probeStep(sends, spacingMs, spreadMaxMs);
+    let slot = 0;
+    /** The moment this send's slot comes: now for the first, k steps on for the k-th. */
+    const nextSlot = (): number => t + slot++ * step;
+    /** Send at its slot — after the probe is pended and noted, as before (v0.71.0). */
+    const launch = (at: number, send: () => Promise<unknown>): Promise<unknown> => {
+      if (at <= t) return send();
+      return new Promise((resolve, reject) => later(() => {
+        const shut = stopped ? 'the runner stopped before its slot'
+          : (o.paused?.() ?? false) ? 'paused before its slot'
+          : (o.rfOffSince?.() ?? null) != null ? 'the controller\'s receiver was off at its slot'
+          : (o.operatorBusy?.() ?? false) ? 'an operator action was in flight at its slot'
+          : !o.ready() ? 'Home Assistant was not ready at its slot'
+          : null;
+        if (shut != null) { reject(new SlotShut(shut)); return; }
+        try { send().then(resolve, reject); } catch (e) { reject(e); }
+      }, at - t));
+    };
+    /** Said on a probe that waited for its slot, so the log shows the spacing. */
+    const slotNote = (at: number): string => (at > t ? ` — sent ${Math.round((at - t) / 1000)} s after this tick's first probe` : '');
+
     for (const nodeId of decision.stale) {
       // Captured BEFORE noteStale books the cadence clock, or the refund below
       // hands back the value this sweep just booked (v0.40.2) — the same
@@ -1702,6 +1781,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
         : selfProven ? 'self-proven'
         : echoOnly ? 'echo-only'
         : 'unheard';
+      const at = nextSlot();
       const msg = `auto-ping: node ${nodeId} liveness sweep ` +
         (attributionUnknown
           ? (inReconnectBurst && attributed != null
@@ -1718,7 +1798,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
             : echoOnly
               ? `(nothing heard past our last probe's answer ${silence} ago — probing for its own voice)`
               : `(unheard for ${silence}, threshold ${Math.round(o.config.staleMs / 60_000)}m)`) +
-        frameNote(frame, nodeId, t);
+        frameNote(frame, nodeId, t) + slotNote(at);
       // DELIBERATELY still info on BOTH sinks (re-affirmed v0.50.0).
       //
       // 941 of these in 50 hours is 71.6% of the add-on log, and an audit
@@ -1751,13 +1831,13 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // `noteStale` above booked the cadence clock; a launch that never left
       // must give it back too, or the node waits a full staleMs having never
       // been asked (v0.40.2).
-      pendProbe(state, nodeId, t, 'sweep', cls, frame);
-      o.onMeasurementSent?.(nodeId, t, 'sweep', frame);
-      settleProbe(o, state, nodeId, t, measure(frame, nodeId), () => {
+      pendProbe(state, nodeId, at, 'sweep', cls, frame);
+      o.onMeasurementSent?.(nodeId, at, 'sweep', frame);
+      settleProbe(o, state, nodeId, at, launch(at, () => measure(frame, nodeId)), (shut) => {
         if (priorStale == null) state.lastStaleAt.delete(nodeId);
         else state.lastStaleAt.set(nodeId, priorStale);
-        o.onMeasurementWithdrawn?.(nodeId, t);
-        if (frame === 'read') readLaunchFailed(nodeId, t);
+        o.onMeasurementWithdrawn?.(nodeId, at);
+        if (frame === 'read' && !shut) readLaunchFailed(nodeId, at);
       }, frame === 'read' ? READ_REJECT_WHY : undefined);
     }
 
@@ -1774,7 +1854,8 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // and say only what was measured (the node went Dead with our probe to it
       // unanswered), which is a correlation, not a verdict on the cause.
       const killedBy = state.probeDeath.get(nodeId);
-      const msg = state.probeDeath.has(nodeId)
+      const at = nextSlot();
+      const msg = (state.probeDeath.has(nodeId)
         ? (attempt === 1
           ? `auto-ping: node ${nodeId} went Dead with our ${killedBy === 'verify' ? 'verification' : 'sweep'} probe to it unanswered — probing without the dwell `
           // Only the second rung follows the immediate retry (v0.72.1: the
@@ -1782,7 +1863,7 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
           : `auto-ping: node ${nodeId} is still Dead after ${attempt === 2 ? 'the immediate retry' : `attempt ${attempt - 1}`} — probing `) +
           `(attempt ${attempt}/${o.config.maxAttempts})`
         : `auto-ping: node ${nodeId} has been Dead past the dwell — ` +
-          `probing (attempt ${attempt}/${o.config.maxAttempts})`;
+          `probing (attempt ${attempt}/${o.config.maxAttempts})`) + slotNote(at);
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       // Fire and forget: the ping runner records its own outcome into the M5
@@ -1796,11 +1877,12 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // silently spends a node's 3-attempt remediation budget on packets that
       // were never transmitted, and the ladder gives up on a node it never
       // actually probed.
-      pendProbe(state, nodeId, t, 'dead');
-      settleProbe(o, state, nodeId, t, o.ping(nodeId), () => {
+      pendProbe(state, nodeId, at, 'dead');
+      settleProbe(o, state, nodeId, at, launch(at, () => o.ping(nodeId)), (shut) => {
         if (priorTries == null) state.attempts.delete(nodeId);
         else state.attempts.set(nodeId, priorTries);
-        state.launchFailures.set(nodeId, (state.launchFailures.get(nodeId) ?? 0) + 1);
+        // A slot a gate shut was never a launch (v0.79.1).
+        if (!shut) state.launchFailures.set(nodeId, (state.launchFailures.get(nodeId) ?? 0) + 1);
       });
     }
 
@@ -1817,12 +1899,13 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       if (state.probeDeath.has(nodeId)) state.readAfterOwnKill.add(nodeId);
       else state.readAfterOwnKill.delete(nodeId);
       state.reads.set(nodeId, (state.reads.get(nodeId) ?? 0) + 1);
+      const at = nextSlot();
       const m = `auto-ping: node ${nodeId} did not answer its ladder ping — sending one routed read ` +
-        `(a single Get with the driver's default routing, which may auto-route; a ping can use only the stored routes)`;
+        `(a single Get with the driver's default routing, which may auto-route; a ping can use only the stored routes)` + slotNote(at);
       o.log('info', nodeId, m);
       o.log2?.(m);
-      pendProbe(state, nodeId, t, 'read', 'unheard', 'read');
-      settleProbe(o, state, nodeId, t, o.read!(nodeId), () => {
+      pendProbe(state, nodeId, at, 'read', 'unheard', 'read');
+      settleProbe(o, state, nodeId, at, launch(at, () => o.read!(nodeId)), () => {
         state.reads.set(nodeId, Math.max(0, (state.reads.get(nodeId) ?? 1) - 1));
       }, 'no switch/light value to read, or transport error');
     }
@@ -1868,7 +1951,8 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // A single rtt-degraded confirmation (v0.78.0) serves no episode; audits
       // that count episode bursts from these lines tell it apart by its label.
       const why = decision.verifyConfirm.includes(nodeId) ? 'rtt-degraded confirm' : `episode evidence, ${gap}`;
-      const msg = `auto-ping: node ${nodeId} verification probe (${why}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t);
+      const at = nextSlot();
+      const msg = `auto-ping: node ${nodeId} verification probe (${why}, ${decision.verifyOwed} node${decision.verifyOwed === 1 ? '' : 's'} owed)` + frameNote(frame, nodeId, t) + slotNote(at);
       o.log('info', nodeId, msg);
       o.log2?.(msg);
       // MEASUREMENT lane too (v0.38.1) — a verification probe exists to fill
@@ -1878,13 +1962,13 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // the map after the set above, so it put back this probe's own stamp and
       // the next burst gap was measured from a probe that never left — the
       // capture-order trap the sweep and ladder refunds document.
-      pendProbe(state, nodeId, t, 'verify', 'unheard', frame);
-      o.onMeasurementSent?.(nodeId, t, 'verify', frame);
-      settleProbe(o, state, nodeId, t, measure(frame, nodeId), () => {
+      pendProbe(state, nodeId, at, 'verify', 'unheard', frame);
+      o.onMeasurementSent?.(nodeId, at, 'verify', frame);
+      settleProbe(o, state, nodeId, at, launch(at, () => measure(frame, nodeId)), (shut) => {
         if (prevVerify == null) state.lastVerifyAt.delete(nodeId);
         else state.lastVerifyAt.set(nodeId, prevVerify);
-        o.onMeasurementWithdrawn?.(nodeId, t);
-        if (frame === 'read') readLaunchFailed(nodeId, t);
+        o.onMeasurementWithdrawn?.(nodeId, at);
+        if (frame === 'read' && !shut) readLaunchFailed(nodeId, at);
       }, frame === 'read' ? READ_REJECT_WHY : undefined);
     }
 
@@ -2106,5 +2190,5 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
     pendProbe(state, nodeId, at ?? now(), lane);
   };
 
-  return { stop: () => clearInterval(timer), tick, snapshot, notePending };
+  return { stop: () => { stopped = true; clearInterval(timer); }, tick, snapshot, notePending };
 }

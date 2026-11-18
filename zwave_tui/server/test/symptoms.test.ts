@@ -1,7 +1,7 @@
 import type { SleeperWatch } from '../src/zwave/missedReport';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, rttFoldResidue, rttYardstick, RTT_SEED_MAX_MS, RTT_CEILING_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
+import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, rttFoldResidue, rttYardstick, RTT_SEED_MAX_MS, RTT_CEILING_MS, RTT_HOLD_MARGIN_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
 import { planEpisodeLifecycle } from '../src/zwave/outcomes';
 import { diffSymptomLog } from '../src/zwave/zwaveData';
 import type { RateNormal, ContNormal, BaselineStore } from '../src/zwave/baselines';
@@ -74,6 +74,8 @@ interface Fixture {
   suspects?: { id: number; raw: number }[];
   /** Collects the nodes whose RTT average is over the line (v0.78.0). */
   overLine?: number[];
+  /** The configured sweep cadence (v0.63.0); absent = the sweep is off. */
+  sweepMs?: number;
 }
 function input(f: Fixture): DetectInput {
   return {
@@ -91,6 +93,7 @@ function input(f: Fixture): DetectInput {
     ...(f.confirmable != null ? { rttConfirmable: () => f.confirmable === true } : {}),
     ...(f.suspects ? { rttSuspect: (id: number, fr: { raw: number }) => { f.suspects!.push({ id, raw: fr.raw }); } } : {}),
     ...(f.overLine ? { rttOverLine: (id: number) => { f.overLine!.push(id); } } : {}),
+    ...(f.sweepMs != null ? { sweepMs: f.sweepMs } : {}),
     recordingSince: () => T - 30 * 86_400_000,
     sleeperWatch: (n) => f.sleeperWatch?.(n) ?? null,
     duplicateBursts: (id) => f.duplicateBursts?.(id) ?? [],
@@ -1526,4 +1529,116 @@ test('repeated-frames: a node repeating its frames fires after the dwell, never 
   assert.deepEqual(fired[0].evidence, [{ label: 'bursts (24 h)', value: '1' }, { label: 'largest burst', value: '20 repeats in 1 min' }]);
   const dead: SymptomState = new Map();
   assert.equal(settle((n) => inp(n, NodeStatus.Dead), dead, T0, 6).filter((s) => s.kind === 'repeated-frames').length, 0, 'node-down owns a Dead node');
+});
+
+/* ── v0.79.1: a matured rtt-degraded breach is held through silence ───────── */
+
+const SWEEP = 120 * MIN;
+/** Tick the detector each minute over [from, to]; record what rtt-degraded showed. */
+function holdRun(ring: (now: number) => EvidenceSample[], from: number, to: number,
+  o: { confirmable?: boolean; sweepMs?: number; baselines?: (now: number) => BaselineStore; state?: SymptomState } = {}) {
+  const state: SymptomState = o.state ?? new Map();
+  const seen = new Map<number, Symptom | undefined>();
+  for (let now = from; now <= to; now += MIN) {
+    const out = detectSymptoms(input({
+      nodes: [node(1), node(6)], recent: new Map([[6, ring(now).filter((x) => x.t <= now)]]), now,
+      confirmable: o.confirmable, sweepMs: o.sweepMs, baselines: o.baselines?.(now) ?? unlearned(),
+    }), state);
+    seen.set(now, out.find((x) => x.kind === 'rtt-degraded'));
+  }
+  return { at: (t: number) => seen.get(t), state };
+}
+/** A node already slow (average 350): 420 then 410 ms pair over the ceiling at
+ *  T and T+1, so the breach starts at T+1 and matures at T+6. */
+const slowPair = (more: { t: number; raw: number }[] = []) => (now: number) =>
+  trips(350, [{ t: T, raw: 420 }, { t: T + MIN, raw: 410 }, ...more]).filter((x) => x.t <= now);
+
+test('rtt-degraded: a matured breach is HELD through the silence between sweeps — same onset, still shown, marked held (v0.79.1)', () => {
+  const r = holdRun(slowPair(), T, T + 160 * MIN, { confirmable: true, sweepMs: SWEEP });
+  assert.equal(r.at(T + 5 * MIN), undefined, 'arming');
+  const live = r.at(T + 11 * MIN)!;
+  assert.ok(live && live.held === undefined, 'shown live while its reading is in the window');
+  assert.equal(live.sinceMs, T + MIN);
+  // T+12: the reading of T+1 has left the 10-minute window. Until v0.79.1 this
+  // cleared the breach as if the node had recovered.
+  for (const m of [12, 30, 90, 151]) {
+    const h = r.at(T + m * MIN);
+    assert.ok(h, `m${m}: still shown`);
+    assert.equal(h!.held, true, `m${m}: marked held`);
+    assert.equal(h!.sinceMs, T + MIN, `m${m}: the same breach, not a new one`);
+  }
+  assert.equal(r.at(T + 152 * MIN), undefined, 'lets go once the sweep\'s next read is overdue: cadence + margin past the reading');
+});
+
+test('rtt-degraded: a held breach shows the reading it stands on, how old it is, and why it is held (v0.79.1)', () => {
+  const h = holdRun(slowPair(), T, T + 41 * MIN, { confirmable: true, sweepMs: SWEEP }).at(T + 41 * MIN)!;
+  assert.deepEqual(h.evidence.map((e) => e.label), ['RTT', 'ceiling', 'newest round trips'], 'same rows, yardstick before the round trips');
+  assert.equal(h.evidence[0].value, '378ms · 40m ago');
+  // The round trips the breach last stood on while live: by T+11 the 420 of T
+  // had left the window, so live and held both show the newest alone.
+  assert.equal(h.evidence[2].value, '410ms');
+  assert.match(h.narrative, /over 300 ms/);
+  assert.match(h.narrative, /Nothing has read it for 40 min, so the breach is held on that last reading until a newer one decides it\.$/);
+});
+
+test('rtt-degraded: the next reading decides a held breach — still slow continues the SAME breach live, normal clears it (v0.79.1)', () => {
+  const slow = holdRun(slowPair([{ t: T + 120 * MIN, raw: 400 }]), T, T + 125 * MIN, { confirmable: true, sweepMs: SWEEP });
+  assert.equal(slow.at(T + 119 * MIN)!.held, true);
+  const s = slow.at(T + 120 * MIN)!;
+  assert.ok(s && s.held === undefined, 'a newer slow reading: live again');
+  assert.equal(s.sinceMs, T + MIN, 'the same breach: its episode never closed');
+  assert.equal(s.evidence[0].value, '384ms');
+  const fast = holdRun(slowPair([{ t: T + 120 * MIN, raw: 25 }]), T, T + 125 * MIN, { confirmable: true, sweepMs: SWEEP });
+  assert.equal(fast.at(T + 119 * MIN)!.held, true);
+  assert.equal(fast.at(T + 120 * MIN), undefined, 'a newer normal reading: the average is back under the line, cleared');
+  assert.ok(!fast.state.has('6:rtt-degraded'));
+});
+
+test('rtt-degraded: nothing is held with the sweep off, or on a node no probe can reach — no newer reading is guaranteed (v0.79.1)', () => {
+  const noSweep = holdRun(slowPair(), T, T + 12 * MIN, { confirmable: true });
+  assert.ok(noSweep.at(T + 11 * MIN), 'fires as before');
+  assert.equal(noSweep.at(T + 12 * MIN), undefined, 'and clears with its reading, as before');
+  // Unreachable: no ceiling, so judged against a learned line (30±8 → 62).
+  const ring = (now: number) => trips(100, [{ t: T, raw: 120 }, { t: T + MIN, raw: 110 }]).filter((x) => x.t <= now);
+  const unreachable = holdRun(ring, T, T + 12 * MIN, { confirmable: false, sweepMs: SWEEP, baselines: () => baselineStub() });
+  assert.ok(unreachable.at(T + 10 * MIN), 'fires on the newest round trip alone, as before');
+  assert.equal(unreachable.at(T + 12 * MIN), undefined, 'not held');
+});
+
+test('rtt-degraded: a held reading that is no longer over the yardstick of now lets go (v0.79.1)', () => {
+  // Learned 30±8 (line 62) until T+30, then the band of now reads 200±10 (line 240).
+  const ring = (now: number) => trips(100, [{ t: T, raw: 120 }, { t: T + MIN, raw: 110 }]).filter((x) => x.t <= now);
+  const wide = baselineStub({ rtt: { median: 200, scale: 10, ready: true, days: 5 } as ContNormal });
+  const r = holdRun(ring, T, T + 31 * MIN, { confirmable: true, sweepMs: SWEEP, baselines: (now) => (now < T + 30 * MIN ? baselineStub() : wide) });
+  assert.equal(r.at(T + 29 * MIN)!.held, true, 'held against 62');
+  assert.match(r.at(T + 29 * MIN)!.evidence[1].value, /^30±8ms$/, 'judged against the learned line, uncapped');
+  assert.equal(r.at(T + 30 * MIN), undefined, '106 is not over 240');
+});
+
+test('rtt-degraded: only a MATURED breach keeps a reading — an armed one still clears on silence (v0.79.1)', () => {
+  const state: SymptomState = new Map([['6:rtt-degraded', { since: T, lastSeen: T, hits: 1 }]]);
+  const r = holdRun(() => [], T + 11 * MIN, T + 11 * MIN, { confirmable: true, sweepMs: SWEEP, state });
+  assert.equal(r.at(T + 11 * MIN), undefined);
+  assert.ok(!state.has('6:rtt-degraded'), 'the dwell is dropped, not held');
+});
+
+test('rtt-degraded: a held breach keeps its episode open and opens none (v0.79.1)', () => {
+  const r = holdRun(slowPair(), T, T + 40 * MIN, { confirmable: true, sweepMs: SWEEP });
+  const h = r.at(T + 40 * MIN)!;
+  const pending = new Map<string, number>();
+  const open = [{ key: '6:rtt-degraded', nodeId: 6, kind: 'rtt-degraded' as const }];
+  for (let m = 0; m <= 30; m++) {
+    const plan = planEpisodeLifecycle([h], open, pending, T + (40 + m) * MIN, 10 * MIN);
+    assert.deepEqual(plan.toResolve, [], `m${m}: its episode does not close`);
+  }
+  assert.deepEqual(planEpisodeLifecycle([h], [], new Map(), T + 40 * MIN, 10 * MIN).toOpen, [], 'and with none open, a held reading opens none');
+  assert.deepEqual(planEpisodeLifecycle([{ ...h, held: undefined }], [], new Map(), T + 40 * MIN, 10 * MIN).toOpen,
+    [{ nodeId: 6, kind: 'rtt-degraded' }], 'a live one would');
+});
+
+test('RTT_HOLD_MARGIN_MS: the hold spans the sweep\'s next read with half an hour to spare (v0.79.1)', () => {
+  assert.equal(RTT_HOLD_MARGIN_MS, 30 * MIN);
+  const r = holdRun(slowPair(), T, T + 92 * MIN, { confirmable: true, sweepMs: 60 * MIN });
+  assert.equal(r.at(T + 91 * MIN)!.held, true, 'a 60-minute sweep: held through 1 + 60 + 30');
+  assert.equal(r.at(T + 92 * MIN), undefined);
 });
