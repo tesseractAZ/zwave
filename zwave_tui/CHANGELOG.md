@@ -78,8 +78,16 @@ the same millisecond.
 
 ### Tests
 
-- TESTS_PLACEHOLDER
-- HARNESS_PLACEHOLDER
+- 26 new tests: the hold in the detector (13), the hold through the real
+  engine pass (one slowdown is one episode: held for 100 minutes, a slow
+  sweep read continues it, one normal sweep read ends it within the hour),
+  the refresh trial skipping a held breach, probe spacing (10: slots, each
+  gate at the slot, a node gone or Dead, a storm, stop, a transport failure
+  at a later slot, the step, the ladder's attempt and backoff given back, a
+  re-owed dead-lane read, the burst gap between slots, production's default
+  timer), and a contract pin that production keeps the default spacing.
+- 48 new mutation-harness entries, three of them declared equivalent; 43
+  existing entries re-anchored to the rewritten lines.
 
 ## 0.79.0
 
