@@ -552,6 +552,7 @@ export interface ZwaveData {
   recordProbeResult(nodeId: number, answered: boolean, cls: ProbeClassLite, frame?: ProbeFrameLite): void;
   /** A sweep or verification probe is about to be sent (v0.71.0). */
   noteMeasurementProbe(nodeId: number, at: number, lane: 'sweep' | 'verify', frame: ProbeFrameLite): void;
+  noteMeasurementPlanned(nodeId: number, at: number): void;
   /** That probe never left (v0.71.0): withdraw its stamp. */
   clearMeasurementProbe(nodeId: number, at: number): void;
   /** Drain the Alive→Dead transitions the feed has since seen clear, with the
@@ -3609,6 +3610,17 @@ class ZwaveDataImpl implements ZwaveData {
     const s = this.statsByNode.get(nodeId);
     this.measurementSent.set(nodeId, { at, lane, frame, tx0: s == null ? null : s.commandsTX + s.commandsDroppedTX });
     this.lastProbeAt.set(nodeId, at);
+  }
+
+  /** A sweep or verification probe is waiting for its slot at `at` (v0.79.2).
+   *  Only the settle guard hears of it now: attribution (`measurementSent`, its
+   *  TX snapshot) waits for the frame to leave (noteMeasurementProbe), but an
+   *  episode must not be scored before this probe has left and settled. Before
+   *  v0.79.2 the guard saw a probe only once it had left, and two episodes
+   *  closed on four of their five closing readings, the fifth still waiting. */
+  noteMeasurementPlanned(nodeId: number, at: number): void {
+    const prev = this.lastProbeAt.get(nodeId);
+    if (prev == null || at > prev) this.lastProbeAt.set(nodeId, at);
   }
 
   /** When the latest probe to a node can have reached the evidence (v0.75.3):

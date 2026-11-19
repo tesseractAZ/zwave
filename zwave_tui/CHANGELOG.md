@@ -1,10 +1,67 @@
 # Changelog
 
+## 0.79.2
+
+A held `rtt-degraded` breach now ends on two normal round trips, as a breach
+starts on two slow ones; an episode is not scored before its last closing
+probe leaves; and a FLiRS node read Dead after a driver restart waits for its
+next report before it is a critical outage.
+
+### Fixed — an episode was scored before its last closing probe left (0.79.1)
+
+- Since 0.79.1 one tick's probes leave up to 30 s apart, and the guard that
+  keeps an episode open until its last probe has settled (0.75.3) saw a probe
+  only once it had left. On the reference mesh 2 of 5 episodes in 21 hours
+  closed on four of their five closing readings, the fifth still waiting for
+  its slot.
+- A probe's slot now reaches the guard when the probe is pended. Attribution
+  still waits for the frame to leave.
+
+### Changed — a hold ends on two normal round trips
+
+- In 0.79.1 one round trip under the line ended a held breach. On the
+  reference mesh a 178 ms read on a node still at 493 ms ended one, the
+  closing burst found the node still slow, and a new episode opened minutes
+  later: two slowdowns became five episodes and cost 23 and 31 probes.
+- One normal round trip now owes one confirmation probe and keeps the hold's
+  reading meanwhile. A slow answer keeps the hold; a second normal one ends
+  it. While the confirmation is owed the breach is not held, so one that never
+  comes lets it go at the window's end, as before.
+- A slow round trip read across a route change no longer refreshes a hold on
+  its own; it owes a confirmation too. A 1194 ms read taken as a node
+  re-routed to 100 kbps had carried a hold for two more hours.
+- An average falling to the line still ends a breach at once; in those 21
+  hours that split one slowdown.
+
+### Changed — a FLiRS node read Dead after a restart is not an outage at once
+
+- A node no probe can reach (FLiRS or sleeping) must read Dead for
+  `NODE_DOWN_UNREACHABLE_DWELL_MS` (90 min) before `node-down`. On the
+  reference mesh one FLiRS motion sensor read Dead after each of four driver
+  restarts in eight days and came back 13, 38, 46 and 48 minutes later, and
+  another once for 9 minutes. Each time `node-down` raised a critical card and
+  `binary_sensor.zwave_tui_degraded`. A listening node, or one whose
+  capability is unknown, keeps the 5-minute dwell.
+
+### Corrected
+
+- 0.79.1's "one episode per slowdown" and "10 probes plus confirmations" held
+  only for a slowdown with no reading that ends the hold. Live, 0.79.1 still
+  cut burst probes per breach-hour from 22.3 to 4.6, and probes the ceiling
+  caused from about 109 to 66 a day.
+- A held symptom's round-trip age is on the TUI's card; Home Assistant's
+  symptom sensor carries the count and kinds only.
+
+### Tests
+
+- TESTS_PLACEHOLDER
+- HARNESS_PLACEHOLDER
+
 ## 0.79.1
 
-One slowdown on a node only the sweep talks to is one `rtt-degraded`
-episode, not one every 27 minutes, and one tick's probes no longer go out in
-the same millisecond.
+One slowdown on a node only the sweep talks to is held as one `rtt-degraded`
+episode, not one every 27 minutes, until a reading ends the hold (see 0.79.2),
+and one tick's probes no longer go out in the same millisecond.
 
 ### Fixed — one slowdown re-opened an episode about every 27 minutes
 
@@ -33,11 +90,12 @@ the same millisecond.
   reach, or on a Dead node, and a breach still arming clears on silence as
   before. A read that comes after the deadline finds the breach let go, and
   the pair rule starts it again.
-- While held, the symptom stays shown, with its round trip's age
-  (`RTT 378ms · 40m ago`) and a sentence saying it is held. It keeps its
-  episode open and can open none, and the refresh trial does not decide on
-  it. A slowdown the sweep reads within the hold spends its opening and
-  closing bursts, 10 probes, plus any confirmations.
+- While held, the symptom stays shown: on the TUI's card with its round
+  trip's age (`RTT 378ms · 40m ago`) and a sentence saying it is held, and in
+  Home Assistant's symptom count. It keeps its episode open and can open none,
+  and the refresh trial does not decide on it. A slowdown the sweep reads
+  within the hold, with no reading that ends it, spends its opening and
+  closing bursts, 10 probes, plus any confirmations (corrected in 0.79.2).
 
 ### Fixed — a probe sent right behind another node's read measured that node
 
@@ -463,74 +521,6 @@ dash.
 
 - The README's verification figures are corrected: 1,632 tests, and 1,487
   mutants in the harness, 13 of them labelled equivalent.
-
-## 0.77.0
-
-The LAN terminal is SSH: telnet is removed.
-
-### Changed — SSH replaces telnet on port 2324
-
-- The full-screen TUI is served over SSH on the same port, 2324, so nothing
-  changes on the LAN side: `ssh -p 2324 <user>@<host>`. Telnet sent the login
-  and everything on screen in clear text.
-- Logins are password only, using the login gate's existing users
-  (`auth_enabled`, `users`) and its per-address backoff after
-  `auth_max_attempts`. With the gate off, or no user configured, every login is
-  refused, and the add-on log says why. Usernames and passwords are never
-  logged.
-- The host key (ed25519) is generated on first start in `/data` and kept; its
-  fingerprint is on the startup log line, to compare with what `ssh` shows on
-  the first connection.
-- Each connection gets one terminal. The window size comes from the SSH client
-  and follows resizes; exec and subsystems (sftp) are refused. The connection
-  caps (16, 4 per address), keep-alive and the 30-minute idle reclaim carry
-  over.
-- The option `telnet_enabled` is now `ssh_enabled` (on by default).
-- The sidebar console is unchanged.
-
-## 0.76.1
-
-Follow-ups from a 6.35 h trial of the Z-Wave JS driver at `verbose`: the driver
-log lane is visible to automations, the long-term evidence says when S2 was
-blind, and the engine sensor no longer reads 0 of 0 at boot.
-
-### Added — the driver log lane on the engine sensor
-
-- `sensor.zwave_tui_engine` gains `driver_log_level`, `s2_lane` (`live`,
-  `pending`, `storm-paused`, `silent`, `refused`, `level`, `down`, `disabled`)
-  and `silence_watchdog` (`armed`, `disarmed`). `/api/health` carries them
-  too. Until now the lane's state was shown only on the login-gated ENGINE
-  screen.
-- The silence watchdog writes one add-on log line when it arms or disarms. It
-  arms only while `verbose` lines arrive, and arming wrote nothing, so whether
-  it had armed could not be shown.
-
-### Added — long-term evidence counts the S2 samples it could see
-
-- Each 30-min evidence bucket now counts its known S2 samples (`s2N`) beside
-  the resync sum, so 0 resyncs over 0 known samples reads blind rather than
-  clean once the 40-min fine ring has rolled over. A bucket saved before
-  0.76.1 reads unknown.
-
-### Fixed — the engine sensor at boot
-
-- Nothing is published to Home Assistant before the first roster load. With
-  no node loaded every count was 0, and the engine sensor read "0 unmeasured
-  of 0" for about 30 s at each start.
-
-### Documented — what `verbose` costs here
-
-- The cost is the host journal, not the archive. The Z-Wave JS app writes
-  every driver entry to the journal, which is capped at 500 MB. The trial
-  measured about 5,600 more journal data objects an hour at `verbose`, which
-  would leave permanent `verbose` about 4 h above a 36 h journal floor on a
-  typical day. `info` stays the permanent level; `verbose` is set at runtime
-  for bounded investigations.
-- The archive at `verbose` is about 3.3 MB a day raw and 181–195 KB gzipped.
-- The storm guard counts driver entries, not printed lines: the nightly NVM
-  backup was 1,335 entries (5,271 lines) in its busiest 60 s, 44.5 % of the
-  limit. Restart, re-interview, heal, inclusion and reconnect bursts are
-  still unmeasured at `verbose`.
 
 ## Older releases
 

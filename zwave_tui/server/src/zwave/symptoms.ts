@@ -137,6 +137,11 @@ export interface DwellEntry {
    *  breach can be held and shown through the silence between sweeps, which
    *  outlasts the fine ring. */
   rtt?: { avg: number; judged: number; residue: number; t: number; raw: number[] };
+  /** rtt-degraded (v0.79.2): the time of a round trip that would end the hold
+   *  and is waiting for its confirmation probe — a normal one with no normal
+   *  one behind it, or a slow one read across a route change. While it waits,
+   *  silence does not hold the breach. */
+  rttDoubt?: number;
 }
 export type SymptomState = Map<string, DwellEntry>;
 
@@ -283,6 +288,19 @@ export const RTT_CEILING_MS = 300;
  * no probe can reach, nothing is held.
  */
 export const RTT_HOLD_MARGIN_MS = 30 * 60_000;
+
+/**
+ * How long a node no probe can reach must read Dead before node-down (v0.79.2).
+ *
+ * A FLiRS or sleeping node answers on its own schedule. The driver marks it
+ * Dead when its own attempt to reach it fails — on the reference mesh, at the
+ * driver's start — and it clears at the node's next report: one FLiRS motion
+ * sensor read Dead after each of four driver restarts in eight days and came
+ * back 13, 38, 46 and 48 minutes later, another once for 9 minutes, and each
+ * time node-down raised a critical card and the degraded alarm. The dead-node
+ * ladder never probes such a node, so nothing is lost by waiting.
+ */
+export const NODE_DOWN_UNREACHABLE_DWELL_MS = 90 * 60_000;
 
 /**
  * The line an RTT reading is judged against (v0.79.0), and where it came from.
@@ -442,7 +460,7 @@ function key(nodeId: number | null, kind: SymptomKind): string {
 
 /** Update dwell for a (node,kind) breach; return the dwell-start once it has
  *  persisted ≥ DWELL_MS, else null (still arming). Clears when not breaching. */
-function dwell(state: SymptomState, k: string, breaching: boolean, now: number): number | null {
+function dwell(state: SymptomState, k: string, breaching: boolean, now: number, dwellMs = DWELL_MS): number | null {
   if (!breaching) {
     state.delete(k);
     return null;
@@ -454,8 +472,16 @@ function dwell(state: SymptomState, k: string, breaching: boolean, now: number):
   }
   e.lastSeen = now;
   e.hits += 1;
-  return now - e.since >= DWELL_MS ? e.since : null;
+  return now - e.since >= dwellMs ? e.since : null;
 }
+
+/** Whether a round trip was read across a route change (v0.79.2): the sample
+ *  that carried it, or the next one (the trailing statistics emit carries the
+ *  route), reported one. */
+function routeChangedOn(samples: EvidenceSample[], t: number): boolean {
+  return samples.some((s) => s.t >= t && s.t - t <= ROUTE_READ_SPAN_MS && (s.dRouteChanges ?? 0) > 0);
+}
+const ROUTE_READ_SPAN_MS = 15_000;
 
 /** The newest sample within the window that is FRESH and has a usable value —
  *  so a dwell gated on a per-tick freshness flag isn't reset every non-fresh
@@ -704,7 +730,12 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // NOT markDegrading: a dead node contributes no RF readings, and feeding
       // it to the mesh-correlation gate would let a single dead device look
       // like environmental degradation.
-      const since = dwell(state, key(id, 'node-down'), b, now);
+      // A node no probe can reach (FLiRS or sleeping, v0.79.2) dwells for
+      // NODE_DOWN_UNREACHABLE_DWELL_MS: the driver marks it Dead when its own
+      // attempt fails, after a restart above all, and it clears at the node's
+      // next report. The dead-node ladder never probes it, so the short dwell
+      // that opens an episode before that probe buys nothing here.
+      const since = dwell(state, key(id, 'node-down'), b, now, node.isListening === false ? NODE_DOWN_UNREACHABLE_DWELL_MS : DWELL_MS);
       if (since != null) {
         breaching = true;
         const downFor = Math.max(0, Math.round((now - since) / 60_000));
@@ -938,8 +969,9 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // reading, so the next silence clears the breach as before v0.79.1 and its
       // closing burst measures the node. An armed breach keeps nothing.
       const kept = state.get(rk)?.rtt;
+      const doubt = state.get(rk)?.rttDoubt;
       const holdMs = confirmable && input.sweepMs ? input.sweepMs + RTT_HOLD_MARGIN_MS : 0;
-      const held = obs == null && kept != null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;
+      const held = obs == null && kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;
       const line = b ? yard!.line : Infinity;
       const frames = b ? rawRttFrames(samples).filter((f) => now - f.t <= WINDOW_MS) : [];
       const r1 = frames[frames.length - 1];
@@ -956,8 +988,19 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
         // kept for a hold only while that round trip is slow (above).
         const live = held ? null : { avg: obs!.rtt, judged: obs!.rtt - residue, residue, t: r1?.t ?? obs!.t, raw: frames.slice(-2).reverse().map((f) => f.raw) };
         if (live != null) {
-          if (slow) e.rtt = live;
-          else if (r1 != null) delete e.rtt;
+          // CONFIRMED BOTH WAYS (v0.79.2). A breach starts on two slow round
+          // trips, and the hold now ends on two normal ones. One normal round
+          // trip, or one slow one read across a route change, owes one
+          // confirmation probe and keeps the kept reading meanwhile; while it
+          // waits the breach is not held, so a confirmation that never comes
+          // lets it go at the window's end as before. On the reference mesh a
+          // lone 178 ms read on a node still at 493 ms, and a 1194 ms read taken
+          // as a node re-routed, each split or stretched one slowdown.
+          const rerouted = r1 != null && routeChangedOn(samples, r1.t);
+          if (slow && !rerouted) { e.rtt = live; delete e.rttDoubt; }
+          else if (r1 != null && !slow && r2 != null && r2.raw <= line) { delete e.rtt; delete e.rttDoubt; }
+          else if (r1 != null && e.rtt != null && confirmable) { e.rttDoubt = r1.t; input.rttSuspect?.(id, r1); }
+          else if (r1 != null && !slow) delete e.rtt;
         }
         const shown = held ? e.rtt! : live!;
         const ageMin = Math.round((now - shown.t) / 60_000);

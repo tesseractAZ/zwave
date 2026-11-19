@@ -1,7 +1,7 @@
 import type { SleeperWatch } from '../src/zwave/missedReport';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, rttFoldResidue, rttYardstick, RTT_SEED_MAX_MS, RTT_CEILING_MS, RTT_HOLD_MARGIN_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
+import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, rttFoldResidue, rttYardstick, RTT_SEED_MAX_MS, RTT_CEILING_MS, RTT_HOLD_MARGIN_MS, NODE_DOWN_UNREACHABLE_DWELL_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
 import { planEpisodeLifecycle } from '../src/zwave/outcomes';
 import { diffSymptomLog } from '../src/zwave/zwaveData';
 import type { RateNormal, ContNormal, BaselineStore } from '../src/zwave/baselines';
@@ -1710,4 +1710,72 @@ test('rtt-degraded: a held breach keeps the restart allowance it was judged with
   assert.ok(live && allowance(live), `fixture guard: an allowance while live: ${JSON.stringify(live?.evidence)}`);
   assert.equal(held?.held, true);
   assert.equal(allowance(held), allowance(live), 'the same allowance while held');
+});
+
+/* ── v0.79.2: the hold ends on two normal round trips; route-change reads; node-down on unreachable nodes ── */
+
+/** holdRun, also collecting what the detector asks a confirmation for. */
+function holdRunAsked(ring: (now: number) => EvidenceSample[], from: number, to: number) {
+  const state: SymptomState = new Map();
+  const seen = new Map<number, Symptom | undefined>();
+  const asked: { at: number; raw: number }[] = [];
+  for (let now = from; now <= to; now += MIN) {
+    const suspects: { id: number; raw: number }[] = [];
+    const out = detectSymptoms(input({ nodes: [node(1), node(6)], recent: new Map([[6, ring(now).filter((x) => x.t <= now)]]), now, confirmable: true, sweepMs: SWEEP, baselines: unlearned(), suspects }), state);
+    for (const x of suspects) asked.push({ at: now, raw: x.raw });
+    seen.set(now, out.find((x) => x.kind === 'rtt-degraded'));
+  }
+  return { at: (t: number) => seen.get(t), asked, state };
+}
+/** A slow node (average ~640) held on 700/690, read again by the sweep at T+120. */
+const veryslow = (more: { t: number; raw: number }[]) => (now: number) =>
+  trips(600, [{ t: T, raw: 700 }, { t: T + MIN, raw: 690 }, ...more]).filter((x) => x.t <= now);
+
+test('rtt-degraded: ONE normal round trip in a held breach owes a confirmation instead of ending the hold; a slow answer keeps it held (v0.79.2)', () => {
+  const r = holdRunAsked(veryslow([{ t: T + 120 * MIN, raw: 25 }, { t: T + 121 * MIN, raw: 650 }]), T, T + 135 * MIN);
+  assert.equal(r.at(T + 119 * MIN)!.held, true, 'fixture guard: held before the sweep');
+  assert.ok(r.asked.some((x) => x.at === T + 120 * MIN && Math.round(x.raw) === 25), `a confirmation is asked about the lone normal round trip: ${JSON.stringify(r.asked)}`);
+  assert.ok(r.at(T + 120 * MIN) && r.at(T + 120 * MIN)!.held === undefined, 'live meanwhile, on the average');
+  assert.equal(r.at(T + 132 * MIN)!.held, true, 'the confirmation read slow: held again, the same breach');
+  assert.equal(r.at(T + 132 * MIN)!.sinceMs, T + MIN);
+});
+
+test('rtt-degraded: a lone normal round trip whose confirmation never comes lets the breach go at the window\'s end, not held (v0.79.2)', () => {
+  const r = holdRunAsked(veryslow([{ t: T + 120 * MIN, raw: 25 }]), T, T + 132 * MIN);
+  assert.ok(r.at(T + 130 * MIN), 'live while that round trip is in the window');
+  assert.equal(r.at(T + 131 * MIN), undefined, 'then let go: an unconfirmed doubt is not held');
+});
+
+test('rtt-degraded: TWO normal round trips end the hold, as two slow ones start a breach (v0.79.2)', () => {
+  const r = holdRunAsked(veryslow([{ t: T + 120 * MIN, raw: 25 }, { t: T + 121 * MIN, raw: 30 }]), T, T + 132 * MIN);
+  assert.ok(r.at(T + 121 * MIN), 'fixture guard: still live on the average');
+  assert.equal(r.at(T + 132 * MIN), undefined, 'released, and let go at the window\'s end');
+  assert.ok(!r.asked.some((x) => x.at === T + 121 * MIN), 'nothing more asked once two normal ones stand');
+});
+
+test('rtt-degraded: a slow round trip read across a route change does not refresh the hold; it owes a confirmation (v0.79.2)', () => {
+  // The sweep at T+120 reads 1194 ms as the node re-routes; nothing answers after it.
+  const ring = (now: number) => veryslow([{ t: T + 120 * MIN, raw: 1194 }])(now).map((x) => (x.t === T + 120 * MIN ? { ...x, dRouteChanges: 1 } : x));
+  const r = holdRunAsked(ring, T, T + 132 * MIN);
+  assert.ok(r.asked.some((x) => x.at === T + 120 * MIN && Math.abs(x.raw - 1194) < 1), 'a confirmation is asked about the re-route read');
+  assert.equal(r.at(T + 131 * MIN), undefined, 'not held on it: let go at the window\'s end');
+  // Without the route change the same read refreshes the hold.
+  const plain = holdRunAsked(veryslow([{ t: T + 120 * MIN, raw: 1194 }]), T, T + 132 * MIN);
+  assert.equal(plain.at(T + 131 * MIN)!.held, true, 'positive control: an ordinary slow read carries the hold');
+});
+
+test('node-down: a node no probe can reach must read Dead for NODE_DOWN_UNREACHABLE_DWELL_MS; a listening node still for DWELL_MS (v0.79.2)', () => {
+  assert.equal(NODE_DOWN_UNREACHABLE_DWELL_MS, 90 * MIN);
+  const run = (n: NodeSnapshot, minutes: number) => {
+    const state: SymptomState = new Map();
+    let first: number | null = null;
+    for (let m = 0; m <= minutes; m++) {
+      const out = detectSymptoms(input({ nodes: [node(1), n], recent: new Map([[n.nodeId, []]]), now: T + m * MIN }), state);
+      if (first == null && out.some((x) => x.kind === 'node-down')) first = m;
+    }
+    return first;
+  };
+  assert.equal(run(node(60, { status: NodeStatus.Dead, isListening: false, isFrequentListening: true } as never), 95), 90, 'a FLiRS node: at 90 min');
+  assert.equal(run(node(7, { status: NodeStatus.Dead, isListening: true }), 10), 5, 'a listening node: at 5 min, as before');
+  assert.equal(run(node(8, { status: NodeStatus.Dead, isListening: null } as never), 10), 5, 'an unknown capability keeps the short dwell');
 });
