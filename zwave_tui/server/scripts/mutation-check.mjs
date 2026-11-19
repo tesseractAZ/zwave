@@ -7722,13 +7722,15 @@ const MUTANTS = [
     repl: "const back = 'was Alive again before the next tick';",
     what: "the line does not claim the node is Alive when it is Dead again" },
   { id: 'measurement-stamp-leaves-with-the-node', file: 'src/zwave/zwaveData.ts', tests: ["zwaveDataChurn"],
-    find: "          this.measurementSent.delete(id);\n          this.lastProbeAt.delete(id);\n          this.ourTxReport.delete(id);\n          this.measurementReroutes.delete(id);",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "          this.measurementSent.delete(id);\n          this.lastProbeAt.delete(id);\n          this.plannedProbeAt.delete(id);\n          this.ourTxReport.delete(id);\n          this.measurementReroutes.delete(id);",
     repl: "",
     what: "a departed node's measurement state goes with it",
     equivalent: true,
     why: "a node is evicted only after five minutes absent from the roster; by then its stamp is past the 90 s grace (a stale stamp attributes nothing when consumed), its TX-report window past its 2 s deadline, and its reroute mark consumed by an engine pass, its probe settle time (v0.75.3) past its 30 s \u2014 a re-included device on the same id cannot inherit any of them" },
   { id: 'measurement-state-cleared-on-home-change', file: 'src/zwave/zwaveData.ts', tests: ["zwaveDataChurn"],
-    find: "        this.measurementSent.clear();\n        this.lastProbeAt.clear();\n        this.ourTxReport.clear();\n        this.measurementReroutes.clear();\n        this.deadEvents = [];",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "        this.measurementSent.clear();\n        this.lastProbeAt.clear();\n        this.plannedProbeAt.clear();\n        this.ourTxReport.clear();\n        this.measurementReroutes.clear();\n        this.deadEvents = [];",
     repl: "",
     what: "a home-id change drops measurement stamps, held TX reports, reroute marks and queued deaths",
     equivalent: true,
@@ -7949,20 +7951,23 @@ const MUTANTS = [
   { id: "rtt-hold-needs-silence", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
     // Re-anchored in v0.79.1 (probes spaced into slots; the rtt hold).
     // Re-anchored in v0.79.2 (planned stamps; the hold confirmed both ways).
-    find: "      const held = obs == null && kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
-    repl: "      const held = kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
+    repl: "      const held = kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
     what: "a fresh reading decides a held breach instead of the hold" },
   { id: "rtt-hold-deadline-inclusive", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
     // Re-anchored in v0.79.1 (probes spaced into slots; the rtt hold).
     // Re-anchored in v0.79.2 (planned stamps; the hold confirmed both ways).
-    find: "      const held = obs == null && kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
-    repl: "      const held = obs == null && kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t < holdMs && kept.judged > yard.line;",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
+    repl: "      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t < holdMs && kept.judged > yard.line;",
     what: "the hold lasts through cadence + margin, inclusive" },
   { id: "rtt-hold-judged-against-now", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
     // Re-anchored in v0.79.1 (probes spaced into slots; the rtt hold).
     // Re-anchored in v0.79.2 (planned stamps; the hold confirmed both ways).
-    find: "      const held = obs == null && kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
-    repl: "      const held = obs == null && kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > -Infinity;",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
+    repl: "      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > -Infinity;",
     what: "a held reading no longer over the yardstick of now lets go" },
   { id: "rtt-hold-spans-cadence-plus-margin", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
     find: "      const holdMs = confirmable && input.sweepMs ? input.sweepMs + RTT_HOLD_MARGIN_MS : 0;",
@@ -8088,18 +8093,21 @@ const MUTANTS = [
   // ── v0.79.1 review: the hold rides slow round trips; slots re-check the decision's gates ──
   { id: "rtt-hold-rides-slow-round-trips", file: "src/zwave/symptoms.ts", tests: ["symptoms", "zwaveDataChurn"],
     // Re-anchored in v0.79.2 (planned stamps; the hold confirmed both ways).
-    find: "          if (slow && !rerouted) { e.rtt = live; delete e.rttDoubt; }\n          else if (r1 != null && !slow && r2 != null && r2.raw <= line) { delete e.rtt; delete e.rttDoubt; }\n          else if (r1 != null && e.rtt != null && confirmable) { e.rttDoubt = r1.t; input.rttSuspect?.(id, r1); }\n          else if (r1 != null && !slow) delete e.rtt;",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "          if (slow && !rerouted) { if (now - r1!.t >= ROUTE_READ_SPAN_MS) { e.rtt = live; delete e.rttDoubt; } }\n          else if (r1 != null && !slow && r2 != null && (r2.raw <= line || reroutedBefore)) { delete e.rtt; delete e.rttDoubt; }\n          else if (r1 != null && holdable) { e.rttDoubt = { t: r1.t, kind: slow ? 'reroute' : 'normal' }; input.rttSuspect?.(id, r1); }\n          else if (r1 != null && !slow) { delete e.rtt; delete e.rttDoubt; }",
     repl: "          e.rtt = live;",
     what: "a recovered node is not held on its lagging average: only a slow round trip carries the hold" },
   { id: "rtt-hold-normal-round-trip-drops-it", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
     // Re-anchored in v0.79.2 (planned stamps; the hold confirmed both ways).
-    find: "          else if (r1 != null && !slow && r2 != null && r2.raw <= line) { delete e.rtt; delete e.rttDoubt; }",
-    repl: "          else if (r1 != null && !slow && r2 != null && r2.raw <= line) { void 0; }",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "          else if (r1 != null && !slow && r2 != null && (r2.raw <= line || reroutedBefore)) { delete e.rtt; delete e.rttDoubt; }",
+    repl: "          else if (r1 != null && !slow && r2 != null && (r2.raw <= line || reroutedBefore)) { void 0; }",
     what: "two normal round trips release the hold, as two slow ones start a breach" },
   { id: "rtt-hold-report-keeps-the-reading", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
     // Re-anchored in v0.79.2 (planned stamps; the hold confirmed both ways).
-    find: "          else if (r1 != null && !slow) delete e.rtt;",
-    repl: "          else if (!slow) delete e.rtt;",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "          else if (r1 != null && !slow) { delete e.rtt; delete e.rttDoubt; }",
+    repl: "          else if (!slow) { delete e.rtt; delete e.rttDoubt; }",
     what: "a tick with no round trip in the window (a receive-only report) keeps the kept reading" },
   { id: "rtt-hold-timed-from-the-round-trip", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
     find: "t: r1?.t ?? obs!.t,",
@@ -8107,8 +8115,9 @@ const MUTANTS = [
     what: "a held breach is aged from its round trip, not from a receive-only report" },
   { id: "rtt-hold-not-on-a-dead-node", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
     // Re-anchored in v0.79.2 (planned stamps; the hold confirmed both ways).
-    find: "      const held = obs == null && kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
-    repl: "      const held = obs == null && kept != null && doubt == null && yard != null && now - kept.t <= holdMs && kept.judged > yard.line;",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
+    repl: "      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && now - kept.t <= holdMs && kept.judged > yard.line;",
     what: "a Dead node is not held: node-down owns it" },
   { id: "probe-verify-noted-when-it-leaves", file: "src/zwave/autoPing.ts", tests: ["autoPing"],
     // Re-anchored in v0.79.2 (planned stamps; the hold confirmed both ways).
@@ -8171,7 +8180,8 @@ const MUTANTS = [
     what: "the refresh trial decides on live evidence only, never on a held breach" },
   // ── v0.79.2: settle guard sees planned probes; the hold ends on two normal round trips; route-change reads; node-down dwell for unreachable nodes ──
   { id: "settle-sees-a-planned-probe", file: "src/zwave/zwaveData.ts", tests: ["zwaveDataChurn"],
-    find: "    if (prev == null || at > prev) this.lastProbeAt.set(nodeId, at);",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "    if (prev == null || at > prev) this.plannedProbeAt.set(nodeId, at);",
     repl: "    void prev;",
     what: "an episode is not scored while a probe of its node waits for its slot" },
   { id: "planned-hook-sweep", file: "src/zwave/autoPing.ts", tests: ["autoPing"],
@@ -8191,29 +8201,86 @@ const MUTANTS = [
     repl: "        else state.lastVerifyAt.set(nodeId, prevVerify);\n        // Planned or sent, its stamp goes (v0.79.2): a slot a gate shut was\n        // planned and never sent.\n        if (!shut) o.onMeasurementWithdrawn?.(nodeId, at);\n        if (frame === 'read' && !shut) readLaunchFailed(nodeId, at);",
     what: "a slot a gate shut withdraws its planned stamp" },
   { id: "rtt-doubt-owes-a-confirmation", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
-    find: "          else if (r1 != null && e.rtt != null && confirmable) { e.rttDoubt = r1.t; input.rttSuspect?.(id, r1); }",
-    repl: "          else if (r1 != null && e.rtt != null && confirmable) { e.rttDoubt = r1.t; }",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "          else if (r1 != null && holdable) { e.rttDoubt = { t: r1.t, kind: slow ? 'reroute' : 'normal' }; input.rttSuspect?.(id, r1); }",
+    repl: "          else if (r1 != null && holdable) { e.rttDoubt = { t: r1.t, kind: slow ? 'reroute' : 'normal' }; }",
     what: "one normal round trip in a held breach owes a confirmation probe" },
   { id: "rtt-doubt-blocks-the-hold", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
-    find: "      const held = obs == null && kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
     repl: "      const held = obs == null && kept != null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
     what: "an unconfirmed doubt is not held: a confirmation that never comes lets the breach go" },
   { id: "rtt-slow-answer-clears-the-doubt", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
-    find: "          if (slow && !rerouted) { e.rtt = live; delete e.rttDoubt; }",
-    repl: "          if (slow && !rerouted) { e.rtt = live; }",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "          if (slow && !rerouted) { if (now - r1!.t >= ROUTE_READ_SPAN_MS) { e.rtt = live; delete e.rttDoubt; } }",
+    repl: "          if (slow && !rerouted) { if (now - r1!.t >= ROUTE_READ_SPAN_MS) { e.rtt = live; } }",
     what: "a slow confirmation clears the doubt and the hold goes on" },
   { id: "rtt-reroute-read-does-not-carry-the-hold", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
-    find: "          const rerouted = r1 != null && routeChangedOn(samples, r1.t);",
-    repl: "          const rerouted = (false as boolean) && r1 != null && routeChangedOn(samples, r1.t);",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "          const rerouted = r1 != null && routeChangedOn(samples, r1.t, input.ownRerouteAt?.(id) ?? null);",
+    repl: "          const rerouted = (false as boolean) && r1 != null && routeChangedOn(samples, r1.t, input.ownRerouteAt?.(id) ?? null);",
     what: "a slow read across a route change does not refresh the hold" },
   { id: "node-down-unreachable-dwells-longer", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
-    find: "node.isListening === false ? NODE_DOWN_UNREACHABLE_DWELL_MS : DWELL_MS",
-    repl: "(false as boolean) ? NODE_DOWN_UNREACHABLE_DWELL_MS : DWELL_MS",
+    // Re-anchored in v0.79.2 review fixes.
+    find: "      const since = dwell(state, nk, b, now, atStart ? NODE_DOWN_START_DWELL_MS : DWELL_MS);",
+    repl: "      const since = dwell(state, nk, b, now, DWELL_MS);",
     what: "a node no probe can reach must read Dead for 90 min before node-down" },
-  { id: "node-down-unknown-capability-short", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
-    find: "node.isListening === false ? NODE_DOWN_UNREACHABLE_DWELL_MS : DWELL_MS",
-    repl: "node.isListening !== true ? NODE_DOWN_UNREACHABLE_DWELL_MS : DWELL_MS",
-    what: "a node whose capability is unknown keeps the 5-minute dwell" },
+  { id: "node-down-start-window-only", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    // Re-anchored in v0.79.2 review fixes.
+    find: "        && startedAt != null && onset >= startedAt && onset - startedAt <= NODE_DOWN_START_WINDOW_MS;",
+    repl: "        && startedAt != null && onset >= startedAt && (true as boolean);",
+    what: "only a death inside the start window gets the long dwell" },
+  // ── v0.79.2 review fixes: own failovers, span bounds, re-route doubts, start-scoped node-down, planned stamps apart ──
+  { id: "rtt-own-reroute-is-a-route-change", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "  if (ownRerouteAt != null && Math.abs(ownRerouteAt - t) <= ROUTE_READ_SPAN_MS) return true;",
+    repl: "  if ((false as boolean)) return true;",
+    what: "our own routed read failing over is a route change" },
+  { id: "rtt-own-reroute-within-the-span", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "  if (ownRerouteAt != null && Math.abs(ownRerouteAt - t) <= ROUTE_READ_SPAN_MS) return true;",
+    repl: "  if (ownRerouteAt != null && (true as boolean)) return true;",
+    what: "a failover minutes away is not this read's" },
+  { id: "rtt-route-change-on-the-next-sample", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "  return samples.some((s) => s.t >= t && s.t - t <= ROUTE_READ_SPAN_MS && (s.dRouteChanges ?? 0) > 0);",
+    repl: "  return samples.some((s) => s.t >= t && s.t - t <= 0 && (s.dRouteChanges ?? 0) > 0);",
+    what: "a route change on the next sample is the same read's" },
+  { id: "rtt-route-change-span-bounded", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "  return samples.some((s) => s.t >= t && s.t - t <= ROUTE_READ_SPAN_MS && (s.dRouteChanges ?? 0) > 0);",
+    repl: "  return samples.some((s) => s.t >= t && (true as boolean) && (s.dRouteChanges ?? 0) > 0);",
+    what: "a route change minutes later is another event" },
+  { id: "rtt-refresh-waits-for-route-evidence", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "          if (slow && !rerouted) { if (now - r1!.t >= ROUTE_READ_SPAN_MS) { e.rtt = live; delete e.rttDoubt; } }",
+    repl: "          if (slow && !rerouted) { if ((true as boolean)) { e.rtt = live; delete e.rttDoubt; } }",
+    what: "a slow round trip refreshes the hold only once its route evidence can have landed" },
+  { id: "rtt-reroute-doubt-keeps-the-older-hold", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
+    repl: "      const held = obs == null && kept != null && doubt == null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;",
+    what: "a re-route doubt does not cut short the hold an older reading carries" },
+  { id: "rtt-normal-answer-ends-a-reroute-doubt", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "          else if (r1 != null && !slow && r2 != null && (r2.raw <= line || reroutedBefore)) { delete e.rtt; delete e.rttDoubt; }",
+    repl: "          else if (r1 != null && !slow && r2 != null && r2.raw <= line) { delete e.rtt; delete e.rttDoubt; }",
+    what: "a normal answer to a re-route doubt is the second normal round trip" },
+  { id: "rtt-doubt-only-where-a-hold-matters", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "          const holdable = e.rtt != null && confirmable && holdMs > 0 && now - e.rtt.t <= holdMs && e.rtt.judged > line;",
+    repl: "          const holdable = e.rtt != null && confirmable && now - e.rtt.t <= holdMs && e.rtt.judged > line;",
+    what: "with the sweep off a lone normal round trip asks nothing",
+    equivalent: true,
+    why: "With the sweep off holdMs is 0, and the next conjunct, now - e.rtt.t <= holdMs, already fails: a kept reading is stored only once it is ROUTE_READ_SPAN_MS old, so it is never at or after now. holdMs > 0 states the intent; the behaviour is pinned by the sweep-off test through the deadline conjunct." },
+  { id: "node-down-latched", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "      const atStart = b && ne?.latched !== true && node.isListening !== true",
+    repl: "      const atStart = b && node.isListening !== true",
+    what: "a node-down already raised is not withdrawn by a change of capability flags" },
+  { id: "node-down-unknown-capability-at-start", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
+    find: "      const atStart = b && ne?.latched !== true && node.isListening !== true",
+    repl: "      const atStart = b && ne?.latched !== true && node.isListening === false",
+    what: "a node whose capability is not yet known at the start gets the long dwell" },
+  { id: "planned-withdraw-clears-only-the-plan", file: "src/zwave/zwaveData.ts", tests: ["zwaveDataChurn"],
+    find: "    if (this.plannedProbeAt.get(nodeId) === at) this.plannedProbeAt.delete(nodeId);\n",
+    repl: "",
+    what: "a withdrawn plan is cleared, so it no longer holds the close" },
+  { id: "settle-waits-for-the-later-stamp", file: "src/zwave/zwaveData.ts", tests: ["zwaveDataChurn"],
+    find: "    const at = sent == null ? planned : planned == null ? sent : Math.max(sent, planned);",
+    repl: "    const at = sent == null ? planned : sent;",
+    what: "the settle guard waits for whichever of the sent and planned stamps is later" },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

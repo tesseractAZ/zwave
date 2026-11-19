@@ -1794,7 +1794,9 @@ test('rtt-degraded: a route change on the NEXT sample counts; one minutes later 
   const rc = (dt: number) => (now: number) => [...veryslow([{ t: T + 120 * MIN, raw: 1194 }])(now),
     ...(T + 120 * MIN + dt <= now ? [ev({ t: T + 120 * MIN + dt, rtt: 645, dTx: 0, dRx: 0, fresh: false, dRouteChanges: 1 })] : [])].sort((a, b) => a.t - b.t);
   assert.equal(holdRunAsked(rc(10_000), T, T + 131 * MIN).at(T + 131 * MIN)!.evidence[0].value.endsWith('· 130m ago'), true, '+10 s: the same read');
-  assert.equal(holdRunAsked(rc(3 * MIN), T, T + 131 * MIN).at(T + 131 * MIN)!.evidence[0].value.endsWith('· 11m ago'), true, '+3 min: another event');
+  const later = holdRunAsked(rc(3 * MIN), T, T + 131 * MIN);
+  assert.equal(later.at(T + 131 * MIN)!.evidence[0].value.endsWith('· 11m ago'), true, '+3 min: another event');
+  assert.ok(!later.asked.some((x) => x.at > T + 120 * MIN), 'and it is not taken for the read\'s, so nothing is asked about it');
 });
 
 test('rtt-degraded: a normal answer to a re-route doubt ends the hold as the second normal round trip (v0.79.2 review)', () => {

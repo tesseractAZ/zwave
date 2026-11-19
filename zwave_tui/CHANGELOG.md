@@ -66,8 +66,16 @@ start waits 90 minutes before it is a critical outage.
 
 ### Tests
 
-- TESTS_PLACEHOLDER
-- HARNESS_PLACEHOLDER
+- 13 new tests: the hold confirmed both ways (a lone normal round trip owes a
+  confirmation, a slow answer keeps the hold, an unanswered doubt lets go, two
+  normal round trips release it, two in one tick at once, nothing asked with
+  the sweep off), re-route reads (a reported route change, our own failover,
+  the span's bounds, a normal answer ending the doubt), node-down's
+  start-scoped dwell and its latch, the settle guard waiting for a planned
+  probe kept apart from the sent one, the planned stamp at each slot, and the
+  confirmation staying owed through the real engine pass.
+- 23 new mutation-harness entries, one declared equivalent; 19 existing
+  entries re-anchored to the rewritten lines.
 
 ## 0.79.1
 
