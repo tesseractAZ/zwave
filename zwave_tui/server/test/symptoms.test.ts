@@ -1779,3 +1779,11 @@ test('node-down: a node no probe can reach must read Dead for NODE_DOWN_UNREACHA
   assert.equal(run(node(7, { status: NodeStatus.Dead, isListening: true }), 10), 5, 'a listening node: at 5 min, as before');
   assert.equal(run(node(8, { status: NodeStatus.Dead, isListening: null } as never), 10), 5, 'an unknown capability keeps the short dwell');
 });
+
+test('rtt-degraded: two normal round trips seen in ONE tick release the hold at once, with no confirmation owed (v0.79.2)', () => {
+  // Both land between the ticks of T+120 and T+121 (the node's own traffic, or a burst).
+  const r = holdRunAsked(veryslow([{ t: T + 120 * MIN + 20_000, raw: 25 }, { t: T + 120 * MIN + 40_000, raw: 30 }]), T, T + 132 * MIN);
+  assert.ok(r.at(T + 121 * MIN) && r.at(T + 121 * MIN)!.held === undefined, 'fixture guard: live on the average');
+  assert.ok(!r.asked.some((x) => x.at >= T + 120 * MIN), 'nothing is asked: two normal ones already stand');
+  assert.equal(r.at(T + 131 * MIN), undefined, 'released: let go at the window\'s end, not held');
+});

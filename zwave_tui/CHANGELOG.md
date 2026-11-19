@@ -54,8 +54,13 @@ next report before it is a critical outage.
 
 ### Tests
 
-- TESTS_PLACEHOLDER
-- HARNESS_PLACEHOLDER
+- 8 new tests: the hold confirmed both ways (a lone normal round trip owes a
+  confirmation, a slow answer keeps the hold, an unanswered doubt lets go, two
+  normal round trips release it, two in one tick release it at once), a
+  re-route read, node-down's dwell by capability, an episode not scored while
+  a probe waits for its slot, and the planned stamp at each slot.
+- 11 new mutation-harness entries; 17 existing entries re-anchored to the
+  rewritten lines.
 
 ## 0.79.1
 
