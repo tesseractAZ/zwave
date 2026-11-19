@@ -3,45 +3,57 @@
 ## 0.79.2
 
 A held `rtt-degraded` breach now ends on two normal round trips, as a breach
-starts on two slow ones; an episode is not scored before its last closing
-probe leaves; and a FLiRS node read Dead after a driver restart waits for its
-next report before it is a critical outage.
+starts on two slow ones; an episode is not scored while a probe of its node is
+still waiting for its slot; and a FLiRS node read Dead right after a driver
+start waits 90 minutes before it is a critical outage.
 
-### Fixed — an episode was scored before its last closing probe left (0.79.1)
+### Fixed — an episode was scored while a probe of its node waited for its slot (0.79.1)
 
-- Since 0.79.1 one tick's probes leave up to 30 s apart, and the guard that
-  keeps an episode open until its last probe has settled (0.75.3) saw a probe
-  only once it had left. On the reference mesh 2 of 5 episodes in 21 hours
-  closed on four of their five closing readings, the fifth still waiting for
-  its slot.
-- A probe's slot now reaches the guard when the probe is pended. Attribution
-  still waits for the frame to leave.
+- Since 0.79.1 one tick's probes leave 10 s apart, the last up to 45 s after
+  the tick, and the guard that keeps an episode open until its last probe has
+  settled (0.75.3) saw a probe only once it had left. On the reference mesh 2
+  of 5 episodes in 21 hours closed on four of their five closing readings, the
+  fifth still waiting for its slot.
+- A probe's slot now reaches the guard when the probe is pended, kept apart
+  from the probe sent before it. A burst probe not yet planned when the window
+  ends (a suppressed tick) is not waited for. Attribution still waits for the
+  frame to leave.
 
 ### Changed — a hold ends on two normal round trips
 
 - In 0.79.1 one round trip under the line ended a held breach. On the
-  reference mesh a 178 ms read on a node still at 493 ms ended one, the
-  closing burst found the node still slow, and a new episode opened minutes
-  later: two slowdowns became five episodes and cost 23 and 31 probes.
-- One normal round trip now owes one confirmation probe and keeps the hold's
-  reading meanwhile. A slow answer keeps the hold; a second normal one ends
-  it. While the confirmation is owed the breach is not held, so one that never
-  comes lets it go at the window's end, as before.
-- A slow round trip read across a route change no longer refreshes a hold on
-  its own; it owes a confirmation too. A 1194 ms read taken as a node
-  re-routed to 100 kbps had carried a hold for two more hours.
+  reference mesh two such reads ended holds on nodes still slow (one measured:
+  178 ms against a closing median of 493), the closing burst found each node
+  still slow, and a new episode opened minutes later: two slowdowns became
+  five episodes and cost 23 and 31 probes.
+- Where a hold can still matter (the sweep on, the kept reading inside its
+  deadline), one normal round trip now owes one confirmation probe. A slow
+  answer keeps the hold; a second normal one ends it. While it is owed the
+  breach is not held, so one that never comes lets it go at the window's end,
+  as before. Each doubt costs at most one probe per round trip asked about.
+- A slow round trip read across a route change (one the driver reports, or
+  our own routed read failing over) no longer refreshes a hold. It owes a
+  confirmation, and the reading before it holds to its own deadline
+  meanwhile. A 1194 ms read taken as a node re-routed to 100 kbps had carried
+  a hold for two more hours; whether the node was still slow, the data cannot
+  tell. A slow round trip refreshes the hold only once 15 s old, so a route
+  change on the next sample is seen first.
 - An average falling to the line still ends a breach at once; in those 21
   hours that split one slowdown.
 
-### Changed — a FLiRS node read Dead after a restart is not an outage at once
+### Changed — a FLiRS node read Dead right after a driver start
 
-- A node no probe can reach (FLiRS or sleeping) must read Dead for
-  `NODE_DOWN_UNREACHABLE_DWELL_MS` (90 min) before `node-down`. On the
-  reference mesh one FLiRS motion sensor read Dead after each of four driver
-  restarts in eight days and came back 13, 38, 46 and 48 minutes later, and
+- A node auto-ping does not probe (FLiRS, sleeping, or capability not yet
+  known) that reads Dead within 10 minutes of the driver's start must read
+  Dead for `NODE_DOWN_START_DWELL_MS` (90 min) before `node-down`. Any other
+  death keeps the 5-minute dwell, and a node-down already raised stays raised.
+- On the reference mesh one FLiRS motion sensor read Dead after each of four
+  driver restarts in eight days and was back 13, 38, 46 and 48 minutes later,
   another once for 9 minutes. Each time `node-down` raised a critical card and
-  `binary_sensor.zwave_tui_degraded`. A listening node, or one whose
-  capability is unknown, keeps the 5-minute dwell.
+  `binary_sensor.zwave_tui_degraded`.
+- The cost: a real outage of such a node right at a driver start is raised
+  after 90 minutes instead of 5. Home Assistant's own zwave_js status shows it
+  Dead meanwhile.
 
 ### Corrected
 
@@ -54,13 +66,8 @@ next report before it is a critical outage.
 
 ### Tests
 
-- 8 new tests: the hold confirmed both ways (a lone normal round trip owes a
-  confirmation, a slow answer keeps the hold, an unanswered doubt lets go, two
-  normal round trips release it, two in one tick release it at once), a
-  re-route read, node-down's dwell by capability, an episode not scored while
-  a probe waits for its slot, and the planned stamp at each slot.
-- 11 new mutation-harness entries; 17 existing entries re-anchored to the
-  rewritten lines.
+- TESTS_PLACEHOLDER
+- HARNESS_PLACEHOLDER
 
 ## 0.79.1
 

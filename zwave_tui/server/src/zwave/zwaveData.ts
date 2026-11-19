@@ -797,6 +797,10 @@ class ZwaveDataImpl implements ZwaveData {
    *  measurementSent, kept after the probe's report is matched, so an episode's
    *  close can wait for that probe's outcome. */
   private readonly lastProbeAt = new Map<number, number>();
+  /** Slot time of the latest PLANNED measurement probe per node (v0.79.2), kept
+   *  apart from lastProbeAt so withdrawing a plan never erases the sent probe
+   *  before it. The settle guard waits for whichever is later. */
+  private readonly plannedProbeAt = new Map<number, number>();
   /** nodeId → our measurement frame's TX report once its counters have arrived
    *  (`txAt`), held open for the trailing statistics emit that carries its route,
    *  until the counters move again or `until` passes (v0.71.0). */
@@ -1492,6 +1496,10 @@ class ZwaveDataImpl implements ZwaveData {
         // against. 0/absent when the sweep is off, which floors the dwell at
         // the old constant.
         sweepMs: this.autoPingSnapshotFn?.()?.config.staleMs || undefined,
+        // v0.79.2: our own routed read's failover is a route change too, and a
+        // FLiRS node read Dead at the driver's start dwells longer.
+        ownRerouteAt: (id) => this.measurementRerouteAt.get(id) ?? null,
+        driverStartedAt: this.driverReconnectedAt(),
         recordingSince: () => ev.recordingSince(),
         sleeperWatch: (n) => this.sleeperWatchFor(n, now),
         duplicateBursts: (id) => this.duplicateBursts(id, now),
@@ -2211,7 +2219,9 @@ class ZwaveDataImpl implements ZwaveData {
    * (RTT_CONFIRM_COOLDOWN_MS); the owed entry carries the round trip's time.
    * An owed confirmation the detector no longer asks for (the node's own
    * traffic answered, the frame aged out, the breach started or ended) is
-   * withdrawn before it is sent.
+   * withdrawn before it is sent. Since v0.79.2 the detector also asks here, in
+   * a matured breach, about one normal round trip or one slow one read across a
+   * route change: the same one probe, the same rules.
    */
   private requestRttConfirms(suspects: Map<number, RttFrame>, now: number): void {
     for (const [id, st] of this.verifyOwed) if (st.confirm && !suspects.has(id)) this.verifyOwed.delete(id);
@@ -2829,6 +2839,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.rttConfirmAt.delete(id);
           this.measurementSent.delete(id);
           this.lastProbeAt.delete(id);
+          this.plannedProbeAt.delete(id);
           this.ourTxReport.delete(id);
           this.measurementReroutes.delete(id);
           this.subStatus.delete(id);
@@ -2953,6 +2964,7 @@ class ZwaveDataImpl implements ZwaveData {
         for (const [id, st] of this.verifyOwed) if (st.confirm) this.verifyOwed.delete(id);
         this.measurementSent.clear();
         this.lastProbeAt.clear();
+        this.plannedProbeAt.clear();
         this.ourTxReport.clear();
         this.measurementReroutes.clear();
         this.deadEvents = [];
@@ -3619,8 +3631,8 @@ class ZwaveDataImpl implements ZwaveData {
    *  v0.79.2 the guard saw a probe only once it had left, and two episodes
    *  closed on four of their five closing readings, the fifth still waiting. */
   noteMeasurementPlanned(nodeId: number, at: number): void {
-    const prev = this.lastProbeAt.get(nodeId);
-    if (prev == null || at > prev) this.lastProbeAt.set(nodeId, at);
+    const prev = this.plannedProbeAt.get(nodeId);
+    if (prev == null || at > prev) this.plannedProbeAt.set(nodeId, at);
   }
 
   /** When the latest probe to a node can have reached the evidence (v0.75.3):
@@ -3628,7 +3640,9 @@ class ZwaveDataImpl implements ZwaveData {
    *  sample carries it. An episode on the node is not scored before then. */
   private probeSettleAt(nodeId: number | null): number | null {
     if (nodeId == null) return null;
-    const at = this.lastProbeAt.get(nodeId);
+    const sent = this.lastProbeAt.get(nodeId);
+    const planned = this.plannedProbeAt.get(nodeId);
+    const at = sent == null ? planned : planned == null ? sent : Math.max(sent, planned);
     return at == null ? null : at + Math.max(PROBE_SETTLE_MS, 2 * this.evidenceSampleMs);
   }
 
@@ -3637,6 +3651,7 @@ class ZwaveDataImpl implements ZwaveData {
   clearMeasurementProbe(nodeId: number, at: number): void {
     if (this.measurementSent.get(nodeId)?.at === at) this.measurementSent.delete(nodeId);
     if (this.lastProbeAt.get(nodeId) === at) this.lastProbeAt.delete(nodeId);
+    if (this.plannedProbeAt.get(nodeId) === at) this.plannedProbeAt.delete(nodeId);
     // …and if another frame's counters already arrived and were taken for ours,
     // that held report goes too: a read that never left owns no TX report.
     if (this.ourTxReport.get(nodeId)?.at === at) this.ourTxReport.delete(nodeId);

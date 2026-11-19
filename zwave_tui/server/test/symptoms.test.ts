@@ -1,7 +1,7 @@
 import type { SleeperWatch } from '../src/zwave/missedReport';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, rttFoldResidue, rttYardstick, RTT_SEED_MAX_MS, RTT_CEILING_MS, RTT_HOLD_MARGIN_MS, NODE_DOWN_UNREACHABLE_DWELL_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
+import { detectSymptoms, heldSymptoms, windowTimeoutRate, rttRestartResidue, rttFoldResidue, rttYardstick, RTT_SEED_MAX_MS, RTT_CEILING_MS, RTT_HOLD_MARGIN_MS, NODE_DOWN_START_DWELL_MS, NODE_DOWN_START_WINDOW_MS, type DetectInput, type Symptom, type SymptomState } from '../src/zwave/symptoms';
 import { planEpisodeLifecycle } from '../src/zwave/outcomes';
 import { diffSymptomLog } from '../src/zwave/zwaveData';
 import type { RateNormal, ContNormal, BaselineStore } from '../src/zwave/baselines';
@@ -76,6 +76,9 @@ interface Fixture {
   overLine?: number[];
   /** The configured sweep cadence (v0.63.0); absent = the sweep is off. */
   sweepMs?: number;
+  /** v0.79.2: our own routed read's failover times, and the driver's start. */
+  ownRerouteAt?: Map<number, number>;
+  driverStartedAt?: number | null;
 }
 function input(f: Fixture): DetectInput {
   return {
@@ -94,6 +97,8 @@ function input(f: Fixture): DetectInput {
     ...(f.suspects ? { rttSuspect: (id: number, fr: { raw: number }) => { f.suspects!.push({ id, raw: fr.raw }); } } : {}),
     ...(f.overLine ? { rttOverLine: (id: number) => { f.overLine!.push(id); } } : {}),
     ...(f.sweepMs != null ? { sweepMs: f.sweepMs } : {}),
+    ...(f.ownRerouteAt ? { ownRerouteAt: (id: number) => f.ownRerouteAt!.get(id) ?? null } : {}),
+    ...(f.driverStartedAt !== undefined ? { driverStartedAt: f.driverStartedAt } : {}),
     recordingSince: () => T - 30 * 86_400_000,
     sleeperWatch: (n) => f.sleeperWatch?.(n) ?? null,
     duplicateBursts: (id) => f.duplicateBursts?.(id) ?? [],
@@ -1715,13 +1720,14 @@ test('rtt-degraded: a held breach keeps the restart allowance it was judged with
 /* ── v0.79.2: the hold ends on two normal round trips; route-change reads; node-down on unreachable nodes ── */
 
 /** holdRun, also collecting what the detector asks a confirmation for. */
-function holdRunAsked(ring: (now: number) => EvidenceSample[], from: number, to: number) {
+function holdRunAsked(ring: (now: number) => EvidenceSample[], from: number, to: number, o: { sweepMs?: number | null; ownRerouteAt?: Map<number, number> } = {}) {
   const state: SymptomState = new Map();
   const seen = new Map<number, Symptom | undefined>();
   const asked: { at: number; raw: number }[] = [];
   for (let now = from; now <= to; now += MIN) {
     const suspects: { id: number; raw: number }[] = [];
-    const out = detectSymptoms(input({ nodes: [node(1), node(6)], recent: new Map([[6, ring(now).filter((x) => x.t <= now)]]), now, confirmable: true, sweepMs: SWEEP, baselines: unlearned(), suspects }), state);
+    const out = detectSymptoms(input({ nodes: [node(1), node(6)], recent: new Map([[6, ring(now).filter((x) => x.t <= now)]]), now, confirmable: true,
+      sweepMs: o.sweepMs === null ? undefined : (o.sweepMs ?? SWEEP), ownRerouteAt: o.ownRerouteAt, baselines: unlearned(), suspects }), state);
     for (const x of suspects) asked.push({ at: now, raw: x.raw });
     seen.set(now, out.find((x) => x.kind === 'rtt-degraded'));
   }
@@ -1753,32 +1759,20 @@ test('rtt-degraded: TWO normal round trips end the hold, as two slow ones start 
   assert.ok(!r.asked.some((x) => x.at === T + 121 * MIN), 'nothing more asked once two normal ones stand');
 });
 
-test('rtt-degraded: a slow round trip read across a route change does not refresh the hold; it owes a confirmation (v0.79.2)', () => {
+test('rtt-degraded: a slow round trip read across a route change does not refresh the hold — it owes a confirmation, and the older reading holds to its own deadline (v0.79.2)', () => {
   // The sweep at T+120 reads 1194 ms as the node re-routes; nothing answers after it.
   const ring = (now: number) => veryslow([{ t: T + 120 * MIN, raw: 1194 }])(now).map((x) => (x.t === T + 120 * MIN ? { ...x, dRouteChanges: 1 } : x));
-  const r = holdRunAsked(ring, T, T + 132 * MIN);
+  const r = holdRunAsked(ring, T, T + 152 * MIN);
   assert.ok(r.asked.some((x) => x.at === T + 120 * MIN && Math.abs(x.raw - 1194) < 1), 'a confirmation is asked about the re-route read');
-  assert.equal(r.at(T + 131 * MIN), undefined, 'not held on it: let go at the window\'s end');
+  const h = r.at(T + 131 * MIN)!;
+  assert.equal(h.held, true, 'still held, on the reading of T+1, not refreshed by the re-route read');
+  assert.equal(h.evidence[0].value.endsWith('· 130m ago'), true, `aged from T+1: ${h.evidence[0].value}`);
+  assert.equal(r.at(T + 152 * MIN), undefined, 'and let go at that reading\'s deadline, not the re-route read\'s');
   // Without the route change the same read refreshes the hold.
   const plain = holdRunAsked(veryslow([{ t: T + 120 * MIN, raw: 1194 }]), T, T + 132 * MIN);
-  assert.equal(plain.at(T + 131 * MIN)!.held, true, 'positive control: an ordinary slow read carries the hold');
+  assert.equal(plain.at(T + 131 * MIN)!.evidence[0].value.endsWith('· 11m ago'), true, 'positive control: an ordinary slow read carries the hold');
 });
 
-test('node-down: a node no probe can reach must read Dead for NODE_DOWN_UNREACHABLE_DWELL_MS; a listening node still for DWELL_MS (v0.79.2)', () => {
-  assert.equal(NODE_DOWN_UNREACHABLE_DWELL_MS, 90 * MIN);
-  const run = (n: NodeSnapshot, minutes: number) => {
-    const state: SymptomState = new Map();
-    let first: number | null = null;
-    for (let m = 0; m <= minutes; m++) {
-      const out = detectSymptoms(input({ nodes: [node(1), n], recent: new Map([[n.nodeId, []]]), now: T + m * MIN }), state);
-      if (first == null && out.some((x) => x.kind === 'node-down')) first = m;
-    }
-    return first;
-  };
-  assert.equal(run(node(60, { status: NodeStatus.Dead, isListening: false, isFrequentListening: true } as never), 95), 90, 'a FLiRS node: at 90 min');
-  assert.equal(run(node(7, { status: NodeStatus.Dead, isListening: true }), 10), 5, 'a listening node: at 5 min, as before');
-  assert.equal(run(node(8, { status: NodeStatus.Dead, isListening: null } as never), 10), 5, 'an unknown capability keeps the short dwell');
-});
 
 test('rtt-degraded: two normal round trips seen in ONE tick release the hold at once, with no confirmation owed (v0.79.2)', () => {
   // Both land between the ticks of T+120 and T+121 (the node's own traffic, or a burst).
@@ -1786,4 +1780,60 @@ test('rtt-degraded: two normal round trips seen in ONE tick release the hold at 
   assert.ok(r.at(T + 121 * MIN) && r.at(T + 121 * MIN)!.held === undefined, 'fixture guard: live on the average');
   assert.ok(!r.asked.some((x) => x.at >= T + 120 * MIN), 'nothing is asked: two normal ones already stand');
   assert.equal(r.at(T + 131 * MIN), undefined, 'released: let go at the window\'s end, not held');
+});
+
+test('rtt-degraded: our OWN routed read failing over is a route change too, though the sample reports none (v0.79.2 review)', () => {
+  const r = holdRunAsked(veryslow([{ t: T + 120 * MIN, raw: 1194 }]), T, T + 131 * MIN, { ownRerouteAt: new Map([[6, T + 120 * MIN + 1_350]]) });
+  assert.ok(r.asked.some((x) => x.at === T + 120 * MIN && Math.abs(x.raw - 1194) < 1), 'asked about it');
+  assert.equal(r.at(T + 131 * MIN)!.evidence[0].value.endsWith('· 130m ago'), true, 'the hold is not refreshed by it');
+  const far = holdRunAsked(veryslow([{ t: T + 120 * MIN, raw: 1194 }]), T, T + 131 * MIN, { ownRerouteAt: new Map([[6, T + 117 * MIN]]) });
+  assert.equal(far.at(T + 131 * MIN)!.evidence[0].value.endsWith('· 11m ago'), true, 'a failover minutes away is not this read\'s');
+});
+
+test('rtt-degraded: a route change on the NEXT sample counts; one minutes later does not (ROUTE_READ_SPAN_MS, v0.79.2 review)', () => {
+  const rc = (dt: number) => (now: number) => [...veryslow([{ t: T + 120 * MIN, raw: 1194 }])(now),
+    ...(T + 120 * MIN + dt <= now ? [ev({ t: T + 120 * MIN + dt, rtt: 645, dTx: 0, dRx: 0, fresh: false, dRouteChanges: 1 })] : [])].sort((a, b) => a.t - b.t);
+  assert.equal(holdRunAsked(rc(10_000), T, T + 131 * MIN).at(T + 131 * MIN)!.evidence[0].value.endsWith('· 130m ago'), true, '+10 s: the same read');
+  assert.equal(holdRunAsked(rc(3 * MIN), T, T + 131 * MIN).at(T + 131 * MIN)!.evidence[0].value.endsWith('· 11m ago'), true, '+3 min: another event');
+});
+
+test('rtt-degraded: a normal answer to a re-route doubt ends the hold as the second normal round trip (v0.79.2 review)', () => {
+  const ring = (now: number) => veryslow([{ t: T + 120 * MIN, raw: 1194 }, { t: T + 121 * MIN, raw: 30 }])(now).map((x) => (x.t === T + 120 * MIN ? { ...x, dRouteChanges: 1 } : x));
+  const r = holdRunAsked(ring, T, T + 132 * MIN);
+  assert.ok(!r.asked.some((x) => x.at === T + 121 * MIN), 'no second confirmation is asked');
+  assert.equal(r.at(T + 132 * MIN), undefined, 'released, and let go at the window\'s end');
+});
+
+test('rtt-degraded: with the sweep off nothing can be held, so a lone normal round trip asks nothing and ends the hold\'s reading, as in v0.79.1 (v0.79.2 review)', () => {
+  const r = holdRunAsked(veryslow([{ t: T + 10 * MIN, raw: 25 }]), T, T + 21 * MIN, { sweepMs: null });
+  assert.ok(!r.asked.some((x) => x.at >= T + 10 * MIN), 'no confirmation where no hold can matter');
+  assert.equal(r.at(T + 21 * MIN), undefined);
+});
+
+test('node-down: a death at the driver\'s start on a node auto-ping does not probe dwells NODE_DOWN_START_DWELL_MS; any other death DWELL_MS; once raised it stays raised (v0.79.2)', () => {
+  assert.equal(NODE_DOWN_START_DWELL_MS, 90 * MIN);
+  assert.equal(NODE_DOWN_START_WINDOW_MS, 10 * MIN);
+  const run = (n: () => NodeSnapshot, startedAt: number | null, minutes: number) => {
+    const state: SymptomState = new Map();
+    let first: number | null = null; let last = false;
+    for (let m = 0; m <= minutes; m++) {
+      const nn = n();
+      const out = detectSymptoms(input({ nodes: [node(1), nn], recent: new Map([[nn.nodeId, []]]), now: T + m * MIN, driverStartedAt: startedAt }), state);
+      last = out.some((x) => x.kind === 'node-down');
+      if (first == null && last) first = m;
+    }
+    return { first, last };
+  };
+  const flirs = () => node(60, { status: NodeStatus.Dead, isListening: false, isFrequentListening: true } as never);
+  assert.equal(run(flirs, T - 2 * MIN, 95).first, 90, 'a FLiRS node Dead 2 min after the driver started: at 90 min');
+  assert.equal(run(flirs, T - 20 * MIN, 10).first, 5, 'the same node Dead 20 min after the start: at 5 min');
+  assert.equal(run(flirs, null, 10).first, 5, 'no known start: at 5 min');
+  assert.equal(run(() => node(7, { status: NodeStatus.Dead, isListening: true }), T - MIN, 10).first, 5, 'a listening node at the start: at 5 min');
+  assert.equal(run(() => node(8, { status: NodeStatus.Dead, isListening: null } as never), T - MIN, 95).first, 90, 'a node whose capability is not yet known at the start: at 90 min');
+  // Latched: raised at 5 min outside the window, it is not withdrawn if the flags change.
+  let m = 0;
+  const flip = () => node(9, { status: NodeStatus.Dead, isListening: m++ < 8 ? true : false } as never);
+  const r = run(flip, T - MIN, 12);
+  assert.equal(r.first, 5, 'raised while it read as listening');
+  assert.equal(r.last, true, 'and still raised after its flags changed');
 });

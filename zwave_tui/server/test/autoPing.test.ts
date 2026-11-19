@@ -3756,6 +3756,7 @@ test('a dead-lane routed read whose slot is shut is owed again and goes when the
   paused = false;
   await R.step(); await R.fire();
   assert.equal(R.of('read', 7).length, 1, 'owed again, it goes once the gate is open');
+  assert.deepEqual(R.of('planned', 7), [], 'the ladder ping and its read are never planned: they are not measurements');
   R.h.stop();
 });
 
@@ -3796,7 +3797,7 @@ test('a verification burst\'s +Ns gap is measured between the slots its probes l
   R.h.stop();
 });
 
-test('a sweep or verification probe is PLANNED at its slot when it is pended, so the settle guard can wait for it; the ladder and its read are not (v0.79.2)', async () => {
+test('a sweep or verification probe is PLANNED at its slot when it is pended, so the settle guard can wait for it (v0.79.2)', async () => {
   const R = await rig({ ...spacedFixture(), spacing: 10_000 });
   const t0 = R.at();
   await R.step();
