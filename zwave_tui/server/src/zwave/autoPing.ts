@@ -1291,8 +1291,14 @@ export interface AutoPingRunnerOptions {
    *  data layer can tell a route change our frame caused from one it merely
    *  revealed. Never for the ladder, its read, or a manual ping. */
   onMeasurementSent?: (nodeId: number, at: number, lane: 'sweep' | 'verify', frame: ProbeFrame) => void;
+  /** A sweep or verification probe is pended for its slot at `at` (v0.79.2),
+   *  which can be up to PROBE_SPREAD_OF_TICK of the tick away. The data
+   *  layer's settle guard waits for it: an episode is not scored while a probe
+   *  of its node is still waiting to leave. */
+  onMeasurementPlanned?: (nodeId: number, at: number) => void;
   /** The measurement probe stamped at `at` never left — its launch was refused
-   *  or failed (v0.71.0) — so the stamp must be withdrawn. */
+   *  or failed (v0.71.0), or its slot found a gate shut (v0.79.1) — so the
+   *  stamp, planned or sent, must be withdrawn. */
   onMeasurementWithdrawn?: (nodeId: number, at: number) => void;
   /** Drain the Dead transitions the event feed has seen CLEAR since the last
    *  call (v0.71.0): when the node went Dead (`at`, epoch ms) and the node's
@@ -1854,14 +1860,16 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // must give it back too, or the node waits a full staleMs having never
       // been asked (v0.40.2).
       pendProbe(state, nodeId, at, 'sweep', cls, frame);
+      o.onMeasurementPlanned?.(nodeId, at);
       settleProbe(o, state, nodeId, at, launch(at, 'sweep', nodeId, () => {
         o.onMeasurementSent?.(nodeId, at, 'sweep', frame);
         return measure(frame, nodeId);
       }), (shut) => {
         if (priorStale == null) state.lastStaleAt.delete(nodeId);
         else state.lastStaleAt.set(nodeId, priorStale);
-        // A slot a gate shut was never noted: nothing to withdraw (v0.79.1).
-        if (!shut) o.onMeasurementWithdrawn?.(nodeId, at);
+        // Planned or sent, its stamp goes (v0.79.2): a slot a gate shut was
+        // planned and never sent.
+        o.onMeasurementWithdrawn?.(nodeId, at);
         if (frame === 'read' && !shut) readLaunchFailed(nodeId, at);
       }, frame === 'read' ? READ_REJECT_WHY : undefined);
     }
@@ -1999,14 +2007,16 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       // the next burst gap was measured from a probe that never left — the
       // capture-order trap the sweep and ladder refunds document.
       pendProbe(state, nodeId, at, 'verify', 'unheard', frame);
+      o.onMeasurementPlanned?.(nodeId, at);
       settleProbe(o, state, nodeId, at, launch(at, 'verify', nodeId, () => {
         o.onMeasurementSent?.(nodeId, at, 'verify', frame);
         return measure(frame, nodeId);
       }), (shut) => {
         if (prevVerify == null) state.lastVerifyAt.delete(nodeId);
         else state.lastVerifyAt.set(nodeId, prevVerify);
-        // A slot a gate shut was never noted: nothing to withdraw (v0.79.1).
-        if (!shut) o.onMeasurementWithdrawn?.(nodeId, at);
+        // Planned or sent, its stamp goes (v0.79.2): a slot a gate shut was
+        // planned and never sent.
+        o.onMeasurementWithdrawn?.(nodeId, at);
         if (frame === 'read' && !shut) readLaunchFailed(nodeId, at);
       }, frame === 'read' ? READ_REJECT_WHY : undefined);
     }

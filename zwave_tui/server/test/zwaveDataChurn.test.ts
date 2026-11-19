@@ -3976,3 +3976,80 @@ test('the refresh trial decides only on LIVE rtt-degraded evidence: a held breac
     }
   }
 });
+
+test('an episode is not scored while a probe of its node is still waiting for its slot (v0.79.2)', async () => {
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-settle-planned-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+    const MIN = 60_000;
+    const listening = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true, status: NodeStatus.Alive } : n));
+    const shadow = zd as unknown as {
+      snapshot: () => NodeSnapshot[]; updateEpisodes: (s: unknown[], now: number) => void;
+      requestVerification: (n: number) => boolean; outcomes: { openEpisodes: () => { key: string }[] };
+    };
+    shadow.snapshot = () => listening;
+    shadow.requestVerification = () => true;
+    const t0 = Date.now() - 30 * MIN;
+    const sym = { kind: 'rate-fallback', nodeId: 7, severity: 'watch', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+    shadow.updateEpisodes([sym], t0);
+    const since = t0 + MIN;
+    shadow.updateEpisodes([], since);
+    const end = since + 10 * MIN;
+    // An earlier probe was SENT 50 s before the end (the live shape: the node
+    // already has a stamp), and the burst's last read waits for a slot 20 s
+    // past the window's end.
+    zd.noteMeasurementProbe(7, end - 50_000, 'verify', 'read');
+    zd.noteMeasurementPlanned(7, end + 20_000);
+    shadow.updateEpisodes([], end);
+    assert.equal(shadow.outcomes.openEpisodes().length, 1, 'not cut while that read has not left');
+    shadow.updateEpisodes([], end + 20_000 + 5_000);
+    assert.equal(shadow.outcomes.openEpisodes().length, 1, 'nor before it can have settled');
+    shadow.updateEpisodes([], end + 20_000 + 30_000);
+    assert.equal(shadow.outcomes.openEpisodes().length, 0, 'scored once it has');
+    // A planned probe withdrawn at its slot releases its own wait, and only
+    // its own: the guard falls back to the probe SENT before it (v0.79.2 review).
+    shadow.updateEpisodes([{ ...sym, sinceMs: end + MIN }], end + MIN);
+    shadow.updateEpisodes([], end + 2 * MIN);
+    const end2 = end + 12 * MIN;
+    zd.noteMeasurementProbe(7, end2 - 10_000, 'verify', 'read');
+    zd.noteMeasurementPlanned(7, end2 + 20_000);
+    zd.clearMeasurementProbe(7, end2 + 20_000);
+    shadow.updateEpisodes([], end2);
+    assert.equal(shadow.outcomes.openEpisodes().length, 1, 'the sent probe still has 20 s to settle');
+    shadow.updateEpisodes([], end2 + 25_000);
+    assert.equal(shadow.outcomes.openEpisodes().length, 0, 'and once it has, the episode closes: the withdrawn plan held nothing');
+  } finally { zd.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('through the real engine pass: a lone normal sweep read in a held breach owes ONE confirmation that stays owed until the runner takes it, and a slow answer holds the SAME episode on (v0.79.2 review)', async () => {
+  const r = await confirmRig('zwtui-rttdoubt-', { staleMs: 120 * 60_000 });
+  try {
+    r.trip(300);
+    r.zd.drainVerifyRequests(r.now());
+    r.idle(60_000);
+    r.trip(280);
+    r.idle(310_000);
+    const open = () => r.zd.openEpisodes()?.filter((e) => e.nodeId === 7 && e.kind === 'rtt-degraded') ?? [];
+    const held = () => (r.rtt() as { held?: true } | undefined)?.held === true;
+    for (let i = 0; i < 5; i++) { r.zd.drainVerifyRequests(r.now()); r.trip(400); r.idle(50_000); }
+    r.idle(100 * 60_000);
+    assert.ok(held(), 'fixture guard: held');
+    assert.equal(open().length, 1, 'fixture guard: one episode');
+    r.trip(25); // the sweep reads it normal, once
+    assert.equal(r.zd.verifyOwedCount(), 1, 'one confirmation owed');
+    r.idle(50_000); // five engine passes before the runner's next tick
+    assert.equal(r.zd.verifyOwedCount(), 1, 'still owed: the detector keeps asking about the same round trip');
+    assert.deepEqual(r.zd.drainVerifyRequests(r.now()), [{ id: 7, first: false, confirm: true }], 'handed out as a confirmation');
+    r.trip(420); // it answers slow
+    assert.ok(r.rtt() && !held(), 'live on the slow answer');
+    r.idle(11 * 60_000);
+    assert.ok(held(), 'held again once that answer leaves the window');
+    assert.equal(open().length, 1, 'the SAME episode: the slowdown was not split');
+  } finally { r.done(); }
+});

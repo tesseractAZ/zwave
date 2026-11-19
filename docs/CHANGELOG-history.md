@@ -3,6 +3,74 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.77.0
+
+The LAN terminal is SSH: telnet is removed.
+
+### Changed — SSH replaces telnet on port 2324
+
+- The full-screen TUI is served over SSH on the same port, 2324, so nothing
+  changes on the LAN side: `ssh -p 2324 <user>@<host>`. Telnet sent the login
+  and everything on screen in clear text.
+- Logins are password only, using the login gate's existing users
+  (`auth_enabled`, `users`) and its per-address backoff after
+  `auth_max_attempts`. With the gate off, or no user configured, every login is
+  refused, and the add-on log says why. Usernames and passwords are never
+  logged.
+- The host key (ed25519) is generated on first start in `/data` and kept; its
+  fingerprint is on the startup log line, to compare with what `ssh` shows on
+  the first connection.
+- Each connection gets one terminal. The window size comes from the SSH client
+  and follows resizes; exec and subsystems (sftp) are refused. The connection
+  caps (16, 4 per address), keep-alive and the 30-minute idle reclaim carry
+  over.
+- The option `telnet_enabled` is now `ssh_enabled` (on by default).
+- The sidebar console is unchanged.
+
+## 0.76.1
+
+Follow-ups from a 6.35 h trial of the Z-Wave JS driver at `verbose`: the driver
+log lane is visible to automations, the long-term evidence says when S2 was
+blind, and the engine sensor no longer reads 0 of 0 at boot.
+
+### Added — the driver log lane on the engine sensor
+
+- `sensor.zwave_tui_engine` gains `driver_log_level`, `s2_lane` (`live`,
+  `pending`, `storm-paused`, `silent`, `refused`, `level`, `down`, `disabled`)
+  and `silence_watchdog` (`armed`, `disarmed`). `/api/health` carries them
+  too. Until now the lane's state was shown only on the login-gated ENGINE
+  screen.
+- The silence watchdog writes one add-on log line when it arms or disarms. It
+  arms only while `verbose` lines arrive, and arming wrote nothing, so whether
+  it had armed could not be shown.
+
+### Added — long-term evidence counts the S2 samples it could see
+
+- Each 30-min evidence bucket now counts its known S2 samples (`s2N`) beside
+  the resync sum, so 0 resyncs over 0 known samples reads blind rather than
+  clean once the 40-min fine ring has rolled over. A bucket saved before
+  0.76.1 reads unknown.
+
+### Fixed — the engine sensor at boot
+
+- Nothing is published to Home Assistant before the first roster load. With
+  no node loaded every count was 0, and the engine sensor read "0 unmeasured
+  of 0" for about 30 s at each start.
+
+### Documented — what `verbose` costs here
+
+- The cost is the host journal, not the archive. The Z-Wave JS app writes
+  every driver entry to the journal, which is capped at 500 MB. The trial
+  measured about 5,600 more journal data objects an hour at `verbose`, which
+  would leave permanent `verbose` about 4 h above a 36 h journal floor on a
+  typical day. `info` stays the permanent level; `verbose` is set at runtime
+  for bounded investigations.
+- The archive at `verbose` is about 3.3 MB a day raw and 181–195 KB gzipped.
+- The storm guard counts driver entries, not printed lines: the nightly NVM
+  backup was 1,335 entries (5,271 lines) in its busiest 60 s, 44.5 % of the
+  limit. Restart, re-interview, heal, inclusion and reconnect bursts are
+  still unmeasured at `verbose`.
+
 ## 0.76.0
 
 Ready for the Z-Wave JS driver logging at `verbose`: the driver log stream

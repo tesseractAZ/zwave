@@ -200,6 +200,8 @@ async function main(): Promise<void> {
       // and the death feed shows the containment a death that clears between ticks.
       probeRead: (n) => actions.routedRead(n, 'probe'),
       onMeasurementSent: (n, at, lane, frame) => zwaveData.noteMeasurementProbe(n, at, lane, frame),
+      // v0.79.2: the settle guard waits for a probe still waiting for its slot.
+      onMeasurementPlanned: (n, at) => zwaveData.noteMeasurementPlanned(n, at),
       onMeasurementWithdrawn: (n, at) => zwaveData.clearMeasurementProbe(n, at),
       deaths: () => zwaveData.drainDeadEvents(),
       // v0.36: the outcome ledger's verification probes ride the same runner,

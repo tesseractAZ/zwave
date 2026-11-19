@@ -2736,7 +2736,7 @@ test('a SWEEP miss never earns a routed read — only a judged ladder ping does 
 
 /* ── v0.71.0: the measurement lanes send a routed read; our own kills are contained ── */
 
-type RigCall = { verb: 'ping' | 'probe' | 'probeRead' | 'read' | 'sent' | 'withdrawn'; id: number; at: number; lane?: string; frame?: string };
+type RigCall = { verb: 'ping' | 'probe' | 'probeRead' | 'read' | 'sent' | 'withdrawn' | 'planned'; id: number; at: number; lane?: string; frame?: string };
 
 /** The real runner with every v0.71.0 hook recorded. The clock starts past the
  *  boot window, so the measurement lanes are open from the first tick. */
@@ -2780,6 +2780,7 @@ async function rig(over: {
     canRead: over.canRead ?? (() => true),
     onMeasurementSent: (id, at, lane, frame) => { calls.push({ verb: 'sent', id, at, lane, frame }); },
     onMeasurementWithdrawn: (id, at) => { calls.push({ verb: 'withdrawn', id, at }); },
+    onMeasurementPlanned: (id, at) => { calls.push({ verb: 'planned', id, at }); },
     verifyRequests: over.verify,
     deaths: over.deaths,
     log: (sev, id, text) => { logs.push({ sev, id, text }); }, log2,
@@ -3638,8 +3639,9 @@ test('a slot that finds a gate shut sends nothing — withdrawn and refunded, sa
     g.shut();
     await R.fire();
     assert.deepEqual(R.of('probeRead').map((c) => c.id), [50], `${g.why}: only the first went`);
-    assert.deepEqual(R.of('sent').map((c) => c.id), [50], `${g.why}: the later ones were never noted`);
-    assert.deepEqual(R.of('withdrawn'), [], `${g.why}: so nothing is withdrawn`);
+    assert.deepEqual(R.of('sent').map((c) => c.id), [50], `${g.why}: the later ones were never noted as sent`);
+    assert.deepEqual(R.of('withdrawn').map((c) => [c.id, c.at]), R.of('planned').filter((c) => c.id !== 50).map((c) => [c.id, c.at]),
+      `${g.why}: their planned stamps are withdrawn, at their slots (v0.79.2)`);
     assert.equal(R.snap(100)?.pending ?? 0, 0, `${g.why}: nothing left pending`);
     assert.ok(R.lines.includes(`auto-ping: node 100 could not be probed (${g.why}) — not judged`), g.why);
     assert.deepEqual(R.warns, [], `${g.why}: a gate working is not a warning`);
@@ -3754,6 +3756,7 @@ test('a dead-lane routed read whose slot is shut is owed again and goes when the
   paused = false;
   await R.step(); await R.fire();
   assert.equal(R.of('read', 7).length, 1, 'owed again, it goes once the gate is open');
+  assert.deepEqual(R.of('planned', 7), [], 'the ladder ping and its read are never planned: they are not measurements');
   R.h.stop();
 });
 
@@ -3791,5 +3794,19 @@ test('a verification burst\'s +Ns gap is measured between the slots its probes l
   await R.step(); await R.fire();
   assert.ok(R.lines.some((l) => /^auto-ping: node 101 verification probe \(episode evidence, \+50s, /.test(l)),
     `101 left 20 s into tick 1 and 10 s into tick 2: ${JSON.stringify(R.lines.filter((l) => /node 10[01] verification/.test(l)))}`);
+  R.h.stop();
+});
+
+test('a sweep or verification probe is PLANNED at its slot when it is pended, so the settle guard can wait for it (v0.79.2)', async () => {
+  const R = await rig({ ...spacedFixture(), spacing: 10_000 });
+  const t0 = R.at();
+  await R.step();
+  assert.deepEqual(R.of('planned').map((c) => [c.id, c.at - t0]), [[50, 0], [100, 10_000], [101, 20_000]], 'planned at each slot, at the tick');
+  assert.deepEqual(R.of('sent').map((c) => c.id), [50], 'only the first is sent yet');
+  const pi = R.calls.findIndex((c) => c.verb === 'planned' && c.id === 50);
+  const si = R.calls.findIndex((c) => c.verb === 'sent' && c.id === 50);
+  assert.ok(pi >= 0 && pi < si, 'planned before it is noted as sent');
+  await R.fire();
+  assert.deepEqual(R.of('sent').map((c) => c.id), [50, 100, 101]);
   R.h.stop();
 });

@@ -455,6 +455,8 @@ test('index.ts leaves auto-ping\'s probe spacing at its default, on real timers 
   const block = index.slice(apStart, apEnd);
   assert.doesNotMatch(block, /probeSpacingMs/, 'no spacing override in production');
   assert.doesNotMatch(block, /setTimer/, 'and no timer override');
+  // v0.79.2: the settle guard hears of a probe still waiting for its slot.
+  assert.match(block, /onMeasurementPlanned: \(n, at\) => zwaveData\.noteMeasurementPlanned\(n, at\),/, 'a planned probe reaches the settle guard');
 });
 
 test('index.ts hands auto-ping the two driver-WS readings (v0.65.0)', () => {

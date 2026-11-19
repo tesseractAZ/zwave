@@ -137,6 +137,15 @@ export interface DwellEntry {
    *  breach can be held and shown through the silence between sweeps, which
    *  outlasts the fine ring. */
   rtt?: { avg: number; judged: number; residue: number; t: number; raw: number[] };
+  /** rtt-degraded (v0.79.2): a round trip that may end or stretch the hold
+   *  and is waiting for its confirmation probe. `normal`: a normal one with no
+   *  normal one behind it; while it waits, silence does not hold the breach.
+   *  `reroute`: a slow one read across a route change; it does not refresh the
+   *  kept reading, which holds to its own deadline meanwhile. */
+  rttDoubt?: { t: number; kind: 'normal' | 'reroute' };
+  /** node-down (v0.79.2): raised once, so a later change of the node's
+   *  capability flags cannot lengthen its dwell and withdraw it. */
+  latched?: true;
 }
 export type SymptomState = Map<string, DwellEntry>;
 
@@ -164,8 +173,10 @@ export interface DetectInput {
    *  rtt-degraded starts on the newest round trip alone. Absent reads as no. */
   rttConfirmable?: (node: NodeSnapshot) => boolean;
   /** Told when the average breaches on ONE slow round trip that nothing backs
-   *  yet, on a node a confirmation can reach (v0.78.0). The caller decides
-   *  whether a probe may be owed for it; the detector only says so. */
+   *  yet, on a node a confirmation can reach (v0.78.0) — and, in a matured
+   *  breach that can still be held, about one normal round trip or one slow
+   *  one read across a route change (v0.79.2). The caller decides whether a
+   *  probe may be owed for it; the detector only says so. */
   rttSuspect?: (nodeId: number, frame: RttFrame) => void;
   /** Told on every tick a node's RTT average is over the line, started or not
    *  (v0.78.0). Until then the average alone armed the dwell, and arming is
@@ -177,6 +188,16 @@ export interface DetectInput {
    *  the default the constant was written against — on an install that
    *  lengthened the cadence, the detector fired before one sweep had asked. */
   sweepMs?: number;
+  /** When our own measurement read last re-routed this node (v0.79.2). A
+   *  failover of our routed read changes the route without a driver-reported
+   *  route change in the sample, and its round trip carries the failed first
+   *  attempt. Absent reads as never. */
+  ownRerouteAt?: (nodeId: number) => number | null;
+  /** When the Z-Wave driver's connection last started (v0.79.2: the driver WS
+   *  connected, or the zwave_js entry reloaded, whichever is later). A node
+   *  auto-ping does not probe that reads Dead soon after it gets the long
+   *  node-down dwell. Absent reads as unknown. */
+  driverStartedAt?: number | null;
   /** Store-level: epoch ms evidence collection began (coverage floor). */
   recordingSince: () => number | null;
   /** A sleeping node's missed-report watch status, or null for a node that
@@ -283,6 +304,24 @@ export const RTT_CEILING_MS = 300;
  * no probe can reach, nothing is held.
  */
 export const RTT_HOLD_MARGIN_MS = 30 * 60_000;
+
+/**
+ * How long a node auto-ping does not probe must read Dead, when it went Dead
+ * within NODE_DOWN_START_WINDOW_MS of the driver's start, before node-down
+ * (v0.79.2). Any other death keeps DWELL_MS.
+ *
+ * After a driver start the driver marks some FLiRS nodes Dead and they read
+ * Alive again on their own later: on the reference mesh one FLiRS motion
+ * sensor read Dead after each of four driver restarts in eight days and was
+ * back 13, 38, 46 and 48 minutes later, another once for 9 minutes, and each
+ * time node-down raised a critical card and the degraded alarm. The cost: a
+ * real outage of such a node right at a driver start is raised after 90
+ * minutes instead of 5, while Home Assistant's own status shows it Dead. A
+ * reading that is still Dead past 90 minutes is raised then.
+ */
+export const NODE_DOWN_START_DWELL_MS = 90 * 60_000;
+/** How soon after the driver's start a death counts as a start death (v0.79.2). */
+export const NODE_DOWN_START_WINDOW_MS = 10 * 60_000;
 
 /**
  * The line an RTT reading is judged against (v0.79.0), and where it came from.
@@ -442,7 +481,7 @@ function key(nodeId: number | null, kind: SymptomKind): string {
 
 /** Update dwell for a (node,kind) breach; return the dwell-start once it has
  *  persisted ≥ DWELL_MS, else null (still arming). Clears when not breaching. */
-function dwell(state: SymptomState, k: string, breaching: boolean, now: number): number | null {
+function dwell(state: SymptomState, k: string, breaching: boolean, now: number, dwellMs = DWELL_MS): number | null {
   if (!breaching) {
     state.delete(k);
     return null;
@@ -454,8 +493,18 @@ function dwell(state: SymptomState, k: string, breaching: boolean, now: number):
   }
   e.lastSeen = now;
   e.hits += 1;
-  return now - e.since >= DWELL_MS ? e.since : null;
+  return now - e.since >= dwellMs ? e.since : null;
 }
+
+/** Whether a round trip was read across a route change (v0.79.2): the sample
+ *  that carried it, or the next one (the trailing statistics emit carries the
+ *  route), reported one, or our own routed read failed over within the same
+ *  span (the store books that one apart from the driver's route changes). */
+function routeChangedOn(samples: EvidenceSample[], t: number, ownRerouteAt: number | null): boolean {
+  if (ownRerouteAt != null && Math.abs(ownRerouteAt - t) <= ROUTE_READ_SPAN_MS) return true;
+  return samples.some((s) => s.t >= t && s.t - t <= ROUTE_READ_SPAN_MS && (s.dRouteChanges ?? 0) > 0);
+}
+const ROUTE_READ_SPAN_MS = 15_000;
 
 /** The newest sample within the window that is FRESH and has a usable value —
  *  so a dwell gated on a per-tick freshness flag isn't reset every non-fresh
@@ -704,8 +753,19 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // NOT markDegrading: a dead node contributes no RF readings, and feeding
       // it to the mesh-correlation gate would let a single dead device look
       // like environmental degradation.
-      const since = dwell(state, key(id, 'node-down'), b, now);
+      // A death at the driver's start on a node auto-ping does not probe
+      // (FLiRS or sleeping, or capability not yet known; v0.79.2) dwells for
+      // NODE_DOWN_START_DWELL_MS. Any other death keeps DWELL_MS, and one
+      // already raised stays raised (`latched`).
+      const nk = key(id, 'node-down');
+      const ne = state.get(nk);
+      const startedAt = input.driverStartedAt ?? null;
+      const onset = ne?.since ?? now;
+      const atStart = b && ne?.latched !== true && node.isListening !== true
+        && startedAt != null && onset >= startedAt && onset - startedAt <= NODE_DOWN_START_WINDOW_MS;
+      const since = dwell(state, nk, b, now, atStart ? NODE_DOWN_START_DWELL_MS : DWELL_MS);
       if (since != null) {
+        state.get(nk)!.latched = true;
         breaching = true;
         const downFor = Math.max(0, Math.round((now - since) / 60_000));
         out.push({
@@ -934,12 +994,14 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // average keeps 0.75 of itself per transmission, so a sweep-only node that
       // has recovered still reads over the line for several sweeps on its
       // average alone, and a hold kept on the average showed such a node as
-      // degraded for hours. A newer round trip under the line drops the kept
-      // reading, so the next silence clears the breach as before v0.79.1 and its
-      // closing burst measures the node. An armed breach keeps nothing.
+      // degraded for hours. Two newer round trips under the line drop the kept
+      // reading (one owes a confirmation first, v0.79.2), so the next silence
+      // clears the breach and its closing burst measures the node. An armed
+      // breach keeps nothing.
       const kept = state.get(rk)?.rtt;
+      const doubt = state.get(rk)?.rttDoubt;
       const holdMs = confirmable && input.sweepMs ? input.sweepMs + RTT_HOLD_MARGIN_MS : 0;
-      const held = obs == null && kept != null && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;
+      const held = obs == null && kept != null && doubt?.kind !== 'normal' && yard != null && node.status !== NS.Dead && now - kept.t <= holdMs && kept.judged > yard.line;
       const line = b ? yard!.line : Infinity;
       const frames = b ? rawRttFrames(samples).filter((f) => now - f.t <= WINDOW_MS) : [];
       const r1 = frames[frames.length - 1];
@@ -956,8 +1018,29 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
         // kept for a hold only while that round trip is slow (above).
         const live = held ? null : { avg: obs!.rtt, judged: obs!.rtt - residue, residue, t: r1?.t ?? obs!.t, raw: frames.slice(-2).reverse().map((f) => f.raw) };
         if (live != null) {
-          if (slow) e.rtt = live;
-          else if (r1 != null) delete e.rtt;
+          // CONFIRMED BOTH WAYS (v0.79.2). A breach starts on two slow round
+          // trips, and the hold now ends on two normal ones. One normal round
+          // trip, or one slow one read across a route change, owes one
+          // confirmation probe and keeps the kept reading meanwhile; while it
+          // waits the breach is not held, so a confirmation that never comes
+          // lets it go at the window's end as before. On the reference mesh a
+          // lone 178 ms read on a node still at 493 ms split one slowdown, and a
+          // 1194 ms read taken as a node re-routed may have stretched another;
+          // the confirmation now decides.
+          const rerouted = r1 != null && routeChangedOn(samples, r1.t, input.ownRerouteAt?.(id) ?? null);
+          // A doubt is asked only where a hold can still matter (the sweep on,
+          // the kept reading inside its deadline and over the line of now);
+          // elsewhere the v0.79.1 rule stands. A normal answer to a re-route
+          // doubt is the second normal round trip: the re-route read was not one.
+          const holdable = e.rtt != null && confirmable && holdMs > 0 && now - e.rtt.t <= holdMs && e.rtt.judged > line;
+          const reroutedBefore = e.rttDoubt?.kind === 'reroute' && r2 != null && r2.t === e.rttDoubt.t;
+          // A slow round trip refreshes the reading only once ROUTE_READ_SPAN_MS
+          // old: its route change, or our read's failover, can land on the next
+          // sample, after the tick that first sees the round trip.
+          if (slow && !rerouted) { if (now - r1!.t >= ROUTE_READ_SPAN_MS) { e.rtt = live; delete e.rttDoubt; } }
+          else if (r1 != null && !slow && r2 != null && (r2.raw <= line || reroutedBefore)) { delete e.rtt; delete e.rttDoubt; }
+          else if (r1 != null && holdable) { e.rttDoubt = { t: r1.t, kind: slow ? 'reroute' : 'normal' }; input.rttSuspect?.(id, r1); }
+          else if (r1 != null && !slow) { delete e.rtt; delete e.rttDoubt; }
         }
         const shown = held ? e.rtt! : live!;
         const ageMin = Math.round((now - shown.t) / 60_000);
