@@ -5,7 +5,8 @@
 A deploy, update or restart of this add-on no longer withdraws a raised
 `node-down` or reads as a driver start: raised node-downs and waiting start
 deaths outlive the add-on, and only a driver start the add-on can show opens
-the 90-minute start window. The update from 0.79.2 itself carries nothing,
+node-down's start window, where a death waits 90 minutes. The update from
+0.79.2 itself carries nothing,
 since 0.79.2 wrote no carry: a node-down raised at the update is raised again
 5 minutes after it.
 
@@ -110,7 +111,7 @@ start waits 90 minutes before it is a critical outage.
   breach is not held, so one that never comes lets it go at the window's end,
   as before. Each doubt costs at most one probe per round trip asked about.
 - A slow round trip read across a route change (one the driver reports, or
-  our own routed read failing over) no longer refreshes a hold. It owes a
+  the add-on's own routed read failing over) no longer refreshes a hold. It owes a
   confirmation, and the reading before it holds to its own deadline
   meanwhile. A 1194 ms read taken as a node re-routed to 100 kbps had carried
   a hold for two more hours; whether the node was still slow, the data cannot
@@ -147,7 +148,7 @@ start waits 90 minutes before it is a critical outage.
 - 13 new tests: the hold confirmed both ways (a lone normal round trip owes a
   confirmation, a slow answer keeps the hold, an unanswered doubt lets go, two
   normal round trips release it, two in one tick at once, nothing asked with
-  the sweep off), re-route reads (a reported route change, our own failover,
+  the sweep off), re-route reads (a reported route change, the add-on's own failover,
   the span's bounds, a normal answer ending the doubt), node-down's
   start-scoped dwell and its latch, the settle guard waiting for a planned
   probe kept apart from the sent one, the planned stamp at each slot, and the
@@ -242,7 +243,7 @@ and one tick's probes no longer go out in the same millisecond.
   at a later slot, the step, the ladder's attempt and backoff given back, a
   re-owed dead-lane read, the burst gap between slots, production's default
   timer), and a contract pin that production keeps the default spacing.
-- 48 new mutation-harness entries, three of them declared equivalent; 43
+- 48 new mutation-harness entries, three of them declared equivalent; 31
   existing entries re-anchored to the rewritten lines.
 
 ## 0.79.0
@@ -336,8 +337,7 @@ The app is published as stable.
   yellow "Experimental" chip on the app's info page. It now declares
   `stage: stable`, the Supervisor's default, and the chip is gone.
 - The Supervisor reads an installed app's stage from the copy it saved at
-  install or update, so the badge goes away with this update, not with a
-  store reload.
+  install or update, not from the store.
 
 ### Tests
 

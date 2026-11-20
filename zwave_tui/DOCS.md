@@ -1576,7 +1576,7 @@ bindHomeId(id) {
 
 The on-disk format (`interface Persisted`, `SCHEMA_V = 2`) is genuinely **columnar** — parallel arrays per field per node (`FineCols`, `CoarseCols`, `CtrlCols`) rather than an array of objects, which keeps the file small and cheap to parse. `save()`:
 
-- is a **no-op when `!dirty`** — avoids SD-card write amplification;
+- is a **no-op when nothing was recorded since the last write and the symptom engine's carry matches the one last written or restored** (v0.79.3) — avoids SD-card write amplification;
 - **prunes again at save time** (`saveCutoff = now() - coarseHorizonMs`) so a node that stopped sampling can't serve beyond-horizon buckets forever, and drops all-quiet buckets via `bucketWorthPersisting`;
 - writes **atomically**: `writeFileSync(tmp, …)` then `renameSync(tmp, path)`, where `tmp = ${path}.tmp` — a crash mid-write leaves the old good file intact;
 - **never throws** — a failed write is logged and swallowed.
@@ -1792,7 +1792,7 @@ interface DriverWsCallbacks {
   onBgRssi?: (channels: BgRssiChannels, at: number) => void;              // controller background RSSI (ch 0..3)
   onNodeLastSeen?: (nodeId: number, lastSeen: number) => void;           // driver-side last communication (epoch ms)
   onNodeFlags?: (nodeId, { isListening, isFrequentListening }) => void;  // capability flags (listening / FLiRS)
-  onHomeId?: (homeId: number) => void;                                   // from the version handshake — for cross-check
+  onHomeId?: (homeId: number, link: { peerClosedAt: number | null }) => void; // cross-check + driver-start detection (v0.79.3)
   onS2Resync?: (nodeId: number) => void;                                 // v0.26: an S2 SPAN-resync log event attributed to a node (§6.11)
   onDuplicateDrop?: (nodeId: number) => void;                            // v0.74.0: the driver dropped a node's S2 frame as a duplicate (repeated-frames)
   onNodeDeclared?: (nodeId: number, declared: Declared) => void;         // v0.73.0: a sleeping node's declared report interval (missed-report)
@@ -1808,7 +1808,7 @@ interface DriverWsCallbacks {
 
 **Capability flags — `isListening` / FLiRS.** From each state-dump node, and from a node's `ready` event (v0.73.1): `isListening` is read as a strict boolean (anything else → `null`, i.e. "unknown", never a defaulted "listening"). `isFrequentListening` arrives at the negotiated schema as the FLiRS wake-up period (`false`, `"250ms"` or `"1000ms"`), so `true` or any non-empty string reads as FLiRS, `false` as not, and anything else as `null` (v0.73.4; before it, no FLiRS device was recognised). HA's `network_status` omits `is_listening` entirely; before v0.13 the add-on could only infer it from CC info. These flags gate the battery/FLiRS guards and the quiet-node detector (a mains listening node silent past its cadence is a symptom; a FLiRS node within its wake interval is not).
 
-**`homeId`.** Captured from the `version` handshake and passed straight out for the cross-check below.
+**`homeId`.** Captured from the `version` handshake and passed straight out for the cross-check below. The same callback stamps the connection time for auto-ping's burst refusal (v0.65.0), and its `link.peerClosedAt` (v0.79.3) says when the previous handshaken link ended without this client ending it, which the data layer records as a known driver start for node-down (§7.2.4).
 
 ### 6.8 The homeId cross-check: purge-and-stop on a wrong-network mismatch
 
