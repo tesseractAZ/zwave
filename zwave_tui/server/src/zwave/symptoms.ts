@@ -776,9 +776,9 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // (FLiRS or sleeping, or capability not yet known; v0.79.2) dwells for
       // NODE_DOWN_START_DWELL_MS, and once judged a start death stays one
       // (`start`, v0.79.3). Any other death keeps DWELL_MS. One already
-      // raised stays raised (`latched`) and is raised at once while it reads
-      // Dead, carried across a restart of this add-on too (v0.79.3, see
-      // nodeDownCarry). Unknown is no reading (v0.79.3): a driver restart reads
+      // raised stays raised (`latched`): it is raised at once while it reads
+      // Dead, whatever dwell its flags now ask for, and carried across a
+      // restart of this add-on too (v0.79.3, see nodeDownCarry). Unknown is no reading (v0.79.3): a driver restart reads
       // its nodes Unknown for seconds, and that neither ends a dwell nor
       // advances it, and a raised one stays raised through it.
       const nk = key(id, 'node-down');
@@ -789,7 +789,7 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
         if (ne.latched === true) since = ne.since;
       } else {
         const onset = ne?.since ?? now;
-        const atStart = b && ne?.latched !== true && node.isListening !== true
+        const atStart = b && node.isListening !== true
           && (ne?.start === true || (input.driverStarts ?? []).some((s) => onset >= s.from && onset - s.to <= NODE_DOWN_START_WINDOW_MS));
         since = dwell(state, nk, b, now, atStart ? NODE_DOWN_START_DWELL_MS : DWELL_MS);
         const e = state.get(nk);

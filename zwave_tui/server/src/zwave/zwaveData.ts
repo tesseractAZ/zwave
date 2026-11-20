@@ -424,9 +424,9 @@ export interface ZwaveData {
    *  own first handshake: auto-ping's burst refusal only. */
   driverReconnectedAt(): number | null;
   /** The driver starts known to this run, for node-down's start window
-   *  (v0.79.3): the host boot (from the engine's first tick), a restart seen
-   *  over the driver link, one carried from the previous run on this boot. */
-  driverStarts(): DriverStart[];
+   *  (v0.79.3): the host boot (now − uptime), a restart seen over the driver
+   *  link, one carried from the previous run on this boot. */
+  driverStarts(now?: number): DriverStart[];
   /** When the controller's receiver went off and has not come back (v0.65.0). */
   controllerRfOffSince(): number | null;
   /** Rolling RSSI/RTT history for a node (for sparklines). */
@@ -1025,9 +1025,6 @@ class ZwaveDataImpl implements ZwaveData {
   private driverRestart: DriverStart | null = null;
   /** A driver restart the previous run of this add-on saw on this boot. */
   private carriedDriverStart: DriverStart | null = null;
-  /** The host's boot as a driver start, fixed at the engine's first tick so
-   *  it shares a clock with the first node-down stamps (v0.79.3). */
-  private bootStart: DriverStart | null = null;
   /** The engine has taken the evidence store's restored carry (v0.79.3). */
   private carryTaken = false;
   /** The node-down dwells as last saved (v0.79.3): a change saves at once. */
@@ -1518,12 +1515,9 @@ class ZwaveDataImpl implements ZwaveData {
     const suspects = new Map<number, RttFrame>();
     const rttOver = new Set<number>();
     // v0.79.3: on the first tick — after the home id was bound, so another
-    // network's carry is already gone — fix the host boot as a driver start
-    // and take what the previous run carried.
+    // network's carry is already gone — take what the previous run carried.
     if (!this.carryTaken) {
       this.carryTaken = true;
-      const boot = now - this.uptimeMs();
-      this.bootStart = { from: boot, to: boot };
       const carry = ev.takeCarry();
       if (carry) {
         this.carriedDriverStart = carry.driverStart;
@@ -1560,7 +1554,7 @@ class ZwaveDataImpl implements ZwaveData {
         // FLiRS node read Dead at a known driver start dwells longer (v0.79.3:
         // known starts only — never this add-on's own).
         ownRerouteAt: (id) => this.measurementRerouteAt.get(id) ?? null,
-        driverStarts: this.driverStarts(),
+        driverStarts: this.driverStarts(now),
         recordingSince: () => ev.recordingSince(),
         sleeperWatch: (n) => this.sleeperWatchFor(n, now),
         duplicateBursts: (id) => this.duplicateBursts(id, now),
@@ -3976,8 +3970,13 @@ class ZwaveDataImpl implements ZwaveData {
    * was down meanwhile, or the link never dropped) is not known, and a death
    * then keeps the 5-minute dwell.
    */
-  driverStarts(): DriverStart[] {
-    return [this.bootStart, this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);
+  driverStarts(now = Date.now()): DriverStart[] {
+    // The host's boot as of `now`. A death's start verdict is taken at its
+    // first reading, where its onset and this boot share one clock, so the
+    // window is judged on the host's uptime; a later clock step cannot change
+    // a verdict already taken (DwellEntry.start).
+    const boot = now - this.uptimeMs();
+    return [{ from: boot, to: boot }, this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);
   }
 
   /** What the next run carries (v0.79.3): a restart this run saw, which is

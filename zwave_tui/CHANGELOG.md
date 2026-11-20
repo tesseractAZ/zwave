@@ -18,8 +18,8 @@ since 0.79.2 wrote no carry: a node-down raised at the update is raised again
   `binary_sensor.zwave_tui_degraded` cleared and came back 90 minutes later.
   Reproduced through the real data layer; it did not occur on the reference
   mesh, where nothing was Dead at the 0.79.2 deploy.
-- Only a known driver start opens the window: the host's boot (read once, at
-  the engine's first tick); a driver-WS link this add-on did not end itself
+- Only a known driver start opens the window: the host's boot, judged on the
+  host's uptime at a death's first reading; a driver-WS link this add-on did not end itself
   (the server or the network ended it) and a new handshake, the start lying
   between the two, with the window running to 10 minutes after the handshake;
   or such a restart carried from the previous run on the same boot. The
@@ -60,7 +60,7 @@ since 0.79.2 wrote no carry: a node-down raised at the update is raised again
 
 ### Tests
 
-- 26 new tests: the start window over a span and its bounds; a start death
+- 27 new tests: the start window over a span and its bounds; a start death
   staying one through a later restart; Unknown as no reading; a raised
   node-down carried and raised on the next first tick, clamped or not; a
   start death still waiting across a deploy, with and without a known start;
@@ -71,9 +71,12 @@ since 0.79.2 wrote no carry: a node-down raised at the update is raised again
   the real data layer and a mock driver server, a deploy with a raised FLiRS
   node, a deploy with nothing carried, a host reboot with a start death and
   with a raised node-down saved at once, a Z-Wave JS restart seen over the
-  link and carried, the boot read once, and the default uptime source.
-- 58 new mutation-harness entries, none declared equivalent; 3 existing
-  entries re-anchored to the rewritten lines.
+  link and carried, a wall clock jumping ahead of uptime before and after a
+  death's first reading, and the default uptime source.
+- 57 new mutation-harness entries, none declared equivalent; 4 existing
+  entries re-anchored to the rewritten lines, and 1 retired with the check it
+  covered (a raised node-down is now raised at once whatever its flags ask
+  for, pinned by its own entry).
 
 ## 0.79.2
 

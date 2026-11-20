@@ -8268,13 +8268,10 @@ const MUTANTS = [
     what: "with the sweep off a lone normal round trip asks nothing",
     equivalent: true,
     why: "With the sweep off holdMs is 0, and the next conjunct, now - e.rtt.t <= holdMs, already fails: a kept reading is stored only once it is ROUTE_READ_SPAN_MS old, so it is never at or after now. holdMs > 0 states the intent; the behaviour is pinned by the sweep-off test through the deadline conjunct." },
-  { id: "node-down-latched", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
-    find: "      const atStart = b && ne?.latched !== true && node.isListening !== true",
-    repl: "      const atStart = b && node.isListening !== true",
-    what: "a node-down already raised is not withdrawn by a change of capability flags" },
   { id: "node-down-unknown-capability-at-start", file: "src/zwave/symptoms.ts", tests: ["symptoms"],
-    find: "      const atStart = b && ne?.latched !== true && node.isListening !== true",
-    repl: "      const atStart = b && ne?.latched !== true && node.isListening === false",
+    // Re-anchored in v0.79.3 (the boot judged each tick; the latch raises at once).
+    find: "        const atStart = b && node.isListening !== true",
+    repl: "        const atStart = b && node.isListening === false",
     what: "a node whose capability is not yet known at the start gets the long dwell" },
   { id: "planned-withdraw-clears-only-the-plan", file: "src/zwave/zwaveData.ts", tests: ["zwaveDataChurn"],
     find: "    if (this.plannedProbeAt.get(nodeId) === at) this.plannedProbeAt.delete(nodeId);\n",
@@ -8414,13 +8411,10 @@ const MUTANTS = [
     find: "                this.driverRestart = { from: link.peerClosedAt, to: at };",
     repl: "                this.driverRestart = { from: at, to: at };",
     what: "the restart span runs from the end of the link" },
-  { id: "boot-read-once", file: "src/zwave/zwaveData.ts", tests: ["nodeDownCarry"],
-    find: "    if (!this.carryTaken) {\n      this.carryTaken = true;",
-    repl: "    if ((true as boolean)) {\n      this.carryTaken = true;",
-    what: "the boot is read as a start once, at the first tick" },
   { id: "boot-is-a-start", file: "src/zwave/zwaveData.ts", tests: ["nodeDownCarry"],
-    find: "      this.bootStart = { from: boot, to: boot };",
-    repl: "",
+    // Re-anchored in v0.79.3 (the boot judged each tick; the latch raises at once).
+    find: "    return [{ from: boot, to: boot }, this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);",
+    repl: "    return [this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);",
     what: "the host boot is a known driver start" },
   { id: "carried-driver-start-applied", file: "src/zwave/zwaveData.ts", tests: ["nodeDownCarry"],
     find: "        this.carriedDriverStart = carry.driverStart;",
@@ -8435,7 +8429,8 @@ const MUTANTS = [
     repl: "        const n = seedNodeDown(this.symptomState, [], (id) => onRoster.has(id), now);",
     what: "the carried dwells are seeded" },
   { id: "driver-starts-fed-to-detector", file: "src/zwave/zwaveData.ts", tests: ["nodeDownCarry"],
-    find: "        driverStarts: this.driverStarts(),",
+    // Re-anchored in v0.79.3 (the boot judged each tick; the latch raises at once).
+    find: "        driverStarts: this.driverStarts(now),",
     repl: "        driverStarts: [],",
     what: "the detector reads the known starts" },
   { id: "carry-getter-node-down", file: "src/zwave/zwaveData.ts", tests: ["nodeDownCarry"],
@@ -8461,8 +8456,9 @@ const MUTANTS = [
     repl: "",
     what: "the store reads the same uptime, so the same boot is told alike" },
   { id: "driver-starts-include-restart", file: "src/zwave/zwaveData.ts", tests: ["nodeDownCarry"],
-    find: "    return [this.bootStart, this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);",
-    repl: "    return [this.bootStart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);",
+    // Re-anchored in v0.79.3 (the boot judged each tick; the latch raises at once).
+    find: "    return [{ from: boot, to: boot }, this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);",
+    repl: "    return [{ from: boot, to: boot }, this.carriedDriverStart].filter((s): s is DriverStart => s != null);",
     what: "a restart seen over the link is a known start" },
   // ── v0.79.3 review fixes: the start verdict sticks, Unknown is no reading, raised at once, reboot carries raised only, network stamp, prompt save, protocol-error close ──
   { id: "unknown-is-no-reading", file: "src/zwave/symptoms.ts", tests: ["nodeDownCarry"],
@@ -8529,6 +8525,10 @@ const MUTANTS = [
     find: "      if (String((e as NodeJS.ErrnoException).code ?? '').startsWith('WS_ERR_')) handshook = false;\n",
     repl: "",
     what: "a link the client closes on a protocol error is not a driver start" },
+  { id: "boot-judged-each-tick", file: "src/zwave/zwaveData.ts", tests: ["nodeDownCarry"],
+    find: "    const boot = now - this.uptimeMs();",
+    repl: "    const boot = ((this as unknown as { _boot?: number })._boot ??= now - this.uptimeMs());",
+    what: "the boot is judged at each death's first reading, on uptime, not fixed at the first tick" },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

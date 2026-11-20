@@ -575,18 +575,42 @@ test('restart (v0.79.3, production-wired): a Z-Wave JS restart seen over the lin
   }
 });
 
-test('restart (v0.79.3, production-wired): the boot is read as a start once, at the engine\'s first tick — a wall clock that then jumps ahead of uptime does not move it off a start death', async () => {
+test('restart (v0.79.3, production-wired): a start death is judged at its first reading — a wall clock that then jumps ahead of uptime does not cut its 90 minutes', async () => {
   const restore = useClock();
   const srv = await mockServer({ nodes: DUMP });
   const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
   try {
     // A host up 40 s whose uptime runs in real time while the wall clock steps
     // ahead 30 s a tick (as an NTP step does on a host without a clock
-    // battery). Read again each tick, now - uptime would slide past the death's
-    // onset within two ticks and drop it to the 5-minute dwell.
+    // battery): within two ticks now - uptime slides past the death's onset,
+    // and only the verdict taken at its first reading keeps the 90 minutes.
     const r0 = realNow();
     const r = await startRun(dir, srv.url, null, [], { uptimeMs: () => 40_000 + (realNow() - r0) });
     assert.equal(ticksTo(r, 95), 90, 'a start death at the reboot waits 90 min');
+    r.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.3, production-wired): a death first seen after the wall clock jumped ahead of uptime is judged on uptime — 1 min after the boot it is a start death', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const roster = ROSTER.map((n) => (n.node_id === 60 ? { ...n, status: 4 } : { ...n }));
+  try {
+    // Uptime runs in real time; the wall clock is 12.5 min ahead of it by the
+    // time node 60 first reads Dead. A boot fixed at the first tick would put
+    // that death 13 min after the boot and dwell 5 min.
+    const r0 = realNow();
+    const r = await startRun(dir, srv.url, null, [], { roster, uptimeMs: () => 40_000 + (realNow() - r0) });
+    assert.equal(ticksTo(r, 12), null, 'Alive while the clock runs ahead');
+    roster.find((n) => n.node_id === 60)!.status = 3;
+    await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Dead));
+    assert.equal(ticksTo(r, 95), 90);
     r.stop();
   } finally {
     stopAll();
@@ -604,7 +628,7 @@ test('restart (v0.79.3, production-wired): by default the boot is the host\'s ow
     const r = await startRun(dir, srv.url, null);
     r.tick();
     const boot = r.zd.driverStarts()[0]!;
-    assert.ok(Math.abs(boot.to - (realNow() - osUptime() * 1000)) < 3000, `${boot.to} vs ${realNow() - osUptime() * 1000}`);
+    assert.ok(Math.abs(boot.to - (Date.now() - osUptime() * 1000)) < 3000, `${boot.to} vs ${Date.now() - osUptime() * 1000}`);
     r.stop();
   } finally {
     stopAll();
