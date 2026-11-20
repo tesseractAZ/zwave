@@ -224,7 +224,7 @@ configuration:
       Seconds between evidence samples: the detection engine's tick (symptoms,
       learned baselines, refresh-trial decisions). It polls nothing; node and
       controller statistics arrive as the driver reports them. A larger value
-      slows detection and lengthens the span of the 240 recent controller samples behind the INTERFERENCE screen's serial-link rates and noise trend (about 40 minutes at the default). Default 10s. Range 5–120.
+      slows detection and lengthens the span of the 240 recent controller samples behind the INTERFERENCE screen's serial-link rates (about 40 minutes at the default) and of the newest 24 that its noise-trend spark draws (about 4 minutes). Default 10s. Range 5–120.
   log_level:
     name: Advanced · log level
     description: >-

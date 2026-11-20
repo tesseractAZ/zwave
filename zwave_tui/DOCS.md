@@ -50,9 +50,11 @@ One `zwaveData` layer owns the upstream subscriptions and evidence; one shared
 `TuiSession` over that single provider. Everything the render loop reads is a
 cheap accessor over state already held — the expensive Z-Wave polling and
 engine recompute happen on the data layer's own timers, never inside `draw()`.
-The one exception is the M6 `interference()` view: it is memoised for 10 s, and
-the first frame that asks for it once the memo is 10 s old recomputes it,
-folding every node's coarse buckets inside that `draw()`.
+There are two exceptions. The M6 `interference()` view is memoised for 10 s,
+and the first frame that asks for it once the memo is 10 s old recomputes it,
+folding every node's coarse buckets inside that `draw()`; and TOPOLOGY's
+route-stability panel sums each end node's coarse buckets (`routeStability()`)
+on every frame.
 
 ### 1.1 The seven-stage bootstrap
 
@@ -296,8 +298,9 @@ value — `nodes: () => cachedNodes`, `scoreFor: (id) => cachedScores.get(id) ??
 Every other accessor (`symptoms`, `engineStatus`, `efficacyFor`, `history`,
 `historyLong`, `interference`, the baselines, …) forwards straight to the data
 layer, which answers from state it already holds; the M6 `interference()` view
-is memoised for 10 s and refilled by the first frame that asks after that, as
-described at the top of this chapter. This is the **per-frame cached-accessor
+is memoised for 10 s and refilled by the first frame that asks after that, and
+`routeStability()` sums a node's coarse buckets on each call, as described at
+the top of this chapter. This is the **per-frame cached-accessor
 render model**: a `TuiSession.draw()` fired at 1 Hz never recomputes a health
 score or a noise floor.
 
@@ -728,7 +731,7 @@ Statistics subscriptions are not polled. They are opened per connection and re-o
 
 The TUI is the human-facing half of the add-on: an instrument-panel–style console that renders over SSH or an xterm.js WebSocket, driven by one per-session state machine. This chapter documents the rendering substrate — the nine screens, the key map that moves between them, the shared frame contract every screen wears, the ANSI-aware layout primitives and terminal gauges they draw with, the width-responsive Overview table, and the anti-flicker draw loop that repaints once a second without smearing. Three of the nine screens — **Remedy**, **Interference** and **Engine** — are the front ends of the remediation engine and get their own chapters; here they appear only as members of the registry and targets of the key map.
 
-Everything in this layer is **pure render over cached data**. The screen functions receive a `DataProvider` whose accessors return the last cached values (`server/src/types.ts`, the `DataProvider` interface) and must never recompute Z-Wave state inside `draw()`; the one exception is the M6 `interference()` view, which the first frame to ask refills once its 10 s memo has lapsed (§1.4). The single source of truth for "what nodes, in what order" is `visibleNodes()` in `server/src/telnet/input.ts`; the session computes it once per frame and hands the same array to every screen so a selection index means the same node everywhere.
+Everything in this layer is **pure render over cached data**. The screen functions receive a `DataProvider` whose accessors return the last cached values (`server/src/types.ts`, the `DataProvider` interface) and must never recompute Z-Wave state inside `draw()`; the exceptions are the M6 `interference()` view, which the first frame to ask refills once its 10 s memo has lapsed (§1.4), and `routeStability()`, which sums a node's coarse buckets on every call (TOPOLOGY asks for every end node each frame). The single source of truth for "what nodes, in what order" is `visibleNodes()` in `server/src/telnet/input.ts`; the session computes it once per frame and hands the same array to every screen so a selection index means the same node everywhere.
 
 ### 3.1 The screen model & render dispatch
 
@@ -1466,7 +1469,7 @@ The store keeps two independent time horizons per node, and — critically — *
 | **Coarse tier** | 30-min `CoarseBucket`s per node | 14 days | `DEFAULT_COARSE_HORIZON_MS = 14·24·60·60·1000` | the INTERFERENCE diurnal heatmap, measured route stability and DETAIL's EVIDENCE section (baselines fold fine samples directly) |
 | **Fine ring** | one `EvidenceSample` per node per sample tick | ~40 min | `DEFAULT_MAX_SAMPLES = 240` (at the 10 s cadence) | recent-window detectors + the outcome after-window verifier |
 
-The two are held in separate maps: `const fine: EvidenceMap = new Map()` and `const coarse = new Map<number, CoarseBucket[]>()`. The fine ring has a **1 h staleness gate** (`DEFAULT_MAX_AGE_MS = 60·60·1000`) that applies *only* to it on load; coarse buckets are pruned individually to the 14-day horizon. A 3-day-old coarse bucket is valid history, not stale state. The load-time reasoning is explicit in the header: *"a daily power blip cannot wipe two weeks of baseline history."* `COARSE_BUCKET_MS = 30·60·1000` is exported because measured route stability (`routeStability`) needs the bucket width to state the span it covers.
+The two are held in separate maps: `const fine: EvidenceMap = new Map()` and `const coarse = new Map<number, CoarseBucket[]>()`. The fine ring has a **1 h staleness gate** (`DEFAULT_MAX_AGE_MS = 60·60·1000`) that applies *only* to it on load; coarse buckets are pruned individually to the 14-day horizon. A 3-day-old coarse bucket is valid history, not stale state. The load-time reasoning: a daily power blip must not wipe two weeks of coarse history. `COARSE_BUCKET_MS = 30·60·1000` is exported because measured route stability (`routeStability`) needs the bucket width to state the span it covers.
 
 ### 5.2 The per-sample shape
 
@@ -1572,7 +1575,7 @@ interface CoarseBucket {
 
 The fold has a **backward-clock-step guard**: if a sample's `t0` lands in an *earlier* bucket than the ring's last (an NTP step-back), it never appends an out-of-order or duplicate `t0`. It searches back up to 4 buckets for an exact `t0` match to fold into; if none is nearby it **drops the fold** (the fine tier has already nulled that sample's deltas anyway). Pruning to the horizon happens cheaply, only when a new bucket is born: `while (ring[0].t0 < s.t - coarseHorizonMs) ring.shift()`.
 
-An all-quiet bucket — no fresh observations, no events, no traffic — is **omitted from disk** by `bucketWorthPersisting(b)`. A missing bucket contributes exactly what it should to a baseline: nothing. On load, `normalizeCoarseRing()` re-sorts by `t0` and **merges duplicate-`t0` buckets**, repairing any ring written by the pre-fix fold after a clock step.
+An all-quiet bucket — no fresh observations, no events, no traffic — is **omitted from disk** by `bucketWorthPersisting(b)`. A missing bucket contributes exactly what it should to every sum read from the tier: nothing. On load, `normalizeCoarseRing()` re-sorts by `t0` and **merges duplicate-`t0` buckets**, repairing any ring written by the pre-fix fold after a clock step.
 
 ### 5.6 The controller ring (+ reserved background channels)
 
@@ -1680,7 +1683,7 @@ The producer is `zwaveData.sampleEvidence()` (`zwaveData.ts`), fired on `evidenc
 4. Attach `s2Resyncs` (the drained `s2Accum` count, stored as `dS2Resync`; `null`, never 0, unless the S2 log lane has watched this sample's whole window without a break and the driver log's node filter includes the node — §6.11), then the driver-WS telemetry (`lastSeen`, `isListening`, `isFrequentListening`) or `null`.
 5. `record(...)` → `guardedDeltas` → push to fine ring (bounded) → `foldCoarse` → bump coverage → `dirty = true`.
 6. Controller: `ctrlFresh = ctrlStats !== prevCtrlStatsRef`; attach `bg` RSSI only if `≤ 90 s` fresh and `driverHomeOk()`; `recordController(...)`.
-7. `runEngine(now)` — the just-recorded samples are read straight back out via `forNode` / `coarseForNode` / `controllerSamples` / `coverage` / `rateRun` / `recordingSince` by `detectSymptoms(...)`, then folded into baselines (quarantining symptomatic nodes so the baseline never chases the pathology). The route-failure ring (`routeFailures`) is not a detector input: its readers are TOPOLOGY's Route-failures panel (§5.7, §3.7) and, since v0.68.0, `sensor.zwave_tui_route_failures` (§12.11).
+7. `runEngine(now)` — the just-recorded samples are read straight back out via `forNode` / `controllerSamples` / `coverage` / `rateRun` / `recordingSince` by `detectSymptoms(...)`, then folded into baselines (quarantining symptomatic nodes so the baseline never chases the pathology). The route-failure ring (`routeFailures`) is not a detector input: its readers are TOPOLOGY's Route-failures panel (§5.7, §3.7) and, since v0.68.0, `sensor.zwave_tui_route_failures` (§12.11).
 
 On shutdown (`stop()` in `zwaveData.ts`) the store is flushed once more. The reader side — `baselines.ts`, `symptoms.ts`, `interference.ts`, `outcomes.ts` — never mutates the store; it only queries the accessor methods, which return the live in-memory arrays (`forNode` returns `fine.get(nodeId) ?? []`).
 
@@ -2166,7 +2169,7 @@ NVM backup. A storm PAUSE (v0.76.0) is different: the subscription stays
 acknowledged, so a reading taken before the pause keeps its own 2-minute
 deadline, and a pause never creates a hold by itself. At `verbose` and finer
 the busiest minute is likeliest inside the NVM backup, the very blackout the
-gate exists for. Every other signal is unaffected.
+gate exists for. The missed-report watch also gives each sleeper one more interval while the stream is not watched (§11.12). Every other signal is unaffected.
 
 #### Into the evidence store
 
@@ -3012,7 +3015,7 @@ Three properties matter here:
 
 1. **The write-actions master gate blocks everything executable.** If `ctx.writeActions` is false, every action candidate is blocked regardless of node type: a gated one reads `write actions off`, and the rest keep their own reason (a fixed anti-pattern reason, or `refreshValues`' Dead-node reason). (This is why `quiet-node`/`dead-flap` need their ungated physical fallback — otherwise, with write-actions off, they'd render an all-blocked plan.)
 2. **`{probes: true}` is applied to the ping candidates only** — `ping` on `dead-flap`, `node-down`, `quiet-node` and `edge-cluster`. For those, an absent snapshot yields `'node not in roster — probe withheld'` and a battery/FLiRS node yields `'battery/FLiRS — probe skipped'`. `refreshValues` and the `chatty-device` re-interview also transmit to the node, but they are gated without it, so neither is withheld from a battery or FLiRS node.
-3. **The probe gate FAILS CLOSED on a missing node.** When the snapshot is `undefined` — a roster miss where "the symptom outlived the node in the roster" — the planner cannot *prove* the probe is safe, so it withholds it rather than assuming a mains, always-listening node. The gated non-probe candidates — `removeFailed` and the `chatty-device` re-interview — call `gateExecutable` without `probes`, so only the write-actions master switch gates them (the `s2-desync` re-interview carries its fixed reason instead). `refreshValues` adds one precondition (v0.70.0): on a node whose status is Dead it is blocked `node is Dead — zwave-js skips a value refresh on a Dead node, so this would send nothing`, whatever the gate says, because the driver's refresh task returns without querying a Dead node while Home Assistant still reports success.
+3. **The probe gate FAILS CLOSED on a missing node.** When the snapshot is `undefined` — a roster miss where "the symptom outlived the node in the roster" — the planner cannot *prove* the probe is safe, so it withholds it rather than assuming a mains, always-listening node. The gated non-probe candidates — `refreshValues`, `removeFailed` and the `chatty-device` re-interview — call `gateExecutable` without `probes`, so only the write-actions master switch gates them (the `s2-desync` re-interview carries its fixed reason instead). `refreshValues` adds one precondition (v0.70.0): on a node whose status is Dead it is blocked `node is Dead — zwave-js skips a value refresh on a Dead node, so this would send nothing`, whatever the gate says, because the driver's refresh task returns without querying a Dead node while Home Assistant still reports success.
 
 **Rebuild is only ever a blocked "NOT recommended" candidate.** There is no code path in `planFor` where `healNode` is emitted with `blocked: null`. In every arm that mentions it, the rebuild candidate is either (a) suppressed entirely because the node is LR, or (b) present solely as a caveated anti-pattern with a `blocked` reason — `no topology change — won't help` (return-path), `no topology change` (rate-fallback), `physical-link symptom — won't settle it` (route-churn), or `no topology change — fix the path first` (repeated-frames). This matches RESEARCH §4.1/§4.2: a rebuild only helps on a genuine topology change (evidence HA's WS cannot provide), it can regress a working route, and it deletes manually-set priority routes.
 

@@ -239,7 +239,7 @@ Per-node learned "normal", split by **time-of-day band** and — for rssi/rtt �
 mixture baseline both false-fires on benign re-routes and mask-inflates MAD).
 Baselines are **persisted aggregates** (incremental quantile structures per
 node × series × band), updated from each new fine sample (rssi/rtt from
-fresh samples only), in the same schema-versioned envelope — they must
+fresh samples only), in their own schema-versioned file (`baselines.json`) — they must
 survive restarts and outages; the raw fine ring's 1 h staleness cap does NOT
 apply to them.
 

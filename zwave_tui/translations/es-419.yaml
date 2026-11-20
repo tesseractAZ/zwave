@@ -251,7 +251,7 @@ configuration:
       Segundos entre muestras de evidencia: el ciclo del motor de detección
       (síntomas, líneas base aprendidas, decisiones del ensayo de refresco). No
       sondea nada: las estadísticas de los nodos y del controlador llegan a
-      medida que Z-Wave JS las informa. Un valor mayor alarga el lapso de las 240 muestras recientes del controlador detrás de las tasas del enlace serie y la tendencia del piso de ruido de la pantalla INTERFERENCE (unos 40 minutos con el valor predeterminado) y vuelve más lenta la
+      medida que Z-Wave JS las informa. Un valor mayor alarga el lapso de las 240 muestras recientes del controlador detrás de las tasas del enlace serie de la pantalla INTERFERENCE (unos 40 minutos con el valor predeterminado) y el de las 24 más recientes que dibuja su tendencia del piso de ruido (unos 4 minutos) y vuelve más lenta la
       detección. Predeterminado 10 s. Rango 5–120.
   log_level:
     name: Avanzado · Nivel de registro

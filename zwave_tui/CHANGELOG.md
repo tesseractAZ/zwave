@@ -8,14 +8,15 @@ does. Nothing the add-on does has changed.
 
 ### Corrected — the option descriptions (English and Spanish)
 
-- **Login for direct access** (`auth_enabled`): SSH needs it, and while it is
+- **Require login (direct access)** (`auth_enabled`): SSH needs it, and while it is
   off every SSH login is refused. A web-console connection that does not come
   through the HA sidebar (possible only from Home Assistant's internal add-on
   network; port 8788 is not published on the LAN) opens with no login while it
   is off.
-- **Failed attempts** (`auth_max_attempts`): the count starts an escalating
+- **Max login attempts** (`auth_max_attempts`): the count starts an escalating
   back-off per address (5 s, doubling, up to 5 min), kept across reconnects;
-  the description said the connection was dropped.
+  the description said the connection was dropped, which only the web
+  console's login screen does.
 - **Idle re-lock** (`auth_idle_lock_min`): it re-locks web-console sessions
   only. A web-console connection idle for 5 minutes is also closed and
   reconnects, so an idle gated session meets the login screen after 5 minutes
@@ -36,7 +37,7 @@ does. Nothing the add-on does has changed.
 ### Corrected — the documents
 
 A scan of every `.md` file against the code, and a second review of the
-corrected text as a whole, found 269 statements that the code or another
+corrected text as a whole, found 279 statements that the code or another
 document contradicts; each is corrected in `DOCS.md`, `README.md`,
 `DESIGN.md`, `PERFORMANCE.md`, `SECURITY.md` or `RESEARCH.md`, or in the
 option descriptions. `RESEARCH.md` now marks the parts of its design that are
