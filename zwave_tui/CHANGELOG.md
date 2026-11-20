@@ -8,11 +8,11 @@ does. Nothing the add-on does has changed.
 
 ### Corrected — the option descriptions (English and Spanish)
 
-- **Require login (direct access)** (`auth_enabled`): SSH needs it, and while it is
-  off every SSH login is refused. A web-console connection that does not come
-  through the HA sidebar (possible only from Home Assistant's internal add-on
-  network; port 8788 is not published on the LAN) opens with no login while it
-  is off.
+- **Require login (direct access)** (`auth_enabled`): SSH needs it, and while
+  it is off every SSH login is refused. A web-console connection that does not
+  come through the HA sidebar (possible only from Home Assistant's internal
+  add-on network; port 8788 is not published on the LAN) opens with no login
+  while it is off.
 - **Max login attempts** (`auth_max_attempts`): the count starts an escalating
   back-off per address (5 s, doubling, up to 5 min), kept across reconnects;
   the description said the connection was dropped, which only the web
