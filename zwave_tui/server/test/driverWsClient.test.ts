@@ -1439,3 +1439,45 @@ test('the state dump reports each node\'s refresh profile: unknown without value
     await srv.close();
   }
 });
+
+test('onHomeId link (v0.79.3): only a link this client did not end reports peerClosedAt — not the first connection, not our own liveness teardown or protocol-error close, not a stop/start', async () => {
+  const srv = await mockServer();
+  const links: (number | null)[] = [];
+  const c = createDriverWsClient({ url: srv.url, callbacks: { onHomeId: (_h, l) => links.push(l.peerClosedAt) }, reconnectBaseMs: 60, livenessMs: 800 });
+  try {
+    // The first connection is ended before its handshake, as by a server
+    // still coming up: that is no driver restart either.
+    srv.configure({ dropBeforeVersion: 1 });
+    c.start();
+    await waitFor(() => c.state() === 'live');
+    assert.equal(srv.connectionCount(), 2);
+    assert.deepEqual(links, [null], 'the first connection proves nothing about the driver');
+    const t0 = Date.now();
+    // The server ends the link and is not back at the first retry: a failed
+    // attempt between the close and the handshake must not lose the close.
+    srv.configure({ dropBeforeVersion: 1 });
+    srv.dropClient();
+    await waitFor(() => links.length === 2 && c.state() === 'live');
+    assert.ok(links[1] != null && links[1] >= t0 && links[1] <= Date.now(), `the server ended it: ${links[1]}`);
+    // Our own liveness check ends a link whose pings go unanswered, and the
+    // next connection is ended before its handshake.
+    srv.configure({ dropBeforeVersion: 1 });
+    srv.stall();
+    await waitFor(() => links.length === 3 && c.state() === 'live', 6000);
+    assert.equal(links[2], null, 'a link we ended ourselves is not a driver start');
+    // A malformed frame: the client's own ws library closes the link.
+    srv.sendMalformed();
+    await waitFor(() => links.length === 4 && c.state() === 'live');
+    assert.equal(links[3], null, 'a link closed on a protocol error is not a driver start');
+    // The server drops it, but a deliberate stop/start comes first.
+    srv.dropClient();
+    await waitFor(() => c.state() === 'backoff');
+    c.stop();
+    c.start();
+    await waitFor(() => links.length === 5 && c.state() === 'live');
+    assert.equal(links[4], null, 'a stop clears it');
+  } finally {
+    c.stop();
+    await srv.close();
+  }
+});

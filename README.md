@@ -54,7 +54,7 @@ health endpoint.
 | --- | --- |
 | Server | about 32,000 lines of TypeScript; 9 screens; SSH, browser and Home Assistant entity interfaces |
 | Detection | 14 per-node detectors, 2 cross-node correlations, controller serial-link health |
-| Verification | 1,737 tests; a mutation-testing harness of 1,729 hand-written mutants (17 labelled equivalent), run in full on each release |
+| Verification | 1,769 tests; a mutation-testing harness of 1,798 hand-written mutants (17 labelled equivalent), run in full on each release |
 | Integration | Home Assistant Core WebSocket (roster, statistics, gated actions) plus a read-only Z-Wave JS driver WebSocket (noise floor, capabilities, log stream) |
 
 ![The Overview screen: a live node table sorted worst-health-first, with per-node health scores, SNR margin, RTT, timeout rate, hop count, data rate and triage flags](docs/screenshots/overview.svg)
@@ -95,7 +95,9 @@ measured evidence:**
    ceiling judges severe slowdowns meanwhile); symptomatic windows are
    quarantined so a fault can't teach the baseline to accept itself.
 3. **Symptom detectors** — degraded return path, dead-flapping, **node down**
-   (a node the driver has marked Dead, past a short dwell), a **quiet node** (a
+   (a node the driver has marked Dead, past a 5-minute dwell, or 90 minutes for
+   a FLiRS or sleeping node at a known driver start; kept across a restart of
+   the add-on), a **quiet node** (a
    mains node that still reads Alive but has gone unheard for at least three
    liveness-sweep cadences, never less than 6 h), rate fallback, high RTT,
    weak signal, **route churn** (the mesh cannot settle on a stable

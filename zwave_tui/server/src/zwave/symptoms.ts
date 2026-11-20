@@ -146,8 +146,21 @@ export interface DwellEntry {
   /** node-down (v0.79.2): raised once, so a later change of the node's
    *  capability flags cannot lengthen its dwell and withdraw it. */
   latched?: true;
+  /** node-down (v0.79.3): judged a start death once, so it stays one — a
+   *  later driver restart, or a deploy that carries only the newest, cannot
+   *  shorten its dwell to the 5-minute one. */
+  start?: true;
 }
 export type SymptomState = Map<string, DwellEntry>;
+
+/** A span the Z-Wave JS driver started within (v0.79.3): `from` ≤ the start ≤
+ *  `to`. A host boot is a point (from = to); a restart seen over the driver
+ *  link runs from the server ending the link to the next handshake. */
+export interface DriverStart { from: number; to: number }
+
+/** One node's node-down dwell, carried across a restart of this add-on
+ *  (v0.79.3). */
+export interface NodeDownCarry { nodeId: number; since: number; latched: boolean; start: boolean }
 
 export interface DetectInput {
   now: number;
@@ -193,11 +206,15 @@ export interface DetectInput {
    *  route change in the sample, and its round trip carries the failed first
    *  attempt. Absent reads as never. */
   ownRerouteAt?: (nodeId: number) => number | null;
-  /** When the Z-Wave driver's connection last started (v0.79.2: the driver WS
-   *  connected, or the zwave_js entry reloaded, whichever is later). A node
-   *  auto-ping does not probe that reads Dead soon after it gets the long
-   *  node-down dwell. Absent reads as unknown. */
-  driverStartedAt?: number | null;
+  /** When the Z-Wave JS driver is KNOWN to have started (v0.79.3), each as the
+   *  span it started within. A node auto-ping does not probe that this run
+   *  first sees Dead inside a span, or up to NODE_DOWN_START_WINDOW_MS after
+   *  it, gets the long node-down dwell. Only positive evidence is a start: the
+   *  host's boot, a driver link the server ended and a later handshake, or
+   *  such a span carried from the previous run on the same boot. This
+   *  add-on's own start is NOT one (v0.79.2 read every handshake as a start,
+   *  its own first included). Absent or empty reads as no known start. */
+  driverStarts?: readonly DriverStart[];
   /** Store-level: epoch ms evidence collection began (coverage floor). */
   recordingSince: () => number | null;
   /** A sleeping node's missed-report watch status, or null for a node that
@@ -306,9 +323,10 @@ export const RTT_CEILING_MS = 300;
 export const RTT_HOLD_MARGIN_MS = 30 * 60_000;
 
 /**
- * How long a node auto-ping does not probe must read Dead, when it went Dead
- * within NODE_DOWN_START_WINDOW_MS of the driver's start, before node-down
- * (v0.79.2). Any other death keeps DWELL_MS.
+ * How long a node auto-ping does not probe must read Dead, when this run first
+ * saw it Dead within NODE_DOWN_START_WINDOW_MS of a known driver start
+ * (`DetectInput.driverStarts`), before node-down (v0.79.2; v0.79.3: known
+ * starts only). Any other death keeps DWELL_MS.
  *
  * After a driver start the driver marks some FLiRS nodes Dead and they read
  * Alive again on their own later: on the reference mesh one FLiRS motion
@@ -320,7 +338,8 @@ export const RTT_HOLD_MARGIN_MS = 30 * 60_000;
  * reading that is still Dead past 90 minutes is raised then.
  */
 export const NODE_DOWN_START_DWELL_MS = 90 * 60_000;
-/** How soon after the driver's start a death counts as a start death (v0.79.2). */
+/** How long after a known driver start a death first seen counts as a start
+ *  death (v0.79.2). */
 export const NODE_DOWN_START_WINDOW_MS = 10 * 60_000;
 
 /**
@@ -753,25 +772,41 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // NOT markDegrading: a dead node contributes no RF readings, and feeding
       // it to the mesh-correlation gate would let a single dead device look
       // like environmental degradation.
-      // A death at the driver's start on a node auto-ping does not probe
+      // A death at a known driver start on a node auto-ping does not probe
       // (FLiRS or sleeping, or capability not yet known; v0.79.2) dwells for
-      // NODE_DOWN_START_DWELL_MS. Any other death keeps DWELL_MS, and one
-      // already raised stays raised (`latched`).
+      // NODE_DOWN_START_DWELL_MS, and once judged a start death stays one
+      // (`start`, v0.79.3). Any other death keeps DWELL_MS. One already
+      // raised stays raised (`latched`): it is raised at once while it reads
+      // Dead, whatever dwell its flags now ask for, and carried across a
+      // restart of this add-on too (v0.79.3, see nodeDownCarry). Unknown is no reading (v0.79.3): a driver restart reads
+      // its nodes Unknown for seconds, and that neither ends a dwell nor
+      // advances it, and a raised one stays raised through it.
       const nk = key(id, 'node-down');
       const ne = state.get(nk);
-      const startedAt = input.driverStartedAt ?? null;
-      const onset = ne?.since ?? now;
-      const atStart = b && ne?.latched !== true && node.isListening !== true
-        && startedAt != null && onset >= startedAt && onset - startedAt <= NODE_DOWN_START_WINDOW_MS;
-      const since = dwell(state, nk, b, now, atStart ? NODE_DOWN_START_DWELL_MS : DWELL_MS);
+      const noReading = node.status === NS.Unknown && ne != null;
+      let since: number | null = null;
+      if (noReading) {
+        if (ne.latched === true) since = ne.since;
+      } else {
+        const onset = ne?.since ?? now;
+        const atStart = b && node.isListening !== true
+          && (ne?.start === true || (input.driverStarts ?? []).some((s) => onset >= s.from && onset - s.to <= NODE_DOWN_START_WINDOW_MS));
+        since = dwell(state, nk, b, now, atStart ? NODE_DOWN_START_DWELL_MS : DWELL_MS);
+        const e = state.get(nk);
+        if (e != null && atStart) e.start = true;
+        if (since == null && e?.latched === true) since = e.since;
+      }
       if (since != null) {
         state.get(nk)!.latched = true;
         breaching = true;
-        const downFor = Math.max(0, Math.round((now - since) / 60_000));
+        // Dead time only: an Unknown stretch is no reading (v0.79.3).
+        const downFor = Math.max(0, Math.round(((noReading ? state.get(nk)!.lastSeen : now) - since) / 60_000));
         out.push({
           kind: 'node-down', nodeId: id, severity: 'crit', sinceMs: since, basis: 'measured',
-          evidence: [{ label: 'driver status', value: `Dead for ${downFor}m` }],
-          narrative: `${node.name} is marked Dead by the driver — a transmission to it failed and has not since succeeded. Silence alone would not prove this; the status is a measured verdict. A ping often revives a node whose radio is still there.`,
+          evidence: [{ label: 'driver status', value: noReading ? `Unknown now; Dead for ${downFor}m before` : `Dead for ${downFor}m` }],
+          narrative: noReading
+            ? `${node.name} read Dead for ${downFor} min and its status is now Unknown, which is no reading: the node-down stays raised until the node reads Alive, Awake or Asleep.`
+            : `${node.name} is marked Dead by the driver — a transmission to it failed and has not since succeeded. Silence alone would not prove this; the status is a measured verdict. A ping often revives a node whose radio is still there.`,
         });
       }
     }
@@ -1347,6 +1382,46 @@ export function heldSymptoms(state: SymptomState): { key: string; nodeId: number
   }
   return out;
 }
+
+/**
+ * The node-down dwells to carry across a restart of this add-on (v0.79.3).
+ * The dwell state lives in memory: without this a restart withdrew a raised
+ * node-down (`latched`) and re-armed it from the restart, so an outage already
+ * known read clear until it matured again — and, while v0.79.2 read the
+ * add-on's own start as a driver start, for 90 minutes on a FLiRS node.
+ */
+export function nodeDownCarry(state: SymptomState): NodeDownCarry[] {
+  const out: NodeDownCarry[] = [];
+  for (const [k, e] of state) {
+    if (!k.endsWith(NODE_DOWN_SUFFIX)) continue;
+    const id = Number(k.slice(0, -NODE_DOWN_SUFFIX.length));
+    if (Number.isInteger(id) && id > 0) out.push({ nodeId: id, since: e.since, latched: e.latched === true, start: e.start === true });
+  }
+  return out;
+}
+
+/**
+ * Seed carried node-down dwells (v0.79.3) for the nodes `keep` admits, never
+ * over an entry this run already holds. Nothing else is trusted: the detector
+ * re-judges each one on its next tick, and a node that does not read Dead
+ * there drops it, as any dwell is dropped. A `since` ahead of `now` (a host
+ * without a clock battery boots behind its last save) is taken as `now`; a
+ * raised one is raised at once all the same, dated from the restart. Returns
+ * how many were seeded.
+ */
+export function seedNodeDown(state: SymptomState, carried: readonly NodeDownCarry[], keep: (nodeId: number) => boolean, now: number): number {
+  let n = 0;
+  for (const c of carried) {
+    const k = key(c.nodeId, 'node-down');
+    if (!keep(c.nodeId) || state.has(k)) continue;
+    const since = Math.min(c.since, now);
+    // lastSeen: Dead as of the restart, as far as this run knows.
+    state.set(k, { since, lastSeen: now, hits: 1, ...(c.latched ? { latched: true as const } : {}), ...(c.start ? { start: true as const } : {}) });
+    n += 1;
+  }
+  return n;
+}
+const NODE_DOWN_SUFFIX = ':node-down';
 
 export function armingNodes(state: SymptomState): Set<number> {
   const s = new Set<number>();

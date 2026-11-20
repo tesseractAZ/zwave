@@ -79,8 +79,16 @@ export interface DriverWsCallbacks {
   onNodeLastSeen?: (nodeId: number, lastSeen: number) => void;
   /** Node capability flags from the state dump (listening / FLiRS). */
   onNodeFlags?: (nodeId: number, flags: { isListening: boolean | null; isFrequentListening: boolean | null }) => void;
-  /** The server's homeId (from the version handshake) — caller cross-checks vs HA. */
-  onHomeId?: (homeId: number) => void;
+  /** The server's homeId (from the version handshake) — caller cross-checks vs HA.
+   *  `link.peerClosedAt` (v0.79.3): when a handshaken link last ended without
+   *  this client ending it (the server or the network ended it), if one did
+   *  since the last handshake, else null. Then the server — and the driver in
+   *  it — went away and came back between that moment and this handshake, or
+   *  (not told apart) the server dropped this client or the network did.
+   *  Null on this client's first connection and after a link this client
+   *  ended itself (a liveness or handshake timeout, a protocol error), which
+   *  prove nothing about the driver. */
+  onHomeId?: (homeId: number, link: { peerClosedAt: number | null }) => void;
   /** An S2 SPAN-resync log event was attributed to a node (v0.26). */
   onS2Resync?: (nodeId: number) => void;
   /** The driver dropped a node's S2 frame as a duplicate (v0.74.0). */
@@ -581,6 +589,14 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   let lastMsgAt = 0;
   let negotiatedSchema: number | null = null;
   let serverHomeId: number | null = null;
+  /** The current socket completed the version handshake (v0.79.3). */
+  let handshook = false;
+  /** When a handshaken link ended without this client ending it, until the
+   *  next handshake reports it (v0.79.3). Our own teardowns strip the close
+   *  listener first, and a protocol error clears `handshook` before the close
+   *  the ws library then sends itself, so only the peer's close (or the
+   *  network's) can set it. */
+  let peerClosedAt: number | null = null;
   let statusLine = url ? 'not started' : 'disabled (no driver_ws_url)';
   let msgId = 0;
   /** Log-stream state — all per-connection, reset in connect(). */
@@ -740,6 +756,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   function connect(): void {
     if (stopped || state === 'dormant' || !url) return;
     teardownSocket('reconnecting');
+    handshook = false;
     logsMsgId = null;
     // A blackout observed on the OLD connection says nothing about the new one,
     // and a `Turning RF on` that lands while we are disconnected is lost — so
@@ -831,10 +848,14 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       }
     });
     sock.on('error', (e: Error) => {
-      // 'close' follows; reconnect scheduled there.
+      // 'close' follows; reconnect scheduled there. A protocol error (a frame
+      // too large or malformed) the ws library answers by closing the link
+      // itself: that close is ours, not the driver going away (v0.79.3).
+      if (String((e as NodeJS.ErrnoException).code ?? '').startsWith('WS_ERR_')) handshook = false;
       log(`driver-ws: socket error (${e.message})`);
     });
     sock.on('close', () => {
+      if (handshook) peerClosedAt = Date.now();
       teardownSocket();
       if (state !== 'dormant' && !stopped) scheduleReconnect('connection closed');
     });
@@ -846,9 +867,12 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
         const v = m as unknown as VersionMsg;
         const serverMin = typeof v.minSchemaVersion === 'number' ? v.minSchemaVersion : 0;
         const serverMax = typeof v.maxSchemaVersion === 'number' ? v.maxSchemaVersion : 0;
+        handshook = true;
         if (typeof v.homeId === 'number') {
           serverHomeId = v.homeId;
-          cb.onHomeId?.(v.homeId);
+          const link = { peerClosedAt };
+          peerClosedAt = null;
+          cb.onHomeId?.(v.homeId, link);
         }
         if (serverMax <= 0) {
           // No usable schema range ⇒ not a zwave-js-server we understand (wrong
@@ -1230,6 +1254,9 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
         reconnectTimer = null;
       }
       teardownSocket('stopped');
+      // A deliberate stop is ours: the next start() proves nothing about the
+      // driver from the link it ended.
+      peerClosedAt = null;
       setState(url ? 'stopped' : 'disabled', 'stopped');
     },
     state: () => state,

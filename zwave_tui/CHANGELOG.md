@@ -1,5 +1,98 @@
 # Changelog
 
+## 0.79.3
+
+A deploy, update or restart of this add-on no longer withdraws a raised
+`node-down` or reads as a driver start: raised node-downs and waiting start
+deaths outlive the add-on, and only a driver start the add-on can show opens
+node-down's start window, where a death waits 90 minutes. The update from
+0.79.2 itself carries nothing, since 0.79.2 wrote no carry: a node-down raised
+at the update is raised again 5 minutes after it, and so is a FLiRS start
+death still waiting at the update.
+
+### Fixed — a restart of this add-on held back a FLiRS node's node-down for 90 minutes (0.79.2)
+
+- 0.79.2 took the driver's start from every driver-WS handshake, this add-on's
+  own first one included, and kept its dwell state in memory. After a deploy,
+  update or restart, a node auto-ping does not probe that was already Dead,
+  its `node-down` raised, read as a new start death: the critical card and
+  `binary_sensor.zwave_tui_degraded` cleared and came back 90 minutes later.
+  Reproduced through the real data layer; it did not occur on the reference
+  mesh, where nothing was Dead at the 0.79.2 deploy.
+- Only a known driver start opens the window: the host's boot, as now minus
+  uptime on each tick (a start verdict, once taken, stays; a forward clock
+  step during a death's 5-minute dwell can still make it one); or a
+  driver-WS link this add-on did not end itself followed by a new handshake,
+  read as a driver start between the two, with the window running to 10
+  minutes after the handshake
+  (a network drop, or the server dropping this client, is not told apart from
+  a restart); or such a restart carried from the previous run on the same
+  boot. The add-on's own first handshake, and a link it ended itself (a
+  liveness or handshake timeout, or a malformed frame its WebSocket library
+  closes on), are not driver starts. A Z-Wave JS restart the add-on did not
+  see keeps the 5-minute dwell.
+- A death judged a start death stays one: a later driver restart, or a deploy
+  that carries only the newest restart, no longer cuts its 90 minutes to 5.
+- Node-down dwells are carried in `evidence.json` (optional `nodeDown` and
+  `driverStart` fields; the schema is unchanged) and seeded at the next run's
+  first engine tick, for nodes still on the roster. On the same boot every
+  dwell is carried: a raised node-down is raised again on that tick, dated
+  from the outage, and a start death still waiting keeps its own onset. After
+  a host reboot only raised node-downs are carried, without a driver start; a
+  dwell still waiting began before that boot's own start, and the next Dead
+  reading starts it again, so a FLiRS node's real outage under 5 minutes old
+  at a reboot is raised 90 minutes after the reboot's first Dead reading.
+- A carried dwell is judged again on that tick: a node that reads Alive,
+  Awake or Asleep drops it. A raised node-down is raised at once while the
+  node reads Dead. A host without a clock battery that boots behind its last
+  save keeps the carry only when the add-on starts within its 180-second boot
+  grace (the outage is then dated from the restart); started later, a save
+  dated ahead of the clock is discarded, the carry with it.
+- Unknown is no reading: a driver restart reads its nodes Unknown for seconds,
+  and that no longer ends a node-down dwell or withdraws a raised one. Its
+  card counts Dead time only and says the status is Unknown.
+- Home Assistant is sent nothing until the engine's first tick after a
+  restart, so `binary_sensor.zwave_tui_degraded` is not sent off before a
+  carried node-down is raised again.
+- A raised node-down, a start death and a newly seen driver restart are saved
+  within a minute rather than at the next 15-minute flush, so a power cut or
+  crash restart does not lose them, at most one such save a minute. A change
+  in the carry saves the store even when no sample was recorded; an unchanged
+  carry writes nothing. A carry of another network is not written, also after
+  a change of network while running, and a node that leaves the network
+  takes its dwells with it.
+- Auto-ping's driver-restart burst refusal (0.65.0) still reads every
+  handshake: right after this add-on's start no probe has been sent, so it
+  withholds nothing there.
+
+### Corrected
+
+- 0.79.2's "a node-down already raised stays raised" held only within one run
+  of the add-on. From 0.79.3 it holds across restarts of the add-on and host
+  reboots, and through an Unknown reading.
+
+### Tests
+
+- 32 new tests: the start window over a span and its bounds; a start death
+  staying one through a later restart; Unknown as no reading; a raised
+  node-down carried and raised on the next first tick, clamped or not; a
+  start death still waiting across a deploy, with and without a known start;
+  a carried dwell judged again; the carry in the evidence store (same boot,
+  another boot, boot grace, another network, malformed entries, a carry change
+  alone saving the store, the same carry in another order writing nothing);
+  the driver link reporting only a link this add-on did not end; and, through
+  the real data layer and a mock driver server, a deploy with a raised FLiRS
+  node, a deploy with nothing carried, a host reboot with a start death and
+  with a raised node-down saved at once, a Z-Wave JS restart seen over the
+  link and carried, a wall clock jumping ahead of uptime before and after a
+  death's first reading, the default uptime source, a carried node-down that
+  ends on the first tick saved at once, the prompt save's spacing, a node that
+  left the network, and nothing published before the engine's first tick.
+- 70 new mutation-harness entries, none declared equivalent; 4 existing
+  entries re-anchored to the rewritten lines, and 1 retired with the check it
+  covered (a raised node-down is now raised at once whatever its flags ask
+  for, pinned by its own entry).
+
 ## 0.79.2
 
 A held `rtt-degraded` breach now ends on two normal round trips, as a breach
@@ -32,7 +125,7 @@ start waits 90 minutes before it is a critical outage.
   breach is not held, so one that never comes lets it go at the window's end,
   as before. Each doubt costs at most one probe per round trip asked about.
 - A slow round trip read across a route change (one the driver reports, or
-  our own routed read failing over) no longer refreshes a hold. It owes a
+  the add-on's own routed read failing over) no longer refreshes a hold. It owes a
   confirmation, and the reading before it holds to its own deadline
   meanwhile. A 1194 ms read taken as a node re-routed to 100 kbps had carried
   a hold for two more hours; whether the node was still slow, the data cannot
@@ -69,7 +162,7 @@ start waits 90 minutes before it is a critical outage.
 - 13 new tests: the hold confirmed both ways (a lone normal round trip owes a
   confirmation, a slow answer keeps the hold, an unanswered doubt lets go, two
   normal round trips release it, two in one tick at once, nothing asked with
-  the sweep off), re-route reads (a reported route change, our own failover,
+  the sweep off), re-route reads (a reported route change, the add-on's own failover,
   the span's bounds, a normal answer ending the doubt), node-down's
   start-scoped dwell and its latch, the settle guard waiting for a planned
   probe kept apart from the sent one, the planned stamp at each slot, and the
@@ -164,7 +257,7 @@ and one tick's probes no longer go out in the same millisecond.
   at a later slot, the step, the ladder's attempt and backoff given back, a
   re-owed dead-lane read, the burst gap between slots, production's default
   timer), and a contract pin that production keeps the default spacing.
-- 48 new mutation-harness entries, three of them declared equivalent; 43
+- 48 new mutation-harness entries, three of them declared equivalent; 31
   existing entries re-anchored to the rewritten lines.
 
 ## 0.79.0
@@ -258,8 +351,7 @@ The app is published as stable.
   yellow "Experimental" chip on the app's info page. It now declares
   `stage: stable`, the Supervisor's default, and the chip is gone.
 - The Supervisor reads an installed app's stage from the copy it saved at
-  install or update, so the badge goes away with this update, not with a
-  store reload.
+  install or update, not from the store.
 
 ### Tests
 
@@ -419,128 +511,6 @@ single probe instead of a 10-probe episode.
   confirmations replace the 140 burst probes 0.77.3 spent on one-frame
   episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
 - 31 new tests; 99 new mutation entries, 7 re-anchored.
-
-## 0.77.3
-
-The RTT restart allowance now survives a deploy, and the RTT baseline's
-restart hold judges a re-routed node against its own readings.
-
-### Fixed — the restart seed across an add-on restart
-
-- v0.77.1 kept each node's first fresh RTT reading of a driver lifetime, the
-  seed the restart allowance is measured from, in memory only. After every
-  add-on restart the next fresh reading became the seed, so its excess over
-  the node's median counted as restart. The 2 s ceiling caps that once the
-  driver has made about 20 transmissions to the node, but on a quiet mesh
-  that takes hours, and until then a slowdown first measured on that reading
-  was masked and fired from a later one, about one liveness sweep (~2 h)
-  later on a sweep-only node. The v0.77.1 comments and DOCS said the ceiling
-  always capped it; the morning after a host restart on the reference mesh
-  the re-taken seed was the smaller bound on 37 of 38 nodes.
-- The evidence store now saves each node's seed with the counters of its
-  newest sample, and carries the seeds over an add-on restart while the
-  driver can still be the one that measured them: the host is on the same
-  boot (told by when the boot began, which a clock restored behind the save
-  cannot fake), the save is under an hour old, and no node's first sample
-  after the restart has a counter below its saved one. One driver keeps every
-  node's counters, so a single node showing a new driver drops every carried
-  seed. A seed that cannot be carried is re-taken from the next fresh
-  reading, as before.
-
-### Fixed — the RTT baseline's restart hold
-
-- A route change empties a node's RTT bands, and an empty band's median reads
-  0, so the hold counted a re-routed node's whole round trip as restart and
-  kept normal readings out of the new band (four of 38 nodes on 10-28). With
-  no learned median the seed is now measured against what the driver
-  averaged after it, `(rtt − 0.75^(k − k0) × a0) / (1 − 0.75^(k − k0))`: a
-  normal seed holds nothing past its own reading, and a large one is held
-  while it washes out. An empty band is never ready, so no alarm changes.
-- DETAIL's *RTT learning is PAUSED* showed on every node within ~21
-  transmissions of a driver restart after each add-on restart (38 of 38 on
-  10-28), though nothing was held until the next fresh reading. It now
-  reports the verdict on the node's newest RTT reading, for as long as the
-  driver lifetime it was judged in lasts.
-- The hold judges a reading at the transmission count it was recorded with.
-  The roster's copy, polled apart from the statistics feed, could trail it,
-  and at the trailing count the 2 s ceiling held a reading the seed allowed.
-- A tick on which the settle rule deferred a node folded that node's previous
-  sample into its baselines a second time. Each sample is now folded once.
-
-Tests pin these — the seed carried over a restart and not over a host
-restart (also with a clock restored behind the save), an hour-old save or
-the boot grace, any node's lower counter
-dropping every carried seed (taken up or not, and after a live restart), a
-carried seed kept through a save before its node samples, a reset, reload
-or eviction forgetting it, the fold's yardstick for a band with a median and
-for an empty one (a steady node, a washing-out seed, the seed reading
-itself), the banner's set, standing, cleared and lapsed verdicts, one fold
-per sample, and the recorded count — and 28 new mutants (eight existing ones
-re-anchored) show each guard is load-bearing.
-
-## 0.77.2
-
-### Security — dependency updates
-
-- `fastify` 5.12.5 → 5.12.7: a route's headers schema could be bypassed
-  through a case-sensitive `propertyNames` keyword.
-- `fast-uri` 3.1.8 → 3.1.9 and 4.2.1 → 4.2.3, both reached through the HTTP
-  server's schema compilers: scheme spoofing through a percent-encoded scheme,
-  host confusion through unchecked WHATWG host canonicalisation, scheme
-  injection through an unescaped colon in a reference's first segment, and
-  path equivalence in relative-reference normalisation.
-
-No route in the add-on declares a validation or response schema, so none of
-these paths is reached. No code change. `npm audit` reports no
-vulnerabilities in production dependencies.
-
-## 0.77.1
-
-`rtt-degraded` no longer fires on the round-trip average a Z-Wave JS restart
-leaves behind.
-
-### Fixed — `rtt-degraded` after a driver restart
-
-- zwave-js keeps each node's round-trip time as a running average, in memory
-  only. A restart seeds it with one measurement from the restart's own burst,
-  and every later acknowledged transmission keeps 0.75 of it. On the reference
-  mesh most nodes' first reading after a restart was normal, but a few read up
-  to about 1.4 s against a 20–60 ms normal, and on quiet nodes that took
-  6–12 h to wash out. Every fresh statistics event from such a node re-tripped
-  `rtt-degraded`: nine 5–8 min symptoms in the 5 h after the 10-24 restart,
-  against 1–7 symptom onsets a day before.
-- The detector now subtracts what the restart can still be adding before its
-  usual test: the smaller of a fixed ceiling,
-  `0.75^(commandsTX − 1) × (2 s − median)`, and the exact share of the first
-  fresh reading the add-on saw after the restart,
-  `0.75^(commandsTX − k0) × (a0 − median)`. A node whose first reading was
-  normal is back at full sensitivity within a few transmissions; a slowdown
-  measured after a large seed still fires, with a `restart allowance`
-  evidence row. A node with no transmission yet in the new lifetime gets no
-  allowance.
-- The RTT baseline no longer learns a reading the restart can still move by
-  more than 8 ms, by the same bound. Until now those readings were kept out
-  only while they tripped `rtt-degraded`. DETAIL says when this pauses RTT
-  learning: *RTT learning is PAUSED — the driver restarted N tx ago*.
-
-Tests pin these — the seed's exact weight, no allowance before the first
-transmission, the first reading's bound and its cap, a seed-sized reading that
-neither fires nor arms, a normal first reading that restores full sensitivity,
-new excess under a large seed that still fires, the allowance subtracted to
-the millisecond, the store keeping each lifetime's first fresh reading, and
-the baseline holding out the RTT reading on a copy, against the band's own
-median, and nothing else — and 33 new mutants (one existing mutant
-re-anchored) show each guard is load-bearing.
-
-Two older checks a mutant slipped past are tightened: the auto-ping wiring
-check reads only auto-ping's own options (the refresh trial's copy has its
-own check and mutant), and zero samples must show the fresh share as a bare
-dash.
-
-### Documented
-
-- The README's verification figures are corrected: 1,632 tests, and 1,487
-  mutants in the harness, 13 of them labelled equivalent.
 
 ## Older releases
 

@@ -386,7 +386,9 @@ async function main(): Promise<void> {
       haError: client.lastError(),
       // WHAT THE ENGINE CONCLUDED — the half this endpoint never carried.
       // Same values published as HA states, so a monitor polling here and an
-      // automation triggering there can never disagree about the mesh.
+      // automation triggering there agree about the mesh — except after a
+      // restart, before the engine's first tick, when HA is sent nothing yet
+      // (v0.79.3) and this endpoint already reports.
       degraded: degraded?.state === 'on',
       degradedReason: degraded?.attrs.reason ?? 'none',
       engine: Object.fromEntries(

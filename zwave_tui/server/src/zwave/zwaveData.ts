@@ -30,6 +30,7 @@
  * (the latter rejects with `invalid_format`).
  */
 
+import { uptime as osUptime } from 'node:os';
 import type { IdentityChoice, IdentityDecision } from './homeTag';
 import type { HaWsClient, HaSubscription } from '../ha/haWsClient';
 import { subsumptionLabel, firstSentence } from '../telnet/ledgerText';
@@ -71,7 +72,7 @@ import { createBaselineStore, bandOf, N_BANDS, RTT_MAD_FLOOR, type BaselineStore
 import { refusalScope } from './planner';
 import { noteDrop, burstsOf, type Burst } from './repeatedFrames';
 import { sleeperWatch, latchWatch, type Declared, type SleeperWatch, type WatchLatch } from './missedReport';
-import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, windowTimeoutRate, rttFoldResidue, rttYardstick, type RttYardstick, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, WEAK_EVENT_LOOKBACK_MS, CHRONIC_DAYS_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
+import { detectSymptoms, symptomaticNodes, armingNodes, heldSymptoms, nodeDownCarry, seedNodeDown, type DriverStart, windowTimeoutRate, rttFoldResidue, rttYardstick, type RttYardstick, WINDOW_MS as SYMPTOM_WINDOW_MS, DWELL_MS as SYMPTOM_DWELL_MS, WEAK_EVENT_LOOKBACK_MS, CHRONIC_DAYS_MS, type Symptom, type SymptomKind, type SymptomState, type Severity } from './symptoms';
 import { createOutcomeStore, windowMetrics, degradedSpan, confirmBurstDue, planEpisodeLifecycle, type OutcomeStore, type Efficacy, rttSeedBefore } from './outcomes';
 import { isPingCandidate, ANSWER_GRACE_MS, type AutoPingSnapshot } from './autoPing';
 import type { ActionRefusal, ActionOrigin, ActionEffect } from './zwaveActions';
@@ -380,6 +381,10 @@ export interface ZwaveDataOptions {
   /** The evidence store's boot-grace window (ms); default its own 180 s. Tests
    *  that restore a ring set 0, so a freshly booted CI runner does not drop it. */
   evidenceBootGraceMs?: number;
+  /** Host uptime (ms), for the host boot as a known driver start (v0.79.3).
+   *  Default os.uptime(). Tests set it: a freshly booted CI runner would
+   *  otherwise open the start window in every test. */
+  uptimeMs?: () => number;
   /**
    * READ-ONLY zwave-js driver WS (v0.13, DESIGN §2.1) — feeds background RSSI
    * (real noise floor), node lastSeen, and listening/FLiRS flags. Empty/null ⇒
@@ -414,8 +419,14 @@ export interface ZwaveData {
   lastUpdated(): number | null;
   /** Epoch ms of the last statistics event (node or controller), or null. */
   lastStatsUpdated(): number | null;
-  /** When the driver-WS link last handshook (v0.65.0), or null. */
+  /** The newer of the latest driver-WS handshake and zwave_js entry reload
+   *  (v0.65.0), or null. A driver restart moves it, and so does this add-on's
+   *  own first handshake: auto-ping's burst refusal only. */
   driverReconnectedAt(): number | null;
+  /** The driver starts known to this run, for node-down's start window
+   *  (v0.79.3): the host boot (now − uptime), a restart seen over the driver
+   *  link, one carried from the previous run on this boot. */
+  driverStarts(now?: number): DriverStart[];
   /** When the controller's receiver went off and has not come back (v0.65.0). */
   controllerRfOffSince(): number | null;
   /** Rolling RSSI/RTT history for a node (for sparklines). */
@@ -1005,9 +1016,22 @@ class ZwaveDataImpl implements ZwaveData {
   /** A (re)subscribe REPLAYS every node's snapshot, so events inside this
    *  window prove nothing about the feed being alive (v0.67.0). */
   private statsReplayUntil = 0;
-  /** When the driver-WS link last completed its version handshake (v0.65.0) —
-   *  i.e. when the driver last (re)started under us. */
+  /** When the driver-WS link last completed its version handshake (v0.65.0):
+   *  a driver (re)start, but also this process's own first connection and a
+   *  reconnect after our own liveness teardown, which are not (v0.79.3). */
   private driverWsConnAt: number | null = null;
+  /** The newest driver restart seen over the link (v0.79.3): the server ended
+   *  a handshaken link at `from` and handshook again at `to`. */
+  private driverRestart: DriverStart | null = null;
+  /** A driver restart the previous run of this add-on saw on this boot. */
+  private carriedDriverStart: DriverStart | null = null;
+  /** The engine has taken the evidence store's restored carry (v0.79.3). */
+  private carryTaken = false;
+  /** What a crash or power cut must not lose, as last saved (v0.79.3): a
+   *  change saves the evidence store at once, at most once a minute. */
+  private promptSavedKey = promptCarryKey([], null);
+  private promptSavedAt = -Infinity;
+  private readonly uptimeMs: () => number;
   /** Node status from the previous poll — diffed to log alive/dead/wake events. */
   private prevStatus = new Map<number, NodeStatus>();
   /** Event + command log ring (newest first), consumed by the Log screen. */
@@ -1097,8 +1121,16 @@ class ZwaveDataImpl implements ZwaveData {
     // writes drop by ~3×. Shutdown still flushes unconditionally.
     const evFlush = opts.evidenceFlushMs ?? Number(process.env.EVIDENCE_FLUSH_MS ?? 900_000);
     this.evidenceFlushMs = Number.isFinite(evFlush) ? evFlush : 900_000;
+    this.uptimeMs = opts.uptimeMs ?? (() => osUptime() * 1000);
     this.evidenceStore = evPath
-      ? createEvidenceStore({ path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log, bootGraceMs: opts.evidenceBootGraceMs })
+      ? createEvidenceStore({
+          path: evPath, cadenceMs: this.evidenceSampleMs, log: this.log, bootGraceMs: opts.evidenceBootGraceMs,
+          ...(opts.uptimeMs ? { uptimeMs: opts.uptimeMs } : {}),
+          // v0.79.3: node-down dwells and the newest known driver restart
+          // outlive this process, so a restart neither withdraws a raised
+          // node-down nor reads as a driver start.
+          carry: () => ({ homeId: this.lastHomeId, nodeDown: nodeDownCarry(this.symptomState), driverStart: this.newestDriverRestart() }),
+        })
       : null;
     const restored = this.evidenceStore?.load();
     // The ring is restored across an add-on restart and the confirmation
@@ -1137,12 +1169,21 @@ class ZwaveDataImpl implements ZwaveData {
           callbacks: {
             onDriverLog: opts.onDriverLog,
             onDriverLogGap: opts.onDriverLogGap,
-            onHomeId: (id) => {
+            onHomeId: (id, link) => {
               this.driverHomeId = id;
-              // A handshake means a NEW driver connection: the driver pings the
-              // mesh itself as it comes up, and auto-ping must not read those
-              // answers as the nodes' own voices (v0.65.0).
-              this.driverWsConnAt = Date.now();
+              // A handshake means a NEW connection to the driver. After a driver
+              // restart the driver pings the mesh as it comes up, and auto-ping
+              // must not read those answers as the nodes' own voices (v0.65.0);
+              // after this add-on's own start it does not, but a stamp there
+              // withholds nothing (the boot window has sent no probe yet).
+              const at = Date.now();
+              this.driverWsConnAt = at;
+              // Only a link this add-on did not end itself shows the driver went
+              // away and came back (v0.79.3): its own first handshake does not.
+              if (link?.peerClosedAt != null) {
+                this.driverRestart = { from: link.peerClosedAt, to: at };
+                this.log(`driver-ws: the link ended ${Math.max(0, Math.round((at - link.peerClosedAt) / 1000))}s ago, not by this add-on, and is back — a driver start for the node-down start window`);
+              }
             },
             onBgRssi: (channels, at) => {
               if (!this.driverHomeOk()) return;
@@ -1475,6 +1516,24 @@ class ZwaveDataImpl implements ZwaveData {
     // whose RTT average is over the line (v0.78.0).
     const suspects = new Map<number, RttFrame>();
     const rttOver = new Set<number>();
+    // v0.79.3: on the first tick — after the home id was bound, so another
+    // network's carry is already gone — take what the previous run carried.
+    if (!this.carryTaken) {
+      this.carryTaken = true;
+      const carry = ev.takeCarry();
+      if (carry) {
+        this.carriedDriverStart = carry.driverStart;
+        const onRoster = new Set(this.lastNodes.map((n) => n.nodeId));
+        // As written to disk, off-roster entries included: one dropped on this
+        // tick is a change, and is saved below.
+        this.promptSavedKey = promptCarryKey(carry.nodeDown, carry.driverStart);
+        const n = seedNodeDown(this.symptomState, carry.nodeDown, (id) => onRoster.has(id), now);
+        if (n > 0) {
+          const raised = carry.nodeDown.filter((d) => d.latched && onRoster.has(d.nodeId)).length;
+          this.log(`node-down: carried ${n} dwell(s) across the restart (${raised} already raised) — each is re-judged on this tick`);
+        }
+      }
+    }
     const symptoms = detectSymptoms(
       {
         now,
@@ -1497,9 +1556,10 @@ class ZwaveDataImpl implements ZwaveData {
         // the old constant.
         sweepMs: this.autoPingSnapshotFn?.()?.config.staleMs || undefined,
         // v0.79.2: our own routed read's failover is a route change too, and a
-        // FLiRS node read Dead at the driver's start dwells longer.
+        // FLiRS node read Dead at a known driver start dwells longer (v0.79.3:
+        // known starts only — never this add-on's own).
         ownRerouteAt: (id) => this.measurementRerouteAt.get(id) ?? null,
-        driverStartedAt: this.driverReconnectedAt(),
+        driverStarts: this.driverStarts(now),
         recordingSince: () => ev.recordingSince(),
         sleeperWatch: (n) => this.sleeperWatchFor(n, now),
         duplicateBursts: (id) => this.duplicateBursts(id, now),
@@ -1507,6 +1567,17 @@ class ZwaveDataImpl implements ZwaveData {
       this.symptomState,
     );
     this.lastSymptoms = symptoms;
+    // v0.79.3: a raised node-down, a start death or a driver restart seen —
+    // what a crash restart or a power cut must not lose — reaches disk within
+    // a minute, not at the next 15-minute flush. A node-down still on its
+    // 5-minute dwell is not worth a write: it starts again at the next reading.
+    // The spacing keeps a flapping node from rewriting the store every tick.
+    const promptKey = promptCarryKey(nodeDownCarry(this.symptomState), this.newestDriverRestart());
+    if (promptKey !== this.promptSavedKey && now - this.promptSavedAt >= PROMPT_SAVE_SPACING_MS) {
+      this.promptSavedKey = promptKey;
+      this.promptSavedAt = now;
+      ev.save();
+    }
     this.requestRttConfirms(suspects, now);
     // Held through a dark lane (v0.76.0): live for the log and the episodes.
     const held = heldSymptoms(this.symptomState);
@@ -2506,7 +2577,8 @@ class ZwaveDataImpl implements ZwaveData {
       if (this.baselines.rssiNormal(n.nodeId, now)?.ready) rssiReady += 1;
       if (windowTimeoutRate(this.evidence(n.nodeId), now) == null) timeoutWindowBlind += 1;
     }
-    return { enabled: true, ready: timeoutReady, total, timeoutReady, timeoutWindowBlind, rttReady, rttCeiling, rssiReady, band, bands: N_BANDS };
+    // An engine with no evidence store never runs: nothing to wait for.
+    return { enabled: true, ready: timeoutReady, total, timeoutReady, timeoutWindowBlind, rttReady, rttCeiling, rssiReady, band, bands: N_BANDS, ran: this.carryTaken || this.evidenceStore == null };
   }
 
   /** Fold each node's since-last-tick interval mean into its coarse ring. */
@@ -2804,6 +2876,10 @@ class ZwaveDataImpl implements ZwaveData {
         } else if (now - since > this.evictAfterMs) {
           this.log(`node ${id} left the network — evicting its evidence + caches`);
           this.evidenceStore?.evictNode(id);
+          // Its dwells too (v0.79.3): a raised node-down is held through an
+          // Unknown reading now, so a device that reuses the id would re-raise
+          // it while it is interviewed — and it would be carried.
+          for (const k of [...this.symptomState.keys()]) if (k.startsWith(`${id}:`)) this.symptomState.delete(k);
           // Baselines too (v0.35 review): the onNodeRemoved hook only covers a
           // removal issued from THIS TUI. A node excluded from HA's own UI, or
           // replaced via replace_failed_node, arrives here with its learned
@@ -3897,6 +3973,33 @@ class ZwaveDataImpl implements ZwaveData {
     return Math.max(ws, reload);
   }
 
+  /**
+   * The driver starts KNOWN to this run (v0.79.3), for node-down's start
+   * window: the host's boot, a driver restart seen over the link, and one the
+   * previous run saw on this boot. NOT `driverReconnectedAt()`: that one also
+   * moves at this add-on's own first handshake, which v0.79.2 read as a driver
+   * start, so after a deploy a FLiRS node already Dead lost its raised
+   * node-down for 90 minutes. A Z-Wave JS restart this add-on did not see (it
+   * was down meanwhile, or the link never dropped) is not known, and a death
+   * then keeps the 5-minute dwell.
+   */
+  driverStarts(now = Date.now()): DriverStart[] {
+    // The host's boot as of `now`. A death's start verdict is taken at its
+    // first reading, where its onset and this boot share one clock, so the
+    // window is judged on the host's uptime. A start verdict, once taken,
+    // stays (DwellEntry.start); a death not yet judged one is judged again
+    // each tick, so a forward clock step during its dwell can still make it one.
+    const boot = now - this.uptimeMs();
+    return [{ from: boot, to: boot }, this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);
+  }
+
+  /** What the next run carries (v0.79.3): a restart this run saw, which is
+   *  newer than any it was carried, else the carried one. The boot is not
+   *  carried — the next run reads its own. */
+  private newestDriverRestart(): DriverStart | null {
+    return this.driverRestart ?? this.carriedDriverStart;
+  }
+
   /** When the controller reported its receiver off and has not reported it back
    *  on (v0.65.0), or null. Auto-ping suppresses every lane while it is set. */
   controllerRfOffSince(): number | null {
@@ -4352,6 +4455,16 @@ export function diffSymptomLog(
     events.push({ severity: 'info', nodeId: was.nodeId, text: `${was.kind} cleared` });
   }
   return { next, events };
+}
+
+/** The shortest spacing of the carry's prompt saves (v0.79.3). */
+export const PROMPT_SAVE_SPACING_MS = 60_000;
+
+/** What a crash restart or a power cut must not lose, as a key (v0.79.3): the
+ *  raised node-downs, the start deaths, and the newest driver restart seen. */
+function promptCarryKey(nodeDown: readonly { nodeId: number; latched: boolean; start: boolean }[], restart: DriverStart | null): string {
+  const n = nodeDown.filter((d) => d.latched || d.start).map((d) => `${d.nodeId}${d.latched ? 'r' : ''}${d.start ? 's' : ''}`).sort().join(',');
+  return `${n}|${restart ? `${restart.from}-${restart.to}` : ''}`;
 }
 
 export function driverHomeGuard(

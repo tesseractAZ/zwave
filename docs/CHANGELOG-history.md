@@ -3,6 +3,128 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.77.3
+
+The RTT restart allowance now survives a deploy, and the RTT baseline's
+restart hold judges a re-routed node against its own readings.
+
+### Fixed — the restart seed across an add-on restart
+
+- v0.77.1 kept each node's first fresh RTT reading of a driver lifetime, the
+  seed the restart allowance is measured from, in memory only. After every
+  add-on restart the next fresh reading became the seed, so its excess over
+  the node's median counted as restart. The 2 s ceiling caps that once the
+  driver has made about 20 transmissions to the node, but on a quiet mesh
+  that takes hours, and until then a slowdown first measured on that reading
+  was masked and fired from a later one, about one liveness sweep (~2 h)
+  later on a sweep-only node. The v0.77.1 comments and DOCS said the ceiling
+  always capped it; the morning after a host restart on the reference mesh
+  the re-taken seed was the smaller bound on 37 of 38 nodes.
+- The evidence store now saves each node's seed with the counters of its
+  newest sample, and carries the seeds over an add-on restart while the
+  driver can still be the one that measured them: the host is on the same
+  boot (told by when the boot began, which a clock restored behind the save
+  cannot fake), the save is under an hour old, and no node's first sample
+  after the restart has a counter below its saved one. One driver keeps every
+  node's counters, so a single node showing a new driver drops every carried
+  seed. A seed that cannot be carried is re-taken from the next fresh
+  reading, as before.
+
+### Fixed — the RTT baseline's restart hold
+
+- A route change empties a node's RTT bands, and an empty band's median reads
+  0, so the hold counted a re-routed node's whole round trip as restart and
+  kept normal readings out of the new band (four of 38 nodes on 10-28). With
+  no learned median the seed is now measured against what the driver
+  averaged after it, `(rtt − 0.75^(k − k0) × a0) / (1 − 0.75^(k − k0))`: a
+  normal seed holds nothing past its own reading, and a large one is held
+  while it washes out. An empty band is never ready, so no alarm changes.
+- DETAIL's *RTT learning is PAUSED* showed on every node within ~21
+  transmissions of a driver restart after each add-on restart (38 of 38 on
+  10-28), though nothing was held until the next fresh reading. It now
+  reports the verdict on the node's newest RTT reading, for as long as the
+  driver lifetime it was judged in lasts.
+- The hold judges a reading at the transmission count it was recorded with.
+  The roster's copy, polled apart from the statistics feed, could trail it,
+  and at the trailing count the 2 s ceiling held a reading the seed allowed.
+- A tick on which the settle rule deferred a node folded that node's previous
+  sample into its baselines a second time. Each sample is now folded once.
+
+Tests pin these — the seed carried over a restart and not over a host
+restart (also with a clock restored behind the save), an hour-old save or
+the boot grace, any node's lower counter
+dropping every carried seed (taken up or not, and after a live restart), a
+carried seed kept through a save before its node samples, a reset, reload
+or eviction forgetting it, the fold's yardstick for a band with a median and
+for an empty one (a steady node, a washing-out seed, the seed reading
+itself), the banner's set, standing, cleared and lapsed verdicts, one fold
+per sample, and the recorded count — and 28 new mutants (eight existing ones
+re-anchored) show each guard is load-bearing.
+
+## 0.77.2
+
+### Security — dependency updates
+
+- `fastify` 5.12.5 → 5.12.7: a route's headers schema could be bypassed
+  through a case-sensitive `propertyNames` keyword.
+- `fast-uri` 3.1.8 → 3.1.9 and 4.2.1 → 4.2.3, both reached through the HTTP
+  server's schema compilers: scheme spoofing through a percent-encoded scheme,
+  host confusion through unchecked WHATWG host canonicalisation, scheme
+  injection through an unescaped colon in a reference's first segment, and
+  path equivalence in relative-reference normalisation.
+
+No route in the add-on declares a validation or response schema, so none of
+these paths is reached. No code change. `npm audit` reports no
+vulnerabilities in production dependencies.
+
+## 0.77.1
+
+`rtt-degraded` no longer fires on the round-trip average a Z-Wave JS restart
+leaves behind.
+
+### Fixed — `rtt-degraded` after a driver restart
+
+- zwave-js keeps each node's round-trip time as a running average, in memory
+  only. A restart seeds it with one measurement from the restart's own burst,
+  and every later acknowledged transmission keeps 0.75 of it. On the reference
+  mesh most nodes' first reading after a restart was normal, but a few read up
+  to about 1.4 s against a 20–60 ms normal, and on quiet nodes that took
+  6–12 h to wash out. Every fresh statistics event from such a node re-tripped
+  `rtt-degraded`: nine 5–8 min symptoms in the 5 h after the 10-24 restart,
+  against 1–7 symptom onsets a day before.
+- The detector now subtracts what the restart can still be adding before its
+  usual test: the smaller of a fixed ceiling,
+  `0.75^(commandsTX − 1) × (2 s − median)`, and the exact share of the first
+  fresh reading the add-on saw after the restart,
+  `0.75^(commandsTX − k0) × (a0 − median)`. A node whose first reading was
+  normal is back at full sensitivity within a few transmissions; a slowdown
+  measured after a large seed still fires, with a `restart allowance`
+  evidence row. A node with no transmission yet in the new lifetime gets no
+  allowance.
+- The RTT baseline no longer learns a reading the restart can still move by
+  more than 8 ms, by the same bound. Until now those readings were kept out
+  only while they tripped `rtt-degraded`. DETAIL says when this pauses RTT
+  learning: *RTT learning is PAUSED — the driver restarted N tx ago*.
+
+Tests pin these — the seed's exact weight, no allowance before the first
+transmission, the first reading's bound and its cap, a seed-sized reading that
+neither fires nor arms, a normal first reading that restores full sensitivity,
+new excess under a large seed that still fires, the allowance subtracted to
+the millisecond, the store keeping each lifetime's first fresh reading, and
+the baseline holding out the RTT reading on a copy, against the band's own
+median, and nothing else — and 33 new mutants (one existing mutant
+re-anchored) show each guard is load-bearing.
+
+Two older checks a mutant slipped past are tightened: the auto-ping wiring
+check reads only auto-ping's own options (the refresh trial's copy has its
+own check and mutant), and zero samples must show the fresh share as a bare
+dash.
+
+### Documented
+
+- The README's verification figures are corrected: 1,632 tests, and 1,487
+  mutants in the harness, 13 of them labelled equivalent.
+
 ## 0.77.0
 
 The LAN terminal is SSH: telnet is removed.
