@@ -50,8 +50,9 @@ configuration:
       complemento es un monitor de solo lectura. Es seguro dejarlo activado:
       cada comando que llega a la malla, salvo el atajo de ping de una sola
       tecla (p), debe armarse escribiendo la palabra CONFIRM antes de
-      ejecutarse. Las recomendaciones del motor nunca se ejecutan solas; solo
-      el ping automático, más abajo, actúa sin que se presione una tecla.
+      ejecutarse. Las recomendaciones del motor nunca se ejecutan solas; solo el
+      ping automático y el ensayo de refresco (ambos más abajo y desactivados de
+      forma predeterminada) actúan sin que se presione una tecla.
   # ── Autorreparación (auto-ping) ─────────────────────────────────────────────
   auto_ping_enabled:
     name: Seguridad · Hacer ping automático a un nodo caído
@@ -62,18 +63,18 @@ configuration:
       despertarlo. Los dispositivos a batería o dormidos
       nunca se tocan: dormido no es lo mismo que caído, y un ping no puede
       alcanzarlos antes de su propio despertar. Requiere "Habilitar acciones de
-      escritura". Se suspende durante una reconstrucción de rutas o la
-      eliminación de un nodo fallido, en la ventana
-      de reinicio (para un nodo caído, solo hasta que el listado de nodos esté
-      listo), mientras la radio del controlador está apagada (como durante su
-      respaldo nocturno de NVM) y cuando una cuarta parte de la malla está caída
-      a la vez (eso
-      es un problema del controlador, no de un dispositivo). Cada intento queda
-      registrado. Si pone fin a una caída no se califica (una caída termina
-      cuando el dispositivo vuelve, así que no hay con qué compararlo), y lo que
-      aprenden sus pings se muestra en ENGINE en su propia fila y nunca se
-      presenta como una solución. Presione Z en la pantalla ENGINE para
-      pausarlo todo a la vez.
+      escritura". Al activarlo también se inicia el sondeo de vida de más abajo.
+      Se suspende durante una reconstrucción de rutas o la eliminación de un
+      nodo fallido, en la ventana de reinicio (para un nodo caído, solo hasta
+      que el listado de nodos esté listo), mientras la radio del controlador
+      está apagada (como durante su respaldo nocturno de NVM) y cuando una
+      cuarta parte de los nodos alimentados por red (como mínimo 4) están caídos
+      (Dead) a la vez (eso es un problema del controlador, no de un
+      dispositivo). Cada intento queda registrado. Si pone fin a una caída no se
+      califica (una caída termina cuando el dispositivo vuelve, así que no hay
+      con qué compararlo), y lo que aprenden sus pings se muestra en ENGINE en
+      su propia fila y nunca se presenta como una solución. Presione Z en la
+      pantalla ENGINE para pausarlo todo a la vez.
   auto_ping_after_min:
     name: Seguridad · Ping automático después de (minutos caído)
     description: >-
@@ -115,8 +116,11 @@ configuration:
       el sondeo lee. Todos los nodos se
       consultan con la misma cadencia, conversadores o no, así que su
       proporción de respuestas mide si son alcanzables y no cuánto hablan. Un
-      sondeo por ciclo, empezando por el más antiguo, con las mismas
-      suspensiones que el ping automático.
+      sondeo por ciclo, empezando por el que lleva más tiempo sin oírse, con las
+      mismas suspensiones que el ping automático. Hay un ciclo por minuto, así
+      que consultar N nodos lleva al menos N minutos, aunque este valor sea
+      menor. Solo se ejecuta mientras el ping automático y las acciones de
+      escritura están activados.
   refresh_trial_enabled:
     name: Seguridad · Ensayo de refresco (experimento prerregistrado)
     description: >-
@@ -146,12 +150,15 @@ configuration:
     name: Registros · Días de archivo
     description: >-
       Días de registros que se guardan en el archivo propio del complemento,
-      incluido hoy (0 lo desactiva y borra lo que escribió). El journal del host solo conserva alrededor
-      de un día y medio del registro de cada aplicación; este archivo guarda por
-      más tiempo el registro del complemento y el flujo de registro del
-      controlador Z-Wave JS, en archivos diarios en la carpeta de configuración
-      del complemento (/addon_configs/<slug del complemento>/logs, legible por
-      SSH). Los días terminados se comprimen con gzip y entran en las copias de
+      incluido hoy (0 lo desactiva y borra lo que escribió). El journal del host
+      tiene un tamaño máximo y lo comparte el registro de todas las
+      aplicaciones, así que en un host con mucha actividad puede abarcar solo
+      uno o dos días; este archivo guarda por más tiempo el registro del
+      complemento y el flujo de registro del controlador Z-Wave JS, en archivos
+      diarios en la carpeta de configuración del complemento
+      (/addon_configs/<slug del complemento>/logs, legible desde un complemento
+      de terminal como Terminal & SSH; el SSH de este complemento solo sirve la
+      TUI). Los días terminados se comprimen con gzip y entran en las copias de
       seguridad del complemento; el archivo de hoy no.
   log_archive_max_mb:
     name: Registros · Tamaño máximo del archivo (MB)
@@ -176,14 +183,19 @@ configuration:
       inicio de sesión usa un usuario y contraseña de la puerta de abajo, así
       que actívela y agregue un usuario; con la puerta desactivada se rechaza
       todo inicio de sesión. La huella de la clave del host está en el registro
-      del complemento.
+      del complemento con el nivel de registro info o uno más detallado.
   # ── Puerta de inicio de sesión ──────────────────────────────────────────────
   auth_enabled:
     name: Inicio de sesión · Exigir inicio de sesión (acceso directo)
     description: >-
-      Exige usuario y contraseña para el acceso DIRECTO: por SSH o entrando
-      al puerto directamente. El acceso por la barra lateral de Home Assistant
-      ya está autenticado por HA y no se restringe (salvo que active también la
+      Activa el inicio de sesión con usuario y contraseña para el acceso
+      DIRECTO. SSH lo necesita: con esta opción desactivada se rechaza todo
+      inicio de sesión por SSH. Una conexión a la consola web que no llega por
+      la barra lateral de HA (solo es posible desde la red interna de
+      complementos de Home Assistant; el puerto 8788 no se publica en la red
+      local) también pasa por la puerta, y con esta opción desactivada se abre
+      sin inicio de sesión. El acceso por la barra lateral de Home Assistant ya
+      está autenticado por HA y no se restringe (salvo que active también la
       opción siguiente). Agregue al menos un usuario abajo primero: sin ninguno
       configurado, el acceso directo se deniega.
   auth_require_on_ingress:
@@ -208,29 +220,39 @@ configuration:
   auth_max_attempts:
     name: Inicio de sesión · Intentos máximos
     description: >-
-      Intentos de contraseña fallidos permitidos antes de cerrar la conexión.
-      Predeterminado 3.
+      Intentos de contraseña fallidos desde una misma dirección antes de que
+      empiece una espera creciente (5 s, que se duplica con cada nuevo fallo,
+      hasta 5 min); la cuenta se conserva entre reconexiones y un inicio de
+      sesión correcto la borra. Durante la espera se rechaza todo intento desde
+      esa dirección; la pantalla de inicio de sesión de la consola web además
+      cierra la conexión al llegar a este número. Predeterminado 3. Rango 1–10.
   auth_idle_lock_min:
     name: Inicio de sesión · Bloqueo por inactividad (minutos)
     description: >-
       Vuelve a exigir el inicio de sesión tras estos minutos sin pulsaciones de
-      teclas en una sesión ya iniciada. 0 lo desactiva. Se aplica solo a las
-      sesiones que pasaron por la puerta de inicio de sesión; a las de la barra
-      lateral de HA, solo si "Exigirlo también en la barra lateral de HA" está
-      activado.
+      teclas en una sesión de la consola web que pasó por la puerta de inicio de
+      sesión (0 lo desactiva): una sesión directa de la consola web o, en la
+      barra lateral de HA, solo si "Exigirlo también en la barra lateral de HA"
+      está activado. Las sesiones SSH no se vuelven a bloquear: SSH comprueba la
+      contraseña una sola vez, al conectarse, y una conexión SSH se cierra tras
+      30 minutos sin tráfico entrante (los keep-alive del cliente cuentan como
+      tráfico).
   # ── Avanzado ────────────────────────────────────────────────────────────────
   refresh_interval:
     name: Avanzado · Intervalo de actualización (segundos)
     description: >-
-      Segundos entre cada redibujado en vivo y el sondeo ligero del listado de
-      nodos (network_status). El valor predeterminado de 2 s es un buen
-      equilibrio: menos es más ágil, más es más liviano. Rango 1–30.
+      Segundos entre cada actualización de los datos que muestra la TUI (la
+      pantalla se redibuja cada segundo) y el sondeo ligero del listado de nodos
+      (network_status). El valor predeterminado de 2 s es un buen equilibrio:
+      menos es más ágil, más es más liviano. Rango 1–30.
   route_poll_interval:
-    name: Avanzado · Intervalo de sondeo de rutas (segundos)
+    name: Avanzado · Intervalo de muestreo de evidencia (segundos)
     description: >-
-      Segundos entre los sondeos más pesados de rutas y estadísticas del
-      controlador, mantenidos fuera del ciclo rápido de dibujado para que no
-      castiguen la malla. Predeterminado 10 s. Rango 5–120.
+      Segundos entre muestras de evidencia: el ciclo del motor de detección
+      (síntomas, líneas base aprendidas, decisiones del ensayo de refresco). No
+      sondea nada: las estadísticas de los nodos y del controlador llegan a
+      medida que Z-Wave JS las informa. Un valor mayor solo vuelve más lenta la
+      detección. Predeterminado 10 s. Rango 5–120.
   log_level:
     name: Avanzado · Nivel de registro
     description: >-
@@ -248,10 +270,12 @@ configuration:
     name: Avanzado · URL del WebSocket de Home Assistant
     description: >-
       Déjelo en el valor predeterminado ws://supervisor/core/websocket para una
-      instalación normal. Cámbielo solo para apuntar la capa de datos a otro
-      Home Assistant Core, nunca al WebSocket del controlador (para eso está la
-      URL del controlador, a continuación): la capa de datos usa los comandos
-      zwave_js de Home Assistant, que el servidor del controlador no atiende.
+      instalación normal. La capa de datos se autentica solo con el token de
+      Supervisor de este complemento (ninguna opción aporta otro), así que la
+      URL debe llegar al Core de este mismo Home Assistant, nunca al WebSocket
+      del controlador (para eso está la URL del controlador, a continuación): la
+      capa de datos usa los comandos zwave_js de Home Assistant, que el servidor
+      del controlador no atiende.
   driver_ws_url:
     name: Avanzado · URL del WebSocket del controlador Z-Wave JS (telemetría de solo lectura)
     description: >-

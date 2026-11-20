@@ -1,5 +1,5 @@
 name: "Z-Wave TUI"
-version: "0.79.3"
+version: "0.79.4"
 slug: zwave_tui
 description: "Z-Wave mesh observability and remediation engine — live link measurement, learned baselines, 14 fault detectors and ranked, outcome-scored fixes; SSH + sidebar console and HA entities"
 url: https://github.com/tesseractAZ/zwave
@@ -51,8 +51,8 @@ ingress: true
 ingress_port: 8788
 panel_icon: mdi:z-wave
 panel_title: "Z-Wave TUI"
-# ADMIN-ONLY. The console can remove a failed node, rebuild every route, and —
-# with write actions on — unlock a lock and open a garage door. `false` exposed
+# ADMIN-ONLY. With write actions on, the console can remove a failed node,
+# rebuild every route, unlock a lock and open a garage door. `false` exposed
 # that panel to every HA user, while the add-on treats "arrived via ingress" as
 # full operator authority: the only authorization the mesh-mutating console
 # received was "HA let this browser through", a bar this setting had lowered to

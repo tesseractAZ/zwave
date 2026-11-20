@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.79.4
+
+Documentation only: the option descriptions Home Assistant shows on the
+Configuration tab, and every document in the repository, now say what the code
+does. Nothing the add-on does has changed.
+
+### Corrected — the option descriptions (English and Spanish)
+
+- **Login for direct access** (`auth_enabled`): SSH needs it, and while it is
+  off every SSH login is refused. A web-console connection that does not come
+  through the HA sidebar (possible only from Home Assistant's internal add-on
+  network; port 8788 is not published on the LAN) opens with no login while it
+  is off.
+- **Failed attempts** (`auth_max_attempts`): the count starts an escalating
+  back-off per address (5 s, doubling, up to 5 min), kept across reconnects;
+  the description said the connection was dropped.
+- **Idle re-lock** (`auth_idle_lock_min`): it re-locks web-console sessions
+  only. SSH checks the password once, when the connection opens, and closes a
+  connection after 30 minutes with no inbound traffic.
+- **Evidence sample interval** (`route_poll_interval`, renamed from "route
+  poll interval"; the option key is unchanged): it is the detection engine's
+  tick and polls nothing.
+- Auto-ping and the refresh trial are the only actions taken without a key
+  press, both off by default; auto-ping also starts the liveness sweep, and
+  its mesh-wide suppressor counts a quarter of the mains-powered nodes (at
+  least 4). The liveness sweep asks at most one node a minute. The log
+  archive is read from a shell add-on, not this add-on's SSH. The Core
+  WebSocket URL must reach this Home Assistant, since the data layer
+  authenticates with this add-on's own Supervisor token.
+
+### Corrected — the documents
+
+A scan of every `.md` file against the code found 243 statements the code
+contradicts; each is corrected in `DOCS.md`, `README.md`, `DESIGN.md`,
+`PERFORMANCE.md`, `SECURITY.md`, `RESEARCH.md` and the older releases in
+`docs/CHANGELOG-history.md`. `RESEARCH.md` now marks the parts of its design
+that are not built (among them the 0–10 rating and the `backup_nvm` rule).
+36 more passages are reworded to the impersonal register.
+
+### Tests
+
+- The pin on the frozen history (`changelogContract.test.ts`) is updated for
+  the corrected older releases.
+
 ## 0.79.3
 
 A deploy, update or restart of this add-on no longer withdraws a raised

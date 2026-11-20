@@ -17,8 +17,9 @@ health endpoint.
   - round-trip time, reply-timeout rate and negotiated data rate;
   - hop count and the last working and next-to-last working routes, with failing hops recorded from the driver's route-failure reports.
 
-  An opt-in liveness sweep sends one routed read per node on a cadence, so
-  mains devices that never speak on their own are still measured.
+  An opt-in liveness sweep sends one routed read per node on a cadence (a
+  NoOp ping where no read can be sent), so mains devices that never speak on
+  their own are still measured.
 - **Learns each node's normal.** A persistent evidence time-series (a fine ring
   plus a multi-day coarse tier) feeds per-node baselines.
   - Baselines are learned per time-of-day band, across several distinct days.
@@ -46,9 +47,9 @@ health endpoint.
   - a multi-day noise-floor trend and a diurnal timeout heatmap;
   - controller serial-link health kept apart from RF, so a USB fault is not mistaken for interference.
 - **Protects the mesh.** The engine is read-only by default.
-  - Every operator write sits behind a typed `CONFIRM`.
-  - The only autonomous writes are the opt-in probes. They are admitted risk-first and pause themselves during a storm.
-  - The 0–100 health score states how much of itself rests on defaults instead of measurement.
+  - Every operator write to the mesh except the one-key `p` ping sits behind a typed `CONFIRM`.
+  - The only autonomous writes are auto-ping's probes and the refresh trial's one refresh, both opt-in and behind `write_actions_enabled`. Neither is admitted by the admission rule, which admits nothing; both stand down during a dead-node storm.
+  - The 0–100 health score states how much of its signal and route weight rests on defaults instead of measurement.
 
 | | |
 | --- | --- |
@@ -137,9 +138,10 @@ measured evidence:**
    driver WebSocket, since HA strips it), controller serial-link health shown
    apart, a diurnal timeout heatmap, and a persisted multi-day noise-floor trend.
 
-**Read-only by default.** Every operator action is human-gated behind a typed
-`CONFIRM`; the engine's recommendations are never self-executed. The one
-autonomous mesh write — the opt-in **auto-ping** probe — is documented in
+**Read-only by default.** Every operator write to the mesh except the one-key
+`p` ping sits behind a typed `CONFIRM`; the engine's recommendations are never
+self-executed. The autonomous mesh writes — the opt-in **auto-ping** probes
+and the opt-in **refresh trial**'s one refresh — are documented in
 [Write actions & safety](#write-actions--safety).
 
 ## Screens & keys
@@ -226,10 +228,12 @@ lesser one — a separate judgement from the score, and it sorts.
 
 **The score says how much of itself is assumption.** Signal (25%) and Route
 (20%) fall back to a neutral value when there is nothing to measure — a routed
-node has no usable RSSI of its own — so up to 45% of a grade can stand on
-defaults. Detail states the share and which lanes, directly under the gauge: a
-`C` built half out of defaults and a `C` built out of measurements are different
-claims about a device.
+node has no usable RSSI of its own — and Response Reliability (20%) is
+credited at a default before anything has been sent to the node, so up to 65%
+of a grade can stand on defaults. Detail states the Signal and Route share and
+which of the two, directly under the gauge (the reliability default is not
+counted there): a `C` built half out of defaults and a `C` built out of
+measurements are different claims about a device.
 
 ## Write actions & safety
 
@@ -296,7 +300,8 @@ dimmers the trial sends nothing at all, and ENGINE says so. It needs write
 actions and auto-ping running, decides at most once per node per day, twice an
 hour and six times a day, only 09:00–20:00 and never within 10 minutes of your
 own action, and a node that goes Dead within 5 minutes of a refresh is excluded
-for a week (a second such death stops the trial until you restart with it off).
+for a week (a second such death latches the trial off, raising
+`binary_sensor.zwave_tui_degraded`, until you restart with it off).
 Running it admits nothing; a pass only makes an automatic refresh reviewable.
 ENGINE shows its counts, and `sensor.zwave_tui_engine` publishes them
 (DOCS §11.14).
@@ -320,11 +325,14 @@ engine's own probes, since that skips the dwell), and asks every listening mains
 node not marked Dead **on a fixed per-node cadence** (default every 120 min, however chatty the node — Z-Wave JS
 marks Dead only reactively, so an unplugged device can read "Alive" for hours until
 something talks to it). The dead-node ladder and a manual `p` send Home
-Assistant's ping; the liveness sweep, the verification bursts and (v0.78.0) the
+Assistant's ping (the ladder follows an unanswered one with one routed read
+where it can); the liveness sweep, the verification bursts and (v0.78.0) the
 single `rtt-degraded` confirmation (one probe per lone slow round trip, to
-check it) send **one routed read** instead — `zwave_js.refresh_value` on the device's own
-switch/light value, a single Get that changes nothing on the device (its Report
-can correct a stale Home Assistant state) — because a ping is one
+check it) send **one routed read** instead where the node has a switch/light
+value — `zwave_js.refresh_value` on that value, a single Get that changes
+nothing on the device (its Report can correct a stale Home Assistant state). A
+node without one, or one whose read could not be sent in the last 30 min, gets
+the NoOp ping. The read is preferred because a ping is one
 ACK-only attempt on the stored routes, and an unanswered one marks a working
 device Dead: on the reference mesh 100 of 106 mains Dead episodes in 67 days
 began on one of the add-on's own pings (v0.71.0). A read can still go unanswered;
@@ -416,8 +424,11 @@ them would make an existing uptime check flap on a single symptom.
 on one node is the resting state of a real mesh, and an alert that is always on
 is not an alert. It fires on a summons (the remediation ladder has spent its
 budget and is asking for a person), a critical symptom, the engine being
-structurally unable to do its job, or a pause on automatic writes older than 24
-hours while auto-ping is running for it to stop.
+structurally unable to do its job, a dead-node storm with `auto_ping_enabled`
+and `write_actions_enabled` both on (at least a quarter of the listening nodes,
+and at least 4, Dead at once), a pause on automatic writes older than 24 hours
+while auto-ping is running for it to stop, or a latched refresh trial while
+`refresh_trial_enabled` is on.
 
 **There is no built-in notifier, on purpose.** The add-on could call
 `notify.mobile_app_*` directly — it has the permission — but that hardcodes a
@@ -447,9 +458,10 @@ Assistant ignores a write whose state and attributes both match what it already
 holds, so on a healthy mesh — publishing `off` / `none` every 30 s — the entity
 never changed, and a stopped add-on looked exactly the same. `published_at` is
 a heartbeat: the time of the last publish, rounded to the minute so it costs
-one recorder row a minute rather than two. It makes `last_updated` advance on
-every publish; `last_changed` still moves only when the state flips, so the
-`for:` above still measures how long it has been `on`. Watch for silence:
+one recorder row a minute rather than two. It makes `last_updated` advance
+once a minute, on the first publish of each new minute; `last_changed` still
+moves only when the state flips, so the `for:` above still measures how long it
+has been `on`. Watch for silence:
 
 ```yaml
   - alias: Z-Wave TUI has stopped reporting
@@ -565,12 +577,13 @@ use the SSH port (it refuses every login while the gate is off).
 A merge whose subject does *not* start with `Release v` changes `main` without
 releasing anything — docs and tooling changes ride along until the next release.
 
-`ci.yml` (typecheck + tests + docs build + `amd64`/`aarch64` docker smoke builds)
-and `codeql.yml` (CodeQL `security-extended`; results are uploaded to the
-Security tab, and `check-sarif.mjs` fails the job on actionable findings) are
-both required status checks on every PR to `main`. Every job, CodeQL included,
-runs on a pinned `ubuntu-26.04` image (native `ubuntu-26.04-arm` for aarch64
-builds).
+`ci.yml` (typecheck + tests + docs build + `amd64`/`aarch64` docker smoke builds,
+plus an AppArmor-profile compile) and `codeql.yml` (CodeQL `security-extended`;
+results are uploaded to the Security tab, and `check-sarif.mjs` fails the job
+on actionable findings) run on every PR to `main`, and every job of both is a
+required status check except the AppArmor compile, which is not yet in that
+set. Every job, CodeQL included, runs on a pinned `ubuntu-26.04` image (native
+`ubuntu-26.04-arm` for aarch64 builds).
 
 ## Local development
 
@@ -580,9 +593,10 @@ builds).
   the Dockerfile and source sat at the repository root, where a store install
   could never find them.
 - `zwave_tui/server/` — TypeScript backend run directly with `tsx` (no build step).
-  `npm test` runs the node:test suite (count and run time under
-  [Performance](#performance)); `npm run typecheck` is the CI gate; `npm start`
-  runs the server.
+  `npm test` runs the node:test suite (its current count is in the
+  Verification row of the table at the top of this page; the last measured run
+  time, from the v0.71.0 release run, is under [Performance](#performance));
+  `npm run typecheck` is the CI gate; `npm start` runs the server.
 - `node server/scripts/mutation-check.mjs` (from `zwave_tui/`) reverts each behavioural fix one at a time
   and requires the suite to go red. A green suite proves the tests run; this
   proves they would *notice*. It refuses to draw a conclusion it has not earned:

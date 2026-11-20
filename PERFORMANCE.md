@@ -12,7 +12,8 @@ Reproduce any of it with the commands given, run from `zwave_tui/server/`; each
 section names its own method.
 
 - **Measured at:** each figure section states when it was measured — a
-  version, a date or both; the newest is §3, v0.71.0 (2026-09-23), and §8
+  version, a date or both; the newest is §4c, v0.76.0–v0.76.1
+  (2026-10-15/16); §3 was last re-measured at v0.71.0 (2026-09-23), and §8
   lists every re-measurement
 - **Reference mesh:** 39 nodes (38 + controller), Zooz ZST39 LR 800-series
   for every figure up to 2026-10-16, then a Home Assistant Connect ZWA-2
@@ -446,12 +447,17 @@ the 80×24 zero was wrong.
 At both sizes the maximum second is **exactly twice the median**, with a
 scattering of zero-seconds. That is not burstiness: it is a whole-frame redraw
 on a 1 Hz timer, sampled by a 1 s clock that drifts against it, so occasionally
-two frames land in one bucket and occasionally none. The connection handler in
-`startTelnetServer()` (`telnet/server.ts`) confirms it in one line:
+two frames land in one bucket and occasionally none. At v0.63.7 the
+connection handler in `startTelnetServer()` (`telnet/server.ts`) confirmed it
+in one line:
 
 ```js
 conn.timer = setInterval(() => session.draw(), 1000);
 ```
+
+Its successor, `startSshServer()` in the same file (v0.77.0), keeps the 1 Hz
+timer as `conn.timer = setInterval(() => conn.session?.draw(), 1000);`, and the
+browser console (`telnet/wsConsole.ts`) redraws on a 1 s timer too.
 
 So per-session bandwidth is not an empirical rate to be sampled; it is
 `frame_bytes × 1 Hz` — about 4 994 B per frame at 80×24 and 17 395 B at 200×60
@@ -474,9 +480,13 @@ Against the 32-session policy cap that is ~550 KB/s worst case, ≈4.4 Mbit/s.
 This was never a capacity question, and re-measuring it was about **correcting a
 published number**, not about finding a limit.
 
-> Reproduce: `scripts/bw-probe.mjs <host> 2324 <cols> <rows> <warm-s> <meas-s>`.
-> It negotiates NAWS, discards the warm-up window, and prints the per-second
-> series so the 2× peaks are visible rather than asserted.
+> Reproduce, on the telnet transport only (v0.76.1 or earlier):
+> `scripts/bw-probe.mjs <host> 2324 <cols> <rows> <warm-s> <meas-s>`. It
+> negotiates telnet NAWS over a raw TCP socket, discards the warm-up window,
+> and prints the per-second series so the 2× peaks are visible rather than
+> asserted. Port 2324 has served SSH since v0.77.0, which the probe does not
+> speak, so against a current add-on it receives no TUI frame; the SSH
+> listener's bandwidth needs an SSH-capable probe and is not measured.
 
 ---
 
@@ -533,12 +543,15 @@ at these magnitudes:
   sessions. That is a limit, not a measured capacity, and one operator will not
   approach it.
 
-**Not a gap at all:** the rtt baseline ceiling (21/38 in §4's reading, 22/38
-before it) is *measured and understood* — route churn resets continuous
+**Not a measurement gap:** the rtt baseline ceiling (21/38 in §4's reading,
+22/38 before it) is *measured and understood* — route churn resets continuous
 baselines, and a repeater-routed node must hold one route for roughly two
 weeks to graduate a band. Five redesigns were evaluated and rejected, each with
 a concrete false-symptom scenario. It was previously listed here, which wrongly
-implied open work.
+implied open measurement work. What it cost detection was a defect, fixed in
+v0.79.0 (CHANGELOG 0.79.0): where a confirmation probe can reach a node, one
+whose current time-of-day band has not graduated is judged against the fixed
+300 ms RTT ceiling. The baseline coverage itself is unchanged.
 
 ---
 

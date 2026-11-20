@@ -1396,9 +1396,10 @@ unable to publish, or gone.
 `unheard` is not a shrug. The node dossier states it as the OPPOSITE reading of
 echo-only — "this node is genuinely silent" against "it never speaks except to
 answer us" — and books it into a ledger that is persisted and never decays.
-Deciding it requires `attributed`, the record of our own answered probes, which
-is per-PROCESS. At a boot there is none, so the four-way ladder fell through to
-its last arm and wrote the most negative verdict it has by default.
+Deciding it requires `attributed`, the record of the add-on's own answered
+probes, which is per-PROCESS. At a boot there is none, so the four-way ladder
+fell through to its last arm and wrote the most negative verdict it has by
+default.
 
 v0.65.0 fixed exactly this in the positive direction, after an audit found 28
 fabricated `self-proven` credits: an advance nobody can attribute credits
@@ -2472,9 +2473,9 @@ healthy all-battery mesh legitimately produces little traffic.
 Re-checking the remaining worklist against HEAD rather than trusting its labels
 found five already done: the probe-count zero states (v0.47.0 renders all four),
 probeability on DETAIL, the action-arm attempt count below readiness, the manual
-probe lane, and auto-ping's standing masthead indicator. One of them I had
-begun to re-implement before checking, which would have duplicated a v0.47.0
-branch.
+probe lane, and auto-ping's standing masthead indicator. One of them had
+been partly re-implemented before the check, which would have duplicated a
+v0.47.0 branch.
 
 1051 tests, 530 mutants (0 survived, 0 missing, 0 ambiguous, 0 invalid).
 
@@ -2902,7 +2903,7 @@ ring still holds. The count now carries the span it was actually observed over.
 
 ## 0.50.0 — 2026-09-03
 
-**A log audit of 50 hours of production output, and what it could not tell us.**
+**A log audit of 50 hours of production output, and what it could not tell.**
 
 **Every leveled line was byte-identical to an ordinary one.** `logger.ts` gated
 the write on severity and then discarded it, so the one `error` in 50 hours sat
@@ -2918,13 +2919,13 @@ companion at all: the one line the module calls worth saying out loud was the
 one line an operator grepping the container log could not find.
 
 **Refusing a connection leaked the descriptor.** The connection-cap branch said
-goodbye with `end()`, which is a HALF-close: the socket stays ours until the
-peer closes its own side, and a refused socket joins no `conns` set, so neither
-the active counter nor the idle sweep could ever see it. A peer that never
-closes — yanked cable, expired NAT entry — pinned one descriptor per refusal,
-without limit, on the exact branch whose job is to shed load. Measured live at
-v0.49.1: **30 open sockets against 4 accepted sessions.** The refusal now
-reclaims on our schedule.
+goodbye with `end()`, which is a HALF-close: the socket stays the add-on's until
+the peer closes its own side, and a refused socket joins no `conns` set, so
+neither the active counter nor the idle sweep could ever see it. A peer that
+never closes — yanked cable, expired NAT entry — pinned one descriptor per
+refusal, without limit, on the exact branch whose job is to shed load. Measured
+live at v0.49.1: **30 open sockets against 4 accepted sessions.** The refusal
+now reclaims on the add-on's schedule.
 
 **A session's end was never written down.** 165 `client connected` lines and
 zero teardown lines, so a session that ended looked exactly like one still open
@@ -2937,7 +2938,7 @@ six deploys in one evening each pushed one node's "needs a human" summons a
 fresh dwell into the future, and `DEAD 19.2h` on screen was 19.2 hours of
 *uptime*, not of silence. A node already Dead at first sight is now dated from
 the driver's own `lastSeen`, clamped so a future or absent value cannot invent
-an outage longer than our uptime.
+an outage longer than the add-on's uptime.
 
 **ENGINE published a rate its own store refuses to publish.** The control-arm
 line was gated on `n > 0` while `outcomes.baseRate()` returns null below
@@ -3301,7 +3302,7 @@ states conditionally on the surface that reads the config.
 hard to claim as help.**
 
 **A driver refusal is classified on the ERROR CODE, not on prose — and the
-prose I guessed was wrong.** v0.43.1 shipped a family of phrasings invented
+guessed prose was wrong.** v0.43.1 shipped a family of phrasings invented
 rather than observed. Read against the actual zwave-js source (15.28.0,
 `Controller.removeFailedNode`), it was wrong three ways: it matched strings the
 driver never emits, it missed the single most likely refusal — zwave-js pings
@@ -3310,8 +3311,9 @@ to a ping" — and it read the driver's own explicitly ambiguous reason ("the
 controller is busy **or** the node has responded") as a definite refusal.
 `ZWaveErrorCodes` exists, in the library's own words, *"to identify errors
 without relying on the specific wording of the error message"*, and the code
-reaches us twice over: `ZWaveError` appends ` (ZW0361)`, `FailedZWaveCommand`
-prefixes `Z-Wave error 361 - `, and Home Assistant forwards both unchanged.
+reaches the add-on twice over: `ZWaveError` appends ` (ZW0361)`,
+`FailedZWaveCommand` prefixes `Z-Wave error 361 - `, and Home Assistant forwards
+both unchanged.
 
 One further correction, from reading the driver's control flow rather than its
 strings: `· Node N is not in the list of failed nodes` reads like a refusal and
@@ -3563,8 +3565,8 @@ attempt's probe could be judged. The announcement now waits for no probe to be
 outstanding. The audit recommended hoisting the judgment loop above the
 decision instead — implemented, and a test immediately failed: judging first
 stamps probe attribution before the sweep reads it, so a node's own traffic
-gets credited to our probe. That trades a broad, permanent accuracy loss on
-every echo-only node for a narrow, rare ordering nicety. Reverted.
+gets credited to the add-on's probe. That trades a broad, permanent accuracy
+loss on every echo-only node for a narrow, rare ordering nicety. Reverted.
 
 **The persisted reply-rate counters now say what they are.** They are lifetime
 tallies, never migrated, and on a long-lived install they blend definitions
@@ -3762,10 +3764,11 @@ probe). "Unheard" was false in exactly the way this release cycle set out to
 eliminate.
 
 The echo label is now routed by attribution alone: a node whose lastSeen sits
-at or behind our own last answered probe reads echo at any age. "Unheard" is
-reserved for nodes with nothing on record past what our probes produced and
-no probe answer of ours to point to either — which keeps it honest for the
-one case that earns it (a node that last spoke on its own, long ago).
+at or behind the add-on's own last answered probe reads echo at any age.
+"Unheard" is reserved for nodes with nothing on record past what the add-on's
+probes produced and no probe answer of the add-on's to point to either — which
+keeps it honest for the one case that earns it (a node that last spoke on its
+own, long ago).
 
 The audit also observed the documented once-per-boot attribution reset at
 scale (~35 fabricated "confirming" labels per restart) — left as documented:
@@ -3778,15 +3781,15 @@ bounded, diluted, and worth revisiting only if boots become frequent.
 **The audit queue, all four items — measurement integrity for the instruments
 the engine trusts most.**
 
-**Self-proven means the node's own voice, not our echo.** A probe answer
-advances `lastSeen` too, so "already heard 120m ago on its own — confirming"
-was routinely the node answering the PREVIOUS sweep's probe — a full staleness
-threshold of silence described as confirming — and for quiet-but-answering
-nodes the confirming/unheard split was a sticky sub-minute scheduling bias,
-persisted as if it were device behavior. Self-proven now requires lastSeen to
-have advanced strictly PAST what our own last answered probe put on the record,
-and the echo case gained its own honest sweep label ("silent since answering
-our probe Xm ago — probing for its own voice").
+**Self-proven means the node's own voice, not the add-on's echo.** A probe
+answer advances `lastSeen` too, so "already heard 120m ago on its own —
+confirming" was routinely the node answering the PREVIOUS sweep's probe — a full
+staleness threshold of silence described as confirming — and for
+quiet-but-answering nodes the confirming/unheard split was a sticky sub-minute
+scheduling bias, persisted as if it were device behavior. Self-proven now
+requires lastSeen to have advanced strictly PAST what the add-on's own last
+answered probe put on the record, and the echo case gained its own honest sweep
+label ("silent since answering our probe Xm ago — probing for its own voice").
 
 **Every probe gets its own judgment.** awaitingAnswer was a single per-node
 slot, and 60s burst spacing under the 90s answer grace meant each new probe
@@ -3799,9 +3802,9 @@ the same overwrite disease (found by this release's own new test).
 **Confounded closures are credited to neither arm.** An episode whose node
 went Dead mid-episode, or on which a successful remediation ran unattributed
 (the confirmation-window skip), can no longer book a control-arm "improved" —
-the audited exemplar was a revival our own dead-remediation ping caused,
-recorded as spontaneous. Counted apart (counter, closure tag, REMEDY row),
-non-improvements excluded from the control n as well.
+the audited exemplar was a revival the add-on's own dead-remediation ping
+caused, recorded as spontaneous. Counted apart (counter, closure tag, REMEDY
+row), non-improvements excluded from the control n as well.
 
 **Boot-grace trusts only a clock that PROVABLY carried through the outage.**
 The "no battery RTC" premise is falsified on this host: the Pi 5's RTC held
@@ -4010,7 +4013,7 @@ this cycle.
 
 ## 0.37.3 — 2026-08-23
 
-**I made the same error twice: checking the count and never the span.**
+**The same error twice: the count was checked, never the span.**
 
 v0.37.2 raised `VERIFY_BURST` from 3 to 5 for margin over the verifier's floor.
 Production showed that made it worse. Node 26 took **seven probes at a steady
@@ -4024,8 +4027,8 @@ Production showed that made it worse. Node 26 took **seven probes at a steady
 
 A burst longer than its own window can never fill it: probes 1–2 age out before
 4–5 arrive, so the window holds two or three readings no matter how many are
-fired. Raising the count stretched the stream. Both times I checked the count
-against `MIN_OBS` and never the span against `WINDOW_MS`.
+fired. Raising the count stretched the stream. Both times the count was checked
+against `MIN_OBS`, never the span against `WINDOW_MS`.
 
 `VERIFY_SPACING_MS` drops to 30 s — below the tick, so the tick is the limiter
 and the real spacing is 60 s. A 5-probe burst then spans 240 s inside the 300 s
@@ -4050,7 +4053,7 @@ change to the tick, the window, or the floor.
 
 ## 0.37.2 — 2026-08-23
 
-**The diagnostic refuted my hypothesis, and the real cause was simpler.**
+**The diagnostic refuted the hypothesis, and the real cause was simpler.**
 
 v0.37.1 shipped a measurement rather than a fix, on the theory that verification
 bursts were being stretched by contention for the one-per-tick queue. The
@@ -4067,8 +4070,8 @@ contention hypothesis is **refuted**. Shipping the FIFO rewrite it implied would
 have been effort spent on a story.
 
 **The actual cause is that the burst had no margin.** `VERIFY_BURST` was 3 —
-"exactly the verifier's floor, and no more traffic than that requires", which I
-wrote myself. But `MIN_OBS = 3` means three readings must all land, all be
+"exactly the verifier's floor, and no more traffic than that requires", its own
+source comment. But `MIN_OBS = 3` means three readings must all land, all be
 sampled, and all carry a non-null RTT inside one 300 s window, from a burst
 whose tick-rounded spacing already makes it span 240 s. Lose one probe to
 ordinary transient RF — measured at ~2 % on this mesh today — or slip a single
@@ -4250,8 +4253,8 @@ and then the log simply moves on, which reads exactly like recovery.
 Observed live: node 23 exhausted 3/3 attempts and auto-ping said nothing for the
 **next 80 minutes**. The node was very likely revivable that entire time — it
 was eventually recovered by a single manual ping. The operator had no way to
-know the engine had quit, and the maintainer (me) read the same silence and
-escalated to "this needs a physical power-cycle", which was wrong.
+know the engine had quit, and the same silence was read as needing a physical
+power-cycle, which was wrong.
 
 `decideAutoPings` now returns a `gaveUp` lane. The runner announces it at
 **error** severity on both destinations — the one auto-ping message that asks
@@ -4399,7 +4402,7 @@ never on the outcome auto-ping exists to detect. Both `did not answer` log
 lines were unreachable for their stated purpose.
 
 `judgeProbeAnswers` now asks the only question that has an answer: 90 seconds
-after a probe, did the node's `lastSeen` advance past the moment we sent it? A
+after a probe, did the node's `lastSeen` advance past the moment it was sent? A
 node missing from the roster is judged **neither** way — a roster gap is not
 evidence of a failed probe, and calling it one would manufacture exactly the
 false alarm this signal exists to avoid.
@@ -4710,8 +4713,9 @@ The two definitions are now one exported function. `routeKeyOfLwr` returns
 `null` for absent statistics, `'direct'` for an empty chain, `'r<a>-<b>'`
 otherwise; `isRouteChange` requires both endpoints known and different. A route
 that cannot be seen has not moved — `'direct'` is a fact about the mesh, `null`
-is a fact about our knowledge of it. This is the discipline `dS2Resync` already
-carried, where a dark log lane records `null` rather than a fabricated `0`.
+is a fact about the add-on's knowledge of it. This is the discipline `dS2Resync`
+already carried, where a dark log lane records `null` rather than a fabricated
+`0`.
 
 **`route-churn` recoveries are now measured instead of written off.**
 
