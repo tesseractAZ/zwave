@@ -3986,8 +3986,9 @@ class ZwaveDataImpl implements ZwaveData {
   driverStarts(now = Date.now()): DriverStart[] {
     // The host's boot as of `now`. A death's start verdict is taken at its
     // first reading, where its onset and this boot share one clock, so the
-    // window is judged on the host's uptime; a later clock step cannot change
-    // a verdict already taken (DwellEntry.start).
+    // window is judged on the host's uptime. A start verdict, once taken,
+    // stays (DwellEntry.start); a death not yet judged one is judged again
+    // each tick, so a forward clock step during its dwell can still make it one.
     const boot = now - this.uptimeMs();
     return [{ from: boot, to: boot }, this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);
   }

@@ -7,7 +7,8 @@ A deploy, update or restart of this add-on no longer withdraws a raised
 deaths outlive the add-on, and only a driver start the add-on can show opens
 node-down's start window, where a death waits 90 minutes. The update from
 0.79.2 itself carries nothing, since 0.79.2 wrote no carry: a node-down raised
-at the update is raised again 5 minutes after it.
+at the update is raised again 5 minutes after it, and so is a FLiRS start
+death still waiting at the update.
 
 ### Fixed — a restart of this add-on held back a FLiRS node's node-down for 90 minutes (0.79.2)
 
@@ -18,10 +19,12 @@ at the update is raised again 5 minutes after it.
   `binary_sensor.zwave_tui_degraded` cleared and came back 90 minutes later.
   Reproduced through the real data layer; it did not occur on the reference
   mesh, where nothing was Dead at the 0.79.2 deploy.
-- Only a known driver start opens the window: the host's boot, judged on the
-  host's uptime at a death's first reading; or a driver-WS link this add-on
-  did not end itself followed by a new handshake, read as a driver start
-  between the two, with the window running to 10 minutes after the handshake
+- Only a known driver start opens the window: the host's boot, as now minus
+  uptime on each tick (a start verdict, once taken, stays; a forward clock
+  step during a death's 5-minute dwell can still make it one); or a
+  driver-WS link this add-on did not end itself followed by a new handshake,
+  read as a driver start between the two, with the window running to 10
+  minutes after the handshake
   (a network drop, or the server dropping this client, is not told apart from
   a restart); or such a restart carried from the previous run on the same
   boot. The add-on's own first handshake, and a link it ended itself (a
@@ -85,7 +88,7 @@ at the update is raised again 5 minutes after it.
   death's first reading, the default uptime source, a carried node-down that
   ends on the first tick saved at once, the prompt save's spacing, a node that
   left the network, and nothing published before the engine's first tick.
-- 69 new mutation-harness entries, none declared equivalent; 4 existing
+- 70 new mutation-harness entries, none declared equivalent; 4 existing
   entries re-anchored to the rewritten lines, and 1 retired with the check it
   covered (a raised node-down is now raised at once whatever its flags ask
   for, pinned by its own entry).
