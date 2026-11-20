@@ -439,6 +439,24 @@ export interface EvidenceStoreOptions {
    *  the only report of a store that stopped persisting, and it vanished at
    *  `log_level: warning` along with the routine chatter. */
   log?: LogSink;
+  /** What the symptom engine carries across a restart (v0.79.3), read at each
+   *  save once the engine has taken the restored carry (`takeCarry`). Until
+   *  then a save writes back what was restored, so a second restart before
+   *  the engine's first tick loses nothing. */
+  carry?: () => EvidenceCarry;
+}
+
+/**
+ * The symptom engine's state carried across a restart of this add-on
+ * (v0.79.3): each node-down dwell, and the newest driver start known over the
+ * driver link. Node-down dwells load on any boot — an outage raised before a
+ * host restart is the same outage after it until a reading says otherwise, and
+ * the engine re-judges each one on its next tick. A driver start loads only on
+ * the boot that saw it.
+ */
+export interface EvidenceCarry {
+  nodeDown: { nodeId: number; since: number; latched: boolean }[];
+  driverStart: { from: number; to: number } | null;
 }
 
 export interface EvidenceStore {
@@ -496,6 +514,9 @@ export interface EvidenceStore {
   save(): void;
   /** Drop everything (memory) and immediately rewrite disk. */
   reset(): void;
+  /** The carry restored by load() (v0.79.3), once: later calls return null,
+   *  and later saves write `opts.carry()`. A reset (another network) drops it. */
+  takeCarry(): EvidenceCarry | null;
 }
 
 /* ── On-disk columnar shapes ────────────────────────────────────────────── */
@@ -615,6 +636,12 @@ interface Persisted {
   /** When the host booted, by the clock at save time: now − uptime (v0.77.3).
    *  Optional; absent ⇒ `lives` are not carried. */
   bootAt?: number;
+  /** The symptom engine's node-down dwells (v0.79.3): since, and l=1 once
+   *  raised. OPTIONAL, no schema bump: absent ⇒ nothing is carried. */
+  nodeDown?: Record<string, { s: number; l?: 1 }>;
+  /** The newest driver start known over the driver link (v0.79.3): it
+   *  started between f and t. Optional; read only on the same boot. */
+  driverStart?: { f: number; t: number };
 }
 
 const SCHEMA_V = 2;
@@ -791,6 +818,10 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   let lastCtrl: CtrlSnapshot | null = null;
   let homeId: number | null = null;
   let loadedHomeId: number | null = null;
+  /** Restored by load() and not yet taken by the engine (v0.79.3). */
+  let pendingCarry: EvidenceCarry | null = null;
+  /** The carry as last written or restored, so a change in it alone saves. */
+  let savedCarryKey: string | null = null;
   let since: number | null = null;
   let laneEpoch: number | null = null;
   let creditEpoch: number | null = null;
@@ -1444,6 +1475,23 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             carriedLives.set(id, { at: { tx, timeout: to, dropTx: dr, rx }, seed: k0 != null && k0 >= 1 && a0 != null ? { k0, a0 } : null });
           }
         }
+        // The symptom engine's carry (v0.79.3). Node-down dwells on any boot
+        // and at any age: the engine re-judges each against a live reading
+        // before it counts. A driver start only on the boot that saw it.
+        const nodeDown: EvidenceCarry['nodeDown'] = [];
+        if (obj.nodeDown && typeof obj.nodeDown === 'object') {
+          for (const [k, v] of Object.entries(obj.nodeDown)) {
+            const id = Number(k);
+            if (!Number.isInteger(id) || id <= 0 || !v || typeof v !== 'object') continue;
+            const s = numOrNull(v.s);
+            if (s == null || s <= 0) continue;
+            nodeDown.push({ nodeId: id, since: s, latched: v.l === 1 });
+          }
+        }
+        const df = numOrNull(obj.driverStart?.f), dt = numOrNull(obj.driverStart?.t);
+        const driverStart = sameBoot && df != null && dt != null && df <= dt ? { from: df, to: dt } : null;
+        pendingCarry = { nodeDown, driverStart };
+        savedCarryKey = JSON.stringify(pendingCarry);
         log(`evidence: restored ${coarse.size} node(s) coarse${grace || fineTooOld ? '' : ` + ${fine.size} fine`} from ${path}`);
       } catch (e) {
         log(`evidence: load failed (${(e as Error).message}) — starting fresh`);
@@ -1458,7 +1506,12 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
     },
 
     save(): void {
-      if (!dirty) return;
+      // The carry dirties the store too (v0.79.3): a driver restart seen, or a
+      // node-down raised, while no sample was recorded (HA's roster stale
+      // through a Z-Wave JS restart) must still reach disk.
+      const carry = pendingCarry ?? opts.carry?.() ?? null;
+      const carryKey = carry ? JSON.stringify(carry) : null;
+      if (!dirty && carryKey === savedCarryKey) return;
       try {
         const nodes: Persisted['nodes'] = {};
         for (const [id, ring] of fine) {
@@ -1595,10 +1648,15 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           rateRuns: runsOut,
           lives: livesOut,
           bootAt: now() - uptimeMs(),
+          ...(carry ? {
+            nodeDown: Object.fromEntries(carry.nodeDown.map((d) => [String(d.nodeId), { s: d.since, ...(d.latched ? { l: 1 as const } : {}) }])),
+            ...(carry.driverStart ? { driverStart: { f: carry.driverStart.from, t: carry.driverStart.to } } : {}),
+          } : {}),
         };
         writeFileSync(tmp, JSON.stringify(payload), 'utf8');
         renameSync(tmp, path);
         dirty = false;
+        savedCarryKey = carryKey;
       } catch (e) {
         (log.error ?? log)(`evidence: save failed (${(e as Error).message})`);
       }
@@ -1618,10 +1676,18 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       rateRuns.clear();
       since = null;
       loadedHomeId = homeId;
+      // Another network's node-down dwells and driver start are not this one's.
+      pendingCarry = null;
       // Rewrite disk NOW — a crash between reset and the next flush must not
       // resurrect the previous network's evidence.
       dirty = true;
       this.save();
+    },
+
+    takeCarry(): EvidenceCarry | null {
+      const c = pendingCarry;
+      pendingCarry = null;
+      return c;
     },
   };
 }

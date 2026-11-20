@@ -14,14 +14,22 @@ import { WebSocketServer, type WebSocket as WsSocket } from 'ws';
  * A minimal mock zwave-js-server: records every command the client sends
  * (the allowlist proof), answers the handshake, and lets tests push events.
  */
-export async function mockServer(over: { minSchema?: number; maxSchema?: number; homeId?: number; nodes?: unknown[]; logLevel?: string; nodeFilter?: number[]; refuseLogs?: boolean } = {}) {
+export async function mockServer(over: { minSchema?: number; maxSchema?: number; homeId?: number; nodes?: unknown[]; logLevel?: string; nodeFilter?: number[]; refuseLogs?: boolean; dropBeforeVersion?: number } = {}) {
   const wss = new WebSocketServer({ port: 0 });
   await new Promise<void>((r) => wss.once('listening', () => r()));
   const commands: string[] = [];
   let connections = 0;
   let sock: WsSocket | null = null;
+  const stalled: import('node:net').Socket[] = [];
   wss.on('connection', (ws) => {
     connections += 1;
+    // v0.79.3: end the next N connections before the version frame, as a
+    // server that is still coming up (or going down) does.
+    if ((over.dropBeforeVersion ?? 0) > 0) {
+      over.dropBeforeVersion! -= 1;
+      ws.terminate();
+      return;
+    }
     sock = ws;
     ws.on('message', (raw) => {
       const m = JSON.parse(String(raw)) as { messageId: string; command: string };
@@ -70,6 +78,13 @@ export async function mockServer(over: { minSchema?: number; maxSchema?: number;
     connectionCount: () => connections,
     push: (event: unknown) => sock?.send(JSON.stringify({ type: 'event', event })),
     dropClient: () => sock?.terminate(),
+    /** Stop reading the client (v0.79.3): its pings go unanswered, so its
+     *  liveness check — not the server — ends the link. A stalled socket never
+     *  reads the client's close, so close() destroys it. */
+    stall: () => {
+      const raw = (sock as unknown as { _socket: import('node:net').Socket } | null)?._socket;
+      if (raw) { raw.pause(); stalled.push(raw); }
+    },
     /** Change what the next connection is told (v0.76.0): a server restarted
      *  at another level, another network. */
     configure: (o: typeof over) => Object.assign(over, o),
@@ -81,7 +96,13 @@ export async function mockServer(over: { minSchema?: number; maxSchema?: number;
       raw?.pause();
       raw?.write(Buffer.from([0x88, 0x00]));
     },
-    close: () => new Promise<void>((r) => wss.close(() => r())),
+    close: () => {
+      for (const raw of stalled.splice(0)) raw.destroy();
+      // A client still connected would hold close() open for ever (v0.79.3: a
+      // failing assertion skipped a test's own stop, and a run hung).
+      for (const c of wss.clients) c.terminate();
+      return new Promise<void>((r) => wss.close(() => r()));
+    },
   };
 }
 

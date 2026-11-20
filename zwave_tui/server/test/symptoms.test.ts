@@ -78,7 +78,7 @@ interface Fixture {
   sweepMs?: number;
   /** v0.79.2: our own routed read's failover times, and the driver's start. */
   ownRerouteAt?: Map<number, number>;
-  driverStartedAt?: number | null;
+  driverStarts?: { from: number; to: number }[];
 }
 function input(f: Fixture): DetectInput {
   return {
@@ -98,7 +98,7 @@ function input(f: Fixture): DetectInput {
     ...(f.overLine ? { rttOverLine: (id: number) => { f.overLine!.push(id); } } : {}),
     ...(f.sweepMs != null ? { sweepMs: f.sweepMs } : {}),
     ...(f.ownRerouteAt ? { ownRerouteAt: (id: number) => f.ownRerouteAt!.get(id) ?? null } : {}),
-    ...(f.driverStartedAt !== undefined ? { driverStartedAt: f.driverStartedAt } : {}),
+    ...(f.driverStarts !== undefined ? { driverStarts: f.driverStarts } : {}),
     recordingSince: () => T - 30 * 86_400_000,
     sleeperWatch: (n) => f.sleeperWatch?.(n) ?? null,
     duplicateBursts: (id) => f.duplicateBursts?.(id) ?? [],
@@ -1820,7 +1820,7 @@ test('node-down: a death at the driver\'s start on a node auto-ping does not pro
     let first: number | null = null; let last = false;
     for (let m = 0; m <= minutes; m++) {
       const nn = n();
-      const out = detectSymptoms(input({ nodes: [node(1), nn], recent: new Map([[nn.nodeId, []]]), now: T + m * MIN, driverStartedAt: startedAt }), state);
+      const out = detectSymptoms(input({ nodes: [node(1), nn], recent: new Map([[nn.nodeId, []]]), now: T + m * MIN, driverStarts: startedAt == null ? [] : [{ from: startedAt, to: startedAt }] }), state);
       last = out.some((x) => x.kind === 'node-down');
       if (first == null && last) first = m;
     }
