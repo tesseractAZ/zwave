@@ -206,7 +206,7 @@ configuration:
       Re-require login after this many minutes with no keystrokes on a
       web-console session that passed the login gate (0 disables it): a direct
       web-console session, or an HA-sidebar session only when "Also require
-      login in the HA sidebar" is on. SSH sessions are not re-locked: SSH checks
+      login in the HA sidebar" is on. A web-console connection that receives nothing from the browser (no keystroke or resize) for 5 minutes is also closed and reconnects, and a gated session then opens at the login screen, so at 0, or at 5 or more, an idle gated session meets the login screen after 5 minutes. SSH sessions are not re-locked: SSH checks
       the password once, when the connection opens, and an SSH connection is
       closed after 30 minutes with no inbound traffic (client keep-alives count
       as traffic).
@@ -224,7 +224,7 @@ configuration:
       Seconds between evidence samples: the detection engine's tick (symptoms,
       learned baselines, refresh-trial decisions). It polls nothing; node and
       controller statistics arrive as the driver reports them. A larger value
-      only slows detection. Default 10s. Range 5–120.
+      slows detection and lengthens the span of the 240 recent controller samples behind the INTERFERENCE screen's serial-link rates and noise trend (about 40 minutes at the default). Default 10s. Range 5–120.
   log_level:
     name: Advanced · log level
     description: >-

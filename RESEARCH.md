@@ -673,11 +673,9 @@ fleet-parallel**; results taken under traffic are invalid.
 > **Consequence:** implement a **spec-faithful passive approximation** of this
 > rating from data HA already delivers (drop/timeout ≈ failed pings, rtt ≈
 > latency, LWR changes ≈ routeChanges), and reserve the true active check for the
-> driver-WS phase. *(Not built: no 0–10 rating is computed. The add-on's health
-> score is its own 0–100 composite with an A–F grade (DOCS §4), so it does not
-> match Z-Wave JS UI's, and the read-only driver-WS client runs no health check.)*
+> driver-WS phase.
 >
-> *As built:* the TUI's score is its own 0–100 composite with an A–F grade
+> *As built:* no 0–10 rating is computed; the TUI's score is its own 0–100 composite with an A–F grade
 > (`health.ts`, DOCS §4), on its own thresholds (`W` under a 7 dB margin, `F`
 > over 15 % timeouts, an RTT window of 100–1000 ms), not this 0–10 rubric. The
 > driver-WS client has measured the noise floor since v0.13 (§7 item 2); the
@@ -1121,11 +1119,8 @@ improving) and switch B (77, "DROP 25 %", direct @ 100k, F):
    whenever a fresh reading exists (§7 gap 2), and, with auto-ping on, the
    engine also sends probes. The second half is not built: the grade is this
    add-on's own 0–100 composite with A–F bands and a `W` flag below a 7 dB
-   margin, not the zwave-js 0–10 rating, so it does not match Z-Wave JS UI.)*
-   *(As built: the driver-WS client has measured the noise floor since v0.13
-   (§7 item 2), and the TUI's score is its own 0–100 A–F composite
-   (`health.ts`, DOCS §4), not a copy of Z-Wave JS UI's 0–10 health-check
-   rating — §3.5.)*
+   margin, not the zwave-js 0–10 rating, so it does not match Z-Wave JS UI
+   (`health.ts`, DOCS §4; §3.5).)*
 6. **Measure before/after or it didn't happen.** Long after-windows (wake-keyed
    for sleeping nodes); ledger every action with an **improved/no-change/worse**
    verdict; the ledger is the audit trail *and* the learned layer's data. *(§5.5, §5.1)*

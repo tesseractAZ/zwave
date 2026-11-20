@@ -233,7 +233,7 @@ configuration:
       teclas en una sesión de la consola web que pasó por la puerta de inicio de
       sesión (0 lo desactiva): una sesión directa de la consola web o, en la
       barra lateral de HA, solo si "Exigirlo también en la barra lateral de HA"
-      está activado. Las sesiones SSH no se vuelven a bloquear: SSH comprueba la
+      está activado. Además, una conexión de la consola web que no recibe nada del navegador (ni teclas ni cambios de tamaño) durante 5 minutos se cierra y vuelve a conectarse, y una sesión con inicio de sesión abre entonces en la pantalla de inicio de sesión, de modo que con 0, o con 5 o más, una sesión inactiva así llega a la pantalla de inicio de sesión a los 5 minutos. Las sesiones SSH no se vuelven a bloquear: SSH comprueba la
       contraseña una sola vez, al conectarse, y una conexión SSH se cierra tras
       30 minutos sin tráfico entrante (los keep-alive del cliente cuentan como
       tráfico).
@@ -251,7 +251,7 @@ configuration:
       Segundos entre muestras de evidencia: el ciclo del motor de detección
       (síntomas, líneas base aprendidas, decisiones del ensayo de refresco). No
       sondea nada: las estadísticas de los nodos y del controlador llegan a
-      medida que Z-Wave JS las informa. Un valor mayor solo vuelve más lenta la
+      medida que Z-Wave JS las informa. Un valor mayor alarga el lapso de las 240 muestras recientes del controlador detrás de las tasas del enlace serie y la tendencia del piso de ruido de la pantalla INTERFERENCE (unos 40 minutos con el valor predeterminado) y vuelve más lenta la
       detección. Predeterminado 10 s. Rango 5–120.
   log_level:
     name: Avanzado · Nivel de registro

@@ -20,8 +20,9 @@ health endpoint.
   An opt-in liveness sweep sends one routed read per node on a cadence (a
   NoOp ping where no read can be sent), so mains devices that never speak on
   their own are still measured.
-- **Learns each node's normal.** A persistent evidence time-series (a fine ring
-  plus a multi-day coarse tier) feeds per-node baselines.
+- **Learns each node's normal.** A persistent evidence time-series keeps a fine
+  ring and a multi-day coarse tier; per-node baselines are folded from each new
+  fine sample and persisted on their own.
   - Baselines are learned per time-of-day band, across several distinct days.
   - Windows that contain a symptom are quarantined, so a fault cannot teach its own baseline to accept it.
   - Counter resets and quiet windows never produce invented readings.
@@ -226,7 +227,7 @@ problem · `L` high latency · `I` incomplete interview · `B` battery low ·
 `!` marks a node the **engine** holds an open critical finding on, and `·` a
 lesser one — a separate judgement from the score, and it sorts.
 
-**The score says how much of itself is assumption.** Signal (25%) and Route
+**The score says how much of its signal and route weight is assumption.** Signal (25%) and Route
 (20%) fall back to a neutral value when there is nothing to measure — a routed
 node has no usable RSSI of its own — and Response Reliability (20%) is
 credited at a default before anything has been sent to the node, so up to 65%
@@ -372,9 +373,9 @@ redraw is **412 µs** against a 1 000 ms frame budget; the container holds
 **93 MB** (that is `npm` + the `tsx` loader + the server, not the server's own
 RSS) and sampled **0.02 % CPU** once, not as an average; at the v0.71.0 release
 run, **1 298 tests in 13.4 s** and **879 mutants in ~43 min** gated the release.
-A TUI session costs
-**4.96 KB/s** at 80×24 and **17.22 KB/s** at 200×60 — which is not a sampled
-rate but one whole-frame redraw per second.
+Measured over telnet at v0.63.7 (SSH, the LAN transport since v0.77.0, is not
+re-measured), a TUI session cost **4.96 KB/s** at 80×24 and **17.22 KB/s** at
+200×60 — which is not a sampled rate but one whole-frame redraw per second.
 
 At `verbose` (a 6.35 h trial, 2026-10-15) the Z-Wave JS app ran at **0.13 %**
 of one core, the archive grew about **190 KB a day** gzipped, and the busiest
