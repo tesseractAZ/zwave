@@ -1027,8 +1027,10 @@ class ZwaveDataImpl implements ZwaveData {
   private carriedDriverStart: DriverStart | null = null;
   /** The engine has taken the evidence store's restored carry (v0.79.3). */
   private carryTaken = false;
-  /** The node-down dwells as last saved (v0.79.3): a change saves at once. */
-  private nodeDownSaved = '';
+  /** What a crash or power cut must not lose, as last saved (v0.79.3): a
+   *  change saves the evidence store at once, at most once a minute. */
+  private promptSavedKey = promptCarryKey([], null);
+  private promptSavedAt = -Infinity;
   private readonly uptimeMs: () => number;
   /** Node status from the previous poll — diffed to log alive/dead/wake events. */
   private prevStatus = new Map<number, NodeStatus>();
@@ -1522,6 +1524,9 @@ class ZwaveDataImpl implements ZwaveData {
       if (carry) {
         this.carriedDriverStart = carry.driverStart;
         const onRoster = new Set(this.lastNodes.map((n) => n.nodeId));
+        // As written to disk, off-roster entries included: one dropped on this
+        // tick is a change, and is saved below.
+        this.promptSavedKey = promptCarryKey(carry.nodeDown, carry.driverStart);
         const n = seedNodeDown(this.symptomState, carry.nodeDown, (id) => onRoster.has(id), now);
         if (n > 0) {
           const raised = carry.nodeDown.filter((d) => d.latched && onRoster.has(d.nodeId)).length;
@@ -1562,12 +1567,15 @@ class ZwaveDataImpl implements ZwaveData {
       this.symptomState,
     );
     this.lastSymptoms = symptoms;
-    // v0.79.3: a node-down dwell that starts, is raised or ends reaches disk
-    // now, not at the next flush, so a power cut or a crash restart cannot lose
-    // it. Rare, so the whole save is cheap.
-    const nodeDowns = nodeDownKey(this.symptomState);
-    if (nodeDowns !== this.nodeDownSaved) {
-      this.nodeDownSaved = nodeDowns;
+    // v0.79.3: a raised node-down, a start death or a driver restart seen —
+    // what a crash restart or a power cut must not lose — reaches disk within
+    // a minute, not at the next 15-minute flush. A node-down still on its
+    // 5-minute dwell is not worth a write: it starts again at the next reading.
+    // The spacing keeps a flapping node from rewriting the store every tick.
+    const promptKey = promptCarryKey(nodeDownCarry(this.symptomState), this.newestDriverRestart());
+    if (promptKey !== this.promptSavedKey && now - this.promptSavedAt >= PROMPT_SAVE_SPACING_MS) {
+      this.promptSavedKey = promptKey;
+      this.promptSavedAt = now;
       ev.save();
     }
     this.requestRttConfirms(suspects, now);
@@ -2569,7 +2577,8 @@ class ZwaveDataImpl implements ZwaveData {
       if (this.baselines.rssiNormal(n.nodeId, now)?.ready) rssiReady += 1;
       if (windowTimeoutRate(this.evidence(n.nodeId), now) == null) timeoutWindowBlind += 1;
     }
-    return { enabled: true, ready: timeoutReady, total, timeoutReady, timeoutWindowBlind, rttReady, rttCeiling, rssiReady, band, bands: N_BANDS };
+    // An engine with no evidence store never runs: nothing to wait for.
+    return { enabled: true, ready: timeoutReady, total, timeoutReady, timeoutWindowBlind, rttReady, rttCeiling, rssiReady, band, bands: N_BANDS, ran: this.carryTaken || this.evidenceStore == null };
   }
 
   /** Fold each node's since-last-tick interval mean into its coarse ring. */
@@ -2867,6 +2876,10 @@ class ZwaveDataImpl implements ZwaveData {
         } else if (now - since > this.evictAfterMs) {
           this.log(`node ${id} left the network — evicting its evidence + caches`);
           this.evidenceStore?.evictNode(id);
+          // Its dwells too (v0.79.3): a raised node-down is held through an
+          // Unknown reading now, so a device that reuses the id would re-raise
+          // it while it is interviewed — and it would be carried.
+          for (const k of [...this.symptomState.keys()]) if (k.startsWith(`${id}:`)) this.symptomState.delete(k);
           // Baselines too (v0.35 review): the onNodeRemoved hook only covers a
           // removal issued from THIS TUI. A node excluded from HA's own UI, or
           // replaced via replace_failed_node, arrives here with its learned
@@ -4443,9 +4456,14 @@ export function diffSymptomLog(
   return { next, events };
 }
 
-/** The node-down dwells and which are raised, as a key (v0.79.3). */
-function nodeDownKey(state: SymptomState): string {
-  return nodeDownCarry(state).map((d) => (d.latched ? `${d.nodeId}r` : `${d.nodeId}`)).sort().join(',');
+/** The shortest spacing of the carry's prompt saves (v0.79.3). */
+export const PROMPT_SAVE_SPACING_MS = 60_000;
+
+/** What a crash restart or a power cut must not lose, as a key (v0.79.3): the
+ *  raised node-downs, the start deaths, and the newest driver restart seen. */
+function promptCarryKey(nodeDown: readonly { nodeId: number; latched: boolean; start: boolean }[], restart: DriverStart | null): string {
+  const n = nodeDown.filter((d) => d.latched || d.start).map((d) => `${d.nodeId}${d.latched ? 'r' : ''}${d.start ? 's' : ''}`).sort().join(',');
+  return `${n}|${restart ? `${restart.from}-${restart.to}` : ''}`;
 }
 
 export function driverHomeGuard(

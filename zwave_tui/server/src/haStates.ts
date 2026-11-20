@@ -430,6 +430,10 @@ export function startHaStates(
     // Not before the first roster (v0.76.1): with no node loaded every count is
     // 0, and the engine sensor read "0 unmeasured of 0" for ~30 s at each boot.
     if (!opts.data.ready()) return;
+    // Not before the symptom engine's first tick either (v0.79.3): until then
+    // a node-down carried across the restart is not raised yet, and
+    // binary_sensor.zwave_tui_degraded would be sent off once.
+    if (opts.data.engineStatus().ran === false) return;
     let tickErr: string | null = null;
     let failed = 0;
     let total = 0;

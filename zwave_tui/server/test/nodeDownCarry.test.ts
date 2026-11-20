@@ -139,6 +139,9 @@ test('seedNodeDown (v0.79.3): only nodes `keep` admits, never over an entry this
   assert.deepEqual(s.get('7:node-down'), { since: T - MIN, lastSeen: T, hits: 3 }, 'this run\'s own entry is kept');
   assert.equal(s.has('8:node-down'), false, 'a node off the roster is not seeded');
   assert.deepEqual(s.get('9:node-down'), { since: T, lastSeen: T, hits: 1, latched: true, start: true }, 'a since ahead of the clock is taken as now; the flags are kept');
+  const s2: SymptomState = new Map();
+  seedNodeDown(s2, [{ nodeId: 5, since: T - DAY, latched: true, start: false }], () => true, T);
+  assert.deepEqual(s2.get('5:node-down'), { since: T - DAY, lastSeen: T, hits: 1, latched: true }, 'Dead as of the restart, as far as this run knows');
   // Only node-down entries are carried.
   s.set('7:rtt-degraded', { since: T, lastSeen: T, hits: 1 });
   s.set('75:flapping', { since: T, lastSeen: T, hits: 1 }); // cut by the suffix's length it would read as node 7
@@ -152,7 +155,8 @@ test('node-down (v0.79.3): Unknown is no reading — a raised node-down stays ra
   const held = detectSymptoms(input(T + 7 * MIN, [node(1), flirs(NodeStatus.Unknown)()], []), state).find((x) => x.kind === 'node-down');
   assert.ok(held, 'still raised while Unknown');
   assert.equal(held!.sinceMs, T);
-  assert.equal(held!.evidence[0]!.value, 'Unknown now; Dead for 7m before');
+  assert.equal(held!.evidence[0]!.value, 'Unknown now; Dead for 6m before', 'Dead time only, to the last Dead reading');
+  assert.match(held!.narrative, /status is now Unknown, which is no reading/);
   assert.equal(run(state, flirs(), [], T + 8 * MIN, 0).first, 0, 'raised as it reads Dead again');
   assert.equal(run(state, flirs(NodeStatus.Alive), [], T + 9 * MIN, 0).first, null);
   assert.equal(state.has('60:node-down'), false, 'Alive ends it');
@@ -400,7 +404,7 @@ function stopAll(): void {
   for (const stop of [...live]) stop();
 }
 /** `bootAt` null: production's own uptime source. */
-async function startRun(dir: string, url: string, bootAt: number | null, logs: string[] = [], o: { roster?: Array<Record<string, unknown>>; uptimeMs?: () => number; home?: () => number } = {}): Promise<Run> {
+async function startRun(dir: string, url: string, bootAt: number | null, logs: string[] = [], o: { roster?: Array<Record<string, unknown>>; uptimeMs?: () => number; home?: () => number; extra?: Record<string, unknown> } = {}): Promise<Run> {
   const roster = o.roster ?? ROSTER;
   const ha = fakeHa(roster, o.home);
   const uptimeMs = o.uptimeMs ?? (bootAt == null ? undefined : () => Date.now() - bootAt);
@@ -409,6 +413,7 @@ async function startRun(dir: string, url: string, bootAt: number | null, logs: s
     historyPath: null, evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: url, log: (m: string) => logs.push(m),
     ...(uptimeMs ? { uptimeMs } : {}),
+    ...(o.extra ?? {}),
   } as never);
   let stopProvider: (() => void) | null = null;
   const stop = (): void => {
@@ -465,7 +470,9 @@ test('restart (v0.79.3, production-wired): a deploy while a FLiRS node is Dead a
     skip += MIN;
     const logs: string[] = [];
     const b = await startRun(dir, srv.url, bootAt, logs);
+    assert.equal(b.zd.engineStatus().ran, false, 'before its first tick the engine has not run: Home Assistant is sent nothing yet');
     assert.equal(b.tick(), true, 'raised on the next run\'s first tick');
+    assert.equal(b.zd.engineStatus().ran, true);
     assert.equal(b.degraded(), 'on', 'degraded stays on across the deploy');
     assert.ok(logs.some((l) => /node-down: carried 1 dwell\(s\) across the restart \(1 already raised\)/.test(l)), logs.join('\n'));
     b.stop();
@@ -503,6 +510,8 @@ test('restart (v0.79.3, production-wired): a host reboot is a driver start — a
   try {
     const r = await startRun(dir, srv.url, Date.now() - 40_000); // up 40 s
     assert.equal(ticksTo(r, 95), 90);
+    const file = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { nodeDown?: Record<string, { l?: number; st?: number }> };
+    assert.deepEqual(file.nodeDown?.['60'] && { l: file.nodeDown['60'].l, st: file.nodeDown['60'].st }, { l: 1, st: 1 }, 'raised: on disk at once, so a power cut and a reboot keep it');
     r.stop();
   } finally {
     stopAll();
@@ -552,6 +561,9 @@ test('restart (v0.79.3, production-wired): a Z-Wave JS restart seen over the lin
     assert.ok(starts[1]!.from >= dropAt && starts[1]!.to <= Date.now(), JSON.stringify(starts));
     assert.ok(starts[1]!.to - starts[1]!.from >= 4000, 'from the drop, not the re-handshake (the first retry waits 5 s)');
     assert.ok(logs.some((l) => /the link ended \d+s ago, not by this add-on, and is back — a driver start/.test(l)));
+    a.tick();
+    const early = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { driverStart?: { f: number; t: number } };
+    assert.deepEqual(early.driverStart, { f: starts[1]!.from, t: starts[1]!.to }, 'on disk at the next tick, before any stop or flush');
     a.stop();
     const file = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { driverStart?: { f: number; t: number } };
     assert.deepEqual(file.driverStart, { f: starts[1]!.from, t: starts[1]!.to });
@@ -645,6 +657,8 @@ test('restart (v0.79.3, production-wired): across a host reboot a start death st
   try {
     const a = await startRun(dir, srv.url, Date.now() - 40_000);
     assert.equal(ticksTo(a, 30), null, 'precondition: a start death at boot 1, waiting');
+    const saved = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { nodeDown?: Record<string, { st?: number }> };
+    assert.equal(saved.nodeDown?.['60']?.st, 1, 'the start death is on disk before any stop or flush');
     a.stop();
     skip += 5 * MIN;
     // The host restarted: up 40 s again.
@@ -701,6 +715,100 @@ test('restart (v0.79.3, production-wired): a change of network while running doe
     stopAll();
     restore();
     await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.3, production-wired): a carried node-down that ends on the first tick is saved at once — a power cut cannot bring the stale latch back', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const bootAt = Date.now() - 5 * DAY;
+  try {
+    const a = await startRun(dir, srv.url, bootAt);
+    assert.equal(ticksTo(a, 10), 5, 'precondition: raised');
+    a.stop();
+    skip += MIN;
+    // The node came back while the add-on was down.
+    const roster = ROSTER.map((n) => (n.node_id === 60 ? { ...n, status: 4 } : { ...n }));
+    const b = await startRun(dir, srv.url, bootAt, [], { roster });
+    assert.equal(b.tick(), false, 'Alive: the carried node-down is dropped');
+    const file = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { nodeDown?: Record<string, unknown> };
+    assert.equal(file.nodeDown?.['60'], undefined, 'and that is on disk before any stop or flush');
+    b.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.3, production-wired): the prompt save is spaced a minute apart — a flapping start death does not rewrite the store every tick', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const roster = ROSTER.map((n) => ({ ...n }));
+  const path = join(dir, 'evidence.json');
+  const has60 = (): boolean => (JSON.parse(readFileSync(path, 'utf8')) as { nodeDown?: Record<string, unknown> }).nodeDown?.['60'] != null;
+  try {
+    const r = await startRun(dir, srv.url, Date.now() - 40_000, [], { roster });
+    r.tick(); // a start death: saved at once
+    assert.equal(has60(), true);
+    roster.find((n) => n.node_id === 60)!.status = 4;
+    await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Alive));
+    r.tick(); // 30 s later: it ended, but the last save was under a minute ago
+    assert.equal(has60(), true, 'not saved again within the minute');
+    r.tick(); // a minute after the save
+    assert.equal(has60(), false, 'saved once the minute is up');
+    r.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.3, production-wired): a node that left the network takes its dwells with it — a device reusing the id is not raised while it reads Unknown', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const roster = ROSTER.map((n) => ({ ...n }));
+  try {
+    const r = await startRun(dir, srv.url, Date.now() - 5 * DAY, [], { roster, extra: { evictAfterMs: 1 } });
+    assert.equal(ticksTo(r, 10), 5, 'precondition: raised');
+    const i = roster.findIndex((n) => n.node_id === 60);
+    const [gone] = roster.splice(i, 1);
+    await waitFor(() => !r.zd.snapshot().some((n) => n.nodeId === 60));
+    await sleep(300); // two roster polls: missing, then evicted
+    roster.push({ ...gone!, status: 0 }); // the id comes back, as a new device being interviewed
+    await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Unknown));
+    assert.equal(r.tick(), false, 'no node-down for the new device');
+    r.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('engine status (v0.79.3): with no evidence store the engine never runs, so it reads as run — Home Assistant is not held back for ever', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-'));
+  try {
+    const zd = createZwaveData({
+      client: fakeHa(ROSTER), entryId: ENTRY, historyPath: null, evidencePath: null,
+      baselinesPath: join(dir, 'baselines.json'), outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: '', log: () => {},
+    } as never);
+    try {
+      const st = zd.engineStatus();
+      assert.equal(st.enabled, true);
+      assert.equal(st.ran, true);
+    } finally {
+      zd.stop(); // the constructor arms flush timers: an unstopped instance holds the process open
+    }
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });

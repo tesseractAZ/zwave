@@ -799,11 +799,14 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       if (since != null) {
         state.get(nk)!.latched = true;
         breaching = true;
-        const downFor = Math.max(0, Math.round((now - since) / 60_000));
+        // Dead time only: an Unknown stretch is no reading (v0.79.3).
+        const downFor = Math.max(0, Math.round(((noReading ? state.get(nk)!.lastSeen : now) - since) / 60_000));
         out.push({
           kind: 'node-down', nodeId: id, severity: 'crit', sinceMs: since, basis: 'measured',
           evidence: [{ label: 'driver status', value: noReading ? `Unknown now; Dead for ${downFor}m before` : `Dead for ${downFor}m` }],
-          narrative: `${node.name} is marked Dead by the driver — a transmission to it failed and has not since succeeded. Silence alone would not prove this; the status is a measured verdict. A ping often revives a node whose radio is still there.`,
+          narrative: noReading
+            ? `${node.name} read Dead for ${downFor} min and its status is now Unknown, which is no reading: the node-down stays raised until the node reads Alive, Awake or Asleep.`
+            : `${node.name} is marked Dead by the driver — a transmission to it failed and has not since succeeded. Silence alone would not prove this; the status is a measured verdict. A ping often revives a node whose radio is still there.`,
         });
       }
     }
@@ -1412,7 +1415,8 @@ export function seedNodeDown(state: SymptomState, carried: readonly NodeDownCarr
     const k = key(c.nodeId, 'node-down');
     if (!keep(c.nodeId) || state.has(k)) continue;
     const since = Math.min(c.since, now);
-    state.set(k, { since, lastSeen: since, hits: 1, ...(c.latched ? { latched: true as const } : {}), ...(c.start ? { start: true as const } : {}) });
+    // lastSeen: Dead as of the restart, as far as this run knows.
+    state.set(k, { since, lastSeen: now, hits: 1, ...(c.latched ? { latched: true as const } : {}), ...(c.start ? { start: true as const } : {}) });
     n += 1;
   }
   return n;

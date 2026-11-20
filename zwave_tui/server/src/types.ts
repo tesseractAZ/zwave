@@ -256,6 +256,11 @@ export interface EngineStatus {
   band: number;
   /** How many bands exist — every count above is scoped to 1 of these. */
   bands: number;
+  /** The symptom engine has run since this add-on started (v0.79.3). Until it
+   *  has, the symptom list is empty — a carried node-down is seeded only at
+   *  the first tick — so Home Assistant is not sent the states yet. Absent
+   *  reads as true. */
+  ran?: boolean;
 }
 
 /** M5 learned efficacy of an action against a symptom kind — read by the planner

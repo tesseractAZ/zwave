@@ -525,6 +525,23 @@ test('the engine sensor carries the driver log lane: level, S2 lane state, silen
   assert.equal(eng({ driverWsState: () => 'backoff' as never, driverLogWatch: lw() }).s2_lane, 'down');
 });
 
+test('nothing is published before the symptom engine has run: a node-down carried across a restart is not raised yet, and degraded would be sent off once (v0.79.3)', async () => {
+  let ran = false;
+  let posts = 0;
+  const eng = { enabled: true, ready: 3, total: 38, timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 22, rttCeiling: 0, rssiReady: 22, band: 0, bands: 6 };
+  const pub = startHaStates({
+    data: data({ engineStatus: () => ({ ...eng, ran }) }), baseUrl: 'http://x', token: 't', writeActions: false, intervalMs: 3_600_000,
+    fetchImpl: (async () => { posts += 1; return { ok: true } as Response; }) as never,
+  });
+  try {
+    await pub.publishNow();
+    assert.equal(posts, 0, 'the engine has not run: nothing is sent');
+    ran = true;
+    await pub.publishNow();
+    assert.ok(posts > 0, 'it has: everything is sent');
+  } finally { pub.stop(); }
+});
+
 test('nothing is published before the first roster: the engine sensor read "0 of 0" for ~30 s at boot (v0.76.1)', async () => {
   let ready = false;
   let posts = 0;
