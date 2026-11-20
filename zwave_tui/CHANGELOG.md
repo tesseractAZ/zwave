@@ -3,8 +3,11 @@
 ## 0.79.3
 
 A deploy, update or restart of this add-on no longer withdraws a raised
-`node-down`, nor reads as a driver start: node-down dwells outlive the add-on,
-and only a driver start the add-on can show opens the 90-minute start window.
+`node-down` or reads as a driver start: raised node-downs and waiting start
+deaths outlive the add-on, and only a driver start the add-on can show opens
+the 90-minute start window. The update from 0.79.2 itself carries nothing,
+since 0.79.2 wrote no carry: a node-down raised at the update is raised again
+5 minutes after it.
 
 ### Fixed — a restart of this add-on held back a FLiRS node's node-down for 90 minutes (0.79.2)
 
@@ -16,43 +19,60 @@ and only a driver start the add-on can show opens the 90-minute start window.
   Reproduced through the real data layer; it did not occur on the reference
   mesh, where nothing was Dead at the 0.79.2 deploy.
 - Only a known driver start opens the window: the host's boot (read once, at
-  the engine's first tick); a driver-WS link the server ended and a new
-  handshake, the start lying between the two, with the window running to 10
-  minutes after the handshake; or such a restart carried from the previous run
-  on the same boot. The add-on's own first handshake, and a link it ended
-  itself (a liveness or handshake timeout), are not driver starts. A Z-Wave JS
-  restart the add-on did not see keeps the 5-minute dwell.
+  the engine's first tick); a driver-WS link this add-on did not end itself
+  (the server or the network ended it) and a new handshake, the start lying
+  between the two, with the window running to 10 minutes after the handshake;
+  or such a restart carried from the previous run on the same boot. The
+  add-on's own first handshake, and a link it ended itself (a liveness or
+  handshake timeout, or a malformed frame its WebSocket library closes on),
+  are not driver starts. A Z-Wave JS restart the add-on
+  did not see keeps the 5-minute dwell.
+- A death judged a start death stays one: a later driver restart, or a deploy
+  that carries only the newest restart, no longer cuts its 90 minutes to 5.
 - Node-down dwells are carried in `evidence.json` (optional `nodeDown` and
-  `driverStart` fields; the schema is unchanged). A raised node-down is raised
-  again on the next run's first tick, dated from the outage; a start death
-  still waiting at a deploy keeps its own onset. Each carried dwell is judged
-  again on that tick: a node that no longer reads Dead drops it, a node no
-  longer on the roster is not seeded, and another network's carry is dropped
-  with its evidence. A carried dwell outlives a host restart; a carried driver
-  start does not.
-- A change in the carry saves the store even when no sample was recorded, as
-  when HA's roster goes stale through a Z-Wave JS restart.
+  `driverStart` fields; the schema is unchanged) and seeded at the next run's
+  first engine tick, for nodes still on the roster. On the same boot every
+  dwell is carried: a raised node-down is raised again on that tick, dated
+  from the outage, and a start death still waiting keeps its own onset. After
+  a host reboot only raised node-downs are carried, without a driver start; a
+  dwell still waiting began before that boot's own start, and the next Dead
+  reading starts it again inside the boot's window.
+- A carried dwell is judged again on that tick: a node that reads Alive,
+  Awake or Asleep drops it. A raised node-down is raised at once while the
+  node reads Dead, also when a host without a clock battery boots behind its
+  last save (the outage is then dated from the restart).
+- Unknown is no reading: a driver restart reads its nodes Unknown for seconds,
+  and that no longer ends a node-down dwell or withdraws a raised one.
+- A node-down dwell is saved when it starts, is raised or ends, not at the
+  next 15-minute flush, so a power cut or crash does not lose it; a change in
+  the carry saves the store even when no sample was recorded, and an unchanged carry
+  writes nothing. A carry of another network is not written, also after a
+  change of network while running.
 - Auto-ping's driver-restart burst refusal (0.65.0) still reads every
   handshake: right after this add-on's start no probe has been sent, so it
-  withholds nothing.
+  withholds nothing there.
 
 ### Corrected
 
 - 0.79.2's "a node-down already raised stays raised" held only within one run
-  of the add-on. From 0.79.3 it holds across restarts.
+  of the add-on. From 0.79.3 it holds across restarts of the add-on and host
+  reboots, and through an Unknown reading.
 
 ### Tests
 
-- 18 new tests: the start window over a span and its bounds; a raised
-  node-down carried and raised on the next first tick; a start death still
-  waiting across a deploy; a carried dwell judged again; the carry in the
-  evidence store (same boot, another boot, boot grace, another network,
-  malformed entries, a carry change alone saving the store); the driver link
-  reporting only a link the server ended; and, through the real data layer and
-  a mock driver server, a deploy with a raised FLiRS node, a deploy with
-  nothing carried, a host reboot, a Z-Wave JS restart seen over the link and
-  carried, the boot read once, and the default uptime source.
-- 42 new mutation-harness entries, none declared equivalent; 2 existing
+- 26 new tests: the start window over a span and its bounds; a start death
+  staying one through a later restart; Unknown as no reading; a raised
+  node-down carried and raised on the next first tick, clamped or not; a
+  start death still waiting across a deploy, with and without a known start;
+  a carried dwell judged again; the carry in the evidence store (same boot,
+  another boot, boot grace, another network, malformed entries, a carry change
+  alone saving the store, the same carry in another order writing nothing);
+  the driver link reporting only a link this add-on did not end; and, through
+  the real data layer and a mock driver server, a deploy with a raised FLiRS
+  node, a deploy with nothing carried, a host reboot with a start death and
+  with a raised node-down saved at once, a Z-Wave JS restart seen over the
+  link and carried, the boot read once, and the default uptime source.
+- 58 new mutation-harness entries, none declared equivalent; 3 existing
   entries re-anchored to the rewritten lines.
 
 ## 0.79.2
@@ -474,64 +494,6 @@ single probe instead of a 10-probe episode.
   confirmations replace the 140 burst probes 0.77.3 spent on one-frame
   episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
 - 31 new tests; 99 new mutation entries, 7 re-anchored.
-
-## 0.77.3
-
-The RTT restart allowance now survives a deploy, and the RTT baseline's
-restart hold judges a re-routed node against its own readings.
-
-### Fixed — the restart seed across an add-on restart
-
-- v0.77.1 kept each node's first fresh RTT reading of a driver lifetime, the
-  seed the restart allowance is measured from, in memory only. After every
-  add-on restart the next fresh reading became the seed, so its excess over
-  the node's median counted as restart. The 2 s ceiling caps that once the
-  driver has made about 20 transmissions to the node, but on a quiet mesh
-  that takes hours, and until then a slowdown first measured on that reading
-  was masked and fired from a later one, about one liveness sweep (~2 h)
-  later on a sweep-only node. The v0.77.1 comments and DOCS said the ceiling
-  always capped it; the morning after a host restart on the reference mesh
-  the re-taken seed was the smaller bound on 37 of 38 nodes.
-- The evidence store now saves each node's seed with the counters of its
-  newest sample, and carries the seeds over an add-on restart while the
-  driver can still be the one that measured them: the host is on the same
-  boot (told by when the boot began, which a clock restored behind the save
-  cannot fake), the save is under an hour old, and no node's first sample
-  after the restart has a counter below its saved one. One driver keeps every
-  node's counters, so a single node showing a new driver drops every carried
-  seed. A seed that cannot be carried is re-taken from the next fresh
-  reading, as before.
-
-### Fixed — the RTT baseline's restart hold
-
-- A route change empties a node's RTT bands, and an empty band's median reads
-  0, so the hold counted a re-routed node's whole round trip as restart and
-  kept normal readings out of the new band (four of 38 nodes on 10-28). With
-  no learned median the seed is now measured against what the driver
-  averaged after it, `(rtt − 0.75^(k − k0) × a0) / (1 − 0.75^(k − k0))`: a
-  normal seed holds nothing past its own reading, and a large one is held
-  while it washes out. An empty band is never ready, so no alarm changes.
-- DETAIL's *RTT learning is PAUSED* showed on every node within ~21
-  transmissions of a driver restart after each add-on restart (38 of 38 on
-  10-28), though nothing was held until the next fresh reading. It now
-  reports the verdict on the node's newest RTT reading, for as long as the
-  driver lifetime it was judged in lasts.
-- The hold judges a reading at the transmission count it was recorded with.
-  The roster's copy, polled apart from the statistics feed, could trail it,
-  and at the trailing count the 2 s ceiling held a reading the seed allowed.
-- A tick on which the settle rule deferred a node folded that node's previous
-  sample into its baselines a second time. Each sample is now folded once.
-
-Tests pin these — the seed carried over a restart and not over a host
-restart (also with a clock restored behind the save), an hour-old save or
-the boot grace, any node's lower counter
-dropping every carried seed (taken up or not, and after a live restart), a
-carried seed kept through a save before its node samples, a reset, reload
-or eviction forgetting it, the fold's yardstick for a band with a median and
-for an empty one (a steady node, a washing-out seed, the seed reading
-itself), the banner's set, standing, cleared and lapsed verdicts, one fold
-per sample, and the recorded count — and 28 new mutants (eight existing ones
-re-anchored) show each guard is load-bearing.
 
 ## Older releases
 

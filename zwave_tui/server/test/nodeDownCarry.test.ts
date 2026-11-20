@@ -98,7 +98,7 @@ test('node-down carry (v0.79.3): a node-down raised before a restart is raised o
   const r0 = run(before, flirs(), [{ from: T - 5 * DAY, to: T - 5 * DAY }], T - 60 * MIN, 30);
   assert.equal(r0.first, 5, 'precondition: raised in the old run');
   const carried = nodeDownCarry(before);
-  assert.deepEqual(carried, [{ nodeId: 60, since: T - 60 * MIN, latched: true }]);
+  assert.deepEqual(carried, [{ nodeId: 60, since: T - 60 * MIN, latched: true, start: false }]);
   const after: SymptomState = new Map();
   assert.equal(seedNodeDown(after, carried, () => true, T), 1);
   const r = run(after, flirs(), [], T, 5);
@@ -121,7 +121,7 @@ test('node-down carry (v0.79.3): a start death still waiting at a deploy waits 9
 
 test('node-down carry (v0.79.3): a carried dwell is re-judged — a node that now reads Alive drops it on the first tick', () => {
   const after: SymptomState = new Map();
-  seedNodeDown(after, [{ nodeId: 60, since: T - DAY, latched: true }], () => true, T);
+  seedNodeDown(after, [{ nodeId: 60, since: T - DAY, latched: true, start: false }], () => true, T);
   const r = run(after, flirs(NodeStatus.Alive), [], T, 2);
   assert.equal(r.first, null);
   assert.equal(after.has('60:node-down'), false, 'the dwell is gone');
@@ -131,18 +131,63 @@ test('seedNodeDown (v0.79.3): only nodes `keep` admits, never over an entry this
   const s: SymptomState = new Map();
   s.set('7:node-down', { since: T - MIN, lastSeen: T, hits: 3 });
   const n = seedNodeDown(s, [
-    { nodeId: 7, since: T - DAY, latched: true },
-    { nodeId: 8, since: T - DAY, latched: false },
-    { nodeId: 9, since: T + 10 * MIN, latched: true },
+    { nodeId: 7, since: T - DAY, latched: true, start: false },
+    { nodeId: 8, since: T - DAY, latched: false, start: false },
+    { nodeId: 9, since: T + 10 * MIN, latched: true, start: true },
   ], (id) => id !== 8, T);
   assert.equal(n, 1);
   assert.deepEqual(s.get('7:node-down'), { since: T - MIN, lastSeen: T, hits: 3 }, 'this run\'s own entry is kept');
   assert.equal(s.has('8:node-down'), false, 'a node off the roster is not seeded');
-  assert.deepEqual(s.get('9:node-down'), { since: T, lastSeen: T, hits: 1, latched: true }, 'a clock behind the save cannot postpone it');
+  assert.deepEqual(s.get('9:node-down'), { since: T, lastSeen: T, hits: 1, latched: true, start: true }, 'a since ahead of the clock is taken as now; the flags are kept');
   // Only node-down entries are carried.
   s.set('7:rtt-degraded', { since: T, lastSeen: T, hits: 1 });
   s.set('75:flapping', { since: T, lastSeen: T, hits: 1 }); // cut by the suffix's length it would read as node 7
   assert.deepEqual(nodeDownCarry(s).map((c) => c.nodeId).sort(), [7, 9]);
+});
+
+test('node-down (v0.79.3): Unknown is no reading — a raised node-down stays raised through it, a waiting one keeps its onset; Alive ends it', () => {
+  // Raised, then a driver restart reads the node Unknown for a tick.
+  const state: SymptomState = new Map();
+  assert.equal(run(state, flirs(), [], T, 6).first, 5);
+  const held = detectSymptoms(input(T + 7 * MIN, [node(1), flirs(NodeStatus.Unknown)()], []), state).find((x) => x.kind === 'node-down');
+  assert.ok(held, 'still raised while Unknown');
+  assert.equal(held!.sinceMs, T);
+  assert.equal(held!.evidence[0]!.value, 'Unknown now; Dead for 7m before');
+  assert.equal(run(state, flirs(), [], T + 8 * MIN, 0).first, 0, 'raised as it reads Dead again');
+  assert.equal(run(state, flirs(NodeStatus.Alive), [], T + 9 * MIN, 0).first, null);
+  assert.equal(state.has('60:node-down'), false, 'Alive ends it');
+  // A start death waiting: an Unknown tick 20 min in does not restart its dwell.
+  const span = [{ from: T - MIN, to: T - MIN }];
+  const w: SymptomState = new Map();
+  assert.equal(run(w, flirs(), span, T, 19.5).first, null);
+  detectSymptoms(input(T + 20 * MIN, [node(1), flirs(NodeStatus.Unknown)()], span), w);
+  assert.equal(w.get('60:node-down')?.since, T, 'the onset is kept');
+  assert.equal(run(w, flirs(), span, T + 20.5 * MIN, 75).first, 69.5, 'raised at onset + 90 min');
+});
+
+test('node-down (v0.79.3): a start death stays one — a later driver restart cannot shorten its 90-minute dwell', () => {
+  const st: SymptomState = new Map();
+  assert.equal(run(st, flirs(), [{ from: T, to: T + MIN }], T + 2 * MIN, 22).first, null, 'a start death under restart A');
+  // Restart B is now the only one known (in memory, or after a deploy that carried only B).
+  assert.equal(run(st, flirs(), [{ from: T + 25 * MIN, to: T + 26 * MIN }], T + 24.5 * MIN, 70).first, 67.5, 'raised at onset + 90 min');
+});
+
+test('node-down carry (v0.79.3): the start verdict is carried — a waiting start death seeded with no start known still waits 90 min from its onset', () => {
+  const before: SymptomState = new Map();
+  run(before, flirs(), [{ from: T - MIN, to: T - MIN }], T, 10);
+  const carried = nodeDownCarry(before);
+  assert.deepEqual(carried, [{ nodeId: 60, since: T, latched: false, start: true }]);
+  const after: SymptomState = new Map();
+  seedNodeDown(after, carried, () => true, T + 12 * MIN);
+  assert.equal(run(after, flirs(), [], T + 12 * MIN, 80).first, 78);
+});
+
+test('seedNodeDown (v0.79.3): a raised node-down whose since is ahead of the clock is raised on the first tick, dated from the restart', () => {
+  const s: SymptomState = new Map();
+  seedNodeDown(s, [{ nodeId: 60, since: T + 10 * MIN, latched: true, start: false }], () => true, T);
+  const r = run(s, flirs(), [], T, 1);
+  assert.equal(r.first, 0);
+  assert.equal(r.since, T);
 });
 
 /* ── Evidence store ───────────────────────────────────────────────────────── */
@@ -159,7 +204,7 @@ function freshPath(): { dir: string; path: string } {
   return { dir, path: join(dir, 'evidence.json') };
 }
 const CARRY: EvidenceCarry = {
-  nodeDown: [{ nodeId: 60, since: T - DAY, latched: true }, { nodeId: 61, since: T - 2 * MIN, latched: false }],
+  nodeDown: [{ nodeId: 60, since: T - DAY, latched: true, start: false }, { nodeId: 61, since: T - 2 * MIN, latched: false, start: true }],
   driverStart: { from: T - 20 * MIN, to: T - 19 * MIN },
 };
 
@@ -172,19 +217,19 @@ test('evidence carry (v0.79.3): node-down dwells and the newest driver restart r
     a.record(6, stats(), NodeStatus.Alive);
     a.save();
     const file = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-    assert.deepEqual(file.nodeDown, { 60: { s: T - DAY, l: 1 }, 61: { s: T - 2 * MIN } });
+    assert.deepEqual(file.nodeDown, { 60: { s: T - DAY, l: 1 }, 61: { s: T - 2 * MIN, st: 1 } });
     assert.deepEqual(file.driverStart, { f: T - 20 * MIN, t: T - 19 * MIN });
     const b = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T + MIN, uptimeMs: () => UP + MIN });
     b.load();
     b.bindHomeId(42);
-    assert.deepEqual(b.takeCarry(), CARRY, 'same boot: all of it');
+    assert.deepEqual(b.takeCarry(), { ...CARRY, homeId: 42 }, 'same boot: all of it, with the network it belongs to');
     assert.equal(b.takeCarry(), null, 'once');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('evidence carry (v0.79.3): on another boot the node-down dwells still load but the driver restart does not — under boot grace and from an old file too', () => {
+test('evidence carry (v0.79.3): on another boot only the raised node-down dwells load, and no driver restart — under boot grace and from an old file too', () => {
   const { dir, path } = freshPath();
   try {
     const a = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T, uptimeMs: () => UP, carry: () => CARRY });
@@ -195,11 +240,12 @@ test('evidence carry (v0.79.3): on another boot the node-down dwells still load 
     // carried through (inside the 180 s boot grace: the fine ring is dropped).
     const b = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T + 50_000, uptimeMs: () => 40_000, bootGraceMs: 180_000 });
     b.load();
-    assert.deepEqual(b.takeCarry(), { nodeDown: CARRY.nodeDown, driverStart: null }, 'under boot grace');
+    // 61 was still waiting: it began before this boot's own driver start.
+    assert.deepEqual(b.takeCarry(), { homeId: null, nodeDown: [CARRY.nodeDown[0]], driverStart: null }, 'under boot grace');
     // The same file read 3 hours on (past the fine ring's 60-min age).
     const c = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T + 3 * 60 * MIN, uptimeMs: () => 40_000, bootGraceMs: 180_000 });
     c.load();
-    assert.deepEqual(c.takeCarry(), { nodeDown: CARRY.nodeDown, driverStart: null }, 'from an old file');
+    assert.deepEqual(c.takeCarry(), { homeId: null, nodeDown: [CARRY.nodeDown[0]], driverStart: null }, 'from an old file');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -210,7 +256,7 @@ test('evidence carry (v0.79.3): a save before the engine takes the carry writes 
   try {
     const a = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T, uptimeMs: () => UP, carry: () => CARRY });
     a.load(); a.bindHomeId(42); a.record(6, stats(), NodeStatus.Alive); a.save();
-    const mine: EvidenceCarry = { nodeDown: [{ nodeId: 63, since: T, latched: true }], driverStart: null };
+    const mine: EvidenceCarry = { nodeDown: [{ nodeId: 63, since: T, latched: true, start: false }], driverStart: null };
     const b = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T + MIN, uptimeMs: () => UP + MIN, carry: () => mine });
     b.load(); b.bindHomeId(42); b.record(6, stats(), NodeStatus.Alive); b.save();
     let file = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
@@ -244,6 +290,9 @@ test('evidence carry (v0.79.3): a change in the carry alone saves the store; an 
     b.takeCarry();
     mark(); b.save();
     assert.equal(marked(), true, 'taken, and the engine\'s carry is the same: nothing written');
+    carry = { ...CARRY, nodeDown: [...CARRY.nodeDown].reverse() };
+    mark(); b.save();
+    assert.equal(marked(), true, 'the same dwells in another order: nothing written');
     carry = { ...CARRY, driverStart: { from: T + 30_000, to: T + 35_000 } };
     b.save();
     assert.equal(marked(), false, 'a new driver restart alone is written');
@@ -255,15 +304,33 @@ test('evidence carry (v0.79.3): a change in the carry alone saves the store; an 
   }
 });
 
+test('evidence carry (v0.79.3): a carry for another network than the store\'s is not written', () => {
+  const { dir, path } = freshPath();
+  try {
+    let carry: EvidenceCarry = { ...CARRY, homeId: 7 };
+    const a = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T, uptimeMs: () => UP, carry: () => carry });
+    a.load(); a.bindHomeId(42); a.takeCarry(); a.record(6, stats(), NodeStatus.Alive); a.save();
+    let file = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    assert.equal(file.nodeDown, undefined, 'the engine still holds network 7\'s state');
+    assert.equal(file.driverStart, undefined);
+    carry = { ...CARRY, homeId: 42 };
+    a.save();
+    file = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(file.nodeDown as object).sort(), ['60', '61']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('evidence carry (v0.79.3): malformed entries are skipped, an inverted span is not a start', () => {
   const { dir, path } = freshPath();
   try {
-    const bad = { nodeDown: [{ nodeId: 0, since: T, latched: true }, { nodeId: 5, since: -1, latched: true }, { nodeId: 6, since: T, latched: false }], driverStart: { from: T, to: T - MIN } };
+    const bad = { nodeDown: [{ nodeId: 0, since: T, latched: true, start: false }, { nodeId: 5, since: -1, latched: true, start: false }, { nodeId: 6, since: T, latched: false, start: false }], driverStart: { from: T, to: T - MIN } };
     const a = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T, uptimeMs: () => UP, carry: () => bad });
     a.load(); a.record(6, stats(), NodeStatus.Alive); a.save();
     const b = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T, uptimeMs: () => UP });
     b.load();
-    assert.deepEqual(b.takeCarry(), { nodeDown: [{ nodeId: 6, since: T, latched: false }], driverStart: null });
+    assert.deepEqual(b.takeCarry(), { homeId: null, nodeDown: [{ nodeId: 6, since: T, latched: false, start: false }], driverStart: null });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -273,7 +340,7 @@ test('evidence carry (v0.79.3): malformed entries are skipped, an inverted span 
 
 const ENTRY = 'entry-1';
 const HOME = 3586281591;
-function fakeHa(roster: Array<Record<string, unknown>>): HaWsClient & { fireReady(): void } {
+function fakeHa(roster: Array<Record<string, unknown>>, home: () => number = () => HOME): HaWsClient & { fireReady(): void } {
   const readyCbs: Array<() => void> = [];
   const result = (cmd: Record<string, unknown>): unknown => {
     switch (cmd.type) {
@@ -282,7 +349,7 @@ function fakeHa(roster: Array<Record<string, unknown>>): HaWsClient & { fireRead
       case 'config/entity_registry/list': return [];
       case 'get_states': return [];
       case 'zwave_js/network_status':
-        return { client: { server_version: 't' }, controller: { home_id: HOME, own_node_id: 1, nodes: roster } };
+        return { client: { server_version: 't' }, controller: { home_id: home(), own_node_id: 1, nodes: roster } };
       default: return null;
     }
   };
@@ -325,16 +392,17 @@ function useClock(): () => void {
 }
 
 type Run = { zd: ReturnType<typeof createZwaveData>; tick: () => boolean; degraded: () => string; stop: () => void };
-/** Every run started and not yet stopped: a test's finally stops them all, so a
- *  failing assertion cannot leave a live client holding the mock server open. */
-const live = new Set<Run>();
+/** Every run started and not yet stopped, registered the moment it starts (a
+ *  failure in startRun's own waits included): a test's finally stops them all,
+ *  so a failing assertion cannot leave a live client holding the server open. */
+const live = new Set<() => void>();
 function stopAll(): void {
-  for (const r of [...live]) r.stop();
+  for (const stop of [...live]) stop();
 }
 /** `bootAt` null: production's own uptime source. */
-async function startRun(dir: string, url: string, bootAt: number | null, logs: string[] = [], o: { roster?: Array<Record<string, unknown>>; uptimeMs?: () => number } = {}): Promise<Run> {
+async function startRun(dir: string, url: string, bootAt: number | null, logs: string[] = [], o: { roster?: Array<Record<string, unknown>>; uptimeMs?: () => number; home?: () => number } = {}): Promise<Run> {
   const roster = o.roster ?? ROSTER;
-  const ha = fakeHa(roster);
+  const ha = fakeHa(roster, o.home);
   const uptimeMs = o.uptimeMs ?? (bootAt == null ? undefined : () => Date.now() - bootAt);
   const zd = createZwaveData({
     client: ha, entryId: ENTRY, refreshMs: 100, routePollMs: 60_000, evidenceSampleMs: 30 * MIN,
@@ -342,14 +410,23 @@ async function startRun(dir: string, url: string, bootAt: number | null, logs: s
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: url, log: (m: string) => logs.push(m),
     ...(uptimeMs ? { uptimeMs } : {}),
   } as never);
+  let stopProvider: (() => void) | null = null;
+  const stop = (): void => {
+    if (!live.delete(stop)) return;
+    stopProvider?.();
+    zd.stop();
+  };
+  live.add(stop);
   zd.start();
   ha.fireReady();
   await waitFor(() => zd.driverWsState() === 'live');
   const want = roster.find((n) => n.node_id === 60)!.status === 3 ? NodeStatus.Dead : NodeStatus.Alive;
   await waitFor(() => zd.snapshot().some((n) => n.nodeId === 60 && n.status === want && n.isListening === false));
   const priv = zd as unknown as { lastOkAt: number | null; sampleEvidence: () => void };
-  const { provider, stop: stopProvider } = createTuiDataProvider({ zwaveData: buildZwaveDataSource(zd as never), refreshMs: 60_000, log: () => {} } as never);
-  const run: Run = {
+  const tdp = createTuiDataProvider({ zwaveData: buildZwaveDataSource(zd as never), refreshMs: 60_000, log: () => {} } as never);
+  const provider = tdp.provider;
+  stopProvider = tdp.stop;
+  return {
     zd,
     // One evidence tick (the engine runs in it), then 30 s on.
     tick: () => {
@@ -360,14 +437,8 @@ async function startRun(dir: string, url: string, bootAt: number | null, logs: s
       return up;
     },
     degraded: () => buildStates(provider, Date.now(), { writeActions: false, startedAt: Date.now() }).find((x) => x.entity === ENTITY_DEGRADED)!.state,
-    stop() {
-      if (!live.delete(this)) return;
-      stopProvider();
-      zd.stop();
-    },
+    stop,
   };
-  live.add(run);
-  return run;
 }
 /** Minutes of ticks to the first node-down for node 60, or null. */
 function ticksTo(r: Run, minutes: number): number | null {
@@ -480,7 +551,7 @@ test('restart (v0.79.3, production-wired): a Z-Wave JS restart seen over the lin
     assert.equal(starts.length, 2);
     assert.ok(starts[1]!.from >= dropAt && starts[1]!.to <= Date.now(), JSON.stringify(starts));
     assert.ok(starts[1]!.to - starts[1]!.from >= 4000, 'from the drop, not the re-handshake (the first retry waits 5 s)');
-    assert.ok(logs.some((l) => /the server ended the link \d+s ago and is back — a driver start/.test(l)));
+    assert.ok(logs.some((l) => /the link ended \d+s ago, not by this add-on, and is back — a driver start/.test(l)));
     a.stop();
     const file = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { driverStart?: { f: number; t: number } };
     assert.deepEqual(file.driverStart, { f: starts[1]!.from, t: starts[1]!.to });
@@ -534,6 +605,73 @@ test('restart (v0.79.3, production-wired): by default the boot is the host\'s ow
     r.tick();
     const boot = r.zd.driverStarts()[0]!;
     assert.ok(Math.abs(boot.to - (realNow() - osUptime() * 1000)) < 3000, `${boot.to} vs ${realNow() - osUptime() * 1000}`);
+    r.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.3, production-wired): across a host reboot a start death still waiting starts again inside the new boot\'s window — no alarm at the reboot', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  try {
+    const a = await startRun(dir, srv.url, Date.now() - 40_000);
+    assert.equal(ticksTo(a, 30), null, 'precondition: a start death at boot 1, waiting');
+    a.stop();
+    skip += 5 * MIN;
+    // The host restarted: up 40 s again.
+    const b = await startRun(dir, srv.url, Date.now() - 40_000);
+    assert.equal(ticksTo(b, 95), 90, 'waits 90 min from its first reading on the new boot');
+    b.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.3, production-wired): a raised node-down reaches disk at once and outlives a host reboot — raised again on the new boot\'s first tick', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  try {
+    const a = await startRun(dir, srv.url, Date.now() - 5 * DAY);
+    assert.equal(ticksTo(a, 10), 5, 'precondition: raised at 5 min');
+    // Before any stop or flush: a power cut now would not lose it.
+    const file = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { nodeDown?: Record<string, { l?: number }> };
+    assert.equal(file.nodeDown?.['60']?.l, 1, 'saved when it was raised');
+    a.stop();
+    skip += 5 * MIN;
+    const b = await startRun(dir, srv.url, Date.now() - 40_000); // rebooted
+    assert.equal(b.tick(), true, 'raised on the first tick of the new boot');
+    b.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.3, production-wired): a change of network while running does not write the old network\'s node-down under the new one', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  let home = HOME;
+  try {
+    const r = await startRun(dir, srv.url, Date.now() - 5 * DAY, [], { home: () => home });
+    assert.equal(ticksTo(r, 10), 5, 'precondition: raised on network 1');
+    const path = join(dir, 'evidence.json');
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as { nodeDown?: Record<string, unknown> }).nodeDown?.['60'] != null, true);
+    home = HOME + 1; // the controller was swapped: another network
+    await waitFor(() => (JSON.parse(readFileSync(path, 'utf8')) as { homeId?: number }).homeId === HOME + 1);
+    const file = JSON.parse(readFileSync(path, 'utf8')) as { nodeDown?: Record<string, unknown> };
+    assert.deepEqual(Object.keys(file.nodeDown ?? {}), [], 'the reset wrote no carry of network 1');
     r.stop();
   } finally {
     stopAll();

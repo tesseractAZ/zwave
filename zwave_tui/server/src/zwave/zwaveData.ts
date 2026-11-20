@@ -1030,6 +1030,8 @@ class ZwaveDataImpl implements ZwaveData {
   private bootStart: DriverStart | null = null;
   /** The engine has taken the evidence store's restored carry (v0.79.3). */
   private carryTaken = false;
+  /** The node-down dwells as last saved (v0.79.3): a change saves at once. */
+  private nodeDownSaved = '';
   private readonly uptimeMs: () => number;
   /** Node status from the previous poll — diffed to log alive/dead/wake events. */
   private prevStatus = new Map<number, NodeStatus>();
@@ -1128,7 +1130,7 @@ class ZwaveDataImpl implements ZwaveData {
           // v0.79.3: node-down dwells and the newest known driver restart
           // outlive this process, so a restart neither withdraws a raised
           // node-down nor reads as a driver start.
-          carry: () => ({ nodeDown: nodeDownCarry(this.symptomState), driverStart: this.newestDriverRestart() }),
+          carry: () => ({ homeId: this.lastHomeId, nodeDown: nodeDownCarry(this.symptomState), driverStart: this.newestDriverRestart() }),
         })
       : null;
     const restored = this.evidenceStore?.load();
@@ -1177,11 +1179,11 @@ class ZwaveDataImpl implements ZwaveData {
               // withholds nothing (the boot window has sent no probe yet).
               const at = Date.now();
               this.driverWsConnAt = at;
-              // Only a link the SERVER ended proves the driver went away and came
-              // back (v0.79.3): this add-on's own first handshake does not.
+              // Only a link this add-on did not end itself shows the driver went
+              // away and came back (v0.79.3): its own first handshake does not.
               if (link?.peerClosedAt != null) {
                 this.driverRestart = { from: link.peerClosedAt, to: at };
-                this.log(`driver-ws: the server ended the link ${Math.max(0, Math.round((at - link.peerClosedAt) / 1000))}s ago and is back — a driver start for the node-down start window`);
+                this.log(`driver-ws: the link ended ${Math.max(0, Math.round((at - link.peerClosedAt) / 1000))}s ago, not by this add-on, and is back — a driver start for the node-down start window`);
               }
             },
             onBgRssi: (channels, at) => {
@@ -1566,6 +1568,14 @@ class ZwaveDataImpl implements ZwaveData {
       this.symptomState,
     );
     this.lastSymptoms = symptoms;
+    // v0.79.3: a node-down dwell that starts, is raised or ends reaches disk
+    // now, not at the next flush, so a power cut or a crash restart cannot lose
+    // it. Rare, so the whole save is cheap.
+    const nodeDowns = nodeDownKey(this.symptomState);
+    if (nodeDowns !== this.nodeDownSaved) {
+      this.nodeDownSaved = nodeDowns;
+      ev.save();
+    }
     this.requestRttConfirms(suspects, now);
     // Held through a dark lane (v0.76.0): live for the log and the episodes.
     const held = heldSymptoms(this.symptomState);
@@ -4432,6 +4442,11 @@ export function diffSymptomLog(
     events.push({ severity: 'info', nodeId: was.nodeId, text: `${was.kind} cleared` });
   }
   return { next, events };
+}
+
+/** The node-down dwells and which are raised, as a key (v0.79.3). */
+function nodeDownKey(state: SymptomState): string {
+  return nodeDownCarry(state).map((d) => (d.latched ? `${d.nodeId}r` : `${d.nodeId}`)).sort().join(',');
 }
 
 export function driverHomeGuard(

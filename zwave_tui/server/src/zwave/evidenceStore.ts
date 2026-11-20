@@ -449,13 +449,19 @@ export interface EvidenceStoreOptions {
 /**
  * The symptom engine's state carried across a restart of this add-on
  * (v0.79.3): each node-down dwell, and the newest driver start known over the
- * driver link. Node-down dwells load on any boot — an outage raised before a
- * host restart is the same outage after it until a reading says otherwise, and
- * the engine re-judges each one on its next tick. A driver start loads only on
- * the boot that saw it.
+ * driver link. On the boot that saved them every dwell loads, and the driver
+ * start. On another boot only the raised dwells load — an outage raised before
+ * a host restart is the same outage after it until a reading says otherwise,
+ * while one still waiting began before that boot's own driver start, and the
+ * next Dead reading starts it again inside the boot's window. The engine
+ * re-judges each dwell on its next tick.
  */
 export interface EvidenceCarry {
-  nodeDown: { nodeId: number; since: number; latched: boolean }[];
+  /** The network the engine state belongs to; a carry for another network than
+   *  the store's is not written (a mid-run home-id change resets the store
+   *  before the engine has wiped its state). Null or absent: not checked. */
+  homeId?: number | null;
+  nodeDown: { nodeId: number; since: number; latched: boolean; start: boolean }[];
   driverStart: { from: number; to: number } | null;
 }
 
@@ -636,9 +642,10 @@ interface Persisted {
   /** When the host booted, by the clock at save time: now − uptime (v0.77.3).
    *  Optional; absent ⇒ `lives` are not carried. */
   bootAt?: number;
-  /** The symptom engine's node-down dwells (v0.79.3): since, and l=1 once
-   *  raised. OPTIONAL, no schema bump: absent ⇒ nothing is carried. */
-  nodeDown?: Record<string, { s: number; l?: 1 }>;
+  /** The symptom engine's node-down dwells (v0.79.3): since, l=1 once
+   *  raised, st=1 once judged a start death. OPTIONAL, no schema bump: absent
+   *  ⇒ nothing is carried. */
+  nodeDown?: Record<string, { s: number; l?: 1; st?: 1 }>;
   /** The newest driver start known over the driver link (v0.79.3): it
    *  started between f and t. Optional; read only on the same boot. */
   driverStart?: { f: number; t: number };
@@ -745,6 +752,12 @@ function routeKeyOf(stats: NodeStats): string | null {
   return routeKeyOfLwr(stats.lwr);
 }
 
+/** What a carry says, independent of its entries' order or its home stamp
+ *  (v0.79.3): the file returns them by node id, the engine in its own order. */
+function carryKeyOf(c: EvidenceCarry): string {
+  const n = [...c.nodeDown].sort((a, b) => a.nodeId - b.nodeId).map((d) => [d.nodeId, d.since, d.latched ? 1 : 0, d.start ? 1 : 0]);
+  return JSON.stringify([n, c.driverStart ? [c.driverStart.from, c.driverStart.to] : null]);
+}
 function numOrNull(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
@@ -1475,9 +1488,10 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             carriedLives.set(id, { at: { tx, timeout: to, dropTx: dr, rx }, seed: k0 != null && k0 >= 1 && a0 != null ? { k0, a0 } : null });
           }
         }
-        // The symptom engine's carry (v0.79.3). Node-down dwells on any boot
-        // and at any age: the engine re-judges each against a live reading
-        // before it counts. A driver start only on the boot that saw it.
+        // The symptom engine's carry (v0.79.3), at any age: the engine
+        // re-judges each dwell against a live reading before it counts. On
+        // another boot only raised dwells, and no driver start: that boot is a
+        // newer start of its own.
         const nodeDown: EvidenceCarry['nodeDown'] = [];
         if (obj.nodeDown && typeof obj.nodeDown === 'object') {
           for (const [k, v] of Object.entries(obj.nodeDown)) {
@@ -1485,13 +1499,14 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             if (!Number.isInteger(id) || id <= 0 || !v || typeof v !== 'object') continue;
             const s = numOrNull(v.s);
             if (s == null || s <= 0) continue;
-            nodeDown.push({ nodeId: id, since: s, latched: v.l === 1 });
+            if (!sameBoot && v.l !== 1) continue;
+            nodeDown.push({ nodeId: id, since: s, latched: v.l === 1, start: v.st === 1 });
           }
         }
         const df = numOrNull(obj.driverStart?.f), dt = numOrNull(obj.driverStart?.t);
         const driverStart = sameBoot && df != null && dt != null && df <= dt ? { from: df, to: dt } : null;
-        pendingCarry = { nodeDown, driverStart };
-        savedCarryKey = JSON.stringify(pendingCarry);
+        pendingCarry = { homeId: loadedHomeId, nodeDown, driverStart };
+        savedCarryKey = carryKeyOf(pendingCarry);
         log(`evidence: restored ${coarse.size} node(s) coarse${grace || fineTooOld ? '' : ` + ${fine.size} fine`} from ${path}`);
       } catch (e) {
         log(`evidence: load failed (${(e as Error).message}) — starting fresh`);
@@ -1509,8 +1524,9 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       // The carry dirties the store too (v0.79.3): a driver restart seen, or a
       // node-down raised, while no sample was recorded (HA's roster stale
       // through a Z-Wave JS restart) must still reach disk.
-      const carry = pendingCarry ?? opts.carry?.() ?? null;
-      const carryKey = carry ? JSON.stringify(carry) : null;
+      const offered = pendingCarry ?? opts.carry?.() ?? null;
+      const carry = offered && offered.homeId != null && homeId != null && offered.homeId !== homeId ? null : offered;
+      const carryKey = carry ? carryKeyOf(carry) : null;
       if (!dirty && carryKey === savedCarryKey) return;
       try {
         const nodes: Persisted['nodes'] = {};
@@ -1649,7 +1665,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           lives: livesOut,
           bootAt: now() - uptimeMs(),
           ...(carry ? {
-            nodeDown: Object.fromEntries(carry.nodeDown.map((d) => [String(d.nodeId), { s: d.since, ...(d.latched ? { l: 1 as const } : {}) }])),
+            nodeDown: Object.fromEntries(carry.nodeDown.map((d) => [String(d.nodeId), { s: d.since, ...(d.latched ? { l: 1 as const } : {}), ...(d.start ? { st: 1 as const } : {}) }])),
             ...(carry.driverStart ? { driverStart: { f: carry.driverStart.from, t: carry.driverStart.to } } : {}),
           } : {}),
         };

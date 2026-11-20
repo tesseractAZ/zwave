@@ -80,12 +80,14 @@ export interface DriverWsCallbacks {
   /** Node capability flags from the state dump (listening / FLiRS). */
   onNodeFlags?: (nodeId: number, flags: { isListening: boolean | null; isFrequentListening: boolean | null }) => void;
   /** The server's homeId (from the version handshake) — caller cross-checks vs HA.
-   *  `link.peerClosedAt` (v0.79.3): when the SERVER ended the previous link
-   *  that had handshaken, if it did since the last handshake, else null. Then
-   *  the server — and the driver in it — went away and came back between that
-   *  moment and this handshake. Null on this client's first connection and
-   *  after a link this client tore down itself (a liveness or handshake
-   *  timeout), which prove nothing about the driver. */
+   *  `link.peerClosedAt` (v0.79.3): when a handshaken link last ended without
+   *  this client ending it (the server or the network ended it), if one did
+   *  since the last handshake, else null. Then the server — and the driver in
+   *  it — went away and came back between that moment and this handshake, or
+   *  (not told apart) the server dropped this client or the network did.
+   *  Null on this client's first connection and after a link this client
+   *  ended itself (a liveness or handshake timeout, a protocol error), which
+   *  prove nothing about the driver. */
   onHomeId?: (homeId: number, link: { peerClosedAt: number | null }) => void;
   /** An S2 SPAN-resync log event was attributed to a node (v0.26). */
   onS2Resync?: (nodeId: number) => void;
@@ -589,9 +591,11 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   let serverHomeId: number | null = null;
   /** The current socket completed the version handshake (v0.79.3). */
   let handshook = false;
-  /** When the server ended a handshaken link, until the next handshake reports
-   *  it (v0.79.3). Our own teardowns strip the close listener first, so only
-   *  the peer's close (or the network's) can set it. */
+  /** When a handshaken link ended without this client ending it, until the
+   *  next handshake reports it (v0.79.3). Our own teardowns strip the close
+   *  listener first, and a protocol error clears `handshook` before the close
+   *  the ws library then sends itself, so only the peer's close (or the
+   *  network's) can set it. */
   let peerClosedAt: number | null = null;
   let statusLine = url ? 'not started' : 'disabled (no driver_ws_url)';
   let msgId = 0;
@@ -844,7 +848,10 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       }
     });
     sock.on('error', (e: Error) => {
-      // 'close' follows; reconnect scheduled there.
+      // 'close' follows; reconnect scheduled there. A protocol error (a frame
+      // too large or malformed) the ws library answers by closing the link
+      // itself: that close is ours, not the driver going away (v0.79.3).
+      if (String((e as NodeJS.ErrnoException).code ?? '').startsWith('WS_ERR_')) handshook = false;
       log(`driver-ws: socket error (${e.message})`);
     });
     sock.on('close', () => {

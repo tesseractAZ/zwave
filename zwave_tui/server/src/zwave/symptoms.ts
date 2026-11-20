@@ -146,6 +146,10 @@ export interface DwellEntry {
   /** node-down (v0.79.2): raised once, so a later change of the node's
    *  capability flags cannot lengthen its dwell and withdraw it. */
   latched?: true;
+  /** node-down (v0.79.3): judged a start death once, so it stays one — a
+   *  later driver restart, or a deploy that carries only the newest, cannot
+   *  shorten its dwell to the 5-minute one. */
+  start?: true;
 }
 export type SymptomState = Map<string, DwellEntry>;
 
@@ -156,7 +160,7 @@ export interface DriverStart { from: number; to: number }
 
 /** One node's node-down dwell, carried across a restart of this add-on
  *  (v0.79.3). */
-export interface NodeDownCarry { nodeId: number; since: number; latched: boolean }
+export interface NodeDownCarry { nodeId: number; since: number; latched: boolean; start: boolean }
 
 export interface DetectInput {
   now: number;
@@ -770,22 +774,35 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
       // like environmental degradation.
       // A death at a known driver start on a node auto-ping does not probe
       // (FLiRS or sleeping, or capability not yet known; v0.79.2) dwells for
-      // NODE_DOWN_START_DWELL_MS. Any other death keeps DWELL_MS, and one
-      // already raised stays raised (`latched`; carried across a restart of
-      // this add-on since v0.79.3, see nodeDownCarry).
+      // NODE_DOWN_START_DWELL_MS, and once judged a start death stays one
+      // (`start`, v0.79.3). Any other death keeps DWELL_MS. One already
+      // raised stays raised (`latched`) and is raised at once while it reads
+      // Dead, carried across a restart of this add-on too (v0.79.3, see
+      // nodeDownCarry). Unknown is no reading (v0.79.3): a driver restart reads
+      // its nodes Unknown for seconds, and that neither ends a dwell nor
+      // advances it, and a raised one stays raised through it.
       const nk = key(id, 'node-down');
       const ne = state.get(nk);
-      const onset = ne?.since ?? now;
-      const atStart = b && ne?.latched !== true && node.isListening !== true
-        && (input.driverStarts ?? []).some((s) => onset >= s.from && onset - s.to <= NODE_DOWN_START_WINDOW_MS);
-      const since = dwell(state, nk, b, now, atStart ? NODE_DOWN_START_DWELL_MS : DWELL_MS);
+      const noReading = node.status === NS.Unknown && ne != null;
+      let since: number | null = null;
+      if (noReading) {
+        if (ne.latched === true) since = ne.since;
+      } else {
+        const onset = ne?.since ?? now;
+        const atStart = b && ne?.latched !== true && node.isListening !== true
+          && (ne?.start === true || (input.driverStarts ?? []).some((s) => onset >= s.from && onset - s.to <= NODE_DOWN_START_WINDOW_MS));
+        since = dwell(state, nk, b, now, atStart ? NODE_DOWN_START_DWELL_MS : DWELL_MS);
+        const e = state.get(nk);
+        if (e != null && atStart) e.start = true;
+        if (since == null && e?.latched === true) since = e.since;
+      }
       if (since != null) {
         state.get(nk)!.latched = true;
         breaching = true;
         const downFor = Math.max(0, Math.round((now - since) / 60_000));
         out.push({
           kind: 'node-down', nodeId: id, severity: 'crit', sinceMs: since, basis: 'measured',
-          evidence: [{ label: 'driver status', value: `Dead for ${downFor}m` }],
+          evidence: [{ label: 'driver status', value: noReading ? `Unknown now; Dead for ${downFor}m before` : `Dead for ${downFor}m` }],
           narrative: `${node.name} is marked Dead by the driver — a transmission to it failed and has not since succeeded. Silence alone would not prove this; the status is a measured verdict. A ping often revives a node whose radio is still there.`,
         });
       }
@@ -1375,7 +1392,7 @@ export function nodeDownCarry(state: SymptomState): NodeDownCarry[] {
   for (const [k, e] of state) {
     if (!k.endsWith(NODE_DOWN_SUFFIX)) continue;
     const id = Number(k.slice(0, -NODE_DOWN_SUFFIX.length));
-    if (Number.isInteger(id) && id > 0) out.push({ nodeId: id, since: e.since, latched: e.latched === true });
+    if (Number.isInteger(id) && id > 0) out.push({ nodeId: id, since: e.since, latched: e.latched === true, start: e.start === true });
   }
   return out;
 }
@@ -1385,9 +1402,9 @@ export function nodeDownCarry(state: SymptomState): NodeDownCarry[] {
  * over an entry this run already holds. Nothing else is trusted: the detector
  * re-judges each one on its next tick, and a node that does not read Dead
  * there drops it, as any dwell is dropped. A `since` ahead of `now` (a host
- * without a clock battery boots behind its last save) is taken as `now`, so a
- * raised node-down is not held back until the clock catches up. Returns how
- * many were seeded.
+ * without a clock battery boots behind its last save) is taken as `now`; a
+ * raised one is raised at once all the same, dated from the restart. Returns
+ * how many were seeded.
  */
 export function seedNodeDown(state: SymptomState, carried: readonly NodeDownCarry[], keep: (nodeId: number) => boolean, now: number): number {
   let n = 0;
@@ -1395,7 +1412,7 @@ export function seedNodeDown(state: SymptomState, carried: readonly NodeDownCarr
     const k = key(c.nodeId, 'node-down');
     if (!keep(c.nodeId) || state.has(k)) continue;
     const since = Math.min(c.since, now);
-    state.set(k, { since, lastSeen: since, hits: 1, ...(c.latched ? { latched: true as const } : {}) });
+    state.set(k, { since, lastSeen: since, hits: 1, ...(c.latched ? { latched: true as const } : {}), ...(c.start ? { start: true as const } : {}) });
     n += 1;
   }
   return n;

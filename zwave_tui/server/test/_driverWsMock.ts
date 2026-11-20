@@ -78,6 +78,9 @@ export async function mockServer(over: { minSchema?: number; maxSchema?: number;
     connectionCount: () => connections,
     push: (event: unknown) => sock?.send(JSON.stringify({ type: 'event', event })),
     dropClient: () => sock?.terminate(),
+    /** Send a text frame that is not UTF-8 (v0.79.3): the client's ws library
+     *  closes the link itself (1007), a protocol error, not the server leaving. */
+    sendMalformed: () => (sock as unknown as { _socket: import('node:net').Socket } | null)?._socket.write(Buffer.from([0x81, 0x02, 0xff, 0xfe])),
     /** Stop reading the client (v0.79.3): its pings go unanswered, so its
      *  liveness check — not the server — ends the link. A stalled socket never
      *  reads the client's close, so close() destroys it. */
