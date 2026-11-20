@@ -304,7 +304,8 @@ state on each call (among them `interference()`, memoised for 10 s,
 `routeStability()` and `engineStatus()`) are described at
 the top of this chapter. This is the **per-frame cached-accessor
 render model**: a `TuiSession.draw()` fired at 1 Hz never recomputes a health
-score or a noise floor.
+score, and recomputes a noise floor only when it refills the `interference()`
+memo.
 
 The render cadence is layered so a screen is always cheap to draw but never more
 than ~1–2 s stale:
@@ -733,7 +734,7 @@ Statistics subscriptions are not polled. They are opened per connection and re-o
 
 The TUI is the human-facing half of the add-on: an instrument-panel–style console that renders over SSH or an xterm.js WebSocket, driven by one per-session state machine. This chapter documents the rendering substrate — the nine screens, the key map that moves between them, the shared frame contract every screen wears, the ANSI-aware layout primitives and terminal gauges they draw with, the width-responsive Overview table, and the anti-flicker draw loop that repaints once a second without smearing. Three of the nine screens — **Remedy**, **Interference** and **Engine** — are the front ends of the remediation engine and get their own chapters; here they appear only as members of the registry and targets of the key map.
 
-Everything in this layer is **pure render over cached data**. The screen functions receive a `DataProvider` whose accessors return the last cached values (`server/src/types.ts`, the `DataProvider` interface) and must never recompute Z-Wave state inside `draw()`; some accessors still fold held state on each call (among them `interference()`, `routeStability()` and `engineStatus()`; §1). The single source of truth for "what nodes, in what order" is `visibleNodes()` in `server/src/telnet/input.ts`; the session computes it once per frame and hands the same array to every screen so a selection index means the same node everywhere.
+Everything in this layer is **pure render over cached data**. The screen functions receive a `DataProvider` whose accessors return the last cached values (`server/src/types.ts`, the `DataProvider` interface) and must never recompute Z-Wave state inside `draw()`; some accessors still fold held state inside the frame that asks (among them `interference()`, memoised for 10 s, `routeStability()` and `engineStatus()`; §1). The single source of truth for "what nodes, in what order" is `visibleNodes()` in `server/src/telnet/input.ts`; the session computes it once per frame and hands the same array to every screen so a selection index means the same node everywhere.
 
 ### 3.1 The screen model & render dispatch
 

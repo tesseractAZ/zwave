@@ -36,13 +36,14 @@ does. Nothing the add-on does has changed.
 
 ### Corrected — the documents
 
-A scan of every `.md` file against the code, and three reviews of the
-corrected text as a whole, made 287 corrections where the code or another
-document contradicted the text, in `DOCS.md`, `README.md`, `DESIGN.md`,
-`PERFORMANCE.md`, `SECURITY.md`, `RESEARCH.md` and the option descriptions. `RESEARCH.md` now marks the parts of its design that are
-not built (among them the 0–10 rating and the `backup_nvm` rule). 44 more
-passages, among them passages in the older releases in
-`docs/CHANGELOG-history.md`, are reworded to the impersonal register.
+A scan of every `.md` file against the code, and four reviews of the corrected
+text as a whole, made 289 corrections where the code or another document
+contradicted the text, in `DOCS.md`, `README.md`, `DESIGN.md`,
+`PERFORMANCE.md`, `SECURITY.md`, `RESEARCH.md` and the option descriptions.
+`RESEARCH.md` now marks the parts of its design that are not built (among them
+the 0–10 rating and the `backup_nvm` rule). 44 more passages, among them
+passages in the older releases in `docs/CHANGELOG-history.md`, are reworded to
+the impersonal register.
 
 ### Tests
 
