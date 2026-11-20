@@ -25,7 +25,7 @@ does. Nothing the add-on does has changed.
 - **Evidence sample interval** (`route_poll_interval`, renamed from "route
   poll interval"; the option key is unchanged): it is the detection engine's
   tick and polls nothing; it also sets the span of the 240 controller samples
-  behind the INTERFERENCE screen's serial-link rates and noise trend.
+  behind the INTERFERENCE screen's serial-link rates.
 - Auto-ping and the refresh trial are the only actions taken without a key
   press, both off by default; auto-ping also starts the liveness sweep, and
   its mesh-wide suppressor counts a quarter of the mains-powered nodes (at
@@ -36,11 +36,10 @@ does. Nothing the add-on does has changed.
 
 ### Corrected — the documents
 
-A scan of every `.md` file against the code, and a second review of the
-corrected text as a whole, found 279 statements that the code or another
-document contradicts; each is corrected in `DOCS.md`, `README.md`,
-`DESIGN.md`, `PERFORMANCE.md`, `SECURITY.md` or `RESEARCH.md`, or in the
-option descriptions. `RESEARCH.md` now marks the parts of its design that are
+A scan of every `.md` file against the code, and three reviews of the
+corrected text as a whole, made 287 corrections where the code or another
+document contradicted the text, in `DOCS.md`, `README.md`, `DESIGN.md`,
+`PERFORMANCE.md`, `SECURITY.md`, `RESEARCH.md` and the option descriptions. `RESEARCH.md` now marks the parts of its design that are
 not built (among them the 0–10 rating and the `backup_nvm` rule). 44 more
 passages, among them passages in the older releases in
 `docs/CHANGELOG-history.md`, are reworded to the impersonal register.

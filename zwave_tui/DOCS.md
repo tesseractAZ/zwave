@@ -50,11 +50,13 @@ One `zwaveData` layer owns the upstream subscriptions and evidence; one shared
 `TuiSession` over that single provider. Everything the render loop reads is a
 cheap accessor over state already held — the expensive Z-Wave polling and
 engine recompute happen on the data layer's own timers, never inside `draw()`.
-There are two exceptions. The M6 `interference()` view is memoised for 10 s,
-and the first frame that asks for it once the memo is 10 s old recomputes it,
-folding every node's coarse buckets inside that `draw()`; and TOPOLOGY's
-route-stability panel sums each end node's coarse buckets (`routeStability()`)
-on every frame.
+Some accessors still fold held state inside the frame that asks, among them
+the M6 `interference()` view (memoised for 10 s: the first frame that asks for
+it once the memo is 10 s old recomputes it, folding every node's coarse buckets
+inside that `draw()`), TOPOLOGY's route-stability panel (`routeStability()`
+sums each end node's coarse buckets on every frame) and REMEDY's empty state
+(`engineStatus()` reads every end node's learned normals and scans its fine
+ring on every frame).
 
 ### 1.1 The seven-stage bootstrap
 
@@ -297,9 +299,9 @@ value — `nodes: () => cachedNodes`, `scoreFor: (id) => cachedScores.get(id) ??
 `hasRealNoise`) and `lastUpdated` / `ready` / `lastError` are cached this way.
 Every other accessor (`symptoms`, `engineStatus`, `efficacyFor`, `history`,
 `historyLong`, `interference`, the baselines, …) forwards straight to the data
-layer, which answers from state it already holds; the M6 `interference()` view
-is memoised for 10 s and refilled by the first frame that asks after that, and
-`routeStability()` sums a node's coarse buckets on each call, as described at
+layer, which answers from state it already holds; the accessors that fold that
+state on each call (among them `interference()`, memoised for 10 s,
+`routeStability()` and `engineStatus()`) are described at
 the top of this chapter. This is the **per-frame cached-accessor
 render model**: a `TuiSession.draw()` fired at 1 Hz never recomputes a health
 score or a noise floor.
@@ -731,7 +733,7 @@ Statistics subscriptions are not polled. They are opened per connection and re-o
 
 The TUI is the human-facing half of the add-on: an instrument-panel–style console that renders over SSH or an xterm.js WebSocket, driven by one per-session state machine. This chapter documents the rendering substrate — the nine screens, the key map that moves between them, the shared frame contract every screen wears, the ANSI-aware layout primitives and terminal gauges they draw with, the width-responsive Overview table, and the anti-flicker draw loop that repaints once a second without smearing. Three of the nine screens — **Remedy**, **Interference** and **Engine** — are the front ends of the remediation engine and get their own chapters; here they appear only as members of the registry and targets of the key map.
 
-Everything in this layer is **pure render over cached data**. The screen functions receive a `DataProvider` whose accessors return the last cached values (`server/src/types.ts`, the `DataProvider` interface) and must never recompute Z-Wave state inside `draw()`; the exceptions are the M6 `interference()` view, which the first frame to ask refills once its 10 s memo has lapsed (§1.4), and `routeStability()`, which sums a node's coarse buckets on every call (TOPOLOGY asks for every end node each frame). The single source of truth for "what nodes, in what order" is `visibleNodes()` in `server/src/telnet/input.ts`; the session computes it once per frame and hands the same array to every screen so a selection index means the same node everywhere.
+Everything in this layer is **pure render over cached data**. The screen functions receive a `DataProvider` whose accessors return the last cached values (`server/src/types.ts`, the `DataProvider` interface) and must never recompute Z-Wave state inside `draw()`; some accessors still fold held state on each call (among them `interference()`, `routeStability()` and `engineStatus()`; §1). The single source of truth for "what nodes, in what order" is `visibleNodes()` in `server/src/telnet/input.ts`; the session computes it once per frame and hands the same array to every screen so a selection index means the same node everywhere.
 
 ### 3.1 The screen model & render dispatch
 
@@ -2169,7 +2171,7 @@ NVM backup. A storm PAUSE (v0.76.0) is different: the subscription stays
 acknowledged, so a reading taken before the pause keeps its own 2-minute
 deadline, and a pause never creates a hold by itself. At `verbose` and finer
 the busiest minute is likeliest inside the NVM backup, the very blackout the
-gate exists for. The missed-report watch also gives each sleeper one more interval while the stream is not watched (§11.12). Every other signal is unaffected.
+gate exists for. The missed-report watch also gives a sleeper one more interval when the stream was not watched throughout its silence (§11.12). Every other signal is unaffected.
 
 #### Into the evidence store
 
@@ -3558,7 +3560,7 @@ symptom detector ─┘                                                         
                               renderInterference(ctx)  (pure render, ≤ view.cols per line)
 ```
 
-The expensive step is the diurnal fold: it walks **every non-controller node's coarse-bucket ring** (30-minute buckets over a 14-day horizon — up to ~672 buckets/node, ≈26k buckets across a 39-node mesh). The TUI redraws at ~1 Hz, so folding that per frame would be wasteful. The fold is therefore memoized in `ZwaveData.interference()` on the **~10-second sample cadence**:
+The expensive step is the diurnal fold: it walks **every non-controller node's coarse-bucket ring** (30-minute buckets over a 14-day horizon — up to ~672 buckets/node, ≈26k buckets across a 39-node mesh). The TUI redraws at ~1 Hz, so folding that per frame would be wasteful. The fold is therefore memoized in `ZwaveData.interference()` for a fixed **10 seconds** (a constant, not the `route_poll_interval` sample cadence):
 
 ```ts
 // zwaveData.ts
@@ -3798,7 +3800,7 @@ When a mesh event is live, the screen renders the detector's narrative — a fix
 
 ### 10.7 Tunables and constants
 
-Every number the Interference Watch uses is a **fixed, tuned constant** — there is no per-screen config surface; two add-on options change what this screen can show: `driver_ws_url` (empty disables the noise panel entirely) and `route_poll_interval`, whose evidence tick records one controller sample, so the 240-sample controller ring behind the serial rates and the trend spans 240 × that interval (~40 min at the 10 s default, 20 min to 8 h across its 5–120 s range). A maintainer changing behaviour edits these directly:
+Every number the Interference Watch uses is a **fixed, tuned constant** — there is no per-screen config surface; two add-on options change what this screen can show: `driver_ws_url` (empty disables the noise panel entirely) and `route_poll_interval`, whose evidence tick records one controller sample, so the 240-sample controller ring behind the serial rates spans 240 × that interval (~40 min at the 10 s default, 20 min to 8 h across its 5–120 s range), and the newest 24 that the trend spark draws span 24 × it (~4 min at the default). A maintainer changing behaviour edits these directly:
 
 | Constant | Value | File | Governs |
 | --- | --- | --- | --- |
@@ -4723,7 +4725,7 @@ experiment, not an admission.
 | `log_level` | `info` | `list(trace…fatal)` | `LOG_LEVEL` | `config.logLevel` → `createLogger` | Threshold for the add-on log. `warning` and above silence the operational stream while still surfacing warnings and errors. **Dead config until v0.25.0** — it was parsed and then read by nobody. Since v0.50.0 every line except `info` is prefixed with its level (`DEBUG:`, `WARNING:`, `ERROR:`, `FATAL:`; see §12.9); `info` stays bare. |
 | `refresh_interval` | `2` | `int(1,30)` | `REFRESH_INTERVAL_MS` | `config.refreshMs` | **seconds → ms**: run script does `* 1000`. Cheap render/roster cadence. |
 | `refresh_trial_enabled` | `false` | `bool` | `REFRESH_TRIAL_ENABLED` (numeric-bool) | `config.refreshTrial.enabled` | The pre-registered refresh trial (§11.14). Also requires `write_actions_enabled` and auto-ping running unsuppressed; sends nothing otherwise. A start with it off clears a kill latch. |
-| `route_poll_interval` | `10` | `int(5,120)` | `ROUTE_POLL_INTERVAL_MS` | `config.routePollMs` | **seconds → ms**. The evidence-sample tick: the detection engine's tick (symptoms, learned baselines, refresh-trial decisions). It polls nothing; node and controller statistics are pushed as the driver reports them. Each tick records one controller sample, so the 240-sample controller ring behind the INTERFERENCE screen's serial-link rates and trend spans 240 × this interval (§10.7). |
+| `route_poll_interval` | `10` | `int(5,120)` | `ROUTE_POLL_INTERVAL_MS` | `config.routePollMs` | **seconds → ms**. The evidence-sample tick: the detection engine's tick (symptoms, learned baselines, refresh-trial decisions). It polls nothing; node and controller statistics are pushed as the driver reports them. Each tick records one controller sample, so the 240-sample controller ring behind the INTERFERENCE screen's serial-link rates spans 240 × this interval, and the newest 24 that its noise-trend spark draws span 24 × it (§10.7). |
 | `signal_display` | `margin` | `list(margin\|dbm)` | `SIGNAL_DISPLAY` | `config.signalDisplay` | Anything not exactly `"dbm"` ⇒ `'margin'`. Live-toggleable in the TUI (`T`). |
 | `ssh_enabled` | `true` | `bool` | `SSH_ENABLED` (1/0) | `config.ssh.enabled` | Fail-**open** (`!== '0'`). |
 | `users` | `[]` | repeatable `{username: str, password: password}` | `ZWAVE_USERS` (JSON) | `config.auth.users` | See §12.2.1 — lifted with `jq`, not `bashio::config`. |

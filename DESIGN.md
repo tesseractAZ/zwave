@@ -133,7 +133,7 @@ for no-RTC clocks) — plus the disciplines the design review proved necessary:
 
 **Two tiers, both M2 exit criteria** *(DR blocker: baselines had no substrate)*:
 
-- **Fine ring**: one sample per node per route-poll tick (default 10 s),
+- **Fine ring**: one sample per node per evidence tick (`route_poll_interval`, default 10 s),
   ~40 min horizon — feeds recent-window detectors and the after-window
   verifier.
 - **Coarse tier**: 30-minute buckets × 14 days per node — feeds the
