@@ -60,7 +60,10 @@ means only within the files re-read (`Driver.ts`, `Node.ts`,
 > **`commandsDroppedTX` does NOT count RF ACK failures.** *(source + empirical)*
 
 This is the highest-impact finding and it overturns the assumption baked into
-the current TUI's `txDropPct`. Reproduced against zwave-js@15.25.3:
+the TUI's `txDropPct` at the time. *(v0.11.0 replaced it with a
+response-timeout rate that leaves the drop counter out, now `responseTimeoutPct`
+in `health.ts`: `timeoutResponse / max(commandsTX, MIN_TX_FOR_RATE)`.)*
+Reproduced against zwave-js@15.25.3:
 
 - When a listening node stops ACKing, `SendData` returns `TransmitStatus.NoAck`;
   the driver retries `attempts.sendData` (default **3**, empirically confirmed)
@@ -223,12 +226,15 @@ RSSI when the send queue is idle ≥ 5 s, at most every 30 s (EMA α = 0.9);
 > dropped_tx/rx, nak, can, timeout_ack, `timout_response` *(misspelled in dev
 > source)*, timeout_callback — **`background_rssi` is silently dropped** at
 > HA's WS boundary, even though the python lib parses it. **Noise-floor / SNR
-> analysis is impossible through HA today.** It is the single strongest argument
-> for a future direct driver-WS phase (`ws://core-zwave-js:3000`), or a one-line
-> upstream HA PR. Design the noise-monitor interface now; feed it later.
+> analysis is impossible through HA today.** It was the single strongest argument
+> for the direct driver-WS phase (`ws://core-zwave-js:3000`), or a one-line
+> upstream HA PR. *(Built in v0.13: `driverWsClient.ts` reads the per-channel
+> background RSSI from the driver WS. The Signal lane's SNR margin, `weak-signal`
+> and the INTERFERENCE screen use it; `mesh-interference` does not use it to
+> confirm an event.)*
 
-DrZWave's vendor-endorsed jamming recipe (directly usable when we *can* read the
-floor): sample background RSSI ~every 30 s; **no fixed threshold works** —
+DrZWave's vendor-endorsed jamming recipe (directly usable when the floor *can*
+be read): sample background RSSI ~every 30 s; **no fixed threshold works** —
 average over long windows for a per-site baseline; declare jamming only when
 **delivery failures coincide with an elevated floor**; queue the alert until the
 jam clears so it can actually be delivered.
@@ -312,7 +318,7 @@ to 6 dBm for headroom.)
 
 ### 1.11 Statistics are smoothed & precision-limited *(source)*
 `rssi` and `rtt` are EMAs (α = 0.25) → **~4-sample lag**, so they won't show
-short interference bursts; keep our own windowed history. Counters are
+short interference bursts; keep a separate windowed history. Counters are
 **cumulative since driver start** and never decay → window/delta them with a
 **reset guard** (counter went backwards ⇒ driver restarted ⇒ invalid window).
 RSSI has **error sentinels** `NoSignalDetected=125, ReceiverSaturated=126,
@@ -392,6 +398,13 @@ Resort-to-Direct → Explorer frame (last resort)**.
 > carrier. Explorer-reliance can therefore only ever be a labelled best-effort
 > log-parse enrichment, never a load-bearing detector input. And never force
 > explorer-heavy probes (`tryReallyHard` ping blocks comms for seconds).
+> *(As built, v0.71.0: to every node with a switch or light value to read, the
+> liveness sweep and verification probes send a routed read with the driver's
+> default options, `0x25` — the transmit options a `tryReallyHard` ping
+> switches to, so an explorer frame is allowed as the last resort — one attempt
+> each, at NodeQuery priority. None of the 170 `0x25` frames in the 39 h driver
+> log reviewed for v0.71.0 was delivered by an explorer frame (DOCS §11.12;
+> §5.6).)*
 
 ### 2.2 Rate & `protocolDataRate` *(source)*
 `updateRouteStatistics` sets `lwr.protocolDataRate = txReport.routeSpeed` on
@@ -438,14 +451,14 @@ node, first-non-functional node]` — **it names the exact failing hop** — plu
 `failedRouteFirstNonFunctionalNodeId`, `txChannelNo`, `ackChannelNo`,
 `routeSpeed`, `routingAttempts`, `txPower`, `measuredNoiseFloor`.
 
-> **Consequence:** we can point at a *specific repeater* to blame — but
+> **Consequence:** the add-on can point at a *specific repeater* to blame — but
 > `routeFailedBetween` is **transient** (set only after a recent failure,
 > overwritten on the next OK TX report), so **capture it event-driven at the
-> moment it appears**, not by polling. **⚠ Open probe:** confirm HA's
-> `subscribe_node_statistics` event actually serializes the nested `lwr/nlwr`
-> objects (repeaterRSSI, routeFailedBetween) — the driver has them and the
-> python lib sends them, but HA's event payload field set must be verified live
-> before the engine depends on per-hop localization (see gaps §2/§7).
+> moment it appears**, not by polling. *(Answered since, §7 item 1: HA's
+> `subscribe_node_statistics` event does carry the nested `lwr`/`nlwr` objects —
+> `repeaters`, `repeater_rssi`, `protocol_data_rate`, `route_failed_between` —
+> with the repeaters and the failed hop as HA device ids, and the per-hop
+> localization the add-on ships is built on it.)*
 
 ### 2.4 What `rebuild_node_routes` actually does *(source — step by step)*
 `controller.rebuildNodeRoutes(nodeId)`: throws for the controller's own node and
@@ -589,11 +602,18 @@ returns nothing.
 
 > **Consequence:** through today's HA-WS channel the engine's **only executable
 > route remediation is `rebuild_node_routes` (per node) and
-> `begin_rebuilding_routes` (whole network)** — both blunt and priority-route-
-> destroying — plus `refresh_*` and `remove_failed_node`. **Active health checks,
+> `begin_rebuilding_routes` (whole network)** — both blunt; the per-node one
+> deletes the node's priority return routes (§2.4), and the network-wide one, as
+> HA calls it, skips the nodes that have them (§2.5) — plus `refresh_*` and
+> `remove_failed_node`. **Active health checks,
 > priority routes, neighbors, and background RSSI require the driver-WS phase.**
 > Design so *recommend* is rich but *execute* is gated to rebuild/refresh/remove-
-> failed until that phase lands.
+> failed until that phase lands. *(As built: the driver-WS phase landed in v0.13
+> as a read-only client that sends nothing over RF — background RSSI, `lastSeen`
+> and the listening/FLiRS flags, plus the driver log stream since v0.26. Health
+> checks and priority-route and neighbor reads were never added, so every
+> remediation verb still goes through HA's WS: ping, refresh, re-interview,
+> rebuild and remove-failed (DESIGN §2.1).)*
 
 ### 3.3 The driver-WS phase-2 unlock *(source)*
 `ws://core-zwave-js:3000` (the official add-on declares `ports: 3000/tcp: null` —
@@ -618,12 +638,15 @@ privileged and never proxy it to untrusted surfaces; the driver-WS URL must be
   offline (and pollutes the stats being monitored). **Consented, rate-limited
   only — never a background poller on flaky nodes.** *(Dated note, v0.71.0: the
   add-on's own liveness sweep became exactly that in v0.37 — a background NoOp
-  to every mains node every 120 min, through HA's ping button, which has the
-  same property — and 100 of 106 mains Dead episodes over 67 days on the
-  reference mesh began on one of its pings. The sweep and the verification
-  bursts now send one routed read instead to every node with a switch or light
-  value to read. A node without one, or one whose read failed to launch in the
-  last 30 min, still gets the NoOp; see §5.6.)*
+  to every mains node every 120 min by default, through HA's ping button, which
+  has the same property — and 100 of 106 mains Dead episodes over 67 days on
+  the reference mesh began on one of the add-on's own pings: 63 on a sweep
+  probe, 35 on a verification probe, 2 not attributable to one lane. The sweep
+  and the verification bursts now send one routed read instead to every node
+  with a switch or light value to read. A node without one, or one whose read
+  failed to launch in the last 30 min, still gets the NoOp. A read that goes
+  unanswered marks the node Dead exactly as a ping does, so the sweep is still a
+  background prober of every mains node, with a rarer kill; see §5.6.)*
 - **Powerlevel CC** (class 115): `startNodeTest` + poll `getNodeTestStatus` is
   reachable, but with S2-desync and dangling-test-state risk the driver otherwise
   manages. **Defer to driver-WS phase**; if ever done via `invoke_cc_api`, always
@@ -639,7 +662,7 @@ already running): 10 NOP pings (explorer deliberately excluded), latency =
 not a `max(txTicks·10, rtt)` per-ping formula), `routeChanges` when
 `routingAttempts>1`, SNR margin, and — if the node supports Powerlevel CC — a
 `discreteLinearSearch` from Normal Power down to −9 dBm reduction (10 test frames
-+ 1 s settle per step). **Rating 0–10 rubric** (reuse verbatim so our scores match
++ 1 s settle per step). **Rating 0–10 rubric** (reuse verbatim so the scores match
 Z-Wave JS UI): 10 failed pings→0; 1 failed→max 3; latency ≤50=10/≤100=9/≤250=5/
 ≤500=4/≤1000=3/>1000=2; neighbors >2 vs ≤2 splits the top band; **min powerlevel
 ≤ −6 dBm reduction AND SNR margin ≥ 17 dB required for 8–10**; unmeasurable inputs
@@ -651,6 +674,12 @@ fleet-parallel**; results taken under traffic are invalid.
 > rating from data HA already delivers (drop/timeout ≈ failed pings, rtt ≈
 > latency, LWR changes ≈ routeChanges), and reserve the true active check for the
 > driver-WS phase.
+>
+> *As built:* no 0–10 rating is computed; the TUI's score is its own 0–100 composite with an A–F grade
+> (`health.ts`, DOCS §4), on its own thresholds (`W` under a 7 dB margin, `F`
+> over 15 % timeouts, an RTT window of 100–1000 ms), not this 0–10 rubric. The
+> driver-WS client has measured the noise floor since v0.13 (§7 item 2); the
+> true active check is not built.
 
 ### 3.6 Concurrency & connection safety *(source)*
 The driver **serializes** all serial-API transactions; **one health check per
@@ -725,6 +754,9 @@ controller, (4) remove a dead node.**
 > has such an automation. Rebuild is event-triggered, opt-in, cooldown-gated,
 > single-node-first. The engine must **re-create the guardrail HA deliberately
 > removed** (advise-first, per-action opt-in, no schedules).
+> *(As built: the engine starts no rebuild; an operator runs one from the Actions
+> menu behind a typed CONFIRM, with no cooldown. The add-on does not read
+> automation configurations, so a scheduled heal goes unflagged.)*
 
 ### 4.3 The spec-backed remediation order *(source)*
 zwave-js first-steps + HA docs converge on: **(1) controller
@@ -745,6 +777,11 @@ can't be force-removed — protocol behavior, not stated in the cited docs).
 > harm, deterministic low-risk fix (enumerate dead/no-history nodes → verify via
 > `isFailedNode` → offer `remove_failed_node`). A targeted rebuild of nodes that
 > *had the ghost in their routes* is a legitimate follow-up (topology changed).
+> *(As built: HA's WS does not expose `isFailedNode` and the read-only driver-WS
+> client does not send it, so the verify step cannot run. `ghost-suspect` offers
+> `remove_failed_node` behind a typed CONFIRM, and the removal attempt is the
+> only in-band check: the controller refuses a node it has not marked failed
+> (DESIGN §3.5).)*
 
 ### 4.5 Controller placement & USB3 *(source + lore)*
 zwave-js/HA/Zooz all: sticks are **prone to USB3 interference** — use a passive
@@ -812,9 +849,9 @@ essentially no per-mesh statistical power.** So: ship **static, spec-derived
 playbooks with outcome *logging* first**; treat learned re-ranking as needing
 minimum-evidence thresholds (or opt-in fleet aggregation) before it changes any
 recommendation. **No published quantitative before/after study of Z-Wave heal
-efficacy exists anywhere** — our outcome ledger would generate data that doesn't
-publicly exist, which both argues for conservatism now and makes anonymized
-aggregation a genuinely novel future contribution.
+efficacy exists anywhere** — the add-on's outcome ledger would generate data
+that doesn't publicly exist, which both argues for conservatism now and makes
+anonymized aggregation a genuinely novel future contribution.
 
 ### 5.2 Closed-loop safety patterns to adopt *(source)*
 - **Canarying (Google SRE):** *"partial and time-limited deployment … and its
@@ -866,7 +903,7 @@ AlCalzone's root-cause list for an unreachable node — *bad controller placemen
 bad controller RF (700-series pre-FW 7.17.2), other nodes flooding, external
 interference, not enough repeaters* — *"None of that is obvious from just looking
 at the 'dead' state."* **Correction:** that these *"all produce simultaneous
-multi-node symptoms"* is **our inference**, not his claim (he framed a single
+multi-node symptoms"* is **an inference**, not his claim (he framed a single
 flaky lock). But the inference is sound and matches BGP path-hunting. → **a
 correlation gate runs before any per-node playbook:** if ≥ K nodes degrade in the
 same window (or controller stats degrade), classify as a **mesh-level event**
@@ -883,7 +920,9 @@ seconds; powerlevel tests throw on FLiRS/sleeping nodes; one check per node). �
 snapshot, action + params, after-window KPIs (`timeoutResponse`, route changes,
 rate fallbacks, status flaps), and a verdict (improved / no-change / **worse** —
 the ledger must catch the rebuild-made-it-worse case the docs predict). v1
-verification comes from **passive statistics** (HA can't invoke health checks).
+verification comes from **passive statistics** (HA can't invoke health checks),
+plus, since v0.36 and only while auto-ping runs, probes that the ledger
+requests when an episode opens and again before it closes.
 Battery/FLiRS invariants: `includeSleeping=false` for engine-initiated network
 actions; never queue repeated per-node actions on battery nodes; exclude
 FLiRS/sleeping from active link tests; sleeping-node after-windows key off next
@@ -915,7 +954,8 @@ Applying the corpus to two exterior-wall switches on the reference mesh: switch
 A (score 65, "DROP 33 %", RTT 189 ms, via one repeater @ 9.6k, F+R flags, RSSI
 improving) and switch B (77, "DROP 25 %", direct @ 100k, F):
 
-1. **The "DROP %" is `timeoutResponse`-driven, not ACK-drops** (§0) — nodes are
+1. **The "DROP %" (the column now headed TMO) is `timeoutResponse`-driven,
+   not ACK-drops** (§0) — nodes are
    **Alive**, so the RF link *up to the ACK* works; reports are lost/slow on the
    return path.
 2. **Good RSSI (−70s) ⇒ ~30 dB controller-side margin** (§1.4) — **not** steady-
@@ -937,7 +977,7 @@ improving) and switch B (77, "DROP 25 %", direct @ 100k, F):
    the interior path → **recommend repeater placement** → only then, if a better
    route physically exists and neighbor data is stale, a **targeted** rebuild.
 7. **Confirm per-hop** (§2.3): capture `routeFailedBetween` event-driven to name
-   the exact failing hop; **verify HA serializes lwr/nlwr first** (gap).
+   the exact failing hop; HA serializes lwr/nlwr (§7 gap 1, answered).
 
 ---
 
@@ -959,9 +999,13 @@ improving) and switch B (77, "DROP 25 %", direct @ 100k, F):
    drops it at the WS boundary — but the read-only driver-WS client reads
    `backgroundRSSI` directly and the noise floor is now measured rather than
    assumed. Every screen that quotes it distinguishes the two (`-99 dBm` vs
-   `-99 dBm assumed`), and `hasRealNoise()` gates the distinction on a reading
-   under 90 s old **from the bound home id** — a stale or wrong-network value
-   falls back to the assumed floor rather than being presented as measured.
+   `-95 dBm assumed`, the fallback floor), and `hasRealNoise()` reads the controller snapshot's
+   `backgroundRSSI`, which `zwaveData` leaves empty unless the driver's reading
+   is under 90 s old and the driver's home id does not contradict Home
+   Assistant's. A reading is accepted while either id is still unknown, the
+   first poll included; a proven mismatch latches, purges the driver-WS
+   telemetry and stops the client. A stale or proven wrong-network value falls
+   back to the assumed floor rather than being presented as measured.
 3. **Priority-route cached reads** (`getPriorityReturnRoutesCached`) are not in
    HA WS → the safe-rebuild precondition can't be checked; **warn
    unconditionally** (§2.4).
@@ -1051,25 +1095,64 @@ improving) and switch B (77, "DROP 25 %", direct @ 100k, F):
 3. **Rebuild only on topology-change evidence**, never on weak-link/drop symptoms;
    **never scheduled**; **never network-wide** for a localized problem; **warn it
    deletes manual priority routes**; **never on an unreachable node.** *(§4.1, §4.2, §2.4)*
+   *(As built: the engine sends no rebuild, and the planner offers one only as a
+   blocked candidate that names the priority-route loss. Auto-ping's log lines
+   do suggest one, with no topology-change evidence and no priority-route
+   warning: after a node went Dead on the add-on's own probes twice in 24 h
+   ("its routes are marginal"), after routed reads revived it twice in 24 h,
+   and in the give-up lines that follow routed reads.)*
 4. **Correlation gate first.** ≥ K correlated degradations or rising controller
    stats ⇒ mesh-level event ⇒ **suppress per-node remediation**, look at
    controller/interference. *(§5.4, §2.11, §4.5)*
+   *(As built: under a mesh or controller event every per-node symptom except
+   `chatty-device` is marked subsumed; REMEDY shows no plan of its own for it,
+   and it opens no ledger episode of its own, so no verification burst or
+   refresh-trial decision starts from it. The auto-ping dead-node ladder does
+   not read the event; the nearest guard it has is its own storm guard, which
+   stands it down while at least a quarter of the listening nodes, and at
+   least 4, are Dead.)*
 5. **SNR/noise features are phase-2** (HA drops background RSSI). v1 is passive-
    stats only; approximate the health-check rating with the **exact zwave-js
    thresholds** so scores match Z-Wave JS UI. *(§1.5, §3.5)*
+   *(As built: the first half is overtaken. Since v0.13 the read-only driver-WS
+   client reads `backgroundRSSI`, so the floor and the SNR margin are measured
+   whenever a fresh reading exists (§7 gap 2), and, with auto-ping on, the
+   engine also sends probes. The second half is not built: the grade is this
+   add-on's own 0–100 composite with A–F bands and a `W` flag below a 7 dB
+   margin, not the zwave-js 0–10 rating, so it does not match Z-Wave JS UI
+   (`health.ts`, DOCS §4; §3.5).)*
 6. **Measure before/after or it didn't happen.** Long after-windows (wake-keyed
    for sleeping nodes); ledger every action with an **improved/no-change/worse**
    verdict; the ledger is the audit trail *and* the learned layer's data. *(§5.5, §5.1)*
+   *(As built: the ledger scores symptom episodes, not actions. An action gets a
+   verdict only through an episode open on its node, and an episode's
+   after-window is the 5 minutes of evidence before its close, once the symptom
+   has stayed gone for 10 minutes. A node not known to be listening opens no
+   episode (v0.38.1), so no window is wake-keyed. Verdicts add
+   `refused-misdiagnosis` and `unverifiable` to the three.)*
 7. **Blast-radius discipline:** one action in flight per mesh; blast radius = 1
    node; per-node cooldown + global daily budget + exponential backoff; flap
    suppression with **burst-tolerant** thresholds; empty/degenerate node-selection
    **refuses**. *(§5.2, §5.3, §3.6)*
+   *(As built, for the two automatic senders: auto-ping's sweep sends at most
+   one probe per tick, but the dead-node ladder and the verification bursts can
+   reach several nodes in one tick. The ladder stops after
+   `auto_ping_max_attempts` per dead episode (3 by default), waiting 10, then
+   30, then 60 min between attempts, so the default reaches only the first two
+   waits; every lane stands down while at least a quarter of the listening
+   nodes, and at least 4, are Dead. Auto-ping has no global daily budget and no
+   decaying flap penalty. The refresh trial alone keeps one decision in flight,
+   at most one per node per 24 h, 2 per hour and 6 per day.)*
 8. **Probing is invasive.** NOP ping via `invoke_cc_api` can mark a flaky node
    **dead** — consented + rate-limited, never a background poller; no active link
    tests on battery/FLiRS; `backup_nvm` before any disruptive action. *(§3.4, §5.5, §3.8)*
+   *(Design intent, not built: nothing in this add-on sends `backup_nvm`, and
+   its Rebuild node routes, Rebuild ALL routes and Remove failed node actions
+   run with no NVM backup first.)*
    *(v0.71.0: the background sweep that broke this rule from v0.37 on now reads
    instead of pinging wherever the node has a switch or light value to read; a
-   node without one still gets the NoOp — §5.6.)*
+   node without one, or one whose read failed to launch in the last 30 min,
+   still gets the NoOp, and a read can still mark a node Dead — §5.6.)*
 9. **Closed, tiered allowlist** (read / benign-active / disruptive / destructive)
    in the engine core — the same channel that rebuilds can factory-reset. *(§3.8)*
 10. **Advisory-first, honest nulls, shareable defaults** — the whole program
