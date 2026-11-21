@@ -416,6 +416,40 @@ export async function failureReason(res: { text?: () => Promise<string> }): Prom
   }
 }
 
+/** Whether the engine's conclusions may be reported yet (v0.79.5): not
+ *  before the first roster (v0.76.1), nor before the symptom engine's first
+ *  tick (v0.79.3) — until then a node-down carried across a restart is not
+ *  raised yet, and degraded would read off. The publisher and /api/health
+ *  ask this one question, so the two cannot report different conclusions. */
+export function conclusionsReady(data: DataProvider): boolean {
+  return data.ready() && data.engineStatus().ran !== false;
+}
+
+/** The engine's half of GET /api/health (v0.57.0). Before the conclusions
+ *  are ready (v0.79.5) `degraded` is null, not false, and `engine` is empty:
+ *  Home Assistant is sent nothing then and still shows what it last held,
+ *  and a false here would be the one surface calling the mesh healthy. */
+export interface HealthConclusions {
+  conclusionsReady: boolean;
+  degraded: boolean | null;
+  degradedReason: string;
+  engine: Record<string, Record<string, unknown>>;
+}
+
+export function healthConclusions(data: DataProvider, now: number, bo: BuildOpts): HealthConclusions {
+  if (!conclusionsReady(data)) {
+    return { conclusionsReady: false, degraded: null, degradedReason: 'not judged yet — waiting for the first roster and engine tick', engine: {} };
+  }
+  const conclusions = buildStates(data, now, bo);
+  const degraded = conclusions.find((s) => s.entity === ENTITY_DEGRADED);
+  return {
+    conclusionsReady: true,
+    degraded: degraded?.state === 'on',
+    degradedReason: String(degraded?.attrs.reason ?? 'none'),
+    engine: Object.fromEntries(conclusions.map((s) => [s.entity.split('.')[1], { state: s.state, ...s.attrs }])),
+  };
+}
+
 export function startHaStates(
   opts: HaStatesOptions,
 ): { stop: () => void; publishNow: () => Promise<void> } {
@@ -429,11 +463,11 @@ export function startHaStates(
     if (!opts.token) return;
     // Not before the first roster (v0.76.1): with no node loaded every count is
     // 0, and the engine sensor read "0 unmeasured of 0" for ~30 s at each boot.
-    if (!opts.data.ready()) return;
     // Not before the symptom engine's first tick either (v0.79.3): until then
     // a node-down carried across the restart is not raised yet, and
-    // binary_sensor.zwave_tui_degraded would be sent off once.
-    if (opts.data.engineStatus().ran === false) return;
+    // binary_sensor.zwave_tui_degraded would be sent off once. /api/health
+    // asks the same question (v0.79.5).
+    if (!conclusionsReady(opts.data)) return;
     let tickErr: string | null = null;
     let failed = 0;
     let total = 0;

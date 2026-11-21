@@ -1440,7 +1440,7 @@ test('the state dump reports each node\'s refresh profile: unknown without value
   }
 });
 
-test('onHomeId link (v0.79.3): only a link this client did not end reports peerClosedAt — not the first connection, not our own liveness teardown or protocol-error close, not a stop/start', async () => {
+test('onHomeId link (v0.79.3): only a link this client did not end reports peerClosedAt — not the first connection, not our own liveness teardown or protocol-error close; a stop/start keeps an open one, and a stop of a live link reports none (v0.79.5)', async () => {
   const srv = await mockServer();
   const links: (number | null)[] = [];
   const c = createDriverWsClient({ url: srv.url, callbacks: { onHomeId: (_h, l) => links.push(l.peerClosedAt) }, reconnectBaseMs: 60, livenessMs: 800 });
@@ -1469,13 +1469,44 @@ test('onHomeId link (v0.79.3): only a link this client did not end reports peerC
     srv.sendMalformed();
     await waitFor(() => links.length === 4 && c.state() === 'live');
     assert.equal(links[3], null, 'a link closed on a protocol error is not a driver start');
-    // The server drops it, but a deliberate stop/start comes first.
+    // The server drops it, and a deliberate stop/start comes before the next
+    // handshake (v0.79.5): the stop ended no link, so the close still counts.
+    const t1 = Date.now();
     srv.dropClient();
     await waitFor(() => c.state() === 'backoff');
+    const open = c.peerClosedAt();
+    assert.ok(open != null && open >= t1, `open until the next handshake: ${open}`);
     c.stop();
+    assert.equal(c.peerClosedAt(), open, 'a stop keeps it, for the shutdown save to carry');
     c.start();
     await waitFor(() => links.length === 5 && c.state() === 'live');
-    assert.equal(links[4], null, 'a stop clears it');
+    assert.equal(links[4], open, 'the next handshake reports it');
+    assert.equal(c.peerClosedAt(), null, 'once');
+    // A stop of a LIVE link is this client's own: the next handshake reports nothing.
+    c.stop();
+    c.start();
+    await waitFor(() => links.length === 6 && c.state() === 'live');
+    assert.equal(links[5], null, 'a stop that ends a live link is no driver start');
+  } finally {
+    c.stop();
+    await srv.close();
+  }
+});
+
+test('peerClosedAt option (v0.79.5): a close the previous run carried is reported at this client\'s first handshake, once, though the first connection fails', async () => {
+  const srv = await mockServer();
+  const links: (number | null)[] = [];
+  const carried = Date.now() - 30_000;
+  const c = createDriverWsClient({ url: srv.url, callbacks: { onHomeId: (_h, l) => links.push(l.peerClosedAt) }, reconnectBaseMs: 60, peerClosedAt: carried });
+  try {
+    assert.equal(c.peerClosedAt(), carried, 'held before the first connection');
+    // Z-Wave JS still down when this run starts: the first connection is ended before its handshake.
+    srv.configure({ dropBeforeVersion: 1 });
+    c.start();
+    await waitFor(() => c.state() === 'live');
+    assert.equal(srv.connectionCount(), 2);
+    assert.deepEqual(links, [carried], 'the first handshake reports the carried close');
+    assert.equal(c.peerClosedAt(), null, 'reported once');
   } finally {
     c.stop();
     await srv.close();

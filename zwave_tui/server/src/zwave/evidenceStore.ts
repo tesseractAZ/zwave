@@ -1,18 +1,23 @@
 /**
  * Persistent per-node EVIDENCE store (M2, rev 2 — post design-review) — the
- * trustworthy time-series substrate the symptom engine (M3), planner (M4) and
- * outcome learner (M5) read from. DESIGN.md §3.1 is the contract; this file
- * implements it.
+ * trustworthy time-series substrate the symptom engine and baselines (M3),
+ * the outcome learner (M5) and the interference view (M6) read from.
+ * DESIGN.md §3.1 is the contract; this file implements it.
  *
  * Two tiers, both first-class:
  *   - FINE ring: one sample / node / tick (default 10 s), ~40 min horizon —
- *     recent-window detectors + the outcome after-window verifier.
- *   - COARSE tier: 30-min buckets × 14 days / node — the baseline substrate.
+ *     recent-window detectors, the baseline fold (each engine tick folds the
+ *     sample it just recorded; baselines.ts persists its own aggregates) and
+ *     the outcome after-window verifier.
+ *   - COARSE tier: 30-min buckets × 14 days / node — multi-day history for
+ *     the screens: INTERFERENCE's diurnal heatmap, measured route stability
+ *     (TOPOLOGY's panel, DETAIL's RTT-normal note) and DETAIL's EVIDENCE
+ *     section. No detector reads it, and baselines are not built from it.
  *     Staleness is PER-TIER: the 1 h maxAge kills only the fine ring; coarse
  *     buckets are pruned individually to the horizon. Under boot-grace (host
  *     just booted, no-RTC clock may be pre-NTP) the coarse tier + coverage
  *     metadata still load — only the recency-dependent fine ring is dropped,
- *     so a daily power blip cannot wipe two weeks of baseline history.
+ *     so a daily power blip cannot wipe two weeks of coarse history.
  *
  * Counter discipline (RESEARCH.md §0/§1.11 + design review):
  *   - The zwave-js counters are CUMULATIVE SINCE DRIVER START; per-window
@@ -269,7 +274,8 @@ export interface ControllerSample {
   bg3: number | null;
 }
 
-/** One 30-minute coarse bucket — the baseline substrate (DESIGN §3.2). */
+/** One 30-minute coarse bucket (DESIGN §3.1): multi-day history for the
+ *  screens. Baselines are not built from it; they fold fine samples (§3.2). */
 export interface CoarseBucket {
   /** Bucket start (aligned to COARSE_BUCKET_MS). */
   t0: number;
@@ -448,13 +454,17 @@ export interface EvidenceStoreOptions {
 
 /**
  * The symptom engine's state carried across a restart of this add-on
- * (v0.79.3): each node-down dwell, and the newest driver start known over the
- * driver link. On the boot that saved them every dwell loads, and the driver
- * start. On another boot only the raised dwells load — an outage raised before
+ * (v0.79.3): the node-down dwells the engine hands it — while it runs the
+ * raised ones and the start deaths, at its shutdown save those still waiting
+ * too (v0.79.5) — and the newest driver start known over the driver link. On
+ * the boot that saved them every dwell written loads, and the driver start.
+ * On another boot only the raised dwells load — an outage raised before
  * a host restart is the same outage after it until a reading says otherwise,
  * while one still waiting began before that boot's own driver start, and the
  * next Dead reading starts it again inside the boot's window. The engine
- * re-judges each dwell on its next tick.
+ * re-judges each dwell on its next tick. A driver link the server ended that
+ * had not come back at the save (v0.79.5) loads only on the same boot, and
+ * only when the add-on was down no longer than DRIVER_DROP_CARRY_MS.
  */
 export interface EvidenceCarry {
   /** The network the engine state belongs to; a carry for another network than
@@ -463,6 +473,10 @@ export interface EvidenceCarry {
   homeId?: number | null;
   nodeDown: { nodeId: number; since: number; latched: boolean; start: boolean }[];
   driverStart: { from: number; to: number } | null;
+  /** When the server ended a driver link that no handshake has followed
+   *  (v0.79.5); absent or null when there is none. The next run's first
+   *  handshake closes it into a driver start. */
+  driverDrop?: number | null;
 }
 
 export interface EvidenceStore {
@@ -523,6 +537,10 @@ export interface EvidenceStore {
   /** The carry restored by load() (v0.79.3), once: later calls return null,
    *  and later saves write `opts.carry()`. A reset (another network) drops it. */
   takeCarry(): EvidenceCarry | null;
+  /** The driver drop load() restored (v0.79.5), or null, without taking the
+   *  carry: the driver client needs it when it is built, before its first
+   *  handshake, while the engine takes the carry at its first tick. */
+  carriedDriverDrop(): number | null;
 }
 
 /* ── On-disk columnar shapes ────────────────────────────────────────────── */
@@ -649,9 +667,25 @@ interface Persisted {
   /** The newest driver start known over the driver link (v0.79.3): it
    *  started between f and t. Optional; read only on the same boot. */
   driverStart?: { f: number; t: number };
+  /** When the server ended a driver link no handshake has followed (v0.79.5).
+   *  Optional; read only on the same boot, within DRIVER_DROP_CARRY_MS of the
+   *  save. */
+  driverDrop?: number;
 }
 
 const SCHEMA_V = 2;
+/**
+ * How long this add-on may have been down, after a driver link the server
+ * ended with no handshake since, for the next run to still carry it (v0.79.5):
+ * that run's first handshake closes it into a driver start for node-down's
+ * start window. Measured from the file's save, which is written at every save
+ * while the drop is open, so the shutdown save, to the load. The driver started
+ * between the drop and that handshake, and the window runs 10 minutes past the
+ * handshake (NODE_DOWN_START_WINDOW_MS in symptoms.ts, which imports this file):
+ * a longer absence could put the start further back than the window allows. A
+ * deploy or a restart takes seconds.
+ */
+export const DRIVER_DROP_CARRY_MS = 10 * 60_000;
 const DEFAULT_MAX_SAMPLES = 240; // ~40 min at the 10 s cadence
 /**
  * The longest lookback any detector asks of the FINE ring (symptoms.ts
@@ -833,6 +867,8 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
   let loadedHomeId: number | null = null;
   /** Restored by load() and not yet taken by the engine (v0.79.3). */
   let pendingCarry: EvidenceCarry | null = null;
+  /** The driver drop load() restored (v0.79.5), read by carriedDriverDrop(). */
+  let carriedDrop: number | null = null;
   /** The carry as last written or restored, so a change in it alone saves. */
   let savedCarryKey: string | null = null;
   let since: number | null = null;
@@ -1505,6 +1541,12 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         }
         const df = numOrNull(obj.driverStart?.f), dt = numOrNull(obj.driverStart?.t);
         const driverStart = sameBoot && df != null && dt != null && df <= dt ? { from: df, to: dt } : null;
+        // A driver link the server ended that the previous run saw no
+        // handshake after (v0.79.5): on the same boot, and only when this
+        // add-on was down no longer than DRIVER_DROP_CARRY_MS after the save
+        // that wrote it.
+        const dd = numOrNull(obj.driverDrop);
+        carriedDrop = sameBoot && dd != null && dd > 0 && ageMs <= DRIVER_DROP_CARRY_MS ? dd : null;
         pendingCarry = { homeId: loadedHomeId, nodeDown, driverStart };
         savedCarryKey = carryKeyOf(pendingCarry);
         log(`evidence: restored ${coarse.size} node(s) coarse${grace || fineTooOld ? '' : ` + ${fine.size} fine`} from ${path}`);
@@ -1524,10 +1566,21 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       // The carry dirties the store too (v0.79.3): a driver restart seen, or a
       // node-down raised, while no sample was recorded (HA's roster stale
       // through a Z-Wave JS restart) must still reach disk.
-      const offered = pendingCarry ?? opts.carry?.() ?? null;
+      // Until the engine takes the carry a save writes back what was restored,
+      // except the driver link's part (v0.79.5): the driver client was seeded
+      // with the restored drop and ends it at its first handshake, so that
+      // drop, written back as open after the handshake and re-stamped at every
+      // save, would never age out, and the span the handshake closed it into
+      // would be lost.
+      const live = pendingCarry && opts.carry ? opts.carry() : null;
+      const offered = pendingCarry && live
+        ? { ...pendingCarry, driverStart: live.driverStart ?? pendingCarry.driverStart, driverDrop: live.driverDrop ?? null }
+        : pendingCarry ?? opts.carry?.() ?? null;
       const carry = offered && offered.homeId != null && homeId != null && offered.homeId !== homeId ? null : offered;
       const carryKey = carry ? carryKeyOf(carry) : null;
-      if (!dirty && carryKey === savedCarryKey) return;
+      // An open driver drop is written at every save (v0.79.5), so the file's
+      // save time is the last moment this run watched the link.
+      if (!dirty && carryKey === savedCarryKey && carry?.driverDrop == null) return;
       try {
         const nodes: Persisted['nodes'] = {};
         for (const [id, ring] of fine) {
@@ -1667,6 +1720,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           ...(carry ? {
             nodeDown: Object.fromEntries(carry.nodeDown.map((d) => [String(d.nodeId), { s: d.since, ...(d.latched ? { l: 1 as const } : {}), ...(d.start ? { st: 1 as const } : {}) }])),
             ...(carry.driverStart ? { driverStart: { f: carry.driverStart.from, t: carry.driverStart.to } } : {}),
+            ...(carry.driverDrop != null ? { driverDrop: carry.driverDrop } : {}),
           } : {}),
         };
         writeFileSync(tmp, JSON.stringify(payload), 'utf8');
@@ -1705,5 +1759,7 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
       pendingCarry = null;
       return c;
     },
+
+    carriedDriverDrop: () => carriedDrop,
   };
 }

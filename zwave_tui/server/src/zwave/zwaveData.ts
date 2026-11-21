@@ -318,6 +318,8 @@ interface RawConfigEntry {
 /** Registry-derived per-node metadata (the half `network_status` lacks). */
 interface DeviceRec {
   id: string;
+  /** The node's own device (v0.79.5): identified exactly `<home_id>-<node_id>`. */
+  main: boolean;
   name: string;
   area: string | null;
   manufacturer: string | null;
@@ -385,6 +387,10 @@ export interface ZwaveDataOptions {
    *  Default os.uptime(). Tests set it: a freshly booted CI runner would
    *  otherwise open the start window in every test. */
   uptimeMs?: () => number;
+  /** The driver client's liveness timeout (ms; v0.79.5). Absent: the client's
+   *  own 5 minutes, which the add-on keeps. Tests shrink it to end a wedged
+   *  link through this layer. */
+  driverWsLivenessMs?: number;
   /**
    * READ-ONLY zwave-js driver WS (v0.13, DESIGN §2.1) — feeds background RSSI
    * (real noise floor), node lastSeen, and listening/FLiRS flags. Empty/null ⇒
@@ -424,7 +430,8 @@ export interface ZwaveData {
    *  own first handshake: auto-ping's burst refusal only. */
   driverReconnectedAt(): number | null;
   /** The driver starts known to this run, for node-down's start window
-   *  (v0.79.3): the host boot (now − uptime), a restart seen over the driver
+   *  (v0.79.3): the host boot (now − uptime, marked `boot`: judged at a
+   *  death's first reading only, v0.79.5), a restart seen over the driver
    *  link, one carried from the previous run on this boot. */
   driverStarts(now?: number): DriverStart[];
   /** When the controller's receiver went off and has not come back (v0.65.0). */
@@ -436,7 +443,8 @@ export interface ZwaveData {
   /** Per-node evidence samples (M2) — windowed counter deltas + instantaneous
    *  values, newest last. Read by the symptom engine (M3). Empty if unavailable. */
   evidence(nodeId: number): EvidenceSample[];
-  /** Coarse 30-min evidence buckets (baseline substrate; up to 14 days). */
+  /** Coarse 30-min evidence buckets (up to 14 days): DETAIL's EVIDENCE
+   *  section. Baselines are not built from them. */
   evidenceCoarse(nodeId: number): CoarseBucket[];
   /** Controller serial-link evidence samples. */
   /** Event-latched route failures for a node (newest last). */
@@ -728,6 +736,15 @@ export function nodeIdOfDevice(d: RawDevice): number | null {
   return null;
 }
 
+/** Whether a device is a node's own device (v0.79.5): one of its zwave_js
+ *  identifiers is exactly `<home_id>-<node_id>`, not an endpoint child
+ *  (`-<endpoint>`, `-g<group>`) nor the orphan a replacement by another product
+ *  leaves (`-<mfr>:<type>:<id>`). */
+export function isMainNodeDevice(d: RawDevice): boolean {
+  const ids = d.identifiers;
+  return Array.isArray(ids) && ids.some((id) => Array.isArray(id) && id[0] === 'zwave_js' && typeof id[1] === 'string' && /^\d+-\d+$/.test(id[1]));
+}
+
 export function errMsg(e: unknown): string {
   // SANITIZED AT THE CHOKEPOINT. These strings come from Home Assistant, the
   // Z-Wave JS driver, or a device — none of them ours — and they reach the TUI
@@ -854,6 +871,10 @@ class ZwaveDataImpl implements ZwaveData {
   private statsSubbedNodes = new Set<number>();
   /** Roster ids currently absent → first-absent timestamp (eviction timer). */
   private missingSince = new Map<number, number>();
+  /** Ids the departed branch evicted since the last registry load (v0.79.5):
+   *  their state is gone already, so a new device on the id at the next load
+   *  is not a swap whose state is still to drop. */
+  private readonly evictedSinceLoad = new Set<number>();
   /** ctrlStats object identity at the previous evidence sample (freshness). */
   private prevCtrlStatsRef: ControllerSnapshot['statistics'] = null;
   /** Devices whose per-node subscriptions failed — retried on a slow timer. */
@@ -1021,14 +1042,17 @@ class ZwaveDataImpl implements ZwaveData {
    *  reconnect after our own liveness teardown, which are not (v0.79.3). */
   private driverWsConnAt: number | null = null;
   /** The newest driver restart seen over the link (v0.79.3): the server ended
-   *  a handshaken link at `from` and handshook again at `to`. */
+   *  a handshaken link at `from` and handshook again at `to` — in this run, or
+   *  (v0.79.5) the previous run saw the end and this run the handshake. */
   private driverRestart: DriverStart | null = null;
   /** A driver restart the previous run of this add-on saw on this boot. */
   private carriedDriverStart: DriverStart | null = null;
   /** The engine has taken the evidence store's restored carry (v0.79.3). */
   private carryTaken = false;
   /** What a crash or power cut must not lose, as last saved (v0.79.3): a
-   *  change saves the evidence store at once, at most once a minute. */
+   *  change saves the evidence store at once, at most once a minute. The
+   *  minute is the host's uptime (v0.79.5), which a wall-clock step does not
+   *  move, so `promptSavedAt` is an uptime reading. */
   private promptSavedKey = promptCarryKey([], null);
   private promptSavedAt = -Infinity;
   private readonly uptimeMs: () => number;
@@ -1128,8 +1152,11 @@ class ZwaveDataImpl implements ZwaveData {
           ...(opts.uptimeMs ? { uptimeMs: opts.uptimeMs } : {}),
           // v0.79.3: node-down dwells and the newest known driver restart
           // outlive this process, so a restart neither withdraws a raised
-          // node-down nor reads as a driver start.
-          carry: () => ({ homeId: this.lastHomeId, nodeDown: nodeDownCarry(this.symptomState), driverStart: this.newestDriverRestart() }),
+          // node-down nor reads as a driver start. A dwell still on its
+          // 5-minute dwell is written by the shutdown save only (v0.79.5;
+          // stop() sets `stopped` before it saves): a flush's copy could
+          // outlive the dwell, and a crash restart brought it back.
+          carry: () => ({ homeId: this.lastHomeId, nodeDown: nodeDownCarry(this.symptomState, this.stopped), driverStart: this.newestDriverRestart(), driverDrop: this.driverWs?.peerClosedAt() ?? null }),
         })
       : null;
     const restored = this.evidenceStore?.load();
@@ -1162,10 +1189,18 @@ class ZwaveDataImpl implements ZwaveData {
     // (a misconfigured URL pointing at a DIFFERENT network's server must never
     // pollute this network's evidence).
     const driverUrl = (opts.driverWsUrl ?? process.env.DRIVER_WS_URL ?? '').trim() || null;
+    // v0.79.5: a link the server ended that the previous run on this boot saw
+    // no handshake after, with the add-on down only briefly since: the client
+    // starts as if it had seen the close, so its first handshake is read as the
+    // driver start it is (onHomeId below).
+    const carriedDrop = driverUrl ? this.evidenceStore?.carriedDriverDrop() ?? null : null;
+    if (carriedDrop != null) this.log(`driver-ws: a link the server ended ${Math.max(0, Math.round((Date.now() - carriedDrop) / 1000))}s ago had not come back when this add-on stopped — its next handshake is read as a driver start for the node-down start window`);
     this.driverWs = driverUrl
       ? createDriverWsClient({
           url: driverUrl,
           log: this.log,
+          peerClosedAt: carriedDrop,
+          ...(opts.driverWsLivenessMs != null ? { livenessMs: opts.driverWsLivenessMs } : {}),
           callbacks: {
             onDriverLog: opts.onDriverLog,
             onDriverLogGap: opts.onDriverLogGap,
@@ -1516,16 +1551,21 @@ class ZwaveDataImpl implements ZwaveData {
     // whose RTT average is over the line (v0.78.0).
     const suspects = new Map<number, RttFrame>();
     const rttOver = new Set<number>();
+    // The tick that takes a restored carry (v0.79.5): its write-out does not start the prompt save's minute.
+    let tookCarry = false;
     // v0.79.3: on the first tick — after the home id was bound, so another
     // network's carry is already gone — take what the previous run carried.
     if (!this.carryTaken) {
       this.carryTaken = true;
       const carry = ev.takeCarry();
       if (carry) {
+        tookCarry = true;
         this.carriedDriverStart = carry.driverStart;
         const onRoster = new Set(this.lastNodes.map((n) => n.nodeId));
         // As written to disk, off-roster entries included: one dropped on this
-        // tick is a change, and is saved below.
+        // tick is a change, and is saved below. So is a dwell still waiting,
+        // which only the shutdown save writes (v0.79.5): the first tick's save
+        // takes it off the disk, so a crash after it cannot bring it back.
         this.promptSavedKey = promptCarryKey(carry.nodeDown, carry.driverStart);
         const n = seedNodeDown(this.symptomState, carry.nodeDown, (id) => onRoster.has(id), now);
         if (n > 0) {
@@ -1542,7 +1582,6 @@ class ZwaveDataImpl implements ZwaveData {
         baselines: bl,
         latest: (id) => { const r = ev.forNode(id); return r.length ? r[r.length - 1] : undefined; },
         recent: (id) => ev.forNode(id),
-        coarse: (id) => ev.coarseForNode(id),
         controllerSamples: () => ev.controllerSamples(),
         coverage: (id) => ev.coverage(id),
         rateRun: (id) => ev.rateRun(id),
@@ -1570,12 +1609,16 @@ class ZwaveDataImpl implements ZwaveData {
     // v0.79.3: a raised node-down, a start death or a driver restart seen —
     // what a crash restart or a power cut must not lose — reaches disk within
     // a minute, not at the next 15-minute flush. A node-down still on its
-    // 5-minute dwell is not worth a write: it starts again at the next reading.
-    // The spacing keeps a flapping node from rewriting the store every tick.
-    const promptKey = promptCarryKey(nodeDownCarry(this.symptomState), this.newestDriverRestart());
-    if (promptKey !== this.promptSavedKey && now - this.promptSavedAt >= PROMPT_SAVE_SPACING_MS) {
+    // 5-minute dwell is not written while the add-on runs (v0.79.5, the carry
+    // getter): after a crash it starts again at the next reading. The spacing
+    // keeps a flapping node from rewriting the store every tick. It is
+    // measured on the host's uptime (v0.79.5): on the wall clock, a step back
+    // of X right after a save held the next one off for X + 60 s.
+    const promptKey = promptCarryKey(nodeDownCarry(this.symptomState, false), this.newestDriverRestart());
+    const upNow = this.uptimeMs();
+    if (promptKey !== this.promptSavedKey && upNow - this.promptSavedAt >= PROMPT_SAVE_SPACING_MS) {
       this.promptSavedKey = promptKey;
-      this.promptSavedAt = now;
+      if (!tookCarry) this.promptSavedAt = upNow;
       ev.save();
     }
     this.requestRttConfirms(suspects, now);
@@ -2858,10 +2901,15 @@ class ZwaveDataImpl implements ZwaveData {
       this.prevStatus.set(n.nodeId, n.status);
     }
     // Departed-node eviction (review): a node absent from the roster for 5+
-    // minutes has left the network (excluded / replace_failed_node). Its
+    // minutes has left the network (excluded, or removed as failed). Its
     // evidence must be EVICTED — node-id reuse would otherwise merge two
     // physical devices' histories and pre-satisfy the ghost detector's
     // coverage precondition. 5-min dwell rides out transient roster glitches.
+    // replace_failed_node does not come through here: the driver swaps the
+    // node in place, so the id stays on the roster (v0.79.5). A replacement
+    // that HA registers as another device is caught at the next registry
+    // load instead (forgetSwappedDevice); one HA keeps as the same device
+    // keeps the failed device's state.
     {
       const present = new Set(nodes.map((n) => n.nodeId));
       const now = Date.now();
@@ -2875,16 +2923,18 @@ class ZwaveDataImpl implements ZwaveData {
           this.missingSince.set(id, now);
         } else if (now - since > this.evictAfterMs) {
           this.log(`node ${id} left the network — evicting its evidence + caches`);
+          this.evictedSinceLoad.add(id);
           this.evidenceStore?.evictNode(id);
           // Its dwells too (v0.79.3): a raised node-down is held through an
           // Unknown reading now, so a device that reuses the id would re-raise
           // it while it is interviewed — and it would be carried.
           for (const k of [...this.symptomState.keys()]) if (k.startsWith(`${id}:`)) this.symptomState.delete(k);
           // Baselines too (v0.35 review): the onNodeRemoved hook only covers a
-          // removal issued from THIS TUI. A node excluded from HA's own UI, or
-          // replaced via replace_failed_node, arrives here with its learned
-          // normals still keyed to the id — and a re-include on that id is
-          // different hardware measured against a dead device's yardstick.
+          // removal issued from THIS TUI. A node excluded or removed from HA's
+          // own UI arrives here with its learned normals still keyed to the id
+          // — and a re-include on that id is different hardware measured
+          // against a dead device's yardstick. (replace_failed_node never
+          // arrives here: see forgetSwappedDevice.)
           // Idempotent with the hook; the 5-minute dwell above is what makes
           // this safe against a transient roster glitch wiping weeks of
           // learning.
@@ -2935,8 +2985,8 @@ class ZwaveDataImpl implements ZwaveData {
           this.sleeperLatch.delete(id);
           this.dupDrops.delete(id);
           // M5: abandon any open episodes for the departed node — their after-
-          // window would be empty, and a node-id reuse after replace_failed_node
-          // must start clean (mirrors the evidence eviction).
+          // window would be empty, and a node-id reuse must start clean
+          // (mirrors the evidence eviction).
           const lostOpen = this.outcomes
             ? this.outcomes.openEpisodes().filter((ep) => ep.nodeId === id).length
             : 0;
@@ -3155,8 +3205,15 @@ class ZwaveDataImpl implements ZwaveData {
     for (const d of devices) {
       const nodeId = nodeIdOfDevice(d);
       if (nodeId == null) continue;
+      // The node's own device holds its slot (v0.79.5): an endpoint child or a
+      // stripped orphan filed under the same id joins its entities to the node
+      // but never stands for it, whatever the list order.
+      const main = isMainNodeDevice(d);
+      deviceIdToNodeId.set(d.id, nodeId);
+      if (deviceByNodeId.get(nodeId)?.main === true && !main) continue;
       deviceByNodeId.set(nodeId, {
         id: d.id,
+        main,
         name: sanitizeLabel(d.name_by_user || d.name || `Node ${nodeId}`),
         // Sanitize these too — they reach the Detail/Controller frames and are
         // externally sourced (device DB / user config).
@@ -3164,7 +3221,6 @@ class ZwaveDataImpl implements ZwaveData {
         manufacturer: d.manufacturer ? sanitizeLabel(d.manufacturer) : null,
         model: d.model ? sanitizeLabel(d.model) : null,
       });
-      deviceIdToNodeId.set(d.id, nodeId);
     }
 
     const entitiesByDeviceId = new Map<string, NodeEntity[]>();
@@ -3248,12 +3304,13 @@ class ZwaveDataImpl implements ZwaveData {
     }
     // v0.22: evict the node-id-keyed config cache whenever a node's backing HA
     // device_id CHANGES — not just when the node departs. This is the robust
-    // close for node-id reuse (replace_failed_node / fast exclude→include keeps
-    // the id but swaps the device: A→B) AND for a node that had no device at
-    // first Detail view and later gained one (null→present) — a stale 'ready' or
-    // terminal 'unsupported' entry would otherwise serve the wrong device or stay
-    // stuck forever (both confirmed by adversarial review). Absent→null is a
-    // change too, so this also subsumes the plain removed-node prune.
+    // close for node-id reuse (a replace HA registers as another product, or a
+    // fast exclude→include, keeps the id but swaps the device: A→B) AND for a
+    // node that had no device at first Detail view and later gained one
+    // (null→present) — a stale 'ready' or terminal 'unsupported' entry would
+    // otherwise serve the wrong device or stay stuck forever (both confirmed by
+    // adversarial review). Absent→null is a change too, so this also subsumes
+    // the plain removed-node prune.
     for (const nid of this.configByNode.keys()) {
       const oldDevId = oldDeviceByNodeId.get(nid)?.id ?? null;
       const newDevId = deviceByNodeId.get(nid)?.id ?? null;
@@ -3262,6 +3319,63 @@ class ZwaveDataImpl implements ZwaveData {
         this.configFetchAt.delete(nid);
       }
     }
+    // A DEVICE SWAP (v0.79.5): one known device replaced by another on the
+    // same id between two loads. What was learned or is waiting about the old
+    // device goes with it. Only A→B: the first load has no old map, a device
+    // that drops out of the list (A→null) or first appears (null→B) is no
+    // swap, and an id the departed branch evicted since the last load was
+    // dropped there, so what is on it now is the new device's. Most of the
+    // mesh changing at once is a registry re-created (the integration
+    // re-added, another network), not that many replacements: nothing is
+    // dropped.
+    const swapped: number[] = [];
+    for (const [nid, dev] of deviceByNodeId) {
+      const oldDevId = oldDeviceByNodeId.get(nid)?.id ?? null;
+      if (oldDevId != null && oldDevId !== dev.id && !this.evictedSinceLoad.has(nid)) swapped.push(nid);
+    }
+    this.evictedSinceLoad.clear();
+    if (swapped.length > Math.max(2, deviceByNodeId.size / 2)) {
+      this.log(`device swap: ${swapped.length} of ${deviceByNodeId.size} nodes changed device at once — a re-created registry, not replacements; nothing dropped`);
+    } else {
+      const now = Date.now();
+      for (const nid of swapped) this.forgetSwappedDevice(nid, now);
+    }
+  }
+
+  /** Another device took a node id in Home Assistant (v0.79.5): drop
+   *  what belongs to the old device — its dwells (a raised node-down
+   *  included), evidence, baselines, readings, sparklines, open episodes and
+   *  the refresh trial's open decision. Its symptoms did not end, so none is
+   *  logged as cleared. What the roster, the subscriptions, the driver link
+   *  and the probes hold for the id is kept: it describes the device on the
+   *  id now. */
+  private forgetSwappedDevice(nodeId: number, now: number): void {
+    this.evidenceStore?.evictNode(nodeId);
+    for (const k of [...this.symptomState.keys()]) if (k.startsWith(`${nodeId}:`)) this.symptomState.delete(k);
+    for (const k of [...this.loggedSymptomKeys.keys()]) if (k.startsWith(`${nodeId}:`)) this.loggedSymptomKeys.delete(k);
+    this.forgetNodeBaselines(nodeId);
+    this.statsByNode.delete(nodeId);
+    this.prevSampleSig.delete(nodeId);
+    this.histByNode.delete(nodeId);
+    this.histLongByNode.delete(nodeId);
+    this.coarseAccum.delete(nodeId);
+    this.batteryByNode.delete(nodeId);
+    this.firmwareByNode.delete(nodeId);
+    this.sleeperLatch.delete(nodeId);
+    this.dupDrops.delete(nodeId);
+    this.trial?.dropOpen(nodeId, 'another device took the id', now);
+    let lostOpen = 0;
+    for (const ep of this.outcomes?.openEpisodes() ?? []) {
+      if (ep.nodeId !== nodeId) continue;
+      this.outcomes!.abandon(ep.nodeId, ep.kind);
+      this.pendingResolve.delete(ep.key);
+      lostOpen += 1;
+    }
+    this.log(`node ${nodeId} is another device in Home Assistant — dropping the old device's dwells, evidence + baselines`);
+    this.pushEvent('engine', 'info', 'system', null,
+      lostOpen > 0
+        ? `${lostOpen} in-flight episode${lostOpen === 1 ? '' : 's'} + node ${nodeId}'s baselines discarded — another device took the id`
+        : `node ${nodeId} is another device — its baselines + evidence discarded`);
   }
 
   /** Cached stats with the DISPLAYED lastSeen upgraded by the driver's own
@@ -3984,13 +4098,14 @@ class ZwaveDataImpl implements ZwaveData {
    * then keeps the 5-minute dwell.
    */
   driverStarts(now = Date.now()): DriverStart[] {
-    // The host's boot as of `now`. A death's start verdict is taken at its
-    // first reading, where its onset and this boot share one clock, so the
-    // window is judged on the host's uptime. A start verdict, once taken,
-    // stays (DwellEntry.start); a death not yet judged one is judged again
-    // each tick, so a forward clock step during its dwell can still make it one.
+    // The host's boot as of `now`, marked `boot`: the detector judges it at a
+    // death's first Dead reading only (v0.79.5), where the onset is `now`, so
+    // the window is judged on the host's uptime whatever the wall clock reads,
+    // and the verdict then stays both ways, so a later clock step changes
+    // neither. It is taken from uptime on every tick, not once: a death first
+    // seen after a clock step is judged on the uptime at its own first reading.
     const boot = now - this.uptimeMs();
-    return [{ from: boot, to: boot }, this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);
+    return [{ from: boot, to: boot, boot: true as const }, this.driverRestart, this.carriedDriverStart].filter((s): s is DriverStart => s != null);
   }
 
   /** What the next run carries (v0.79.3): a restart this run saw, which is
@@ -4461,9 +4576,11 @@ export function diffSymptomLog(
 export const PROMPT_SAVE_SPACING_MS = 60_000;
 
 /** What a crash restart or a power cut must not lose, as a key (v0.79.3): the
- *  raised node-downs, the start deaths, and the newest driver restart seen. */
+ *  node-downs given (each tick, the raised ones and the start deaths), and the
+ *  newest driver restart seen. Every entry given counts (v0.79.5), so a
+ *  restored carry's key counts the waiting dwells the shutdown save wrote. */
 function promptCarryKey(nodeDown: readonly { nodeId: number; latched: boolean; start: boolean }[], restart: DriverStart | null): string {
-  const n = nodeDown.filter((d) => d.latched || d.start).map((d) => `${d.nodeId}${d.latched ? 'r' : ''}${d.start ? 's' : ''}`).sort().join(',');
+  const n = nodeDown.map((d) => `${d.nodeId}${d.latched ? 'r' : ''}${d.start ? 's' : ''}`).sort().join(',');
   return `${n}|${restart ? `${restart.from}-${restart.to}` : ''}`;
 }
 
