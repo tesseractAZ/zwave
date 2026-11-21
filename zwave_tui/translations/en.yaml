@@ -53,8 +53,8 @@ configuration:
       add-on a pure read-only monitor. It is safe to leave on: every command
       that reaches the mesh, except the one-key ping shortcut (p), must still be
       armed by typing the word CONFIRM before it runs. The engine's
-      recommendations never run on their own; only auto-ping, below, acts
-      without a key press.
+      recommendations never run on their own; only auto-ping and the refresh
+      trial (both below, both off by default) act without a key press.
   # ── Self-healing (auto-ping) ───────────────────────────────────────────────
   auto_ping_enabled:
     name: Safety · Auto-ping a node that goes offline
@@ -63,11 +63,13 @@ configuration:
       below, the engine pings it, up to the attempts set below, to try to wake
       it. Sleeping and battery
       devices are never touched — asleep is not dead, and a ping cannot reach
-      one before its own wakeup. Requires "Enable write actions". Suppressed
-      during a route rebuild or a failed-node removal, in the restart window
-      (for a Dead node, only until the roster is ready), while the controller's radio is off (as during
-      its nightly NVM backup), and whenever a quarter of
-      the mesh is down at once (that is a controller problem, not a device one).
+      one before its own wakeup. Requires "Enable write actions". Turning it on
+      also starts the liveness sweep below. Suppressed during a route rebuild or
+      a failed-node removal, in the restart window (for a Dead node, only until
+      the roster is ready), while the controller's radio is off (as during its
+      nightly NVM backup), and whenever a quarter of the mains-powered nodes (at
+      least 4) are Dead at once (that is a controller problem, not a device
+      one).
       Every attempt is logged. Whether it ends an outage is not scored (an
       outage ends when the device returns, so there is nothing to compare it
       with), and what its pings learn is shown on ENGINE in their own row and
@@ -105,7 +107,9 @@ configuration:
       sweep reads. Every node is asked on the same
       cadence, chatty or not, so its answered/asked ratio measures reachability
       rather than how talkative it is. One probe per tick, stalest first, under
-      the same suppressors as auto-ping.
+      the same suppressors as auto-ping. A tick comes once a minute, so asking N
+      nodes takes at least N minutes, even when this value is lower. Runs only
+      while auto-ping and write actions are both on.
   refresh_trial_enabled:
     name: Safety · Refresh trial (pre-registered experiment)
     description: >-
@@ -132,12 +136,14 @@ configuration:
     name: Logs · Archive days
     description: >-
       Days of logs kept in the add-on's own archive, today included (0 turns it
-      off and deletes what it wrote). The host's journal holds only about a day and a half of every app's
-      log; this archive keeps the add-on's log and the Z-Wave JS driver's log
+      off and deletes what it wrote). The host's journal is capped in size and
+      shared by every app's log, so on a busy host it may reach back only a day
+      or two; this archive keeps the add-on's log and the Z-Wave JS driver's log
       stream for longer, in daily files in the add-on's config folder
-      (/addon_configs/<this add-on's slug>/logs, readable over SSH). Finished
-      days are gzipped and included in the add-on's backups; today's file is
-      not.
+      (/addon_configs/<this add-on's slug>/logs, readable from a shell add-on
+      such as Terminal & SSH; this add-on's own SSH serves only the TUI).
+      Finished days are gzipped and included in the add-on's backups; today's
+      file is not.
   log_archive_max_mb:
     name: Logs · Archive size cap (MB)
     description: >-
@@ -158,16 +164,19 @@ configuration:
       terminals on your LAN: ssh -p 2324 <user>@<host>. Logins use a username
       and password from the login gate below, so turn it on and add a user;
       with the gate off every login is refused. The host key fingerprint is in
-      the add-on log.
+      the add-on log at log level info or more verbose.
   # ── Login gate ─────────────────────────────────────────────────────────────
   auth_enabled:
     name: Login gate · Require login (direct access)
     description: >-
-      Require a username and password for DIRECT access — SSH, or hitting the
-      port directly. Access through the HA sidebar is already authenticated by
-      Home Assistant and is not gated (unless you also turn on the next option).
-      Add at least one user below first — with none configured, direct access is
-      denied.
+      Turns on username/password login for DIRECT access. SSH needs it: while
+      this is off, every SSH login is refused. A web-console connection that
+      does not come through the HA sidebar (possible only from Home Assistant's
+      internal add-on network; port 8788 is not published on the LAN) is gated
+      too, and while this is off it opens with no login. Access through the HA
+      sidebar is already authenticated by Home Assistant and is not gated
+      (unless you also turn on the next option). Add at least one user below
+      first — with none configured, direct access is denied.
   auth_require_on_ingress:
     name: Login gate · Also require login in the HA sidebar
     description: >-
@@ -186,28 +195,36 @@ configuration:
   auth_max_attempts:
     name: Login gate · Max login attempts
     description: >-
-      Failed password attempts allowed before the connection is dropped.
-      Default 3.
+      Failed password attempts from one address before an escalating back-off
+      starts (5 s, doubling with each further failure, up to 5 min), kept across
+      reconnects and cleared by a successful login. Every login from that
+      address is refused until the back-off ends; the web console's login screen
+      also closes the connection at this count. Default 3. Range 1–10.
   auth_idle_lock_min:
     name: Login gate · Idle re-lock (minutes)
     description: >-
-      Re-require login after this many minutes with no keystrokes on a signed-in
-      session. 0 disables it. Applies only to sessions that passed the login gate,
-      which includes HA-sidebar sessions only when "Also require login in the HA
-      sidebar" is on.
+      Re-require login after this many minutes with no keystrokes on a
+      web-console session that passed the login gate (0 disables it): a direct
+      web-console session, or an HA-sidebar session only when "Also require
+      login in the HA sidebar" is on. A web-console connection that receives nothing from the browser (no keystroke or resize) for 5 minutes is also closed and reconnects, and a gated session then opens at the login screen, so at 0, or at 5 or more, an idle gated session meets the login screen after 5 minutes. SSH sessions are not re-locked: SSH checks
+      the password once, when the connection opens, and an SSH connection is
+      closed after 30 minutes with no inbound traffic (client keep-alives count
+      as traffic).
   # ── Advanced ───────────────────────────────────────────────────────────────
   refresh_interval:
     name: Advanced · refresh interval (seconds)
     description: >-
-      Seconds between live render refreshes and the cheap network_status roster
-      poll. The default 2s is a good balance; lower is snappier, higher is
-      lighter. Range 1–30.
+      Seconds between refreshes of the data the TUI shows (the screen itself
+      redraws every second) and the cheap network_status roster poll. The
+      default 2s is a good balance; lower is snappier, higher is lighter.
+      Range 1–30.
   route_poll_interval:
-    name: Advanced · route poll interval (seconds)
+    name: Advanced · evidence sample interval (seconds)
     description: >-
-      Seconds between the heavier route- and controller-statistics polls, kept
-      off the fast render tick so they don't hammer the mesh. Default 10s.
-      Range 5–120.
+      Seconds between evidence samples: the detection engine's tick (symptoms,
+      learned baselines, refresh-trial decisions). It polls nothing; node and
+      controller statistics arrive as the driver reports them. A larger value
+      slows detection and lengthens the span of the 240 recent controller samples behind the INTERFERENCE screen's serial-link rates (about 40 minutes at the default) and of the newest 24 that its noise-trend spark draws (about 4 minutes). Default 10s. Range 5–120.
   log_level:
     name: Advanced · log level
     description: >-
@@ -223,10 +240,11 @@ configuration:
     name: Advanced · Home Assistant WebSocket URL
     description: >-
       Leave at the default ws://supervisor/core/websocket for a normal install.
-      Override only to point the data layer at a different HA Core
-      WebSocket — never at the driver socket (that is the Z-Wave JS driver
-      WebSocket URL option below): the data layer speaks Home Assistant's
-      zwave_js commands, which the driver server does not serve.
+      The data layer authenticates only with this add-on's own Supervisor token
+      (no option supplies another), so the URL must reach this Home Assistant's
+      Core — never the driver socket (that is the Z-Wave JS driver WebSocket URL
+      option below): the data layer speaks Home Assistant's zwave_js commands,
+      which the driver server does not serve.
   driver_ws_url:
     name: Advanced · Z-Wave JS driver WebSocket URL (read-only telemetry)
     description: >-

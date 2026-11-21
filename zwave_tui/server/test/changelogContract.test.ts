@@ -71,7 +71,7 @@ const KNOWN = `
  *  SHA-256 of that text pins every older release's body, not just its heading.
  *  A deliberate edit to an old entry updates this pin in the same change. */
 const FROZEN_FROM = '## 0.72.0\n';
-const FROZEN_SHA256 = '95d75f3058927ae3a736c8997e4587ba1f7cb20b1ab581689818cc5a2100f739';
+const FROZEN_SHA256 = 'b10b90849c117eaa1702d5767b9323d735964ba4f6794eee871a22a9063cf027';
 
 test('the shipped changelog fits the budget Home Assistant renders quickly', () => {
   const versions = headings(shipped).filter((h) => versionOf(h));

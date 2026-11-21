@@ -47,12 +47,15 @@ seriously.
   own sweep or verification probes to it unanswered) is probed with no keypress,
   as is every non-Dead mains-powered node once per `auto_ping_stale_min` (the
   liveness sweep), a node an open outcome episode needs a verification
-  reading from, and (since 0.78.0) one confirmation read per lone slow round
-  trip that lifted a node's RTT average over its line (no other until that
+  reading from, (since 0.78.0) one confirmation read per lone slow round
+  trip that lifted a node's RTT average over its line, and (since 0.79.2) one
+  confirmation read in a breach that a kept slow reading can still hold, when
+  the newest round trip is a single normal one or a slow one read across a
+  route change. Both kinds share one cooldown per node: no other until that
   round trip has left the 10-minute lookback, so within one run at most two
-  to a node in any 10 minutes: a second can follow as soon as the first one's
-  round trip has left, for that probe's own slow answer or a newer lone slow
-  round trip). Two frames can go out this way: Home Assistant's ping (the
+  to a node in any 10 minutes (a second can follow as soon as the first one's
+  round trip has left, for that probe's own answer or a newer round trip that
+  asks one). Two frames can go out this way: Home Assistant's ping (the
   dead-node ladder), and one `zwave_js.refresh_value` routed read — a single
   Get on the node's own switch/light value — which follows an unanswered
   ladder ping (v0.70.0) and is what the liveness sweep and
@@ -160,20 +163,24 @@ seriously.
   per-channel background RSSI, each node's `lastSeen` and listening/FLiRS flags,
   and, for sleeping nodes only since v0.73.0, the one value that declares a
   node's report interval (its Wake Up interval, or a Configuration parameter
-  labelled as a heartbeat). It keeps that number and nothing else. From the log
-  stream it matches three line families locally: an S2 nonce resync attributed
-  to a node (v0.26), the controller turning its radio off and on around the
-  nightly NVM backup (v0.65.0), and, since v0.74.0, a duplicate S2 frame dropped
-  from a node. A match keeps only the node id (or the radio's off/on) and the
-  time. The matcher logs and stores none of the line text, and nothing new is
-  sent; the archive above is the only place the text is kept. From the state
-  dump and the server's `log config updated` event it also keeps the driver's
-  log level (one of zwave-js's seven level names; anything else is dropped)
-  and the log node filter's node ids (v0.76.0). A storm guard pauses this
-  client's subscription above 3,000 lines a minute and resumes it on its own
-  (5 minutes, doubling to an hour), and after verbose lines ten minutes
-  without one re-subscribes once; both use the same two allowlisted commands,
-  and the allowlist itself is unchanged.
+  labelled as a heartbeat). It keeps that number and nothing else. Since
+  v0.75.0 it also takes from the state dump (and a node's `ready` event) one
+  count per node of the command-class instances a value refresh would query (a
+  count, no values), for the refresh trial's eligibility and ENGINE's
+  eligible-node count. From the log stream it matches three line families
+  locally: an S2 nonce resync attributed to a node (v0.26), the controller
+  turning its radio off and on around the nightly NVM backup (v0.65.0), and,
+  since v0.74.0, a duplicate S2 frame dropped from a node. A match keeps only
+  the node id (or the radio's off/on) and the time. The matcher logs and stores
+  none of the line text, and nothing new is sent; the archive above is the only
+  place the text is kept. From the state dump and the server's
+  `log config updated` event it also keeps the driver's log level (one of
+  zwave-js's seven level names; anything else is dropped) and the log node
+  filter's node ids (v0.76.0). A storm guard pauses this client's subscription
+  above 3,000 driver log events a minute (a multi-line entry counts once) and
+  resumes it on its own (5 minutes, doubling to an hour), and after verbose
+  lines ten minutes without one re-subscribes once; both use the same two
+  allowlisted commands, and the allowlist itself is unchanged.
 - **Trust model.** Access over the Home Assistant sidebar (ingress) is already
   HA-authenticated, and the panel is **admin-only** (`panel_admin: true`) — with
   write actions on, the console can remove a failed node, rebuild every route and
@@ -183,11 +190,21 @@ seriously.
   bridge cannot forge it; resolution failure **fails closed**. Every session that
   is not genuine ingress — SSH, the only port published on the LAN (`ports:`
   maps 2324 alone), and any console connection from a peer other than the
-  Supervisor — is gated by an optional login (`auth_enabled`, users with
-  plaintext or `scrypt:` passwords; `auth_require_on_ingress` extends it to
-  ingress sessions, and `auth_idle_lock_min` re-locks an idle gated session)
-  with a shared per-peer backoff that survives reconnects, charged **before** the
-  async verify so concurrent sessions contend for one counter. The login gate
+  Supervisor — faces the login gate (`auth_enabled`, users with plaintext or
+  `scrypt:` passwords): mandatory over SSH, optional for the console, which
+  opens with no login while `auth_enabled` is off (port 8788 is not published
+  on the LAN, so such a connection can only come from Home Assistant's
+  internal add-on network). `auth_require_on_ingress` extends the gate to
+  ingress sessions, and `auth_idle_lock_min` re-locks an idle console session
+  that typed a login. A shared per-peer backoff survives reconnects. The
+  console's login screen charges each attempt **before** the async verify, so
+  concurrent console sessions contend for one counter; the SSH listener checks
+  the backoff first but charges a failure only after the verify, so concurrent
+  connections from one address (up to its per-IP cap of 4) can each have a
+  password checked before any of them is charged. SSH sessions are never
+  re-locked when idle: they are authenticated in the SSH handshake, and the
+  listener closes one only after 30 minutes with no inbound traffic (client
+  keep-alives count as traffic). The login gate
   **fails closed** (denies) when enabled with no users configured, and a row
   with a blank password is rejected rather than becoming an account whose
   password is `""`. The LAN port is SSH since v0.77.0 (telnet until v0.76.1):
@@ -214,8 +231,9 @@ seriously.
   because U+009B is an 8-bit CSI and U+009D an 8-bit OSC, and xterm.js executes
   both. Inbound console WebSocket frames are size-capped.
 - **What the add-on writes to Home Assistant, and what it does not.** Besides
-  mesh actions (the operator's, and auto-ping's ping and routed read), the add-on
-  publishes six *diagnostic* states
+  mesh actions (the operator's, auto-ping's ping and routed read, and, with
+  `refresh_trial_enabled` on, the refresh trial's
+  `zwave_js/refresh_node_values`), the add-on publishes six *diagnostic* states
   over the Core REST API — a degraded flag, a count of nodes needing attention,
   a live symptom count, the engine's own run state, a week's route failures
   ranked by link, and (v0.72.0) one recommendation naming a node, its symptom
@@ -256,8 +274,15 @@ seriously.
 
 - **Confined by its own AppArmor profile (v0.74.4).** The Supervisor loads
   `zwave_tui/apparmor.txt` in enforce mode, and the server logs the label it
-  runs under at startup (`security: AppArmor local_zwave_tui (enforce)`, or a
-  WARNING when the profile is not in force). The profile keeps the blanket
+  runs under at startup (`security: AppArmor local_zwave_tui (enforce)`).
+  Under the Supervisor it logs a WARNING for any label that is not a profile in
+  enforce mode (complain mode, unconfined, unreadable). Any profile in enforce
+  mode is logged at info, so `docker-default (enforce)`, which the add-on can
+  come back under when the host parser rejects this profile, carries no
+  warning: the label is what to check. A previously loaded version of this
+  profile, which the host can keep until its next boot, logs the same label as
+  the current one; `apparmor.txt` (LOADING) gives the in-container check that
+  tells them apart. The profile keeps the blanket
   file, signal and network grants s6-overlay needs, and narrows from there:
   - **Capabilities** are an allow list (chown, dac_override, fowner, fsetid,
     kill, setgid, setuid); every other one is refused, and `net_raw`,

@@ -133,19 +133,21 @@ for no-RTC clocks) — plus the disciplines the design review proved necessary:
 
 **Two tiers, both M2 exit criteria** *(DR blocker: baselines had no substrate)*:
 
-- **Fine ring**: one sample per node per route-poll tick (default 10 s),
+- **Fine ring**: one sample per node per evidence tick (`route_poll_interval`, default 10 s),
   ~40 min horizon — feeds recent-window detectors and the after-window
   verifier.
-- **Coarse tier**: 30-minute buckets × 14 days per node — feeds baselines
-  (bands are multi-hour; 30 min resolution is ample). Each bucket: sample
-  count, fresh count, invalid-window count, Σ of each valid delta, flap +
-  route-change counts, min/sum/max of *fresh* rssi + rtt, min rate. Staleness
-  is **per-tier**: the 1 h `maxAge` applies to the fine ring only; coarse
-  buckets are pruned individually to the 14-day horizon. A 3-day-old coarse
-  bucket is valid history, not stale state. Under **boot-grace** (untrusted
-  clock) the coarse tier and coverage metadata still load — only the
-  recency-dependent fine ring is discarded; a daily power blip must not wipe
-  two weeks of baseline substrate.
+- **Coarse tier**: 30-minute buckets × 14 days per node — feeds the
+  INTERFERENCE screen's diurnal heatmap, measured route stability and DETAIL's
+  EVIDENCE section. Baselines are not built from it: they fold each new fine
+  sample directly and persist on their own (§3.2). Each bucket: sample count,
+  fresh count, invalid-window count, Σ of each valid delta, flap +
+  route-change counts, min/sum/max of *fresh* rssi, count/sum of *fresh* rtt,
+  min rate. Staleness is **per-tier**: the 1 h `maxAge` applies to the fine
+  ring only; coarse buckets are pruned individually to the 14-day horizon. A
+  3-day-old coarse bucket is valid history, not stale state. Under
+  **boot-grace** (untrusted clock) the coarse tier and coverage metadata still
+  load — only the recency-dependent fine ring is discarded; a daily power blip
+  must not wipe two weeks of coarse history.
 
 **Per-sample shape** (fine tier):
 
@@ -156,7 +158,7 @@ for no-RTC clocks) — plus the disciplines the design review proved necessary:
 | `dS2Resync` | **event-driven accumulator** of S2 SPAN-resync lines from the driver-WS log stream (v0.26), drained per sample; **null** while the log lane is not listening | the S2 nonce-desync fault moves no statistics counter; null rather than 0, so a stopped lane never reads as "none happened" *(DOCS.md §6.11)* |
 | `dTx dTimeout dDropTx dRx` | counter deltas w/ guards | rate math; dTimeout is the primary signal *(§0)* |
 | `fresh` | was the node **heard** since the previous sample (the HA-side arrival stamp advanced — since v0.64.6 only `commandsTX`, `commandsRX` or `commandsDroppedRX` moves it) AND did `commandsTX`, `commandsRX`, `timeoutResponse` or `commandsDroppedTX` move? A timeout-only, dropped-send-only or dropped-RX-only interval, a (re)subscribe replay with unchanged counters, and a node's first-ever sample are not fresh | pseudo-replication guard: EMAs re-sampled without new events carry no information *(DR)* |
-| `lastSeen`, `bgRssi[ch]`, `isListening` | **reserved** (null until v0.13) | schema stability *(§2.1)* |
+| `lastSeen`, `isListening`, `isFrequentListening` | driver-WS (since v0.13; reserved and null before; null without the link) | schema stability *(§2.1)* |
 | `rateKbps`, `routeKey` | LWR | rate-fallback + churn *(§2.2)* |
 | `rtt`, `rssi` | node stats (EMA; sentinels ≥125 ⇒ null) | trend — **meaningful only when `fresh`** *(§1.11, DR)* |
 | `status` | roster level at capture | dwell context only — **never diffed for flaps** *(DR)* |
@@ -192,13 +194,15 @@ overwritten on the next OK transmission, §2.3), never by polling.
   (and `reset()` immediately rewrites the on-disk file, so a crash cannot
   resurrect the old network's rings).
 - **Coverage metadata** that survives ring eviction and restarts: store-level
-  `recordingSince`, per-node `firstSampleAt` + cumulative sample/fresh
-  counts. "No evidence rows" must be distinguishable from "node never
-  communicated" — the ghost detector depends on this (§3.5).
+  `recordingSince`, per-node `firstSeenAt` (its first roster appearance, set
+  before any sample) + cumulative sample/fresh counts. "No evidence rows"
+  must be distinguishable from "node never communicated" — the ghost
+  detector depends on this (§3.5).
 - **Wedge guard**: when the roster/stats feed itself is stale (no successful
-  poll within ~2× the refresh cadence), sampling **skips the tick** — a gap in
-  the ring is honest; a fabricated healthy window is not. The shutdown flush
-  saves but does not synthesize a fresh-timestamped sample from stale caches.
+  poll within max(2× the refresh cadence, 10 s): 10 s at the default 2 s
+  cadence), sampling **skips the tick** — a gap in the ring is honest; a
+  fabricated healthy window is not. The shutdown flush saves but does not
+  synthesize a fresh-timestamped sample from stale caches.
 - **Settle deferral** (v0.64.6): a node whose newest statistics event is under
   300 ms old (`STATS_SETTLE_MS`) is sampled on the next tick instead, at most
   one tick in a row; its counter deltas carry into that sample. zwave-js emits
@@ -234,9 +238,10 @@ Per-node learned "normal", split by **time-of-day band** and — for rssi/rtt �
 **stratified by `routeKey`** (a route change legitimately shifts both; a
 mixture baseline both false-fires on benign re-routes and mask-inflates MAD).
 Baselines are **persisted aggregates** (incremental quantile structures per
-node × series × band), updated once per aggregation window, in the same
-schema-versioned envelope — they must survive restarts and outages; the raw
-fine ring's 1 h staleness cap does NOT apply to them.
+node × series × band), updated from each new fine sample (rssi/rtt from
+fresh samples only), in their own schema-versioned file (`baselines.json`) — they must
+survive restarts and outages; the raw fine ring's 1 h staleness cap does NOT
+apply to them.
 
 **The statistic is per-series — one formula does not fit** *(DR)*:
 
@@ -251,7 +256,9 @@ observations** — windows containing actual traffic (`fresh` / dTx > 0), with
 coverage across ≥K distinct days per band — never raw 10 s snapshots (which
 are ~99% autocorrelated duplicates of driver EMAs). The dormant state renders
 as `learning: 3/7 days × active windows`, and detectors stay dormant until
-their band graduates.
+their band graduates (except `rtt-degraded`, which since v0.79.0 judges a
+node a confirmation probe can reach against a fixed 300 ms ceiling meanwhile,
+§3.3).
 
 **Baseline lifecycle** *(DR)*:
 
@@ -275,7 +282,12 @@ their band graduates.
 > for 5 minutes (which covers `replace_failed_node`), loses its baselines. A
 > home-id mismatch does not decide a re-baseline on its own: the learned stores
 > wipe memory, stop saving and ask the operator to start fresh, keep, or resume
-> an archive (`homeTag.ts`, DOCS §11.13).
+> an archive (`homeTag.ts`, DOCS §11.13). Of the counting series only the
+> timeout rate is learned: flaps and route changes are judged on absolute
+> counts (`dead-flap`, `route-churn`, §3.3), and `dDropTx` has no baseline.
+> The relative timeout test is a proxy, not a Poisson/binomial tail: the
+> window rate must reach max(3 × baseline, 7.5 %) and exceed the baseline by
+> 2 points.
 
 **Division of labor — written down** *(DR)*: the health score answers "how is
 this node NOW, in absolute terms"; relative detectors answer "did it CHANGE
@@ -320,15 +332,20 @@ verbatim where one exists — §3.5):
 | `repeated-frames` | the driver drops a node's S2 frames as duplicates in bursts of ≥ 5 drops within a minute, matched in the driver-WS log stream (v0.74.0). `watch` after the dwell while the node has had two bursts in 24 h, or one of ≥ 15. The node is not hearing the controller's acknowledgements, so the link works one way | a single small burst; a node Dead now; a dark log lane (detection is off, and ENGINE says so); drop times are held in memory only, so a restart restarts the count *(DOCS §11.12)* |
 | `return-path-degraded` | windowed per-command timeout **rate** (ΣdTimeout/ΣdTx, min denominator) ≫ own baseline, dwell ≥ D | tiny samples; traffic-volume shifts (rate not count — DR); unsupervised-SET-only nodes that need no nonce exchange, and traffic-mix shifts between reply-expecting commands and unsupervised Sets — either direction moves the rate (toward reply-expecting commands can inflate it, toward unsupervised Sets can mask a breach) *(§0)* — supervised Sets DO accrue timeouts, and so does a secure send whose nonce Get is acknowledged but never answered (source-traced on zwave-js 15.27.1; empirical repro still open — RESEARCH §7 item 11) |
 | `route-churn` | routeKey churn ≫ baseline + rate/RTT corroboration (**routeSchemeState does not exist on either WS — dropped**; explorer detection only ever as a labelled best-effort log parse) (operationally, v0.30.0: an absolute ≥ 4 LWR route changes in 10 min, at least one within the last 5 min — no baseline and no rate/RTT corroboration; Long-Range nodes excluded) | one legit re-route after topology change *(§2.1, DR)* |
-| `rtt-degraded` | RTT median over **fresh** samples ≫ route-stratified baseline, dwell (operationally, v0.14: the newest fresh reading, which is the driver's running average, above the band's median + 4 × its MAD-derived scale, after taking out what a driver restart can still add: the smaller of 0.75^(commandsTX − 1) × (2 s − median) and 0.75^(commandsTX − k0) × (a0 − median) for the first fresh reading a0 of the lifetime, at k0, v0.77.1; the evidence store carries a0/k0 over an add-on restart while the driver keeps running, v0.77.3, so a deploy no longer re-takes a mid-lifetime reading as the seed. The rtt baseline is reset on a route change rather than stratified by route (§3.2 above). Since v0.78.0 the average starts a breach only with corroboration: the two newest raw round trips in the 10-min lookback (`rawRttFrames`, the per-sample recovery the ledger has scored since v0.74.3, §3.6) both above the same line, or, on a node no confirmation can reach (not a ping candidate, or no auto-ping runner), the newest one; once started the average alone holds it. One slow round trip with nothing behind it owes one verification-lane probe, no other until that round trip leaves the 10-min lookback; the ledger scores the episode on raw round trips, §3.6 below) | route change (settle window); EMA lag; driver restart re-seeds the average (v0.77.1); one slow frame lifts the average over the line alone (v0.78.0); wake latency *(§1.11, DR)* |
+| `rtt-degraded` | RTT median over **fresh** samples ≫ route-stratified baseline, dwell (operationally, v0.14: the newest fresh reading, which is the driver's running average, above the band's median + 4 × its MAD-derived scale, after taking out what a driver restart can still add: the smaller of 0.75^(commandsTX − 1) × (2 s − median) and 0.75^(commandsTX − k0) × (a0 − median) for the first fresh reading a0 of the lifetime, at k0, v0.77.1; the evidence store carries a0/k0 over an add-on restart while the driver keeps running, v0.77.3, so a deploy no longer re-takes a mid-lifetime reading as the seed. The rtt baseline is reset on a route change rather than stratified by route (§3.2 above). Since v0.78.0 the average starts a breach only with corroboration: the two newest raw round trips in the 10-min lookback (`rawRttFrames`, the per-sample recovery the ledger has scored since v0.74.3, §3.6) both above the same line, or, on a node no confirmation can reach (not a ping candidate, or no auto-ping runner), the newest one; once started the average alone holds it. Since v0.79.0, on a node a confirmation probe can reach, a time-of-day band that has not graduated is judged against a fixed 300 ms ceiling (`RTT_CEILING_MS`), and a learned line above 300 ms is capped there. Since v0.79.1, on such a node with the sweep on, a matured breach with no fresh reading left in the window is held on its last slow round trip for up to the sweep cadence + 30 min after it (`RTT_HOLD_MARGIN_MS`); since v0.79.2 one normal round trip owes one confirmation probe, a slow answer keeps the hold, a second normal one ends it, and while it is owed the breach is not held. One slow round trip with nothing behind it owes one verification-lane probe, no other until that round trip leaves the 10-min lookback; the ledger scores the episode on raw round trips, §3.6 below) | route change (settle window); EMA lag; driver restart re-seeds the average (v0.77.1); one slow frame lifts the average over the line alone (v0.78.0); wake latency *(§1.11, DR)* |
 | `s2-desync` | ≥ 12 S2 SPAN resyncs in 30 min from the `dS2Resync` accumulator, at least one within the last 5 min — an absolute threshold, not baseline-relative (v0.26; watch, warn at ≥ 3×) | an occasional resync after a missed frame is normal S2 behaviour; a stopped log lane, which reads null rather than zero. Since v0.76.0 it counts the OUTGOING retry alone (the incoming family streams only at `verbose`), at `info` and finer, and a stretch the lane could not see holds a matured symptom instead of clearing it *(DOCS.md §6.11, §7)* |
-| `weak-signal` | low RSSI **on a direct (non-routed) node** + delivery corroboration: a ≥5 % timeout rate, or — when too few sends to rate — a failed delivery in the last 30 min (v0.69.0) | routed node (RSSI = last hop, not the device) *(§1.3)*; a node Dead now (node-down owns it) |
+| `weak-signal` | low RSSI **on a direct (non-routed) node** + delivery corroboration: a ≥5 % timeout rate, or — when too few sends to rate — a failed delivery in the last 30 min (v0.69.0) | routed node (RSSI = last hop, not the device) *(§1.3)*; on an unmeasured window, a node Dead now (node-down owns it) |
 
 **Detection vs advice — two layers, never conflated** *(DR)*:
 
 - **Detection/evidence**: every detector always computes; dwell accumulates
   from the evidence store continuously and is **never reset, paused, or
-  suppressed** by another symptom's state.
+  suppressed** by another symptom's state. *As built*, that holds for the
+  per-node detectors, which a mesh event only demotes (`subsumedBy`). The
+  mesh-scoped ladder is exclusive at detection time: an active
+  `controller-degraded` event resets the `mesh-interference` dwell, and
+  `edge-cluster` is not evaluated (its dwell is cleared) while a mesh or
+  controller event is active.
 - **Advice/presentation**: when a mesh-level event is active, per-node
   symptoms are still emitted but annotated `subsumedBy` — the planner and TUI
   demote them, never delete them. `edge-cluster` reads the evidence store and
@@ -455,16 +472,21 @@ even when execution is fully disabled.
 > because it measured well.
 >
 > **The safety model, stated completely.** What runs with no one present is
-> auto-ping's three lanes, and nothing else. Those frames never command a
-> device, but (a) an answer that corrects a wrong Home Assistant state is a
-> state change that state-triggered automations react to; (b) a routed read
-> that fails over leaves the controller on the route that worked; (c) a
-> listening device that misses a frame is marked Dead, and the driver rejects
-> every command queued to it at that moment. One switch pauses all three lanes;
-> while paused, a mains device that fails when nothing talks to it is not
-> noticed: `quiet-node` fires only after max(6 h, 3 sweep intervals) of silence
-> plus its dwell, and then for every idle mains node. A pause older than 24 h
-> raises the degraded alarm while auto-ping is running for it to stop. Everything else runs only behind the typed `CONFIRM`.
+> auto-ping's three lanes and, only while `refresh_trial_enabled` is on, the
+> refresh trial's randomized `refreshValues` (as built, below), and nothing
+> else. Those frames never command a device, but (a) an answer that corrects a
+> wrong Home Assistant state is a state change that state-triggered
+> automations react to; (b) a routed read that fails over leaves the
+> controller on the route that worked; (c) a listening device that misses a
+> frame is marked Dead, and the driver rejects every command queued to it at
+> that moment. One switch pauses all of them, and the trial also refuses at
+> send time while paused; while paused, a mains device that fails when nothing
+> talks to it is not noticed: `quiet-node` fires only after max(6 h, 3 sweep
+> intervals) of silence plus its dwell, and then for every idle mains node. A
+> pause older than 24 h raises the degraded alarm while auto-ping is running
+> for it to stop. Apart from the `p` ping shortcut (safe tier, sent at once),
+> every operator action that sends to the mesh runs behind the typed
+> `CONFIRM`.
 >
 > **Any future admission must, all of:** delete that verb's failure rows in
 > review; pass the pre-registered randomized trial below; be handed to an
@@ -753,8 +775,11 @@ without:
   (`▴N ▾M` once cards have scrolled off the top) rather than dropping a
   critical silently. Per-candidate learned efficacy annotations shipped in M5
   (v0.16): a runnable candidate shows "✓ helped X% vs Y% self-heal (n)" once the
-  action beats the control arm, or "≈ not distinguishable" — never on a blocked
-  or anti-pattern candidate.
+  action beats the control arm, or "≈ not distinguishable". Since v0.35 a
+  blocked candidate, an anti-pattern one included, shows the measurement too,
+  never as "✓ helped": "⚠ ledger measured X% here — the block above still
+  applies" (in yellow), or "≈ …: measured — not distinguishable from
+  self-healing".
 - **INTERFERENCE screen** (M6, v0.17 — key `8`/`f`): as-built it shows the
   measured per-channel **background-RSSI noise floor** (median = the masthead
   value) + a fixed-scale −110..−80 dBm trend spark; **controller serial-link
