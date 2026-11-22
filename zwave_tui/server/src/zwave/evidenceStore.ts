@@ -59,6 +59,7 @@ import type { LogSink } from '../logger';
 import { uptime as osUptime } from 'node:os';
 import { rssiReading, medianNoiseFloor, noiseReading } from './health';
 import { NodeStatus, type NodeStats, type RouteStat, type ControllerSnapshot } from '../types';
+import { tagToWrite } from './homeTag';
 
 /** The controller serial-link counters (nullable on the snapshot; non-null here). */
 type CtrlStats = NonNullable<ControllerSnapshot['statistics']>;
@@ -1707,7 +1708,12 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
         const payload: Persisted = {
           v: SCHEMA_V,
           savedAt: now(),
-          homeId,
+          // The sibling stores' tag rule: a save before the bind (an open
+          // driver drop forces one, v0.79.5) writes the tag the file was
+          // loaded with. A null here would make the next run adopt the file
+          // whatever network it binds, so a stick swapped meanwhile would
+          // inherit this network's evidence and node-down dwells.
+          homeId: tagToWrite(homeId, loadedHomeId),
           recordingSince: since,
           // Stamped on the FIRST save after the upgrade, so every node already
           // on the roster keeps the caveat and only nodes first seen from here

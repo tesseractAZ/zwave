@@ -296,6 +296,15 @@ interface RawDevice {
   model?: string | null;
   area_id?: string | null;
   via_device_id?: string | null;
+  /** The config entries the device belongs to: listed for a main device, and
+   *  the only entry field before HA 2026.8. */
+  config_entries?: string[] | null;
+  /** The device's config entry (HA 2026.8+); a child device lists only this. */
+  config_entry_id?: string | null;
+  /** The device a child device belongs to (HA 2026.9+; null on a main
+   *  device). From HA 2026.11 the zwave_js integration files a labelled
+   *  endpoint's entities on a child device of the node's own device. */
+  parent_device_id?: string | null;
 }
 
 interface RawEntity {
@@ -320,6 +329,14 @@ interface DeviceRec {
   id: string;
   /** The node's own device (v0.79.5): identified exactly `<home_id>-<node_id>`. */
   main: boolean;
+  /** The node's own device the state held for the id belongs to (v0.79.5):
+   *  this device when it is the node's own. When a child or an orphan holds
+   *  the slot, the last own device listed, carried on from load to load (none
+   *  after an eviction); the swap check in buildRegistryMaps sets it. */
+  own: string | null;
+  /** Its hardware identifier `<home_id>-<node_id>-<mfr>:<type>:<id>`, if
+   *  Home Assistant gave it one (v0.79.5). */
+  hw: string | null;
   name: string;
   area: string | null;
   manufacturer: string | null;
@@ -738,11 +755,38 @@ export function nodeIdOfDevice(d: RawDevice): number | null {
 
 /** Whether a device is a node's own device (v0.79.5): one of its zwave_js
  *  identifiers is exactly `<home_id>-<node_id>`, not an endpoint child
- *  (`-<endpoint>`, `-g<group>`) nor the orphan a replacement by another product
- *  leaves (`-<mfr>:<type>:<id>`). */
+ *  (`-<endpoint>`, `-g<group>`) nor the orphan Home Assistant leaves when an
+ *  interview reports other hardware ids (`-<mfr>:<type>:<id>`). That happens on
+ *  a replacement by another product, and also when a node in poor RF misreports
+ *  its ids: HA's zwave_js async_register_node_in_dev_reg says it cannot tell
+ *  the two apart. */
 export function isMainNodeDevice(d: RawDevice): boolean {
   const ids = d.identifiers;
   return Array.isArray(ids) && ids.some((id) => Array.isArray(id) && id[0] === 'zwave_js' && typeof id[1] === 'string' && /^\d+-\d+$/.test(id[1]));
+}
+
+/** A device's hardware identifier (v0.79.5), or null: HA's zwave_js
+ *  get_device_id_ext, `<home_id>-<node_id>-<manufacturer_id>:<product_type>:<product_id>`,
+ *  each part a decimal integer. */
+export function hardwareIdOfDevice(d: RawDevice): string | null {
+  const ids = d.identifiers;
+  if (!Array.isArray(ids)) return null;
+  for (const id of ids) {
+    if (Array.isArray(id) && id[0] === 'zwave_js' && typeof id[1] === 'string' && /^\d+-\d+-\d+:\d+:\d+$/.test(id[1])) return id[1];
+  }
+  return null;
+}
+
+/** Whether a device belongs to the zwave_js config entry the add-on reads
+ *  (v0.79.5). Another zwave_js entry is another network, whose devices carry
+ *  node ids of their own. A device that lists no entry is kept, and so is
+ *  every device while the entry is not known. */
+export function deviceInEntry(d: RawDevice, entryId: string | null): boolean {
+  if (entryId == null) return true;
+  const listed: unknown[] = [];
+  if (Array.isArray(d.config_entries)) listed.push(...d.config_entries);
+  if (typeof d.config_entry_id === 'string') listed.push(d.config_entry_id);
+  return listed.length === 0 || listed.includes(entryId);
 }
 
 export function errMsg(e: unknown): string {
@@ -773,7 +817,9 @@ class ZwaveDataImpl implements ZwaveData {
   private lastOkAt: number | null = null;
   private deviceByNodeId = new Map<number, DeviceRec>();
   private deviceIdToNodeId = new Map<string, number>();
-  private entitiesByDeviceId = new Map<string, NodeEntity[]>();
+  /** Each node's entity list (v0.79.5): its slot device's entities and its
+   *  endpoint children's. */
+  private entitiesByNodeId = new Map<number, NodeEntity[]>();
   private entityCount = 0;
   /** v0.8 entity_id → {node, friendly name, domain} for the activity log's
    *  state_changed → value-event mapping. Only ENABLED zwave entities land here
@@ -875,6 +921,10 @@ class ZwaveDataImpl implements ZwaveData {
    *  their state is gone already, so a new device on the id at the next load
    *  is not a swap whose state is still to drop. */
   private readonly evictedSinceLoad = new Set<number>();
+  /** Hardware identifiers each node's own device has carried since the node
+   *  last left the roster (v0.79.5). An own device that carries one of them
+   *  again is the same hardware filed again, not a swap. */
+  private readonly hwSeenByNode = new Map<number, Set<string>>();
   /** ctrlStats object identity at the previous evidence sample (freshness). */
   private prevCtrlStatsRef: ControllerSnapshot['statistics'] = null;
   /** Devices whose per-node subscriptions failed — retried on a slow timer. */
@@ -2961,11 +3011,9 @@ class ZwaveDataImpl implements ZwaveData {
           this.configFetchAt.delete(id);
           // Live-state is entity-id-keyed (new devices mint new entity_ids, so no
           // cross-device aliasing), but drop the departed device's entries so they
-          // don't linger if the registry never reloads.
-          const depDev = this.deviceByNodeId.get(id);
-          if (depDev) {
-            for (const e of this.entitiesByDeviceId.get(depDev.id) ?? []) this.stateByEntityId.delete(e.entityId);
-          }
+          // don't linger if the registry never reloads. The node's list holds
+          // its endpoint children's entities too.
+          for (const e of this.entitiesByNodeId.get(id) ?? []) this.stateByEntityId.delete(e.entityId);
           this.flapAccum.delete(id);
           this.routeChangeAccum.delete(id);
           this.s2Accum.delete(id);
@@ -3210,7 +3258,12 @@ class ZwaveDataImpl implements ZwaveData {
   private buildRegistryMaps(devices: RawDevice[], entities: RawEntity[]): void {
     const deviceByNodeId = new Map<number, DeviceRec>();
     const deviceIdToNodeId = new Map<string, number>();
+    /** device id → its parent device id, for child devices filed under a node. */
+    const parentOf = new Map<string, string>();
     for (const d of devices) {
+      // Only this network's devices (v0.79.5): another zwave_js config entry
+      // is another network, whose `<home_id>-<node_id>` ids name its own nodes.
+      if (!deviceInEntry(d, this.entryId)) continue;
       const nodeId = nodeIdOfDevice(d);
       if (nodeId == null) continue;
       // The node's own device holds its slot (v0.79.5): an endpoint child or a
@@ -3218,13 +3271,17 @@ class ZwaveDataImpl implements ZwaveData {
       // node's entity→node maps (the activity log, the routed-read target,
       // battery, ping, firmware) but does not stand for it while the node's own
       // device is listed, whatever the order; with none listed, the last device
-      // filed under the id does. The node's entity list stays its slot device's.
+      // filed under the id does. The node's entity list is its slot device's
+      // and its endpoint children's (parent_device_id, HA 2026.11+).
       const main = isMainNodeDevice(d);
+      if (typeof d.parent_device_id === 'string') parentOf.set(d.id, d.parent_device_id);
       deviceIdToNodeId.set(d.id, nodeId);
       if (deviceByNodeId.get(nodeId)?.main === true && !main) continue;
       deviceByNodeId.set(nodeId, {
         id: d.id,
         main,
+        own: main ? d.id : null,
+        hw: hardwareIdOfDevice(d),
         name: sanitizeLabel(d.name_by_user || d.name || `Node ${nodeId}`),
         // Sanitize these too — they reach the Detail/Controller frames and are
         // externally sourced (device DB / user config).
@@ -3234,7 +3291,7 @@ class ZwaveDataImpl implements ZwaveData {
       });
     }
 
-    const entitiesByDeviceId = new Map<string, NodeEntity[]>();
+    const entitiesByNodeId = new Map<number, NodeEntity[]>();
     // Rebuilt fresh on every (re)join so a removed node leaves no stale mapping.
     this.updateEntitiesByNode.clear();
     this.updateEntityToNode.clear();
@@ -3255,9 +3312,18 @@ class ZwaveDataImpl implements ZwaveData {
       if (!e.device_id || !deviceIdToNodeId.has(e.device_id)) continue;
       const domain = e.entity_id.split('.')[0];
       const friendly = sanitizeLabel(e.original_name ?? e.name ?? '') || undefined;
-      const list = entitiesByDeviceId.get(e.device_id) ?? [];
-      list.push({ entityId: e.entity_id, domain, name: friendly });
-      entitiesByDeviceId.set(e.device_id, list);
+      // The node's entity list (v0.79.5): the slot device's entities and those
+      // of its endpoint children. An orphan's, and a child of another device's,
+      // belong to other hardware and are left out.
+      {
+        const nid = deviceIdToNodeId.get(e.device_id)!;
+        const slotId = deviceByNodeId.get(nid)!.id;
+        if (e.device_id === slotId || parentOf.get(e.device_id) === slotId) {
+          const list = entitiesByNodeId.get(nid) ?? [];
+          list.push({ entityId: e.entity_id, domain, name: friendly });
+          entitiesByNodeId.set(nid, list);
+        }
+      }
       // Index for the activity log's state_changed → value-event mapping.
       this.entityIndex.set(e.entity_id, {
         nodeId: deviceIdToNodeId.get(e.device_id)!,
@@ -3305,7 +3371,7 @@ class ZwaveDataImpl implements ZwaveData {
     const oldDeviceByNodeId = this.deviceByNodeId; // captured BEFORE overwrite (device-change eviction)
     this.deviceByNodeId = deviceByNodeId;
     this.deviceIdToNodeId = deviceIdToNodeId;
-    this.entitiesByDeviceId = entitiesByDeviceId;
+    this.entitiesByNodeId = entitiesByNodeId;
     this.entityCount = count;
     // v0.22: prune live-state to what the fresh registry still knows, so entities
     // removed from the mesh can't leak memory across registry reloads (surviving
@@ -3330,19 +3396,43 @@ class ZwaveDataImpl implements ZwaveData {
         this.configFetchAt.delete(nid);
       }
     }
-    // A DEVICE SWAP (v0.79.5): one known device replaced by another on the
-    // same id between two loads. What was learned or is waiting about the old
-    // device goes with it. Only A→B: the first load has no old map, a device
-    // that drops out of the list (A→null) or first appears (null→B) is no
-    // swap, and an id the departed branch evicted since the last load was
-    // dropped there, so what is on it now is the new device's. Most of the
-    // mesh changing at once is a registry re-created (the integration
-    // re-added, another network), not that many replacements: nothing is
-    // dropped.
+    // A DEVICE SWAP (v0.79.5): the node's own device on the id changed
+    // between two loads. What was learned or is waiting about the old device
+    // goes with it. Each id is judged in three steps.
+    // - `was` is the own device the held state belongs to, as of the last
+    //   load. It is none at the first load, for an id that had no device then
+    //   (null→B is no swap), and for an id the departed branch evicted since
+    //   then (that state went with the departed device, so what is on the id
+    //   now is the new device's). An id that drops out of the list (A→null) is
+    //   not judged at all.
+    // - A child or an orphan holding the slot (no own device listed) says
+    //   nothing about which device is measured now. It is no swap, and it
+    //   carries `was` on until an own device is listed again, which is then
+    //   compared against it: an exclusion and a re-inclusion around a load
+    //   that lists only an orphan is still a swap.
+    // - An own device that differs from `was` is a swap, unless it carries a
+    //   hardware id one of the node's own devices carried before. Home
+    //   Assistant files a node whose interview misread its hardware ids under
+    //   a new device, and a later correct read files it back (on the orphan,
+    //   or on a third device once the integration's next setup has removed
+    //   the orphan): a known hardware id coming back is the same hardware.
+    //   Limits: the misread itself looks like a replacement by another
+    //   product (HA cannot tell them apart either), so it is taken for a swap
+    //   once; and a replacement by a unit of a product the id already had
+    //   since it last left the roster keeps the interim device's state, as a
+    //   replacement by the same product does.
+    // Most of the mesh changing at once is a registry re-created (the
+    // integration re-added, another network), not that many replacements:
+    // nothing is dropped.
     const swapped: number[] = [];
+    for (const nid of this.evictedSinceLoad) this.hwSeenByNode.delete(nid);
     for (const [nid, dev] of deviceByNodeId) {
-      const oldDevId = oldDeviceByNodeId.get(nid)?.id ?? null;
-      if (oldDevId != null && oldDevId !== dev.id && !this.evictedSinceLoad.has(nid)) swapped.push(nid);
+      const was = this.evictedSinceLoad.has(nid) ? null : (oldDeviceByNodeId.get(nid)?.own ?? null);
+      if (!dev.main) { dev.own = was; continue; }
+      const seen = this.hwSeenByNode.get(nid) ?? new Set<string>();
+      const returning = dev.hw != null && seen.has(dev.hw);
+      if (was != null && was !== dev.id && !returning) swapped.push(nid);
+      if (dev.hw != null) { seen.add(dev.hw); this.hwSeenByNode.set(nid, seen); }
     }
     this.evictedSinceLoad.clear();
     if (swapped.length > Math.max(2, deviceByNodeId.size / 2)) {
@@ -3353,13 +3443,17 @@ class ZwaveDataImpl implements ZwaveData {
     }
   }
 
-  /** Another device took a node id in Home Assistant (v0.79.5): drop
-   *  what belongs to the old device — its dwells (a raised node-down
-   *  included), evidence, baselines, readings, sparklines, open episodes and
-   *  the refresh trial's open decision. Its symptoms did not end, so none is
-   *  logged as cleared. What the roster, the subscriptions, the driver link
-   *  and the probes hold for the id is kept: it describes the device on the
-   *  id now. */
+  /** Home Assistant filed a node id under a new device (v0.79.5): drop what
+   *  belongs to the old device — its dwells (a raised node-down included),
+   *  evidence, baselines, readings, sparklines, open episodes and the refresh
+   *  trial's open decision. Its symptoms did not end, so none is logged as
+   *  cleared. What the roster, the subscriptions, the driver link and the
+   *  probes hold for the id is kept: it describes the device on the id now.
+   *  A new device is a replacement by another product, or the same hardware
+   *  whose interview misread its manufacturer, product type or product id in
+   *  poor RF (HA's zwave_js async_register_node_in_dev_reg cannot tell them
+   *  apart): a misread costs the node its baselines and evidence once. The
+   *  correct read that files it back is not dropped again (hwSeenByNode). */
   private forgetSwappedDevice(nodeId: number, now: number): void {
     this.evidenceStore?.evictNode(nodeId);
     for (const k of [...this.symptomState.keys()]) if (k.startsWith(`${nodeId}:`)) this.symptomState.delete(k);
@@ -3374,7 +3468,7 @@ class ZwaveDataImpl implements ZwaveData {
     this.firmwareByNode.delete(nodeId);
     this.sleeperLatch.delete(nodeId);
     this.dupDrops.delete(nodeId);
-    this.trial?.dropOpen(nodeId, 'another device took the id', now);
+    this.trial?.dropOpen(nodeId, 'Home Assistant filed the id under a new device', now);
     let lostOpen = 0;
     for (const ep of this.outcomes?.openEpisodes() ?? []) {
       if (ep.nodeId !== nodeId) continue;
@@ -3382,11 +3476,11 @@ class ZwaveDataImpl implements ZwaveData {
       this.pendingResolve.delete(ep.key);
       lostOpen += 1;
     }
-    this.log(`node ${nodeId} is another device in Home Assistant — dropping the old device's dwells, evidence + baselines`);
+    this.log(`node ${nodeId} has a new device in Home Assistant (a replacement, or a misread hardware id) — dropping the old device's dwells, evidence + baselines`);
     this.pushEvent('engine', 'info', 'system', null,
       lostOpen > 0
-        ? `${lostOpen} in-flight episode${lostOpen === 1 ? '' : 's'} + node ${nodeId}'s baselines discarded — another device took the id`
-        : `node ${nodeId} is another device — its baselines + evidence discarded`);
+        ? `${lostOpen} in-flight episode${lostOpen === 1 ? '' : 's'} + node ${nodeId}'s baselines discarded — Home Assistant filed the id under a new device`
+        : `node ${nodeId} has a new device in Home Assistant — its baselines + evidence discarded`);
   }
 
   /** Cached stats with the DISPLAYED lastSeen upgraded by the driver's own
@@ -3434,7 +3528,7 @@ class ZwaveDataImpl implements ZwaveData {
         : null,
       firmware: this.firmwareByNode.get(nodeId) ?? null,
       stats: this.mergedStats(nodeId),
-      entities: dev ? this.entitiesByDeviceId.get(dev.id) ?? [] : [],
+      entities: this.entitiesByNodeId.get(nodeId) ?? [],
     };
   }
 
@@ -4013,8 +4107,7 @@ class ZwaveDataImpl implements ZwaveData {
   /** v0.22: a node's entities joined with their current live state. Order follows
    *  the registry entity order; entities with no state yet read `state: null`. */
   entityStates(nodeId: number): EntityLiveState[] {
-    const devId = this.deviceIdOf(nodeId);
-    const ents = devId ? this.entitiesByDeviceId.get(devId) ?? [] : [];
+    const ents = this.entitiesByNodeId.get(nodeId) ?? [];
     return ents.map((e) => {
       const live = this.stateByEntityId.get(e.entityId);
       return {

@@ -19,7 +19,7 @@ import {
   type DetectInput, type DriverStart, type SymptomState,
 } from '../src/zwave/symptoms';
 import { createEvidenceStore, DRIVER_DROP_CARRY_MS, type EvidenceCarry } from '../src/zwave/evidenceStore';
-import { createZwaveData } from '../src/zwave/zwaveData';
+import { createZwaveData, type ZwaveDataOptions } from '../src/zwave/zwaveData';
 import type { BaselineStore, RateNormal, ContNormal } from '../src/zwave/baselines';
 import { NodeStatus, type NodeSnapshot, type ControllerSnapshot, type NodeStats } from '../src/types';
 import type { HaWsClient, HaEventHandler, HaSubscription } from '../src/ha/haWsClient';
@@ -431,11 +431,59 @@ test('evidence carry (v0.79.5): an open driver drop is written at every save and
   }
 });
 
+test('evidence carry (v0.79.5): a save the open driver drop forces before the home id is bound keeps the tag the file was loaded with — the next run on another network still discards the old network\'s evidence and node-down', () => {
+  const { dir, path } = freshPath();
+  try {
+    const A = 3586281591;
+    const B = A + 1;
+    let t = T; let up = UP;
+    const drop = T - 30_000;
+    const read = (): { homeId: number | null; savedAt: number; nodeDown?: Record<string, unknown> } =>
+      JSON.parse(readFileSync(path, 'utf8')) as { homeId: number | null; savedAt: number; nodeDown?: Record<string, unknown> };
+    // Run 1, bound to A: node 60 raised, and the server ended the driver link.
+    const a = createEvidenceStore({
+      path, cadenceMs: 10_000, now: () => t, uptimeMs: () => up,
+      carry: () => ({ homeId: A, nodeDown: [{ nodeId: 60, since: T - 10 * MIN, latched: true, start: false }], driverStart: null, driverDrop: drop }),
+    });
+    a.load(); a.bindHomeId(A); a.takeCarry();
+    a.record(60, stats(), NodeStatus.Dead); a.save();
+    const f1 = read();
+    assert.equal(f1.homeId, A, 'precondition: tagged A');
+    t += MIN; up += MIN;
+    // Run 2 never binds (HA's zwave_js not loaded). The driver client holds
+    // the carried drop, so its save is forced past the dirty gate.
+    let clientDrop: number | null = null;
+    const b = createEvidenceStore({ path, cadenceMs: 10_000, now: () => t, uptimeMs: () => up, carry: () => ({ homeId: null, nodeDown: [], driverStart: null, driverDrop: clientDrop }) });
+    b.load();
+    clientDrop = b.carriedDriverDrop();
+    assert.equal(clientDrop, drop, 'precondition: the drop is carried');
+    b.save();
+    const f2 = read();
+    assert.ok(f2.savedAt > f1.savedAt, 'precondition: run 2 wrote the file');
+    assert.ok(f2.nodeDown?.['60'] != null, 'precondition: with run 1\'s node-down');
+    assert.equal(f2.homeId, A, 'the tag the file was loaded with, not null');
+    t += MIN; up += MIN;
+    // Run 3 binds another network.
+    const logs: string[] = [];
+    const c = createEvidenceStore({ path, cadenceMs: 10_000, now: () => t, uptimeMs: () => up, log: (m: string) => { logs.push(m); } });
+    c.load();
+    assert.ok(c.forNode(60).length > 0, 'precondition: restored while the identity is unknown');
+    c.bindHomeId(B);
+    assert.ok(logs.some((l) => l.includes('controller home id changed — discarding evidence for the previous network')), logs.join('\n'));
+    assert.equal(c.forNode(60).length, 0, 'network A\'s evidence is not network B\'s');
+    assert.equal(c.coverage(60), null);
+    assert.equal(c.takeCarry(), null, 'nor its node-down');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 /* ── Production-wired: createZwaveData restarted over one evidence file ───── */
 
 const ENTRY = 'entry-1';
 const HOME = 3586281591;
-function fakeHa(roster: Array<Record<string, unknown>>, home: () => number = () => HOME): HaWsClient & { fireReady(): void } {
+/** `down`: HA's zwave_js reports no network (the entry not loaded), so no home id is bound. */
+function fakeHa(roster: Array<Record<string, unknown>>, home: () => number = () => HOME, down: () => boolean = () => false): HaWsClient & { fireReady(): void } {
   const readyCbs: Array<() => void> = [];
   const result = (cmd: Record<string, unknown>): unknown => {
     switch (cmd.type) {
@@ -444,6 +492,7 @@ function fakeHa(roster: Array<Record<string, unknown>>, home: () => number = () 
       case 'config/entity_registry/list': return [];
       case 'get_states': return [];
       case 'zwave_js/network_status':
+        if (down()) throw new Error('not_loaded');
         return { client: { server_version: 't' }, controller: { home_id: home(), own_node_id: 1, nodes: roster } };
       default: return null;
     }
@@ -494,18 +543,20 @@ const live = new Set<() => void>();
 function stopAll(): void {
   for (const stop of [...live]) stop();
 }
-/** `bootAt` null: production's own uptime source. */
-async function startRun(dir: string, url: string, bootAt: number | null, logs: string[] = [], o: { roster?: Array<Record<string, unknown>>; uptimeMs?: () => number; home?: () => number; extra?: Record<string, unknown> } = {}): Promise<Run> {
+/** `bootAt` null: production's own uptime source. `awaitReady` false: return
+ *  as soon as it is started, without waiting for the driver link or the roster. */
+async function startRun(dir: string, url: string, bootAt: number | null, logs: string[] = [], o: { roster?: Array<Record<string, unknown>>; uptimeMs?: () => number; home?: () => number; down?: () => boolean; awaitReady?: boolean; extra?: Partial<ZwaveDataOptions> } = {}): Promise<Run> {
   const roster = o.roster ?? ROSTER;
-  const ha = fakeHa(roster, o.home);
+  const ha = fakeHa(roster, o.home, o.down);
   const uptimeMs = o.uptimeMs ?? (bootAt == null ? undefined : () => Date.now() - bootAt);
-  const zd = createZwaveData({
+  const opts: ZwaveDataOptions = {
     client: ha, entryId: ENTRY, refreshMs: 100, routePollMs: 60_000, evidenceSampleMs: 30 * MIN,
     historyPath: null, evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
-    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: url, log: (m: string) => logs.push(m),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: url, log: (m: string) => { logs.push(m); },
     ...(uptimeMs ? { uptimeMs } : {}),
     ...(o.extra ?? {}),
-  } as never);
+  };
+  const zd = createZwaveData(opts);
   let stopProvider: (() => void) | null = null;
   const stop = (): void => {
     if (!live.delete(stop)) return;
@@ -515,9 +566,11 @@ async function startRun(dir: string, url: string, bootAt: number | null, logs: s
   live.add(stop);
   zd.start();
   ha.fireReady();
-  await waitFor(() => zd.driverWsState() === 'live');
-  const want = roster.find((n) => n.node_id === 60)!.status === 3 ? NodeStatus.Dead : NodeStatus.Alive;
-  await waitFor(() => zd.snapshot().some((n) => n.nodeId === 60 && n.status === want && n.isListening === false));
+  if (o.awaitReady !== false) {
+    await waitFor(() => zd.driverWsState() === 'live');
+    const want = roster.find((n) => n.node_id === 60)!.status === 3 ? NodeStatus.Dead : NodeStatus.Alive;
+    await waitFor(() => zd.snapshot().some((n) => n.nodeId === 60 && n.status === want && n.isListening === false));
+  }
   const priv = zd as unknown as { lastOkAt: number | null; sampleEvidence: () => void };
   const tdp = createTuiDataProvider({ zwaveData: buildZwaveDataSource(zd as never), refreshMs: 60_000, log: () => {} } as never);
   const provider = tdp.provider;
@@ -1132,6 +1185,51 @@ test('restart (v0.79.5, production-wired): a run that ended the carried drop at 
   }
 });
 
+test('restart (v0.79.5, production-wired): a run that never binds a home id and is stopped with the driver link still down keeps the file\'s tag — the next run on another network discards the old evidence and does not raise its node-down', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const bootAt = Date.now() - 5 * DAY;
+  const path = join(dir, 'evidence.json');
+  type File = { homeId: number | null; savedAt: number; driverDrop?: number; nodeDown?: Record<string, unknown> };
+  const read = (): File => JSON.parse(readFileSync(path, 'utf8')) as File;
+  try {
+    const a = await startRun(dir, srv.url, bootAt);
+    assert.equal(ticksTo(a, 10), 5, 'precondition: node 60 raised on network HOME');
+    srv.configure({ dropBeforeVersion: 1000 }); // Z-Wave JS goes down and stays down
+    srv.dropClient();
+    await waitFor(() => a.zd.driverWsState() === 'backoff');
+    a.stop();
+    const f1 = read();
+    assert.equal(f1.homeId, HOME, 'precondition: tagged HOME');
+    skip += MIN;
+    // Restarted within DRIVER_DROP_CARRY_MS; HA's zwave_js reports no network
+    // for the whole run, so no home id is bound.
+    const logsB: string[] = [];
+    const b = await startRun(dir, srv.url, bootAt, logsB, { down: () => true, awaitReady: false });
+    await waitFor(() => logsB.some((l) => /driver-ws: a link the server ended/.test(l)));
+    await sleep(500);
+    b.stop();
+    const f2 = read();
+    assert.ok(f2.savedAt > f1.savedAt, 'precondition: the open drop forced the stop\'s save');
+    assert.ok(f2.driverDrop != null && f2.nodeDown?.['60'] != null, `precondition: the drop and node 60's node-down written back: ${JSON.stringify(f2)}`);
+    assert.equal(f2.homeId, HOME, 'the tag the file was loaded with, not null');
+    skip += MIN;
+    // A controller with another network comes up; its node 60 reads Dead.
+    srv.configure({ dropBeforeVersion: 0, homeId: HOME + 1 });
+    const logsC: string[] = [];
+    const c = await startRun(dir, srv.url, bootAt, logsC, { home: () => HOME + 1 });
+    assert.ok(logsC.some((l) => l.includes('evidence: controller home id changed — discarding evidence for the previous network')), logsC.join('\n'));
+    assert.equal(c.tick(), false, 'network HOME\'s node-down is not raised on network HOME+1');
+    c.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('driver link (v0.79.5, production-wired): a wedged link the liveness check ends is reconnected and is no driver start — the stamp auto-ping reads moves, a death after it keeps the 5-minute dwell, and a deploy in the backoff carries no drop', async () => {
   const restore = useClock();
   const srv = await mockServer({ nodes: DUMP });
@@ -1145,7 +1243,9 @@ test('driver link (v0.79.5, production-wired): a wedged link the liveness check 
     await waitFor(() => logs.some((l) => /no pong\/traffic — terminating wedged socket/.test(l)), 5000);
     // At least 2: a reconnect handshake slower than the 800 ms handshake clock
     // (a loaded host) is ended and retried, and that is this add-on's own end too.
-    await waitFor(() => srv.connectionCount() >= 2 && r.zd.driverWsState() === 'live', 15_000);
+    // That retry's backoff doubles (attempts resets only at live): 5 s, about
+    // 1 s of handshake clock, then 10 s. The wait covers one slow retry.
+    await waitFor(() => srv.connectionCount() >= 2 && r.zd.driverWsState() === 'live', 25_000);
     assert.ok(r.zd.driverReconnectedAt()! > h0, 'the handshake stamp moves (auto-ping\'s burst refusal)');
     assert.equal(r.zd.driverStarts().length, 1, 'only the boot: a link this add-on ended is no driver start');
     assert.ok(!logs.some((l) => /a driver start for the node-down start window/.test(l)), logs.join('\n'));
