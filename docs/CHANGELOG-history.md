@@ -3,6 +3,136 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.78.1
+
+A new SSH host key is checked to parse back before it is saved.
+
+### Fixed — a first start could fail on the host key it had just made
+
+- ssh2 1.17.0's ed25519 generator strips every leading zero byte from the
+  public key, where only the BIT STRING's unused-bits byte should go. The
+  1 key in 256 whose public half starts with 0x00 comes out 31 bytes long,
+  and ssh2's own parser rejects it (`Malformed OpenSSH private key`):
+  10 and 12 of 3,000 generated keys in two measured runs.
+- The key was written to `/data/ssh_host_ed25519_key` before its
+  fingerprint was taken. On such a start the add-on exited with a `FATAL`
+  line before its HTTP console came up, with the malformed key already
+  saved; s6 restarted it, and that start replaced the key with a warning
+  that clients would see a changed host key, though none had connected.
+  Replacing a host key that does not parse took the same 1-in-256 risk.
+- `generateHostKey()` parses each generated key back and draws another
+  when one does not parse, up to 8 keys. Only a key that parses is
+  written (0600, through a rename). Eight unparsable keys in a row stop
+  the start with `ssh: none of 8 generated host keys parsed back (…)` and
+  write nothing.
+- An existing host key that parses is read and kept as before, so an
+  installed add-on keeps its fingerprint.
+
+### Tests
+
+- The SSH test files took their host key straight from ssh2's generator,
+  so 1 run in 256 failed every test in the file that starts a server, and
+  once made the mutation harness report a spurious mapping miss. They now
+  take it through `generateHostKey()`.
+- New: a generator that returns a malformed key and then a good one
+  leaves only the good key on disk and one `generated` line in the log;
+  eight malformed keys throw the message above and leave no file; 1,000
+  keys from the real generator all parse back.
+- 3 new mutation-harness entries (1,617 in all): the retry, the write
+  after the parse-back, and the give-up message.
+
+## 0.78.0
+
+`rtt-degraded` no longer fires on one slow round trip, and checks one with a
+single probe instead of a 10-probe episode.
+
+### Fixed — one slow round trip is not a slowdown
+
+- The driver's RTT average keeps 0.75 of itself per acknowledged
+  transmission, so one frame above the median plus 16 scales lifts it over
+  the detector's line (median plus 4 scales) on its own, and a larger one
+  keeps it there: a 700 ms frame on 25±8 ms holds it over for six readings.
+  In the 13-day reference archive 14 of the 30 `rtt-degraded` episodes were
+  one such frame; their verification bursts spent 140 probes measuring a
+  normal node.
+- A breach now starts only when the average is over the line and the two
+  newest raw round trips in the 10-minute lookback are both over the same
+  line. Once started, the average alone holds it, as before. Raw round trips
+  are recovered per sample from the average and the transmit count, the
+  recovery the ledger has scored since 0.74.3; a sample with several
+  transmissions is one reading.
+- A driver restart's seed is never a round trip: the recovery starts over at
+  a sample whose counters reset. Neither is a sample whose transmit count
+  moved before its average did, nor a receive-only statistics event keeping
+  an old average fresh.
+- An average over the line stays out of the baselines whether or not its
+  breach has started, as in 0.77.3, when the average alone armed the dwell.
+  DETAIL says `the RTT average is over its line with no breach started`.
+
+### Added — one confirmation probe
+
+- When the average breaches on one slow round trip with nothing behind it,
+  the node is owed one verification-lane probe, logged as
+  `verification probe (rtt-degraded confirm, N nodes owed)`. A slow answer
+  starts the breach; a normal one ends the question. One slow round trip buys
+  at most one probe: no other goes to the node until that round trip has left
+  the 10-minute lookback, counted from the round trip, so a probe sent late
+  does not hold back the next slow round trip. One the runner never takes
+  (refused, withdrawn, absorbed by a burst or dropped by the pause) leaves no
+  cooldown; one it takes and then drops (a node Dead at its tick) does. The
+  cooldown is not saved, so a round trip restored with the evidence after an
+  add-on restart gets no probe (it may already have had one); a newer one is
+  asked about as usual. It passes every gate a burst probe does,
+  opens no episode, is withdrawn unsent when the node's own traffic answers
+  first, never shortens an owed burst, drains after any burst owed on the
+  same tick, and is not counted as episode evidence on DETAIL or REMEDY.
+- Where no probe can reach the node (a FLiRS or battery node, or an install
+  without auto-ping running), the newest round trip alone starts the breach,
+  as in 0.77.3, but never after a normal one. That includes the start-up
+  window before the driver reports which nodes listen.
+- An episode of a route-sensitive kind opens confounded when the add-on's own
+  routed read re-routed its node during its dwell or in the detector's
+  lookback before it (10 minutes; 30 for `weak-signal`, which reads that far
+  on a node too quiet for a rate). The dwell counts from no earlier than five
+  minutes before its nominal maturity (its start plus its own dwell; two
+  days for `chronic-return-path`). An open held or emitted past that (a mesh
+  event, a thin window, a missed pass, a chronic dwell short of its hits)
+  keeps everything since, erring toward confounding. An episode re-opened on
+  a dwell that already had one counts from the re-open, even when a mesh
+  event holds the re-open; a mesh-identity answer forgets those dwells. A
+  confirmation's failed-over answer can be the round trip that starts the
+  breach, and the guard saw only episodes already open, which also
+  let a sweep read failing over during a dwell through. REMEDY's confounded
+  row now leads with `credited to neither arm` and says `during or just
+  before the episode`.
+- The symptom card shows the newest round trips, after the baseline.
+- Known cost: slow frames that never land in consecutive pairs are never
+  corroborated, strict alternation being the extreme (0.77.3 fired at
+  5 minutes). While no probe can go out to a node that could take one (the
+  pause, a post-kill hold, a runner suppression, bursts filling every
+  verification slot for 10 minutes), a node addressed less than twice in
+  10 minutes does not report a slowdown. An answer within 0.2 ms of the
+  rounded average does not move it, counts as unanswered, and the node's
+  next transmission decides. After a normal answer the average can stay over
+  the line until transmissions to the node (its automations, polls or a
+  liveness sweep) bring it under, and the node's
+  learning stays held until then: one to several 2-hour sweeps on a node
+  nothing else addresses, where 0.77.3's false episode cleared it in minutes
+  with 10 probes.
+
+### Replay
+
+- A tick-level port of the rule over the 13.1-day archive, the
+  confirmation's answer proxied by the frames the node produced next:
+  restart-seed episodes 0 of 9 fire, with no probe; one-frame episodes 0 of
+  14 fire, with 11–12 confirmations; real slowdowns 5–6 of 7 fire (by the
+  normal assumed), 30–40 s later than 0.77.3, with 8 confirmations. The two
+  that may not sat at 50–58 ms against a 57–58 ms line, and one of them was
+  caught 33 minutes later at 9.6k. Inside the 30 episodes, 11–12
+  confirmations replace the 140 burst probes 0.77.3 spent on one-frame
+  episodes, and real slowdowns add 8; elsewhere, 0.3–5.3 confirmations a day.
+- 31 new tests; 99 new mutation entries, 7 re-anchored.
+
 ## 0.77.3
 
 The RTT restart allowance now survives a deploy, and the RTT baseline's
