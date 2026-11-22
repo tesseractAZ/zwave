@@ -32,13 +32,14 @@
  * pre-emission arming window) are QUARANTINED from updates (the baseline must
  * not chase the pathology); aggregates DECAY slowly so genuine improvements are
  * eventually absorbed; and a home-id change (everything), or a node leaving the
- * mesh or Home Assistant filing it under a new device (that node, v0.79.5),
+ * mesh or its own device changing in Home Assistant (that node, v0.79.5),
  * forces a reset. A route change empties that node's rssi and rtt bands, all
  * six (see Bands above), and leaves its timeout rate alone; a re-interview HA
  * keeps on the node's device resets nothing, and the decay absorbs a lasting
  * shift. One that misreads the node's hardware ids is filed under a new device
- * (zwaveData forgetSwappedDevice): a reset, once per add-on run (a restart
- * between the misread and the correct read costs a second).
+ * (zwaveData forgetSwappedDevice): a reset once for each misread value while
+ * the add-on runs, none when the correct read comes before the next registry
+ * load (a restart between the misread and the correct read costs a second).
  *
  * The route reset has a cost: a band needs ~23 fresh readings to graduate,
  * about 12 days at sweep cadence, so a node that re-routes even weekly never

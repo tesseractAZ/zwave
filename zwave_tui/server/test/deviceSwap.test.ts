@@ -192,8 +192,8 @@ test('device swap (v0.79.5): another device on an id that stayed on the roster d
     assert.equal(r.zd.evidence(60).length, 0, 'its evidence is evicted');
     assert.equal(r.tick(), false, 'the new device is not raised while it reads Unknown');
     assert.equal(r.zd.evidence(60).length, 0, 'and its frozen counters are not sampled into the new ring');
-    assert.ok(r.events().some((t) => t.includes('node 60 has a new device in Home Assistant — its baselines + evidence discarded')), 'on the record');
-    assert.ok(r.logs.some((l) => l.startsWith('node 60 has a new device in Home Assistant (a replacement, or a misread hardware id)')), r.logs.join('\n'));
+    assert.ok(r.events().some((t) => t.includes("node 60's device changed in Home Assistant — its baselines + evidence discarded")), 'on the record');
+    assert.ok(r.logs.some((l) => l.startsWith("node 60's device changed in Home Assistant (a replacement, or a misread hardware id)")), r.logs.join('\n'));
     assert.ok(!r.events().some((t) => t === 'node-down cleared'), 'the old device did not recover: no clearance');
   });
 });
@@ -340,8 +340,8 @@ test('device swap (v0.79.5): the old device\'s open episodes are abandoned and t
       r.priv.trial = null;
     }
     assert.deepEqual(abandoned, [[60, 'rtt-degraded']], 'only node 60\'s');
-    assert.deepEqual(dropped.map((a) => a.slice(0, 2)), [[60, 'Home Assistant filed the id under a new device']]);
-    assert.ok(r.events().includes("1 in-flight episode + node 60's baselines discarded — Home Assistant filed the id under a new device"), r.events().join(' | '));
+    assert.deepEqual(dropped.map((a) => a.slice(0, 2)), [[60, 'its device changed in Home Assistant']]);
+    assert.ok(r.events().includes("1 in-flight episode + node 60's baselines discarded — its device changed in Home Assistant"), r.events().join(' | '));
   });
 });
 
@@ -367,7 +367,7 @@ test('device swap (v0.79.5): an endpoint child device filed under the node is no
     assert.deepEqual(r.resetCalls, [], 'nor is the child going');
     assert.equal(r.zd.deviceIdOf(60), 'dev-60');
     assert.equal(r.tick(), true, 'still raised');
-    assert.ok(!r.events().some((t) => t.includes('a new device')), r.events().join(' | '));
+    assert.ok(!r.events().some((t) => t.includes('device changed')), r.events().join(' | '));
   });
 });
 
@@ -541,7 +541,7 @@ test('device swap (v0.79.5): an orphan that holds the slot after an eviction doe
     assert.equal(r.zd.deviceIdOf(60), 'dev-60b');
     assert.equal(r.resetCalls.length, evicted, 'P3\'s own state is not dropped');
     assert.equal(r.tick(), true, 'its node-down stays raised');
-    assert.ok(!r.events().some((t) => t.includes('a new device')), r.events().join(' | '));
+    assert.ok(!r.events().some((t) => t.includes('device changed')), r.events().join(' | '));
   }, { evictAfterMs: 1 });
 });
 
@@ -802,7 +802,7 @@ const networkB = (entry?: string): Dev[] => [
   { id: 'B-7', node: 7, ids: [`${HOME_B}-7`], ...(entry ? { entry } : {}) },
   { id: 'B-60', node: 60, ids: [`${HOME_B}-60`, `${HOME_B}-60-29:12:34`], ...(entry ? { entry } : {}) },
 ];
-const comparedLines = (logs: string[]) => logs.filter((l) => l.startsWith('device swap:') || l.includes('has a new device'));
+const comparedLines = (logs: string[]) => logs.filter((l) => l.startsWith('device swap:') || l.includes('device changed in Home Assistant'));
 
 test('device swap (v0.79.5): a home-id change starts the own-device records afresh — the new network\'s devices, loaded after it, are not compared with the old network\'s', async () => {
   const w = world(ownP1());
@@ -838,6 +838,27 @@ test('device swap (v0.79.5): the self-heal finding another config entry starts t
     await waitFor(() => r.joins() >= n + 2, 8000, () => r.logs.join(' | '));
     assert.ok(r.logs.includes('discovered zwave_js entry_id=entry-2'), r.logs.join('\n'));
     assert.equal(r.zd.deviceIdOf(60), 'B-60');
+    assert.deepEqual(comparedLines(r.logs), []);
+    assert.deepEqual(r.resetCalls, []);
+  }, { entryId: null });
+});
+
+test('device swap (v0.79.5): the self-heal finding another config entry for the same controller (the integration re-added) starts the own-device records afresh — a device id that comes back new is not compared with the old entry\'s', async () => {
+  const w = world(ownP1().map((d) => ({ ...d, entry: ENTRY })));
+  await withRun(w, async (r) => {
+    await joined(r);
+    r.priv.statsByNode.set(60, { ...STATS });
+    raise(r);
+    const n = r.joins();
+    w.statusFail = true;
+    // Re-added on a new entry: Home Assistant restores the orphaned device ids
+    // it still holds; node 60's comes back new, with no hardware id listed.
+    w.entriesList = [{ entry_id: 'entry-2', domain: 'zwave_js', state: 'loaded', title: 'Z-Wave JS' }];
+    w.devices = [{ id: 'dev-1', node: 1, entry: 'entry-2' }, { id: 'dev-7', node: 7, entry: 'entry-2' }, { id: 'dev-60n', node: 60, entry: 'entry-2' }];
+    await waitFor(() => r.logs.some((l) => l.startsWith('repeated failures')), 8000, () => r.logs.join(' | '));
+    w.statusFail = false;
+    await waitFor(() => r.joins() > n && r.zd.deviceIdOf(60) === 'dev-60n', 8000, () => r.logs.join(' | '));
+    assert.ok(r.logs.includes('discovered zwave_js entry_id=entry-2'), r.logs.join('\n'));
     assert.deepEqual(comparedLines(r.logs), []);
     assert.deepEqual(r.resetCalls, []);
   }, { entryId: null });

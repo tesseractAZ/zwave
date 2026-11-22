@@ -329,6 +329,8 @@ interface DeviceRec {
   id: string;
   /** The node's own device (v0.79.5): identified exactly `<home_id>-<node_id>`. */
   main: boolean;
+  /** The home id its zwave_js identifier names (v0.79.5), or null. */
+  home: string | null;
   /** Its hardware identifier `<home_id>-<node_id>-<mfr>:<type>:<id>`, if
    *  Home Assistant gave it one (v0.79.5). */
   hw: string | null;
@@ -337,6 +339,21 @@ interface DeviceRec {
   manufacturer: string | null;
   model: string | null;
 }
+
+/** A node's own device as a registry load listed it (v0.79.5): ownByNode. */
+interface OwnRecord {
+  id: string;
+  hw: string | null;
+  /** The home id the device's identifier named. */
+  home: string | null;
+}
+
+/** The least time between two registry loads asked for by a node's ready
+ *  false→true change or by a poll succeeding after failed ones (v0.79.5). One
+ *  asked sooner waits for the first poll past it, so a node whose ready flaps,
+ *  or a link that keeps failing, costs one such load a minute at most (a
+ *  reconnect's own load is apart from these). */
+const ROSTER_LOAD_SPACING_MS = 60_000;
 
 /**
  * The episode kinds our own read's failover confounds (v0.71.0). Five because
@@ -748,6 +765,22 @@ export function nodeIdOfDevice(d: RawDevice): number | null {
   return null;
 }
 
+/** The home id a device's zwave_js identifier names (v0.79.5): the
+ *  `<home_id>` of the identifier nodeIdOfDevice reads the node id from, as
+ *  the decimal string Home Assistant builds it from the controller's home id. */
+export function homeIdOfDevice(d: RawDevice): string | null {
+  const ids = d.identifiers;
+  if (!Array.isArray(ids)) return null;
+  for (const id of ids) {
+    if (Array.isArray(id) && id[0] === 'zwave_js' && typeof id[1] === 'string') {
+      const m = /^(\d+)-(\d+)(?:-|$)/.exec(id[1]);
+      const n = m ? Number(m[2]) : NaN;
+      if (Number.isInteger(n) && n >= 1 && n <= MAX_NODE_ID) return m![1]!;
+    }
+  }
+  return null;
+}
+
 /** Whether a device is a node's own device (v0.79.5): one of its zwave_js
  *  identifiers is exactly `<home_id>-<node_id>`, not an endpoint child
  *  (`-<endpoint>`, `-g<group>`) nor the orphan Home Assistant leaves when an
@@ -919,19 +952,39 @@ class ZwaveDataImpl implements ZwaveData {
   private readonly evictedSinceLoad = new Set<number>();
   /** Each node's own device as of the last registry load that listed one
    *  (v0.79.5): the device the held state belongs to, by device id and
-   *  hardware id. A load that lists no device on the id, or only a child or
-   *  an orphan, leaves it. Forgotten with hwSeenByNode when the node's
-   *  eviction is consumed at a load, and for every node when the registry's
-   *  config entry or network changes. */
-  private readonly ownByNode = new Map<number, { id: string; hw: string | null }>();
+   *  hardware id, tagged with the home id its identifier names. A record of
+   *  another home id's device counts as none. A load that lists no device on
+   *  the id, or only a child or an orphan, leaves it. Forgotten with
+   *  hwSeenByNode when the node's eviction is consumed at a load, and for
+   *  every node when the registry's config entry or network changes. */
+  private readonly ownByNode = new Map<number, OwnRecord>();
+  /** Roster ids with no own-device record of this network that asked for a
+   *  registry load (v0.79.5): one ask per id while it stays on the roster. */
+  private readonly askedUnrecorded = new Set<number>();
+  /** Each roster id's `ready` at the last poll (v0.79.5); an id off the
+   *  roster reads false, so it coming back ready is a false→true change. */
+  private readonly prevReady = new Map<number, boolean>();
+  /** A ready false→true change waiting for the spacing (v0.79.5). */
+  private readyLoadHeld = false;
+  /** When the last spaced roster ask was made (v0.79.5): ROSTER_LOAD_SPACING_MS. */
+  private rosterLoadAt = Number.NEGATIVE_INFINITY;
+  /** Failed polls so far, and the count when the last registry fetch was
+   *  sent (v0.79.5): a poll that succeeds with the two apart asks for a load. */
+  private failSeq = 0;
+  private failSeqAtLoad = 0;
+  /** Registry loads asked for (v0.79.5): a fetch already out when an ask is
+   *  made does not serve it (askRegistryLoad). */
+  private registryAsks = 0;
+  /** The home ids of the devices the last load admitted (v0.79.5). */
+  private loadedHomes = new Set<string>();
   /** The config entry ownByNode and hwSeenByNode were recorded under (v0.79.5). */
   private ownEntryId: string | null = null;
   /** Hardware identifiers each node's own device has carried since the node's
    *  eviction was last consumed at a registry load (v0.79.5): they are
    *  forgotten there, once the node has been off the roster for evictAfterMs
    *  (5 minutes), not when it merely leaves. An own device that carries one of
-   *  them again is the same hardware filed again, not a swap. Held in memory
-   *  only, so an add-on restart starts with none. */
+   *  them again is taken for the same hardware filed again, not a swap. Held
+   *  in memory only, so an add-on restart starts with none. */
   private readonly hwSeenByNode = new Map<number, Set<string>>();
   /** ctrlStats object identity at the previous evidence sample (freshness). */
   private prevCtrlStatsRef: ControllerSnapshot['statistics'] = null;
@@ -2859,6 +2912,8 @@ class ZwaveDataImpl implements ZwaveData {
       // Back off on repeated failure (e.g. dev without token, HA restarting) so
       // we don't spin the socket; capped so recovery stays timely.
       this.errStreak++;
+      // The poll that succeeds after this asks for a registry load (v0.79.5, refresh).
+      this.failSeq += 1;
       // Self-heal: after a few consecutive failures on an AUTO-DISCOVERED entry,
       // the id may be stale (the integration was removed + re-added, minting a
       // new entry_id + device_ids). Force a fresh discovery + registry reload.
@@ -2895,8 +2950,9 @@ class ZwaveDataImpl implements ZwaveData {
         this.registriesLoaded = false;
         // The swap check's own-device records are kept (v0.79.5): an HA Core
         // restart long enough to fail three refreshes ends here and finds the
-        // same entry again, whose next load is where a replace made meanwhile
-        // shows. A different entry found is not compared with them (ownEntryId).
+        // same entry again, and a replace made meanwhile shows at the load the
+        // poll that succeeds after the failures asks for (refresh). A
+        // different entry found is not compared with them (ownEntryId).
         // The old entry's statistics subscriptions are stale/orphaned — drop the
         // frozen stats and re-subscribe once the new registry loads (below).
         this.statsSubscribed = false;
@@ -2951,7 +3007,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.lastErr = 'network_status returned an empty node list';
       return false;
     }
-    const nodes = ctrl.nodes.map((n) => this.buildNode(n)).sort((a, b) => a.nodeId - b.nodeId);
+    let nodes = ctrl.nodes.map((n) => this.buildNode(n)).sort((a, b) => a.nodeId - b.nodeId);
     // Diff status vs the previous poll → log alive/dead/asleep transitions.
     for (const n of nodes) {
       const prev = this.prevStatus.get(n.nodeId);
@@ -2976,18 +3032,61 @@ class ZwaveDataImpl implements ZwaveData {
     // coverage precondition. 5-min dwell rides out transient roster glitches.
     // replace_failed_node does not come through here: the driver swaps the
     // node in place, so the id stays on the roster (v0.79.5). A replacement
-    // that HA registers as another device is caught at the next registry
-    // load instead (forgetSwappedDevice), while the add-on keeps running: an
-    // add-on restart before that load leaves nothing to compare against. One
-    // HA keeps as the same device keeps the failed device's state.
+    // that HA registers as another device is caught at a registry load
+    // instead (forgetSwappedDevice), which the roster asks for below, while
+    // the add-on keeps running: an add-on restart before that load leaves
+    // nothing to compare against. One HA keeps as the same device keeps the
+    // failed device's state.
     {
       const present = new Set(nodes.map((n) => n.nodeId));
       const now = Date.now();
-      // An evicted id back on the roster (v0.79.5): reload the registry, so
-      // the eviction is consumed against the device the node came back on and
-      // a later swap on the id is one. The load clears every mark, and an id
-      // is only marked while it is off the roster, so this asks once.
-      for (const id of this.evictedSinceLoad) if (present.has(id)) { this.registriesLoaded = false; break; }
+      // REGISTRY LOADS THE ROSTER ASKS FOR (v0.79.5). A swap shows only at a
+      // load, and Home Assistant files a node's interviewed hardware ids when
+      // the node becomes ready (zwave_js async_on_node_ready registers it).
+      // The load runs in this poll, below, before the roster is published.
+      const homeNow = ctrl.home_id ?? null;
+      let ask = false;
+      // An evicted id back on the roster: the eviction is consumed against
+      // the device the node came back on, so a later swap on the id is one.
+      // The load clears every mark, and an id is only marked while it is off
+      // the roster, so this asks once.
+      for (const id of this.evictedSinceLoad) if (present.has(id)) { ask = true; break; }
+      // A roster id with no own-device record of this network: a node first
+      // included since the last load, or one whose eviction a load consumed
+      // while it was away. Recorded now, a later replace on it is a swap. One
+      // ask per id while it stays on the roster, so a node Home Assistant
+      // never registers does not refetch every poll.
+      for (const n of nodes) {
+        if (this.ownRecordOf(n.nodeId, homeNow) != null || this.askedUnrecorded.has(n.nodeId)) continue;
+        this.askedUnrecorded.add(n.nodeId);
+        ask = true;
+      }
+      for (const id of [...this.askedUnrecorded]) if (!present.has(id)) this.askedUnrecorded.delete(id);
+      // A node's ready going false→true: a replacement, a re-interview or a
+      // node included, now registered with its hardware ids. And a poll that
+      // succeeds after failed ones: Home Assistant may have set the
+      // integration up again meanwhile (an entry reload, a Core restart),
+      // re-registering every node and sweeping orphans before it answered.
+      // Every change seen in one poll is one load; spaced by
+      // ROSTER_LOAD_SPACING_MS, one asked sooner waits for the first poll
+      // past it (and the engine may read the node before that load).
+      for (const n of nodes) {
+        if (n.ready && this.prevReady.get(n.nodeId) === false) this.readyLoadHeld = true;
+        this.prevReady.set(n.nodeId, n.ready);
+      }
+      for (const id of this.prevReady.keys()) if (!present.has(id)) this.prevReady.set(id, false);
+      if (this.readyLoadHeld || this.failSeq !== this.failSeqAtLoad) {
+        const since = now - this.rosterLoadAt;
+        if (since >= ROSTER_LOAD_SPACING_MS || since < 0) {
+          this.readyLoadHeld = false;
+          this.rosterLoadAt = now;
+          ask = true;
+        }
+      }
+      // The first home id bound, after a load that admitted another home id's
+      // devices (buildRegistryMaps): load again with the home id known.
+      if (this.lastHomeId == null && homeNow != null && [...this.loadedHomes].some((h) => h !== String(homeNow))) ask = true;
+      if (ask) this.askRegistryLoad();
       for (const id of [...this.prevStatus.keys()]) {
         if (present.has(id)) {
           this.missingSince.delete(id);
@@ -3047,6 +3146,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.pendingNodeSubs.delete(id);
           this.prevSampleSig.delete(id);
           this.prevStatus.delete(id);
+          this.prevReady.delete(id);
           this.missingSince.delete(id);
           this.driverLastSeen.delete(id);
           this.driverListening.delete(id);
@@ -3085,6 +3185,22 @@ class ZwaveDataImpl implements ZwaveData {
               : `node ${id} left the network — its baselines + evidence discarded`);
         }
       }
+    }
+    // The load the roster asked for runs in this poll (v0.79.5), before the
+    // roster the engine reads is published: a swap is acted on before the
+    // replacement's first reading can log the failed device's node-down as
+    // cleared. Not while the home id is changing (the branch below starts the
+    // records afresh and asks for its own load) or not yet bound (the first
+    // poll of a run, whose own load ran moments ago): then the next poll's
+    // load serves it. Limit: a replacement that reads Alive while still
+    // interviewing, before its ready change, is read by the engine before
+    // Home Assistant lists its hardware ids (inferred: that zwave-js reports
+    // Alive during an interview was not checked).
+    if (!this.registriesLoaded && this.lastHomeId != null && ctrl.home_id === this.lastHomeId) {
+      await this.ensureRegistries();
+      // A fetch that was already out when the ask was made does not serve it.
+      if (!this.registriesLoaded) await this.ensureRegistries();
+      nodes = ctrl.nodes.map((n) => this.buildNode(n)).sort((a, b) => a.nodeId - b.nodeId);
     }
     this.lastNodes = nodes;
     this.lastController = this.buildController(ctrl);
@@ -3222,7 +3338,11 @@ class ZwaveDataImpl implements ZwaveData {
         // registriesLoaded + statsSubscribed and rebuilds everything — and, as in
         // the self-heal path, this releases the old subscriptions cleanly).
         // The swap check's own-device records go too (v0.79.5): the new
-        // network's devices are not replacements of the old network's.
+        // network's devices are not replacements of the old network's. Its
+        // nodes are read afresh for the roster's registry asks.
+        this.prevReady.clear();
+        this.askedUnrecorded.clear();
+        this.readyLoadHeld = false;
         this.forgetOwnDevices();
         this.registriesLoaded = false;
         this.client.reconnect();
@@ -3266,13 +3386,31 @@ class ZwaveDataImpl implements ZwaveData {
   }
 
   private async fetchRegistries(): Promise<void> {
+    const asks = this.registryAsks;
+    this.failSeqAtLoad = this.failSeq;
     const [devices, entities] = await Promise.all([
       this.client.send<RawDevice[]>({ type: 'config/device_registry/list' }),
       this.client.send<RawEntity[]>({ type: 'config/entity_registry/list' }),
     ]);
     this.buildRegistryMaps(devices ?? [], entities ?? []);
-    this.registriesLoaded = true;
+    // An ask made while this fetch was out is still owed (v0.79.5).
+    this.registriesLoaded = this.registryAsks === asks;
     this.log(`registry join: ${this.deviceByNodeId.size} z-wave nodes, ${this.entityCount} entities`);
+  }
+
+  /** Ask for a registry load (v0.79.5): the next ensureRegistries fetches, and
+   *  a fetch already out when the ask is made does not count as it. */
+  private askRegistryLoad(): void {
+    this.registriesLoaded = false;
+    this.registryAsks += 1;
+  }
+
+  /** A node's own-device record, when it was made from a device of the given
+   *  home id (v0.79.5): a record of another home id's device counts as none.
+   *  Any record counts while the home id is not known. */
+  private ownRecordOf(nodeId: number, homeId: number | null): OwnRecord | null {
+    const rec = this.ownByNode.get(nodeId);
+    return rec != null && (homeId == null || rec.home === String(homeId)) ? rec : null;
   }
 
   private buildRegistryMaps(devices: RawDevice[], entities: RawEntity[]): void {
@@ -3280,12 +3418,29 @@ class ZwaveDataImpl implements ZwaveData {
     const deviceIdToNodeId = new Map<string, number>();
     /** device id → its parent device id, for child devices filed under a node. */
     const parentOf = new Map<string, string>();
+    // Only the bound network's devices once its home id is known (v0.79.5). A
+    // zwave_js entry whose controller changed is an unknown controller to
+    // Home Assistant: the integration's setup skips its orphan sweep, so the
+    // old network's devices stay listed under the entry until the
+    // migrate_unique_id repair is fixed, on ids the new network may reuse.
+    // Left out, they hold no node's slot and join no entity to a node.
+    // Every device is admitted while the home id is not known (a run's first
+    // load comes before its first roster), and when none of the bound home
+    // id's own devices is listed (nothing registered yet, or an identifier
+    // spelled otherwise): as before the filter.
+    const boundHome = this.lastHomeId != null ? String(this.lastHomeId) : null;
+    const homeListed = boundHome != null
+      && devices.some((d) => deviceInEntry(d, this.entryId) && isMainNodeDevice(d) && homeIdOfDevice(d) === boundHome);
+    const homes = new Set<string>();
     for (const d of devices) {
       // Only this network's devices (v0.79.5): another zwave_js config entry
       // is another network, whose `<home_id>-<node_id>` ids name its own nodes.
       if (!deviceInEntry(d, this.entryId)) continue;
       const nodeId = nodeIdOfDevice(d);
       if (nodeId == null) continue;
+      const home = homeIdOfDevice(d);
+      if (homeListed && home !== boundHome) continue;
+      if (home != null) homes.add(home);
       // The node's own device holds its slot (v0.79.5): an endpoint child or a
       // stripped orphan filed under the same id joins its entities to the
       // node's entity→node maps (the activity log, the routed-read target,
@@ -3300,6 +3455,7 @@ class ZwaveDataImpl implements ZwaveData {
       deviceByNodeId.set(nodeId, {
         id: d.id,
         main,
+        home,
         hw: hardwareIdOfDevice(d),
         name: sanitizeLabel(d.name_by_user || d.name || `Node ${nodeId}`),
         // Sanitize these too — they reach the Detail/Controller frames and are
@@ -3392,6 +3548,7 @@ class ZwaveDataImpl implements ZwaveData {
     this.deviceIdToNodeId = deviceIdToNodeId;
     this.entitiesByNodeId = entitiesByNodeId;
     this.entityCount = count;
+    this.loadedHomes = homes;
     // v0.22: prune live-state to what the fresh registry still knows, so entities
     // removed from the mesh can't leak memory across registry reloads (surviving
     // entries are kept — no Detail flicker).
@@ -3416,15 +3573,19 @@ class ZwaveDataImpl implements ZwaveData {
       }
     }
     // A DEVICE SWAP (v0.79.5): Home Assistant filed the id under another own
-    // device between two loads. What was learned or is waiting about the old
-    // device goes with it. Each id is judged against its record in ownByNode,
-    // the node's own device as of the last load that listed one.
+    // device between two loads, or gave its own device other hardware ids.
+    // What was learned or is waiting about the old device goes with it. Each
+    // id is judged against its record in ownByNode, the node's own device as
+    // of the last load that listed one.
     // - An id has no record at the first load, while no own device has been
     //   listed on it (null→B is no swap), and once its eviction is consumed
     //   here (that state went with the departed device, so what is on the id
-    //   now is the new device's). A load that lists no device on the id
-    //   (A→null), or only a child or an orphan, judges nothing and leaves the
-    //   record.
+    //   now is the new device's). A record of a device of another home id
+    //   counts as none: a controller changed under the same entry leaves the
+    //   old network's devices listed, and the new network's device on a
+    //   reused id is no replacement of them. A load that lists no device on
+    //   the id (A→null), or only a child or an orphan, judges nothing and
+    //   leaves the record.
     // - An own device is a change when its device id differs from the
     //   record's, or its hardware id does and both are known. Home Assistant
     //   gives a node included on a freed id the device it deleted at the
@@ -3441,19 +3602,23 @@ class ZwaveDataImpl implements ZwaveData {
     //   restore once the integration's setup has removed the orphan
     //   (async_remove_device). Limits: the misread itself looks like a
     //   replacement by another product (HA cannot tell them apart either), so
-    //   it is taken for a swap once per add-on run (hwSeenByNode is held in
-    //   memory: an add-on restart between the misread and the correct read
-    //   costs a second); and a replacement by a unit of a product the id
-    //   already had since its eviction was last consumed keeps the interim
-    //   device's state, as a replacement by the same product does.
+    //   it is taken for a swap once for each misread value while the add-on
+    //   runs (none when the correct read comes before the next load);
+    //   hwSeenByNode is held in memory, so an add-on restart between the
+    //   misread and the correct read costs a second. And a replacement by a
+    //   unit of a product the id already had since its eviction was last
+    //   consumed keeps the interim device's state, as a replacement by the
+    //   same product does.
     // The records belong to one config entry: a load under another (the
     // self-heal found a different entry, or a fetch in flight across it
     // landed while none was known) starts them afresh, and so does a
     // home-id change (refresh).
-    // Most of the mesh changing at once is a registry re-created (the
-    // integration re-added, another network), not that many replacements:
-    // every change counts toward that guard, returning or not, and nothing is
-    // dropped when it fires.
+    // Most of the mesh changing at once is every device id new under the same
+    // entry, the registry re-created, not that many replacements. An
+    // integration re-added (a new entry) and a home-id change are reset
+    // before this guard (ownEntryId, the home-id branch, the home-tagged
+    // records). Every change counts toward it, returning or not, and nothing
+    // is dropped when it fires.
     if (this.entryId !== this.ownEntryId) {
       this.forgetOwnDevices();
       this.ownEntryId = this.entryId;
@@ -3463,7 +3628,8 @@ class ZwaveDataImpl implements ZwaveData {
     for (const nid of this.evictedSinceLoad) { this.ownByNode.delete(nid); this.hwSeenByNode.delete(nid); }
     for (const [nid, dev] of deviceByNodeId) {
       if (!dev.main) continue;
-      const was = this.ownByNode.get(nid) ?? null;
+      const rec = this.ownByNode.get(nid) ?? null;
+      const was = rec != null && rec.home === dev.home ? rec : null;
       const seen = this.hwSeenByNode.get(nid) ?? new Set<string>();
       const returning = dev.hw != null && seen.has(dev.hw);
       const hwChanged = was != null && was.hw != null && dev.hw != null && was.hw !== dev.hw;
@@ -3471,7 +3637,7 @@ class ZwaveDataImpl implements ZwaveData {
         changed.push(nid);
         if (!returning) swapped.push(nid);
       }
-      this.ownByNode.set(nid, { id: dev.id, hw: dev.hw ?? (was != null && was.id === dev.id ? was.hw : null) });
+      this.ownByNode.set(nid, { id: dev.id, hw: dev.hw ?? (was != null && was.id === dev.id ? was.hw : null), home: dev.home });
       if (dev.hw != null) { seen.add(dev.hw); this.hwSeenByNode.set(nid, seen); }
     }
     this.evictedSinceLoad.clear();
@@ -3490,19 +3656,28 @@ class ZwaveDataImpl implements ZwaveData {
     this.hwSeenByNode.clear();
   }
 
-  /** Home Assistant filed a node id under a new device (v0.79.5): drop what
+  /** A node's own device changed in Home Assistant (v0.79.5): drop what
    *  belongs to the old device — its dwells (a raised node-down included),
    *  evidence, baselines, readings, sparklines, open episodes and the refresh
    *  trial's open decision. Its symptoms did not end, so none is logged as
    *  cleared. What the roster, the subscriptions, the driver link and the
    *  probes hold for the id is kept: it describes the device on the id now.
-   *  A new device is a replacement by another product, or the same hardware
-   *  whose interview misread its manufacturer, product type or product id in
-   *  poor RF (HA's zwave_js async_register_node_in_dev_reg cannot tell them
-   *  apart): a misread costs the node its baselines and evidence once per
-   *  add-on run. The correct read that files it back is not dropped again
-   *  while the add-on runs (hwSeenByNode, held in memory); an add-on restart
-   *  between the misread and the correct read costs a second reset. */
+   *  Dropped at the load that shows the change, so what the new device built
+   *  before that load goes too: the roster asks for one when the node becomes
+   *  ready (refresh). The change is one of:
+   *  - a replacement by another product: HA files the node under a new
+   *    device and strips the old one to an orphan;
+   *  - another product included on a freed id inside the eviction dwell: HA
+   *    restores the device it deleted at the exclusion, same device id, with
+   *    the new product's hardware id;
+   *  - the same hardware whose interview misread its manufacturer, product
+   *    type or product id in poor RF, filed under a new device (HA's zwave_js
+   *    async_register_node_in_dev_reg cannot tell this from a replacement).
+   *    It costs the node its baselines and evidence once for each misread
+   *    value while the add-on runs, none when the correct read comes before
+   *    the next load. The correct read that files it back is not dropped
+   *    again while the add-on runs (hwSeenByNode, held in memory); an add-on
+   *    restart between the misread and the correct read costs a second reset. */
   private forgetSwappedDevice(nodeId: number, now: number): void {
     this.evidenceStore?.evictNode(nodeId);
     for (const k of [...this.symptomState.keys()]) if (k.startsWith(`${nodeId}:`)) this.symptomState.delete(k);
@@ -3517,7 +3692,7 @@ class ZwaveDataImpl implements ZwaveData {
     this.firmwareByNode.delete(nodeId);
     this.sleeperLatch.delete(nodeId);
     this.dupDrops.delete(nodeId);
-    this.trial?.dropOpen(nodeId, 'Home Assistant filed the id under a new device', now);
+    this.trial?.dropOpen(nodeId, 'its device changed in Home Assistant', now);
     let lostOpen = 0;
     for (const ep of this.outcomes?.openEpisodes() ?? []) {
       if (ep.nodeId !== nodeId) continue;
@@ -3525,11 +3700,11 @@ class ZwaveDataImpl implements ZwaveData {
       this.pendingResolve.delete(ep.key);
       lostOpen += 1;
     }
-    this.log(`node ${nodeId} has a new device in Home Assistant (a replacement, or a misread hardware id) — dropping the old device's dwells, evidence + baselines`);
+    this.log(`node ${nodeId}'s device changed in Home Assistant (a replacement, or a misread hardware id) — dropping the old device's dwells, evidence + baselines`);
     this.pushEvent('engine', 'info', 'system', null,
       lostOpen > 0
-        ? `${lostOpen} in-flight episode${lostOpen === 1 ? '' : 's'} + node ${nodeId}'s baselines discarded — Home Assistant filed the id under a new device`
-        : `node ${nodeId} has a new device in Home Assistant — its baselines + evidence discarded`);
+        ? `${lostOpen} in-flight episode${lostOpen === 1 ? '' : 's'} + node ${nodeId}'s baselines discarded — its device changed in Home Assistant`
+        : `node ${nodeId}'s device changed in Home Assistant — its baselines + evidence discarded`);
   }
 
   /** Cached stats with the DISPLAYED lastSeen upgraded by the driver's own
@@ -3786,10 +3961,11 @@ class ZwaveDataImpl implements ZwaveData {
    * detector starved, every episode closing `unverifiable`, and auto-ping still
    * logging healthy verdicts off the driver-WS feed.
    *
-   * Deliberately NOT a re-discovery: the entry_id, the registries and the cached
-   * counters all still belong to this same network. Only the subscriptions are
-   * rebuilt — the exact thing the v0.26 guard was protecting when it suppressed
-   * the self-heal for `not_loaded`.
+   * Deliberately NOT a re-discovery: the entry_id and the cached counters all
+   * still belong to this same network. The subscriptions are rebuilt — the
+   * exact thing the v0.26 guard was protecting when it suppressed the self-heal
+   * for `not_loaded` — and the registry join is reloaded for a re-arm no poll
+   * saw a reload behind (v0.79.5, below).
    */
   private async rearmStatsFeeds(why: string): Promise<void> {
     const now = Date.now();
@@ -3808,7 +3984,14 @@ class ZwaveDataImpl implements ZwaveData {
     // a re-arm that is going to run. Clearing it before the throttle decided
     // meant a second reload inside the window was dropped silently — the latch
     // gone, nothing rebuilt, and the orphaned feeds left to the watchdog.
+    const reloadSeen = this.entryReloadSeen;
     this.entryReloadSeen = false;
+    // An entry reload is when the integration's setup re-registers every node
+    // and sweeps orphans (v0.79.5). One a poll saw (`not_loaded`) is loaded by
+    // the poll that succeeded after it, in that poll (refresh). A dead feed
+    // with none seen may follow a reload quicker than a poll: ask for a load,
+    // which lands in this re-arm or at the next poll, whichever comes first.
+    if (!reloadSeen) this.askRegistryLoad();
     this.log(`live statistics: re-subscribing (${why})`);
     const stale = this.ownedStatsSubs.splice(0);
     this.statusSubbed.clear();
