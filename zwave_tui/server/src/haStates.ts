@@ -421,9 +421,9 @@ export async function failureReason(res: { text?: () => Promise<string> }): Prom
  *  tick (v0.79.3) — until then a node-down carried across a restart is not
  *  raised yet, and degraded would read off. The publisher and /api/health
  *  ask this one question and report the same conclusions, Home Assistant's
- *  up to one publish interval (30 s) behind while its posts succeed: the
- *  publisher posts at its start and then on its interval, not when this
- *  opens or a conclusion changes. */
+ *  about one publish interval (30 s) behind while its posts succeed, longer
+ *  while it answers slowly: the publisher posts at its start and then on its
+ *  interval, not when this opens or a conclusion changes. */
 export function conclusionsReady(data: DataProvider): boolean {
   return data.ready() && data.engineStatus().ran !== false;
 }

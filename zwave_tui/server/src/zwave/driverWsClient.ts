@@ -83,9 +83,10 @@ export interface DriverWsCallbacks {
    *  `link.peerClosedAt` (v0.79.3): when a handshaken link last ended without
    *  this client ending it (the server or the network ended it), if one did
    *  since the last handshake, else null. zwave-js-server (checked at source,
-   *  3.0.0 and master) ends a client's link only when it shuts down or
+   *  3.0.0 and master) ends this client's link only when it shuts down or
    *  rebuilds a failed driver (src/lib/server.ts: its 30 s sweep drops only
-   *  sockets already closed, and it pings no client); Z-Wave JS UI, which
+   *  sockets already closed, and it pings no client; it also closes a client
+   *  whose message is not JSON, which this client never sends); Z-Wave JS UI, which
    *  embeds the same server class, destroys it only with its driver (checked
    *  in part). So the driver went away and came back between that moment and
    *  this handshake; a link a network fault ended is not told apart and reads
@@ -1271,8 +1272,9 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
       // An open peer close survives a stop (v0.79.5). It is set only while no
       // handshaken link has followed it, so this stop ended no link the driver
       // answered on, and the next handshake — after start(), or in the next
-      // run of the add-on, which the shutdown save carries it to — still shows
-      // the server went away and came back. A live link this stop ends sets
+      // run of the add-on when it loads the shutdown save's copy (same boot,
+      // down no longer than DRIVER_DROP_CARRY_MS) — still shows the server
+      // went away and came back. A live link this stop ends sets
       // nothing: teardownSocket strips the close listener first.
       setState(url ? 'stopped' : 'disabled', 'stopped');
     },

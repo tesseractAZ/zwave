@@ -447,9 +447,10 @@ export interface EvidenceStoreOptions {
   log?: LogSink;
   /** What the symptom engine carries across a restart (v0.79.3), read at each
    *  save once the engine has taken the restored carry (`takeCarry`). Until
-   *  then a save writes back what was restored, so a second restart before
-   *  the engine's first tick loses nothing — except the driver link's part,
-   *  read from the engine at every save (v0.79.5). */
+   *  then a save writes back what was restored, except the driver link's part,
+   *  which is read from the engine at every save (v0.79.5) and still holds the
+   *  restored drop or the span its handshake closed; so a second restart
+   *  before the engine's first tick loses nothing. */
   carry?: () => EvidenceCarry;
 }
 
@@ -490,9 +491,10 @@ export interface EvidenceStore {
    * Remove ALL evidence for a node that left the network, or whose Home
    * Assistant device changed (a replace by another product, caught at a
    * registry load while the add-on keeps running; v0.79.5). A same-product
-   * replace keeps its evidence. Node-id reuse must start from a clean slate —
-   * inherited history would merge two physical devices' evidence and
-   * pre-satisfy the ghost detector's coverage precondition (review).
+   * replace is not seen and keeps its evidence. Node-id reuse the add-on sees
+   * (a departure, a device change) starts from a clean slate — inherited
+   * history would merge two physical devices' evidence and pre-satisfy the
+   * ghost detector's coverage precondition (review).
    */
   evictNode(nodeId: number): void;
   /** Capture one fine sample + fold it into the coarse tier. Never throws. */

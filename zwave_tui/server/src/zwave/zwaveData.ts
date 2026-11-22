@@ -1050,9 +1050,11 @@ class ZwaveDataImpl implements ZwaveData {
   /** The engine has taken the evidence store's restored carry (v0.79.3). */
   private carryTaken = false;
   /** What a crash or power cut must not lose, as last saved (v0.79.3): a
-   *  change saves the evidence store at once, at most once a minute. The
-   *  minute is the host's uptime (v0.79.5), which a wall-clock step does not
-   *  move, so `promptSavedAt` is an uptime reading. */
+   *  change saves the evidence store at once, at most once a minute, except
+   *  that the first tick's write-out of a restored carry does not start the
+   *  minute (v0.79.5). The minute is the host's uptime (v0.79.5), which a
+   *  wall-clock step does not move (inferred: os.uptime() reads /proc/uptime
+   *  on Linux), so `promptSavedAt` is an uptime reading. */
   private promptSavedKey = promptCarryKey([], null);
   private promptSavedAt = -Infinity;
   private readonly uptimeMs: () => number;
@@ -1574,7 +1576,7 @@ class ZwaveDataImpl implements ZwaveData {
         const n = seedNodeDown(this.symptomState, carry.nodeDown, (id) => onRoster.has(id), now);
         if (n > 0) {
           const raised = carry.nodeDown.filter((d) => d.latched && onRoster.has(d.nodeId)).length;
-          this.log(`node-down: carried ${n} dwell(s) across the restart (${raised} already raised) — each is re-judged on this tick`);
+          this.log(`node-down: carried ${n} dwell(s) across the restart (${raised} already raised) — each is read again on this tick`);
         }
       }
     }
@@ -3212,8 +3214,11 @@ class ZwaveDataImpl implements ZwaveData {
       const nodeId = nodeIdOfDevice(d);
       if (nodeId == null) continue;
       // The node's own device holds its slot (v0.79.5): an endpoint child or a
-      // stripped orphan filed under the same id joins its entities to the node
-      // but never stands for it, whatever the list order.
+      // stripped orphan filed under the same id joins its entities to the
+      // node's entity→node maps (the activity log, the routed-read target,
+      // battery, ping, firmware) but does not stand for it while the node's own
+      // device is listed, whatever the order; with none listed, the last device
+      // filed under the id does. The node's entity list stays its slot device's.
       const main = isMainNodeDevice(d);
       deviceIdToNodeId.set(d.id, nodeId);
       if (deviceByNodeId.get(nodeId)?.main === true && !main) continue;

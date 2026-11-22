@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createZwaveData } from '../src/zwave/zwaveData';
+import { createZwaveData, type ZwaveDataOptions } from '../src/zwave/zwaveData';
 import type { HaWsClient, HaEventHandler, HaSubscription } from '../src/ha/haWsClient';
 
 const MIN = 60_000;
@@ -86,7 +86,7 @@ const STATS = { rtt: 20, rssi: -60, lwr: null, nlwr: null, commandsTX: 1, comman
 async function withRun(w: World, body: (r: {
   tick: () => boolean; reload: () => Promise<void>; logs: string[]; events: () => string[]; resetCalls: number[];
   zd: ReturnType<typeof createZwaveData>; priv: Priv;
-}) => Promise<void>, extra: Record<string, unknown> = {}): Promise<void> {
+}) => Promise<void>, extra: Partial<ZwaveDataOptions> = {}): Promise<void> {
   skip = 0;
   Date.now = () => realNow() + skip;
   const dir = mkdtempSync(join(tmpdir(), 'zwtui-swap-'));
@@ -98,7 +98,7 @@ async function withRun(w: World, body: (r: {
     historyPath: null, evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), log: (m: string) => logs.push(m),
     uptimeMs: () => Date.now() - bootAt, ...extra,
-  } as never);
+  });
   try {
     zd.start();
     ha.fireReady();
@@ -326,7 +326,7 @@ test('device swap (v0.79.5): a replace by another product with the stripped orph
   await replacedByAnotherProduct(false);
 });
 
-test('device swap (v0.79.5): an entity on an endpoint child device joins its node, though the child never holds the node\'s slot', async () => {
+test('device swap (v0.79.5): an entity on an endpoint child device maps to its node (the routed-read target), though the child never holds the node\'s slot', async () => {
   const w = world([...own(), { id: 'dev-60-ep2', node: 60, ids: [`${HOME}-60-2`] }]);
   w.entities = [{
     entity_id: 'switch.dev_60_ep2', device_id: 'dev-60-ep2', disabled_by: null, platform: 'zwave_js',
