@@ -37,7 +37,8 @@
  * six (see Bands above), and leaves its timeout rate alone; a re-interview HA
  * keeps on the node's device resets nothing, and the decay absorbs a lasting
  * shift. One that misreads the node's hardware ids is filed under a new device
- * (zwaveData forgetSwappedDevice): a reset, once.
+ * (zwaveData forgetSwappedDevice): a reset, once per add-on run (a restart
+ * between the misread and the correct read costs a second).
  *
  * The route reset has a cost: a band needs ~23 fresh readings to graduate,
  * about 12 days at sweep cadence, so a node that re-routes even weekly never

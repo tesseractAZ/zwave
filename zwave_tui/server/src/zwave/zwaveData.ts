@@ -329,11 +329,6 @@ interface DeviceRec {
   id: string;
   /** The node's own device (v0.79.5): identified exactly `<home_id>-<node_id>`. */
   main: boolean;
-  /** The node's own device the state held for the id belongs to (v0.79.5):
-   *  this device when it is the node's own. When a child or an orphan holds
-   *  the slot, the last own device listed, carried on from load to load (none
-   *  after an eviction); the swap check in buildRegistryMaps sets it. */
-  own: string | null;
   /** Its hardware identifier `<home_id>-<node_id>-<mfr>:<type>:<id>`, if
    *  Home Assistant gave it one (v0.79.5). */
   hw: string | null;
@@ -919,11 +914,24 @@ class ZwaveDataImpl implements ZwaveData {
   private missingSince = new Map<number, number>();
   /** Ids the departed branch evicted since the last registry load (v0.79.5):
    *  their state is gone already, so a new device on the id at the next load
-   *  is not a swap whose state is still to drop. */
+   *  is not a swap whose state is still to drop. The load consumes the mark;
+   *  an evicted id back on the roster asks for that load (refresh). */
   private readonly evictedSinceLoad = new Set<number>();
-  /** Hardware identifiers each node's own device has carried since the node
-   *  last left the roster (v0.79.5). An own device that carries one of them
-   *  again is the same hardware filed again, not a swap. */
+  /** Each node's own device as of the last registry load that listed one
+   *  (v0.79.5): the device the held state belongs to, by device id and
+   *  hardware id. A load that lists no device on the id, or only a child or
+   *  an orphan, leaves it. Forgotten with hwSeenByNode when the node's
+   *  eviction is consumed at a load, and for every node when the registry's
+   *  config entry or network changes. */
+  private readonly ownByNode = new Map<number, { id: string; hw: string | null }>();
+  /** The config entry ownByNode and hwSeenByNode were recorded under (v0.79.5). */
+  private ownEntryId: string | null = null;
+  /** Hardware identifiers each node's own device has carried since the node's
+   *  eviction was last consumed at a registry load (v0.79.5): they are
+   *  forgotten there, once the node has been off the roster for evictAfterMs
+   *  (5 minutes), not when it merely leaves. An own device that carries one of
+   *  them again is the same hardware filed again, not a swap. Held in memory
+   *  only, so an add-on restart starts with none. */
   private readonly hwSeenByNode = new Map<number, Set<string>>();
   /** ctrlStats object identity at the previous evidence sample (freshness). */
   private prevCtrlStatsRef: ControllerSnapshot['statistics'] = null;
@@ -2885,6 +2893,10 @@ class ZwaveDataImpl implements ZwaveData {
         this.log('repeated failures — re-discovering zwave_js entry + reloading registries');
         this.entryId = null;
         this.registriesLoaded = false;
+        // The swap check's own-device records are kept (v0.79.5): an HA Core
+        // restart long enough to fail three refreshes ends here and finds the
+        // same entry again, whose next load is where a replace made meanwhile
+        // shows. A different entry found is not compared with them (ownEntryId).
         // The old entry's statistics subscriptions are stale/orphaned — drop the
         // frozen stats and re-subscribe once the new registry loads (below).
         this.statsSubscribed = false;
@@ -2971,6 +2983,11 @@ class ZwaveDataImpl implements ZwaveData {
     {
       const present = new Set(nodes.map((n) => n.nodeId));
       const now = Date.now();
+      // An evicted id back on the roster (v0.79.5): reload the registry, so
+      // the eviction is consumed against the device the node came back on and
+      // a later swap on the id is one. The load clears every mark, and an id
+      // is only marked while it is off the roster, so this asks once.
+      for (const id of this.evictedSinceLoad) if (present.has(id)) { this.registriesLoaded = false; break; }
       for (const id of [...this.prevStatus.keys()]) {
         if (present.has(id)) {
           this.missingSince.delete(id);
@@ -3204,6 +3221,9 @@ class ZwaveDataImpl implements ZwaveData {
         // re-subscribe against the new device_ids via a reconnect (onReady resets
         // registriesLoaded + statsSubscribed and rebuilds everything — and, as in
         // the self-heal path, this releases the old subscriptions cleanly).
+        // The swap check's own-device records go too (v0.79.5): the new
+        // network's devices are not replacements of the old network's.
+        this.forgetOwnDevices();
         this.registriesLoaded = false;
         this.client.reconnect();
       }
@@ -3280,7 +3300,6 @@ class ZwaveDataImpl implements ZwaveData {
       deviceByNodeId.set(nodeId, {
         id: d.id,
         main,
-        own: main ? d.id : null,
         hw: hardwareIdOfDevice(d),
         name: sanitizeLabel(d.name_by_user || d.name || `Node ${nodeId}`),
         // Sanitize these too — they reach the Detail/Controller frames and are
@@ -3396,51 +3415,79 @@ class ZwaveDataImpl implements ZwaveData {
         this.configFetchAt.delete(nid);
       }
     }
-    // A DEVICE SWAP (v0.79.5): the node's own device on the id changed
-    // between two loads. What was learned or is waiting about the old device
-    // goes with it. Each id is judged in three steps.
-    // - `was` is the own device the held state belongs to, as of the last
-    //   load. It is none at the first load, for an id that had no device then
-    //   (null→B is no swap), and for an id the departed branch evicted since
-    //   then (that state went with the departed device, so what is on the id
-    //   now is the new device's). An id that drops out of the list (A→null) is
-    //   not judged at all.
-    // - A child or an orphan holding the slot (no own device listed) says
-    //   nothing about which device is measured now. It is no swap, and it
-    //   carries `was` on until an own device is listed again, which is then
-    //   compared against it: an exclusion and a re-inclusion around a load
-    //   that lists only an orphan is still a swap.
-    // - An own device that differs from `was` is a swap, unless it carries a
-    //   hardware id one of the node's own devices carried before. Home
-    //   Assistant files a node whose interview misread its hardware ids under
-    //   a new device, and a later correct read files it back (on the orphan,
-    //   or on a third device once the integration's next setup has removed
-    //   the orphan): a known hardware id coming back is the same hardware.
-    //   Limits: the misread itself looks like a replacement by another
-    //   product (HA cannot tell them apart either), so it is taken for a swap
-    //   once; and a replacement by a unit of a product the id already had
-    //   since it last left the roster keeps the interim device's state, as a
-    //   replacement by the same product does.
+    // A DEVICE SWAP (v0.79.5): Home Assistant filed the id under another own
+    // device between two loads. What was learned or is waiting about the old
+    // device goes with it. Each id is judged against its record in ownByNode,
+    // the node's own device as of the last load that listed one.
+    // - An id has no record at the first load, while no own device has been
+    //   listed on it (null→B is no swap), and once its eviction is consumed
+    //   here (that state went with the departed device, so what is on the id
+    //   now is the new device's). A load that lists no device on the id
+    //   (A→null), or only a child or an orphan, judges nothing and leaves the
+    //   record.
+    // - An own device is a change when its device id differs from the
+    //   record's, or its hardware id does and both are known. Home Assistant
+    //   gives a node included on a freed id the device it deleted at the
+    //   exclusion (device_registry async_get_or_create restores a deleted
+    //   device whose identifiers match), with the new hardware id: another
+    //   product included inside the eviction dwell keeps the device id. A
+    //   device listed without a hardware id (before its interview; inferred)
+    //   keeps the one its record holds.
+    // - A change is a swap unless the own device carries a hardware id one of
+    //   the node's own devices carried since its eviction was last consumed
+    //   (returning). Home Assistant files a node whose interview misread its
+    //   hardware ids under a new device, and the correct read files it back:
+    //   on the orphan, or on the orphan's own id, which a re-registration can
+    //   restore once the integration's setup has removed the orphan
+    //   (async_remove_device). Limits: the misread itself looks like a
+    //   replacement by another product (HA cannot tell them apart either), so
+    //   it is taken for a swap once per add-on run (hwSeenByNode is held in
+    //   memory: an add-on restart between the misread and the correct read
+    //   costs a second); and a replacement by a unit of a product the id
+    //   already had since its eviction was last consumed keeps the interim
+    //   device's state, as a replacement by the same product does.
+    // The records belong to one config entry: a load under another (the
+    // self-heal found a different entry, or a fetch in flight across it
+    // landed while none was known) starts them afresh, and so does a
+    // home-id change (refresh).
     // Most of the mesh changing at once is a registry re-created (the
     // integration re-added, another network), not that many replacements:
-    // nothing is dropped.
+    // every change counts toward that guard, returning or not, and nothing is
+    // dropped when it fires.
+    if (this.entryId !== this.ownEntryId) {
+      this.forgetOwnDevices();
+      this.ownEntryId = this.entryId;
+    }
+    const changed: number[] = [];
     const swapped: number[] = [];
-    for (const nid of this.evictedSinceLoad) this.hwSeenByNode.delete(nid);
+    for (const nid of this.evictedSinceLoad) { this.ownByNode.delete(nid); this.hwSeenByNode.delete(nid); }
     for (const [nid, dev] of deviceByNodeId) {
-      const was = this.evictedSinceLoad.has(nid) ? null : (oldDeviceByNodeId.get(nid)?.own ?? null);
-      if (!dev.main) { dev.own = was; continue; }
+      if (!dev.main) continue;
+      const was = this.ownByNode.get(nid) ?? null;
       const seen = this.hwSeenByNode.get(nid) ?? new Set<string>();
       const returning = dev.hw != null && seen.has(dev.hw);
-      if (was != null && was !== dev.id && !returning) swapped.push(nid);
+      const hwChanged = was != null && was.hw != null && dev.hw != null && was.hw !== dev.hw;
+      if (was != null && (was.id !== dev.id || hwChanged)) {
+        changed.push(nid);
+        if (!returning) swapped.push(nid);
+      }
+      this.ownByNode.set(nid, { id: dev.id, hw: dev.hw ?? (was != null && was.id === dev.id ? was.hw : null) });
       if (dev.hw != null) { seen.add(dev.hw); this.hwSeenByNode.set(nid, seen); }
     }
     this.evictedSinceLoad.clear();
-    if (swapped.length > Math.max(2, deviceByNodeId.size / 2)) {
-      this.log(`device swap: ${swapped.length} of ${deviceByNodeId.size} nodes changed device at once — a re-created registry, not replacements; nothing dropped`);
+    if (changed.length > Math.max(2, deviceByNodeId.size / 2)) {
+      this.log(`device swap: ${changed.length} of ${deviceByNodeId.size} nodes changed device at once — a re-created registry, not replacements; nothing dropped`);
     } else {
       const now = Date.now();
       for (const nid of swapped) this.forgetSwappedDevice(nid, now);
     }
+  }
+
+  /** The swap check's own-device records, every node's (v0.79.5): another
+   *  config entry or another network is not compared with them. */
+  private forgetOwnDevices(): void {
+    this.ownByNode.clear();
+    this.hwSeenByNode.clear();
   }
 
   /** Home Assistant filed a node id under a new device (v0.79.5): drop what
@@ -3452,8 +3499,10 @@ class ZwaveDataImpl implements ZwaveData {
    *  A new device is a replacement by another product, or the same hardware
    *  whose interview misread its manufacturer, product type or product id in
    *  poor RF (HA's zwave_js async_register_node_in_dev_reg cannot tell them
-   *  apart): a misread costs the node its baselines and evidence once. The
-   *  correct read that files it back is not dropped again (hwSeenByNode). */
+   *  apart): a misread costs the node its baselines and evidence once per
+   *  add-on run. The correct read that files it back is not dropped again
+   *  while the add-on runs (hwSeenByNode, held in memory); an add-on restart
+   *  between the misread and the correct read costs a second reset. */
   private forgetSwappedDevice(nodeId: number, now: number): void {
     this.evidenceStore?.evictNode(nodeId);
     for (const k of [...this.symptomState.keys()]) if (k.startsWith(`${nodeId}:`)) this.symptomState.delete(k);

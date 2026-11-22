@@ -508,10 +508,11 @@ function fakeHa(roster: Array<Record<string, unknown>>, home: () => number = () 
   } as unknown as HaWsClient & { fireReady(): void };
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-async function waitFor(cond: () => boolean, ms = 8000): Promise<void> {
+/** `why`: what the failure message carries besides the timeout. */
+async function waitFor(cond: () => boolean, ms = 8000, why?: () => string): Promise<void> {
   const t0 = performance.now();
   while (!cond()) {
-    if (performance.now() - t0 > ms) throw new Error('waitFor: condition not met in time');
+    if (performance.now() - t0 > ms) throw new Error(`waitFor: condition not met in time${why ? ` — ${why()}` : ''}`);
     await sleep(20);
   }
 }
@@ -567,9 +568,13 @@ async function startRun(dir: string, url: string, bootAt: number | null, logs: s
   zd.start();
   ha.fireReady();
   if (o.awaitReady !== false) {
-    await waitFor(() => zd.driverWsState() === 'live');
+    // The first handshake and the dump after it, under a loaded suite: room
+    // for one 5 s reconnect backoff, and what the link did if they never come.
+    // `logs` holds the run's lines whether or not the caller passed an array.
+    const linkLog = () => `driver link ${zd.driverWsState()}; ${logs.filter((l) => l.startsWith('driver-ws:')).join(' | ') || 'no driver-ws: lines'}`;
+    await waitFor(() => zd.driverWsState() === 'live', 15_000, linkLog);
     const want = roster.find((n) => n.node_id === 60)!.status === 3 ? NodeStatus.Dead : NodeStatus.Alive;
-    await waitFor(() => zd.snapshot().some((n) => n.nodeId === 60 && n.status === want && n.isListening === false));
+    await waitFor(() => zd.snapshot().some((n) => n.nodeId === 60 && n.status === want && n.isListening === false), 15_000, linkLog);
   }
   const priv = zd as unknown as { lastOkAt: number | null; sampleEvidence: () => void };
   const tdp = createTuiDataProvider({ zwaveData: buildZwaveDataSource(zd as never), refreshMs: 60_000, log: () => {} } as never);
