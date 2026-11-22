@@ -850,3 +850,22 @@ test('config parameters (v0.79.5): parameters fetched while a node was interview
     assert.equal(r.zd.configParams(61).params[0]?.label, `param of ${HOME}-61-${P3}`, 'asked again: the interviewed product\'s');
   });
 });
+
+test('config parameters (v0.79.5): another product included on the freed id while Home Assistant was down — the device id it restores, ready on both sides — loses the old product\'s parameters with the swap', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    r.zd.requestConfigParams(60);
+    await waitFor(() => r.zd.configParams(60).status === 'ready');
+    assert.equal(r.zd.configParams(60).params[0]?.label, `param of ${HOME}-60-${P1}`, 'precondition: the old product\'s parameters cached');
+    const devBefore = r.zd.deviceIdOf(60);
+    // HA down: node 60 excluded and another product included on its id; no roster poll runs meanwhile.
+    s.zw.removeNode(60, 'excluded');
+    s.zw.add(60, P3, 4);
+    await r.reconnect();
+    await r.poll();
+    assert.equal(r.swaps(60), 1, 'precondition: a swap');
+    assert.equal(r.zd.deviceIdOf(60), devBefore, 'precondition: the device id Home Assistant restores, so the device-id prune does not drop them');
+    assert.equal(r.zd.snapshot().find((x) => x.nodeId === 60)?.ready, true, 'precondition: ready on both sides, so no ready change drops them');
+    assert.equal(r.zd.configParams(60).status, 'idle', 'the swap drops the old product\'s parameters');
+  });
+});

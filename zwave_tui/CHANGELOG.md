@@ -173,7 +173,7 @@ in progress at the update is not read as a driver start. The schema of
 
 ### Tests
 
-- 1,852 tests, 83 new; 1,942 mutation-harness entries (18 labelled
+- 1,853 tests, 84 new; 1,942 mutation-harness entries (18 labelled
   equivalent, 1 of them new): 145 new, 1 retired with the check it covered (a
   stop cleared an open peer close), 20 re-anchored; the full harness kills
   every entry not labelled equivalent.
