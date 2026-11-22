@@ -15,7 +15,13 @@ import { WebSocketServer, type WebSocket as WsSocket } from 'ws';
  * (the allowlist proof), answers the handshake, and lets tests push events.
  */
 export async function mockServer(over: { minSchema?: number; maxSchema?: number; homeId?: number; nodes?: unknown[]; logLevel?: string; nodeFilter?: number[]; refuseLogs?: boolean; dropBeforeVersion?: number } = {}) {
-  const wss = new WebSocketServer({ port: 0 });
+  // Bound to 127.0.0.1, the address `url` names (v0.79.5). With no host the
+  // server binds the wildcard address, and macOS can hand that bind a port
+  // another process already listens on at 127.0.0.1: the two share it, and a
+  // connection to 127.0.0.1 reaches the other process. The client then reads
+  // that listener's answer (seen: an HTTP 404 or 407) at every retry, and the
+  // test fails waiting for its first handshake.
+  const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   await new Promise<void>((r) => wss.once('listening', () => r()));
   const commands: string[] = [];
   let connections = 0;

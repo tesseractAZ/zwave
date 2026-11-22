@@ -972,6 +972,11 @@ class ZwaveDataImpl implements ZwaveData {
    *  sent (v0.79.5): a poll that succeeds with the two apart asks for a load. */
   private failSeq = 0;
   private failSeqAtLoad = 0;
+  /** Home Assistant reconnects so far, the first connection not counted, and
+   *  the count at the last successful poll that asked for a registry load
+   *  (v0.79.5): a poll that succeeds with the two apart asks for one. */
+  private reconnects = 0;
+  private reconnectsAtAsk = 0;
   /** Registry loads asked for (v0.79.5): a fetch already out when an ask is
    *  made does not serve it (askRegistryLoad). */
   private registryAsks = 0;
@@ -1397,6 +1402,10 @@ class ZwaveDataImpl implements ZwaveData {
     this.client.onReady(() => {
       this.registriesLoaded = false;
       this.statsSubscribed = false;
+      // A reconnect's own load can run before Home Assistant has set zwave_js
+      // up again (v0.79.5): the poll that succeeds after it asks for one more
+      // (refresh). The first connection is not a reconnect.
+      if (this.connEpoch > 0) this.reconnects += 1;
       this.connEpoch += 1;
       this.autonomy.newConnection();
       void this.subscribeStatistics();
@@ -2951,8 +2960,9 @@ class ZwaveDataImpl implements ZwaveData {
         // The swap check's own-device records are kept (v0.79.5): an HA Core
         // restart long enough to fail three refreshes ends here and finds the
         // same entry again, and a replace made meanwhile shows at the load the
-        // poll that succeeds after the failures asks for (refresh). A
-        // different entry found is not compared with them (ownEntryId).
+        // first poll that succeeds after this reconnect asks for (refresh;
+        // spaced, as every roster ask is). A different entry found is not
+        // compared with them (ownEntryId).
         // The old entry's statistics subscriptions are stale/orphaned — drop the
         // frozen stats and re-subscribe once the new registry loads (below).
         this.statsSubscribed = false;
@@ -3063,10 +3073,16 @@ class ZwaveDataImpl implements ZwaveData {
       }
       for (const id of [...this.askedUnrecorded]) if (!present.has(id)) this.askedUnrecorded.delete(id);
       // A node's ready going false→true: a replacement, a re-interview or a
-      // node included, now registered with its hardware ids. And a poll that
-      // succeeds after failed ones: Home Assistant may have set the
-      // integration up again meanwhile (an entry reload, a Core restart),
-      // re-registering every node and sweeping orphans before it answered.
+      // node included, now registered with its hardware ids. Home Assistant
+      // setting the integration up again re-registers every node and sweeps
+      // orphans, and network_status succeeds only once the entry is loaded,
+      // which is after that setup (zwave_js async_setup_entry awaits it before
+      // Home Assistant marks the entry loaded), so two more cases ask:
+      // - a poll that succeeds after failed ones with no load sent since them
+      //   (an entry reload, or a Core restart the polls saw fail);
+      // - the first poll that succeeds after a reconnect: the reconnect's own
+      //   load can run before the integration is set up again (a Core
+      //   restart). One more load per reconnect.
       // Every change seen in one poll is one load; spaced by
       // ROSTER_LOAD_SPACING_MS, one asked sooner waits for the first poll
       // past it (and the engine may read the node before that load).
@@ -3075,7 +3091,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.prevReady.set(n.nodeId, n.ready);
       }
       for (const id of this.prevReady.keys()) if (!present.has(id)) this.prevReady.set(id, false);
-      if (this.readyLoadHeld || this.failSeq !== this.failSeqAtLoad) {
+      if (this.readyLoadHeld || this.failSeq !== this.failSeqAtLoad || this.reconnects !== this.reconnectsAtAsk) {
         const since = now - this.rosterLoadAt;
         if (since >= ROSTER_LOAD_SPACING_MS || since < 0) {
           this.readyLoadHeld = false;
@@ -3086,7 +3102,12 @@ class ZwaveDataImpl implements ZwaveData {
       // The first home id bound, after a load that admitted another home id's
       // devices (buildRegistryMaps): load again with the home id known.
       if (this.lastHomeId == null && homeNow != null && [...this.loadedHomes].some((h) => h !== String(homeNow))) ask = true;
-      if (ask) this.askRegistryLoad();
+      if (ask) {
+        this.askRegistryLoad();
+        // The load asked here is sent after this poll's network_status
+        // answered, which is after every reconnect counted so far.
+        this.reconnectsAtAsk = this.reconnects;
+      }
       for (const id of [...this.prevStatus.keys()]) {
         if (present.has(id)) {
           this.missingSince.delete(id);
@@ -3191,11 +3212,12 @@ class ZwaveDataImpl implements ZwaveData {
     // replacement's first reading can log the failed device's node-down as
     // cleared. Not while the home id is changing (the branch below starts the
     // records afresh and asks for its own load) or not yet bound (the first
-    // poll of a run, whose own load ran moments ago): then the next poll's
-    // load serves it. Limit: a replacement that reads Alive while still
-    // interviewing, before its ready change, is read by the engine before
-    // Home Assistant lists its hardware ids (inferred: that zwave-js reports
-    // Alive during an interview was not checked).
+    // poll of a run that succeeds; the run's own load came before it, perhaps
+    // before failed polls): then the next poll's load serves it. Limit: a
+    // replacement that reads Alive while still interviewing, before its ready
+    // change, is read by the engine before Home Assistant lists its hardware
+    // ids (inferred: that zwave-js reports Alive during an interview was not
+    // checked).
     if (!this.registriesLoaded && this.lastHomeId != null && ctrl.home_id === this.lastHomeId) {
       await this.ensureRegistries();
       // A fetch that was already out when the ask was made does not serve it.
@@ -3660,11 +3682,18 @@ class ZwaveDataImpl implements ZwaveData {
    *  belongs to the old device — its dwells (a raised node-down included),
    *  evidence, baselines, readings, sparklines, open episodes and the refresh
    *  trial's open decision. Its symptoms did not end, so none is logged as
-   *  cleared. What the roster, the subscriptions, the driver link and the
-   *  probes hold for the id is kept: it describes the device on the id now.
-   *  Dropped at the load that shows the change, so what the new device built
-   *  before that load goes too: the roster asks for one when the node becomes
-   *  ready (refresh). The change is one of:
+   *  cleared. What the roster, the driver link and the probes hold for the id
+   *  is kept: it describes the device on the id now. The node's statistics
+   *  and status subscriptions are kept too, on the old device until the next
+   *  rebuild of the feeds (an HA reconnect, the self-heal or a re-arm). Home
+   *  Assistant bound them to the node object it resolved when they were made,
+   *  and a node replaced or included is another node object there (inferred),
+   *  so until that rebuild the new device has no statistics feed, and the
+   *  roster's flap-count fallback stays off for it, the id still reading
+   *  subscribed: a known limit. The old device's state is dropped at the
+   *  load that shows the change, so what the new device built before that
+   *  load goes too: the roster asks for one when the node becomes ready
+   *  (refresh). The change is one of:
    *  - a replacement by another product: HA files the node under a new
    *    device and strips the old one to an orphan;
    *  - another product included on a freed id inside the eviction dwell: HA
@@ -3988,9 +4017,11 @@ class ZwaveDataImpl implements ZwaveData {
     this.entryReloadSeen = false;
     // An entry reload is when the integration's setup re-registers every node
     // and sweeps orphans (v0.79.5). One a poll saw (`not_loaded`) is loaded by
-    // the poll that succeeded after it, in that poll (refresh). A dead feed
-    // with none seen may follow a reload quicker than a poll: ask for a load,
-    // which lands in this re-arm or at the next poll, whichever comes first.
+    // the poll that succeeded after it, in that poll, or at the first poll
+    // past the spacing when a roster load ran in the minute before (refresh).
+    // A dead feed with none seen may follow a reload quicker than a poll: ask
+    // for a load, which lands in this re-arm or at the next poll, whichever
+    // comes first.
     if (!reloadSeen) this.askRegistryLoad();
     this.log(`live statistics: re-subscribing (${why})`);
     const stale = this.ownedStatsSubs.splice(0);

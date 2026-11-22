@@ -412,6 +412,39 @@ test('registry loads (v0.79.5): a replace made while Home Assistant was restarti
   });
 });
 
+test('registry loads (v0.79.5): a replace made while Home Assistant was restarting, the reconnect\'s own load read before the integration was set up and no poll failing, is a swap in the first poll that succeeds after the reconnect — one more load per reconnect, none for the first connection', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    let n = r.joins();
+    await r.poll();
+    assert.equal(r.joins(), n, 'the first connection is no reconnect: the poll after it asks for no load');
+    raise(r, 60);
+    // HA stops; the driver replaces node 60 by another product meanwhile. No roster poll runs while it is down.
+    s.zw.nodes.set(60, { p: P3, ready: true, status: 4 });
+    await r.reconnect(); // HA back: the reconnect's own load reads the registry as stored
+    assert.equal(r.swaps(60), 0, 'precondition: the stored registry shows no swap');
+    s.zw.setup();        // setup after that load: node 60 re-registered with P3's hardware id, the orphan swept
+    n = r.joins();
+    await r.poll();      // succeeds: the entry is loaded, so set up
+    assert.equal(r.joins(), n + 1, 'the first poll that succeeds after the reconnect loads the registry');
+    assert.equal(r.swaps(60), 1, 'the swap is acted on in that poll');
+    assert.equal(r.tick(60), false, 'the failed device\'s node-down is not carried onto the replacement');
+    assert.equal(r.cleared(60), false, 'nor logged as cleared');
+    skip += 61_000;
+    await r.poll();
+    assert.equal(r.joins(), n + 1, 'one load for the reconnect, not one a minute');
+    // Another reconnect with nothing changed: its own load, then one more at the poll after it.
+    await r.reconnect();
+    n = r.joins();
+    await r.poll();
+    assert.equal(r.joins(), n + 1, 'the poll after the second reconnect loads once');
+    skip += 61_000;
+    await r.poll();
+    assert.equal(r.joins(), n + 1, 'and only once');
+    assert.equal(r.swaps(60), 1);
+  });
+});
+
 test('registry loads (v0.79.5): a zwave_js entry reload a poll saw (not_loaded) is loaded by the poll that succeeds after it; the re-arm that follows loads nothing more', async () => {
   const s = baseSim();
   await withSim(s, async (r) => {

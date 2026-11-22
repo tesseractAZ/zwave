@@ -1066,12 +1066,15 @@ test('restart (v0.79.3, production-wired): a node that left the network takes it
   const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
   const roster = ROSTER.map((n) => ({ ...n }));
   try {
-    const r = await startRun(dir, srv.url, Date.now() - 5 * DAY, [], { roster, extra: { evictAfterMs: 1 } });
+    const logs: string[] = [];
+    const r = await startRun(dir, srv.url, Date.now() - 5 * DAY, logs, { roster, extra: { evictAfterMs: 1 } });
     assert.equal(ticksTo(r, 10), 5, 'precondition: raised');
     const i = roster.findIndex((n) => n.node_id === 60);
     const [gone] = roster.splice(i, 1);
     await waitFor(() => !r.zd.snapshot().some((n) => n.nodeId === 60));
-    await sleep(300); // two roster polls: missing, then evicted
+    // Two roster polls, missing then evicted: waited on, not timed, as a
+    // loaded host can run fewer polls than the clock allows.
+    await waitFor(() => logs.some((l) => l.startsWith('node 60 left the network')), 8000, () => logs.join(' | '));
     roster.push({ ...gone!, status: 0 }); // the id comes back, as a new device being interviewed
     await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Unknown));
     assert.equal(r.tick(), false, 'no node-down for the new device');

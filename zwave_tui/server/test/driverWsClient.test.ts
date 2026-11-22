@@ -1276,7 +1276,9 @@ test('a peer that upgrades and PONGS but never handshakes is torn down (v0.53.0)
   // `handshake`, no evidence stream, no reconnect, for the life of the process.
   // The handshake needs its own clock, measured from OPEN — which nothing
   // refreshes — and it must be tested FIRST so the reason is accurate.
-  const wss = new WebSocketServer({ port: 0 });
+  // 127.0.0.1, the address the client dials: a wildcard bind can share its
+  // port with another process's 127.0.0.1 listener (see _driverWsMock.ts).
+  const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   await new Promise<void>((r) => wss.once('listening', () => r()));
   const port = (wss.address() as { port: number }).port;
   let connections = 0;
