@@ -4,13 +4,15 @@
 
 A forward clock step no longer makes a real outage a 90-minute start death, a
 waiting node-down dwell that ended no longer comes back after a crash restart,
-and a deploy during a Z-Wave JS outage keeps the driver start. A node id Home
-Assistant files under another device drops the old device's dwells, evidence
-and baselines while the add-on keeps running, and `/api/health` reports no
-conclusions before they are judged. The update from 0.79.4 carries no
-`driverDrop`, which 0.79.4 never wrote: a Z-Wave JS restart in progress at the
-update is not read as a driver start. The schema of `evidence.json` is
-otherwise unchanged, and a rollback to 0.79.4 ignores `driverDrop`.
+and a deploy during a Z-Wave JS outage keeps the driver start. A node whose own
+device changes in Home Assistant (a replacement by another product, another
+product included on its freed id, or a misread hardware id) drops the old
+device's dwells, evidence and baselines while the add-on keeps running, and
+`/api/health` reports no conclusions before they are judged. The update from
+0.79.4 carries no `driverDrop`, which 0.79.4 never wrote: a Z-Wave JS restart
+in progress at the update is not read as a driver start. The schema of
+`evidence.json` is otherwise unchanged, and a rollback to 0.79.4 ignores
+`driverDrop`.
 
 ### Fixed — a forward clock step could make a real outage a 90-minute start death (0.79.3)
 
@@ -61,25 +63,85 @@ otherwise unchanged, and a rollback to 0.79.4 ignores `driverDrop`.
   restored one, and the drop as its driver client holds it, so a drop the
   first handshake closed is written as the span it closed, not as open.
 
-### Fixed — another device on a node id that never left the roster
+### Fixed — a node's device changed in Home Assistant while its id stayed on the roster
 
 - `replace_failed_node` keeps the id on the roster, so the departed-node
   eviction never ran for it, and the failed device's dwells (a raised
   node-down included), evidence, baselines, readings, open episodes and the
-  refresh trial's open decision stayed on the id. At a registry load (each
-  Home Assistant reconnection) while the add-on keeps running, a node whose
-  own device changed from one to another now loses them, with a Log line; a
-  first load, a device first seen or gone, and most of the mesh changing at
-  once are no swap. After an add-on restart before that load nothing is
-  compared, and the old state stays. A replace by the same product is the
-  same Home Assistant device and keeps its state.
+  refresh trial's open decision stayed on the id. While the add-on keeps
+  running, a registry load that shows the node's own device changed now drops
+  them, with a Log line (`node N's device changed in Home Assistant …`, or
+  `K in-flight episodes + node N's baselines discarded …` when episodes were
+  open): its device id differs from the one the last load that listed it
+  recorded, or its hardware id (`<home>-<node>-<manufacturer>:<type>:<id>`)
+  does. A hardware id change alone is another product included on a freed id
+  inside the 5-minute eviction dwell: Home Assistant gives it back the device
+  it deleted at the exclusion. No swap: an id with no record yet (a run's
+  first load, a device first seen, an id evicted since the last load), a load
+  that lists no own device on the id (the record is kept), a hardware id the
+  node already carried since it last left the network (the same hardware
+  filed again), and more than max(2, half the mapped nodes) changing at once
+  (a registry re-created: one line, nothing dropped). A replace by the same
+  product is the same Home Assistant device and keeps its state, and so does
+  one by a product the node already carried since it last left the network.
+  After an add-on restart before that load nothing is compared, and the old
+  state stays.
+- A node whose interview misreads its hardware ids in poor RF is filed by
+  Home Assistant under a new device, as a replacement by another product is
+  (it cannot tell the two apart): that costs the node its baselines and
+  evidence once for each misread value while the add-on runs, none when the
+  correct read comes before the next load. The correct read that files it
+  back is no swap while the add-on runs; an add-on restart between the two
+  costs a second reset.
+- A swap drops the node's cached configuration parameters too, also when
+  only the hardware id changed (the device id Home Assistant restores kept
+  them before), and an answer or a failure for a configuration fetch the
+  cache dropped meanwhile (a device change, a departure, a write) is no
+  longer stored as the node's: Detail and the Actions menu do not offer the
+  old product's parameter numbers to the new device.
+- After a replacement, or another product included on the freed id, the
+  node's statistics and status feeds stay bound to the old node (inferred,
+  below) until the next rebuild of the feeds (a Home Assistant reconnect, the
+  self-heal or a re-arm): until then the new device has no statistics feed
+  and its Dead/Alive crossings are not counted. Home Assistant binds each
+  feed to the node object it resolved at subscribe time, and a node replaced
+  or included is another object there (inferred).
+- Registry loads, where a swap shows: besides each Home Assistant
+  reconnection, the self-heal and a home-id change, the roster asks for one
+  when a node's `ready` goes false→true (Home Assistant files the interviewed
+  hardware ids then) or the node is back on the roster ready, when a poll
+  succeeds after failed ones with no load since them (an entry reload), at
+  the first poll that succeeds after a reconnect, whose own load can run
+  before Home Assistant has set zwave_js up again (at most one more load per
+  reconnect), once for a roster node with no record of this network, and for
+  an evicted id back on the roster; a re-arm for a dead statistics feed with
+  no entry reload seen asks for one too. A load the roster asks for runs in
+  that poll, before the roster the engine reads is published, so a
+  replacement's first reading does not log the failed device's node-down as
+  cleared; on a run's first successful poll and on a home-id change the next
+  poll's load serves it. The ready, failed-poll and reconnect asks are spaced
+  60 s apart: one asked sooner waits for the first poll past it, and the
+  engine may read the node first, as it may a replacement that reads Alive
+  while still being interviewed (inferred).
 - The node's own device (a `zwave_js` identifier exactly `<home>-<node>`)
   stands for the node whatever the list order. An endpoint child, or the
-  orphan a replace by another product leaves (`<home>-<node>-…`), still maps
-  its entities to the node, and stands for it only while the node's own
-  device is not listed. Before, the last device listed stood for the node:
-  its name, area and entity list, and the `device_id` its subscriptions,
-  configuration parameters and actions use.
+  orphan Home Assistant leaves when an interview reports other hardware ids
+  (`<home>-<node>-…`), still maps its entities to the node, and stands for it
+  only while the node's own device is not listed. Before, the last device
+  listed stood for the node: its name, area and entity list, and the
+  `device_id` its subscriptions, configuration parameters and actions use.
+- A node's entity list (Detail's LIVE ENTITIES) is its own device's entities
+  and its endpoint children's (`parent_device_id`: from Home Assistant 2026.11
+  a labelled endpoint's entities are on a child device of the node's own
+  device); an orphan's entities, and a child of another device's, are left
+  out. Before, it held the entities of the device standing for the node alone.
+- Another `zwave_js` config entry is another network, whose `<home>-<node>`
+  ids name its own nodes: its devices no longer join this network's nodes (a
+  device that lists no entry is kept). And once the network's home id is
+  known, only its devices hold a node's slot or join an entity to a node, as a
+  controller changed under the same entry leaves the old network's devices
+  listed on ids the new network may reuse; while none of that home id's own
+  devices is listed, every device is.
 
 ### Fixed — `/api/health` before the engine's first tick
 
@@ -109,9 +171,9 @@ otherwise unchanged, and a rollback to 0.79.4 ignores `driverDrop`.
 
 ### Tests
 
-- 1,799 tests, 30 new; 1,866 mutation-harness entries (17 labelled
-  equivalent, none added): 69 new, 1 retired with the check it covered (a
-  stop cleared an open peer close), 18 re-anchored; the 87 new and
+- 1,850 tests, 81 new; 1,939 mutation-harness entries (18 labelled
+  equivalent, 1 of them new): 142 new, 1 retired with the check it covered (a
+  stop cleared an open peer close), 20 re-anchored; the other 161 new and
   re-anchored entries are all killed.
 
 ## 0.79.4
@@ -423,128 +485,6 @@ and one tick's probes no longer go out in the same millisecond.
   timer), and a contract pin that production keeps the default spacing.
 - 48 new mutation-harness entries, three of them declared equivalent; 31
   existing entries re-anchored to the rewritten lines.
-
-## 0.79.0
-
-`rtt-degraded` judges a node with no learned RTT normal against a fixed
-300 ms ceiling.
-
-### Fixed — re-routing nodes were never judged on round-trip time
-
-- The RTT normal is learned per route. A route change empties the node's six
-  time-of-day bands, and a band graduates after about 23 fresh readings:
-  about 12 days for a node that only the 2-hourly liveness sweep talks to. A
-  node that re-routes even once a week never graduates, and the routed nodes
-  re-route the most.
-- On the reference mesh (2026-11-13) 23 of 38 nodes had no graduated RTT band,
-  17 of the 20 routed ones among them. One node's round trips ran at
-  378–525 ms on six consecutive sweeps; it had re-routed 19 times in 14 days
-  and was never judged. Between 2026-11-13 and 2026-11-15 more mains nodes
-  with no graduated band ran 370–880 ms round trips, one of them 880 and then
-  837 ms on consecutive readings, with no verdict.
-- Where a confirmation probe can reach the node (a mains ping candidate, with
-  the auto-ping runner on), `rtt-degraded` now judges a node whose current
-  time-of-day band has not graduated against `RTT_CEILING_MS = 300`. The v0.78.0 start rule is unchanged:
-  the average must be over the line and the two newest raw round trips too,
-  and a lone slow one owes one confirmation probe. From a 30 ms average that
-  takes two round trips at 880 and 837 ms, three at 525 ms or five at 400 ms.
-  One frame over about 1.1 s lifts the average over on its own, but a breach
-  still needs the confirmation's answer to be slow too.
-- For the same nodes a graduated line above 300 ms is capped at it. No learned
-  line on the reference mesh is above 124 ms.
-- Per-route stratification and the route-change reset are unchanged, and so
-  is every verdict against a learned line under the ceiling. A node whose
-  average is over the ceiling is held out of its baselines, as a node over a
-  learned line already was (v0.78.0).
-- After a driver restart, a node whose band has not graduated is judged net
-  of its restart seed measured against what the driver averaged after the
-  seed, even when the band holds a few readings: their median is not a
-  yardstick. A slow node's own slow seed therefore does not hide it for hours,
-  and a seed decaying over a healthy link does not put a node over the
-  ceiling. For a graduated band the allowance is the v0.77.1 one, unchanged.
-- Replayed over 14 days of the reference mesh's coarse tier, the ceiling starts
-  37 breaches on 10 mains nodes, and none on the nine nodes that held one
-  direct route and a graduated normal throughout. The replay put their cost
-  at about 17 probes a day; live it was about 109 a day (corrected in 0.79.1).
-- Not covered: a slowdown under 300 ms on a node with no normal, and FLiRS or
-  sleeping nodes, which keep the learned-only rule.
-- `rtt-degraded` episodes feed the refresh trial, so ceiling breaches on mains
-  nodes join its randomized arms from this release.
-
-### Changed — the screens and HA say which line a node is judged against
-
-- The symptom card's yardstick row reads `ceiling 300ms · no normal for this
-  band yet` for a ceiling breach, and a capped baseline ends `· capped at
-  300ms`. The narrative names the line that was crossed.
-- DETAIL's `Norm RTT` row reads `still learning · Nd so far — held to the
-  300 ms ceiling meanwhile` where the ceiling applies (`no normal yet — held
-  to the 300 ms ceiling meanwhile` for a node the store has never folded), and
-  a capped line ends `· line capped at 300 ms`. Under an ungraduated band, a note gives the
-  coarse tier's route-change count: `The RTT normal restarts on every route
-  change: 12 in the last 7d`.
-- REMEDY's coverage counts gain `ceiling-only N`. With any such node, the
-  partial-coverage text says a degradation *may go unflagged* (it said
-  *would not be flagged*) and names how many the ceiling holds; the learning
-  headline reads *no detector has a learned yardstick yet*, and its text says
-  the *learned* detectors wait while the ceiling judges anyone.
-- `sensor.zwave_tui_engine` gains `rtt_ceiling_only`. `rtt_ready` is
-  unchanged; `detectors_total − rtt_ready − rtt_ceiling_only` nodes are not
-  judged on RTT.
-- `baselines.ts` said a route change resets nothing. It empties the node's
-  rssi and rtt bands and keeps its timeout rate; the comment now says so.
-
-### Tests
-
-- symptoms: `rttYardstick` for every basis, the ceiling's start, its
-  confirmation, its cap, a FLiRS node outside it, a node the store never
-  folded, the learned card's own wording, and the restart seed both ways,
-  for an empty band and for one with a few readings.
-- zwaveDataChurn: the coverage count and DETAIL's accessor use the
-  detector's own reachability rule, for a never-folded node too.
-- driverWsClient: both data-provider bridges forward `rttYardstick`.
-- detailScreen, remedyScreen and haStates for the rows, counts and attribute,
-  and the re-route span either side of 48 h.
-
-## 0.78.3
-
-The app is published as stable.
-
-### Changed — no "Experimental" badge on the app info page
-
-- `config.yaml` declared `stage: experimental`, so Home Assistant showed a
-  yellow "Experimental" chip on the app's info page. It now declares
-  `stage: stable`, the Supervisor's default, and the chip is gone.
-- The Supervisor reads an installed app's stage from the copy it saved at
-  install or update, not from the store.
-
-### Tests
-
-- The config contract test pins `stage: stable`.
-
-## 0.78.2
-
-The add-on's config folder is mapped under the map type's current name.
-
-### Fixed — a Supervisor warning at every store reload
-
-- Supervisor 2026.07.1 renamed the `addon_config` map type to
-  `app_config`. The old name still works, but the current Supervisor
-  logs `App 'Z-Wave TUI' uses legacy map type 'addon_config'; use
-  'app_config' instead.` each time it reloads the add-on store: 16 times
-  in three days on the reference host.
-- `config.yaml` now maps `app_config:rw`. The Supervisor mounts the same
-  folder at the same `/config` for both names, so the log archive keeps
-  its files, its backups and its path.
-- A Supervisor older than 2026.07.1 does not know the new name. From
-  2023.12.1 it drops the entry (from 2025.08.3 with a warning), and the
-  archive is then written inside the container, which backups miss and
-  every stop removes. 2023.12.0 and earlier reject the add-on. The stable
-  channel is on 2026.10.5.
-
-### Tests
-
-- The config contract test pins `app_config:rw` and fails on any legacy
-  map type (`addon_config`, `all_addon_configs`, `addons`).
 
 ## Older releases
 

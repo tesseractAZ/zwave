@@ -962,7 +962,8 @@ class ZwaveDataImpl implements ZwaveData {
    *  registry load (v0.79.5): one ask per id while it stays on the roster. */
   private readonly askedUnrecorded = new Set<number>();
   /** Each roster id's `ready` at the last poll (v0.79.5); an id off the
-   *  roster reads false, so it coming back ready is a false→true change. */
+   *  roster reads false, so it coming back ready inside the eviction dwell is
+   *  a false→true change (an evicted id asks through its eviction mark). */
   private readonly prevReady = new Map<number, boolean>();
   /** A ready false→true change waiting for the spacing (v0.79.5). */
   private readyLoadHeld = false;
@@ -3579,8 +3580,9 @@ class ZwaveDataImpl implements ZwaveData {
     }
     // v0.22: evict the node-id-keyed config cache whenever a node's backing HA
     // device_id CHANGES — not just when the node departs. This is the robust
-    // close for node-id reuse (a replace HA registers as another product, or a
-    // fast exclude→include, keeps the id but swaps the device: A→B) AND for a
+    // close for node-id reuse when a replace HA registers as another product
+    // keeps the id but swaps the device (A→B; an exclude→include gets back the
+    // device id HA restores, so forgetSwappedDevice drops its cache) AND for a
     // node that had no device at first Detail view and later gained one
     // (null→present) — a stale 'ready' or terminal 'unsupported' entry would
     // otherwise serve the wrong device or stay stuck forever (both confirmed by
@@ -3721,6 +3723,12 @@ class ZwaveDataImpl implements ZwaveData {
     this.firmwareByNode.delete(nodeId);
     this.sleeperLatch.delete(nodeId);
     this.dupDrops.delete(nodeId);
+    // Its cached configuration parameters too: a swap on the device id Home
+    // Assistant restores (other hardware ids) keeps the slot's device id, so
+    // the device-id prune above does not drop them, and the new product would
+    // be offered the old one's parameter numbers.
+    this.configByNode.delete(nodeId);
+    this.configFetchAt.delete(nodeId);
     this.trial?.dropOpen(nodeId, 'its device changed in Home Assistant', now);
     let lostOpen = 0;
     for (const ep of this.outcomes?.openEpisodes() ?? []) {
@@ -4412,11 +4420,19 @@ class ZwaveDataImpl implements ZwaveData {
       this.configByNode.set(nodeId, { status: 'unsupported', params: [], error: 'no HA device for this node' });
       return;
     }
-    this.configByNode.set(nodeId, { status: 'loading', params: [] });
+    // The answer is stored only while this fetch's own entry is still the
+    // cache's (v0.79.5): a device change, a device swap, a departure, a network
+    // reset or a write's invalidate drops the entry, so an answer for the old
+    // device that lands after it — or for a fetch a later one superseded — is
+    // not served as the node's parameters, and the next request asks again.
+    const pending: ConfigParamsResult = { status: 'loading', params: [] };
+    this.configByNode.set(nodeId, pending);
     try {
       const raw = await this.client.send<Record<string, RawConfigParam>>({ type: 'zwave_js/get_config_parameters', device_id: devId });
+      if (this.configByNode.get(nodeId) !== pending) return;
       this.configByNode.set(nodeId, { status: 'ready', params: mapConfigParams(raw) });
     } catch (e) {
+      if (this.configByNode.get(nodeId) !== pending) return;
       this.configByNode.set(nodeId, { status: 'error', params: [], error: errMsg(e) });
       this.log(`config params fetch failed for node ${nodeId}: ${errMsg(e)}`);
     }

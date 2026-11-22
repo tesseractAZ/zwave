@@ -9124,6 +9124,18 @@ const MUTANTS = [
     find: "        this.reconnectsAtAsk = this.reconnects;\n",
     repl: "",
     what: "a poll that asks for a load records the reconnects it covers: one load per reconnect, not one a minute" },
+  { id: "config-dropped-at-swap", file: "src/zwave/zwaveData.ts", tests: ["deviceSwapSim"],
+    find: "    this.configByNode.delete(nodeId);\n    this.configFetchAt.delete(nodeId);\n    this.trial?.dropOpen(nodeId, 'its device changed in Home Assistant', now);",
+    repl: "    this.trial?.dropOpen(nodeId, 'its device changed in Home Assistant', now);",
+    what: "a swap on the device id Home Assistant restores drops the node's cached configuration parameters" },
+  { id: "config-answer-for-dropped-fetch", file: "src/zwave/zwaveData.ts", tests: ["deviceSwapSim"],
+    find: "      if (this.configByNode.get(nodeId) !== pending) return;\n      this.configByNode.set(nodeId, { status: 'ready', params: mapConfigParams(raw) });",
+    repl: "      this.configByNode.set(nodeId, { status: 'ready', params: mapConfigParams(raw) });",
+    what: "a configuration answer for a fetch the cache dropped meanwhile is not stored" },
+  { id: "config-failure-for-dropped-fetch", file: "src/zwave/zwaveData.ts", tests: ["deviceSwapSim"],
+    find: "      if (this.configByNode.get(nodeId) !== pending) return;\n      this.configByNode.set(nodeId, { status: 'error', params: [], error: errMsg(e) });",
+    repl: "      this.configByNode.set(nodeId, { status: 'error', params: [], error: errMsg(e) });",
+    what: "a configuration fetch failure for a fetch the cache dropped meanwhile is not stored" },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

@@ -287,21 +287,33 @@ node a confirmation probe can reach against a fixed 300 ms ceiling meanwhile,
 > another, and since v0.47.0 a route that cannot be seen does not count as a
 > change. A node this add-on removes (`removeFailed`), or absent from the roster
 > for 5 minutes, loses its baselines. `replace_failed_node` keeps the id on the
-> roster: since v0.79.5 a replacement Home Assistant registers as another
-> device (another product) loses the old device's baselines, evidence, dwells
-> and open episodes at the next registry load while the add-on keeps running
-> (after an add-on restart before that load there is nothing to compare
-> against, and they stay), and one of the same product is the same device and
-> keeps them. The device compared is the node's own (a `zwave_js` identifier
-> exactly `<home_id>-<node_id>`), whatever the list order: an endpoint child or
-> the orphan a replace leaves maps its entities to the node but stands for it
+> roster: since v0.79.5 a node whose own device changes in Home Assistant
+> loses the old device's baselines, evidence, dwells and open episodes at the
+> registry load that shows it while the add-on keeps running (the roster asks
+> for one when the node becomes ready; after an add-on restart before that
+> load there is nothing to compare against, and they stay). A change is the
+> device id or the hardware id (`<home_id>-<node_id>-<mfr>:<type>:<id>`)
+> differing from the record of the last load that listed the node's own
+> device: a replacement by another product, or another product included on
+> the id inside the eviction dwell (Home Assistant gives it back the device id
+> it deleted at the exclusion). One of the same product is the same device
+> and keeps them, and so does one carrying a hardware id the node already had
+> since it last left the network. An interview that misreads the hardware ids
+> is filed under a new device too, which neither Home Assistant nor the
+> add-on tells from a replacement: a reset once for each misread value while
+> the add-on runs, none when the correct read comes before the next load. The
+> device compared is the node's own (a `zwave_js` identifier exactly
+> `<home_id>-<node_id>`), whatever the list order: an endpoint child or the
+> orphan Home Assistant leaves maps its entities to the node but stands for it
 > only while the node's own device is not listed (before v0.79.5 the last
-> device listed did). A home-id mismatch does not decide a re-baseline on its
-> own: the learned stores wipe memory, stop saving and ask the operator to
-> start fresh, keep, or resume an archive (`homeTag.ts`, DOCS §11.13). Of the
-> counting series only the timeout rate is learned: flaps and route changes are
-> judged on absolute counts (`dead-flap`, `route-churn`, §3.3), and `dDropTx`
-> has no baseline.
+> device listed did). Another config entry's devices are not joined, nor,
+> once the home id is known and any of that network's own devices is listed,
+> another network's (DOCS §2.3). A home-id mismatch does not decide a
+> re-baseline on its own: the learned stores wipe memory, stop saving and ask
+> the operator to start fresh, keep, or resume an archive (`homeTag.ts`, DOCS
+> §11.13). Of the counting series only the timeout rate is learned: flaps and
+> route changes are judged on absolute counts (`dead-flap`, `route-churn`,
+> §3.3), and `dDropTx` has no baseline.
 > The relative timeout test is a proxy, not a Poisson/binomial tail: the
 > window rate must reach max(3 × baseline, 7.5 %) and exceed the baseline by
 > 2 points.

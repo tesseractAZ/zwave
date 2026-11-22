@@ -3,6 +3,128 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.79.0
+
+`rtt-degraded` judges a node with no learned RTT normal against a fixed
+300 ms ceiling.
+
+### Fixed — re-routing nodes were never judged on round-trip time
+
+- The RTT normal is learned per route. A route change empties the node's six
+  time-of-day bands, and a band graduates after about 23 fresh readings:
+  about 12 days for a node that only the 2-hourly liveness sweep talks to. A
+  node that re-routes even once a week never graduates, and the routed nodes
+  re-route the most.
+- On the reference mesh (2026-11-13) 23 of 38 nodes had no graduated RTT band,
+  17 of the 20 routed ones among them. One node's round trips ran at
+  378–525 ms on six consecutive sweeps; it had re-routed 19 times in 14 days
+  and was never judged. Between 2026-11-13 and 2026-11-15 more mains nodes
+  with no graduated band ran 370–880 ms round trips, one of them 880 and then
+  837 ms on consecutive readings, with no verdict.
+- Where a confirmation probe can reach the node (a mains ping candidate, with
+  the auto-ping runner on), `rtt-degraded` now judges a node whose current
+  time-of-day band has not graduated against `RTT_CEILING_MS = 300`. The v0.78.0 start rule is unchanged:
+  the average must be over the line and the two newest raw round trips too,
+  and a lone slow one owes one confirmation probe. From a 30 ms average that
+  takes two round trips at 880 and 837 ms, three at 525 ms or five at 400 ms.
+  One frame over about 1.1 s lifts the average over on its own, but a breach
+  still needs the confirmation's answer to be slow too.
+- For the same nodes a graduated line above 300 ms is capped at it. No learned
+  line on the reference mesh is above 124 ms.
+- Per-route stratification and the route-change reset are unchanged, and so
+  is every verdict against a learned line under the ceiling. A node whose
+  average is over the ceiling is held out of its baselines, as a node over a
+  learned line already was (v0.78.0).
+- After a driver restart, a node whose band has not graduated is judged net
+  of its restart seed measured against what the driver averaged after the
+  seed, even when the band holds a few readings: their median is not a
+  yardstick. A slow node's own slow seed therefore does not hide it for hours,
+  and a seed decaying over a healthy link does not put a node over the
+  ceiling. For a graduated band the allowance is the v0.77.1 one, unchanged.
+- Replayed over 14 days of the reference mesh's coarse tier, the ceiling starts
+  37 breaches on 10 mains nodes, and none on the nine nodes that held one
+  direct route and a graduated normal throughout. The replay put their cost
+  at about 17 probes a day; live it was about 109 a day (corrected in 0.79.1).
+- Not covered: a slowdown under 300 ms on a node with no normal, and FLiRS or
+  sleeping nodes, which keep the learned-only rule.
+- `rtt-degraded` episodes feed the refresh trial, so ceiling breaches on mains
+  nodes join its randomized arms from this release.
+
+### Changed — the screens and HA say which line a node is judged against
+
+- The symptom card's yardstick row reads `ceiling 300ms · no normal for this
+  band yet` for a ceiling breach, and a capped baseline ends `· capped at
+  300ms`. The narrative names the line that was crossed.
+- DETAIL's `Norm RTT` row reads `still learning · Nd so far — held to the
+  300 ms ceiling meanwhile` where the ceiling applies (`no normal yet — held
+  to the 300 ms ceiling meanwhile` for a node the store has never folded), and
+  a capped line ends `· line capped at 300 ms`. Under an ungraduated band, a note gives the
+  coarse tier's route-change count: `The RTT normal restarts on every route
+  change: 12 in the last 7d`.
+- REMEDY's coverage counts gain `ceiling-only N`. With any such node, the
+  partial-coverage text says a degradation *may go unflagged* (it said
+  *would not be flagged*) and names how many the ceiling holds; the learning
+  headline reads *no detector has a learned yardstick yet*, and its text says
+  the *learned* detectors wait while the ceiling judges anyone.
+- `sensor.zwave_tui_engine` gains `rtt_ceiling_only`. `rtt_ready` is
+  unchanged; `detectors_total − rtt_ready − rtt_ceiling_only` nodes are not
+  judged on RTT.
+- `baselines.ts` said a route change resets nothing. It empties the node's
+  rssi and rtt bands and keeps its timeout rate; the comment now says so.
+
+### Tests
+
+- symptoms: `rttYardstick` for every basis, the ceiling's start, its
+  confirmation, its cap, a FLiRS node outside it, a node the store never
+  folded, the learned card's own wording, and the restart seed both ways,
+  for an empty band and for one with a few readings.
+- zwaveDataChurn: the coverage count and DETAIL's accessor use the
+  detector's own reachability rule, for a never-folded node too.
+- driverWsClient: both data-provider bridges forward `rttYardstick`.
+- detailScreen, remedyScreen and haStates for the rows, counts and attribute,
+  and the re-route span either side of 48 h.
+
+## 0.78.3
+
+The app is published as stable.
+
+### Changed — no "Experimental" badge on the app info page
+
+- `config.yaml` declared `stage: experimental`, so Home Assistant showed a
+  yellow "Experimental" chip on the app's info page. It now declares
+  `stage: stable`, the Supervisor's default, and the chip is gone.
+- The Supervisor reads an installed app's stage from the copy it saved at
+  install or update, not from the store.
+
+### Tests
+
+- The config contract test pins `stage: stable`.
+
+## 0.78.2
+
+The add-on's config folder is mapped under the map type's current name.
+
+### Fixed — a Supervisor warning at every store reload
+
+- Supervisor 2026.07.1 renamed the `addon_config` map type to
+  `app_config`. The old name still works, but the current Supervisor
+  logs `App 'Z-Wave TUI' uses legacy map type 'addon_config'; use
+  'app_config' instead.` each time it reloads the add-on store: 16 times
+  in three days on the reference host.
+- `config.yaml` now maps `app_config:rw`. The Supervisor mounts the same
+  folder at the same `/config` for both names, so the log archive keeps
+  its files, its backups and its path.
+- A Supervisor older than 2026.07.1 does not know the new name. From
+  2023.12.1 it drops the entry (from 2025.08.3 with a warning), and the
+  archive is then written inside the container, which backups miss and
+  every stop removes. 2023.12.0 and earlier reject the add-on. The stable
+  channel is on 2026.10.5.
+
+### Tests
+
+- The config contract test pins `app_config:rw` and fails on any legacy
+  map type (`addon_config`, `all_addon_configs`, `addons`).
+
 ## 0.78.1
 
 A new SSH host key is checked to parse back before it is saved.

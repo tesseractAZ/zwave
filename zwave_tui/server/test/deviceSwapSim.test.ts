@@ -159,6 +159,18 @@ interface Sim {
   statusGate?: Gate | null;
   /** Holds the next device list; its rows are read when the request arrives. */
   devicesGate?: Gate | null;
+  /** Holds the next get_config_parameters answer (v0.79.5). */
+  configGate?: Gate | null;
+  /** get_config_parameters fails with this (after its gate) while set. */
+  configErr?: string;
+}
+
+/** One configuration parameter, labelled with the product the device id's
+ *  node 60 holds when the request arrives. */
+function configOf(s: Sim, devId: unknown): Record<string, unknown> {
+  const dev = s.reg.devices.get(String(devId));
+  const hw = dev?.ids.find((i) => /^\d+-\d+-\d+:\d+:\d+$/.test(i)) ?? 'none';
+  return { [`60-112-0-1`]: { property: 1, value: 0, metadata: { label: `param of ${hw}`, writeable: true } } };
 }
 
 function listRows(s: Sim): Array<Record<string, unknown>> {
@@ -180,6 +192,13 @@ function fakeHa(s: Sim): HaWsClient & { fireReady(): void } {
         return rows;
       }
       case 'config/entity_registry/list': return [];
+      case 'zwave_js/get_config_parameters': {
+        const raw = configOf(s, cmd.device_id);
+        const g = s.configGate;
+        if (g) { s.configGate = null; g.arrived = true; await g.wait; }
+        if (s.configErr) throw new Error(s.configErr);
+        return raw;
+      }
       case 'get_states': return [];
       case 'zwave_js/network_status': {
         const g = s.statusGate;
@@ -717,5 +736,85 @@ test('registry loads (v0.79.5): two different misreads in one run cost two reset
     s.zw.reinterview(60, P1);
     await r.reconnect();
     assert.equal(r.swaps(60), 2, 'a value already seen: none');
+  });
+});
+
+/* ── The node's cached configuration parameters across a swap (v0.79.5) ───── */
+
+test('config parameters (v0.79.5): a swap on the device id Home Assistant restores, with other hardware ids, drops the node\'s cached parameters — the new product is not offered the old one\'s', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    r.zd.requestConfigParams(60);
+    await waitFor(() => r.zd.configParams(60).status === 'ready');
+    assert.equal(r.zd.configParams(60).params[0]?.label, `param of ${HOME}-60-${P1}`, 'precondition: the old product\'s parameters cached');
+    const devBefore = r.zd.deviceIdOf(60);
+    s.zw.removeNode(60, 'excluded');
+    await r.poll();
+    s.zw.add(60, P3, 4); // HA restores the deleted device id with P3's hardware id
+    await r.poll();
+    assert.equal(r.swaps(60), 1, 'precondition: a swap');
+    assert.equal(r.zd.deviceIdOf(60), devBefore, 'precondition: the same device id, so the device-id prune does not fire');
+    assert.equal(r.zd.configParams(60).status, 'idle', 'the old product\'s parameters are gone');
+    r.zd.requestConfigParams(60);
+    await waitFor(() => r.zd.configParams(60).status === 'ready');
+    assert.equal(r.zd.configParams(60).params[0]?.label, `param of ${HOME}-60-${P3}`, 'asked again: the new product\'s');
+  });
+});
+
+test('config parameters (v0.79.5): an answer for the old device that lands after the node\'s device changed is not stored — the next request asks again', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    const g = gate();
+    s.configGate = g;
+    r.zd.requestConfigParams(60);
+    await waitFor(() => g.arrived);
+    assert.equal(r.zd.configParams(60).status, 'loading', 'precondition: the fetch is out');
+    // replace_failed_node by another product: added, read while interviewing, then ready.
+    s.zw.removeNode(60, 'replaced');
+    s.zw.addPending(60);
+    await r.poll();
+    s.zw.interview(60, P3, 4);
+    await r.poll();
+    assert.equal(r.swaps(60), 1, 'precondition: a swap');
+    g.open(); // the old device's answer lands now
+    await sleep(50);
+    assert.equal(r.zd.configParams(60).status, 'idle', 'not stored as the new device\'s parameters');
+    r.zd.requestConfigParams(60);
+    await waitFor(() => r.zd.configParams(60).status === 'ready');
+    assert.equal(r.zd.configParams(60).params[0]?.label, `param of ${HOME}-60-${P3}`);
+  });
+});
+
+test('config parameters (v0.79.5): an answer for a fetch a write invalidated is not stored — the parameters are asked again after the write', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    const g = gate();
+    s.configGate = g;
+    r.zd.requestConfigParams(60);
+    await waitFor(() => g.arrived);
+    r.zd.invalidateConfigParams(60); // a set_config_parameter write succeeded meanwhile
+    g.open();
+    await sleep(50);
+    assert.equal(r.zd.configParams(60).status, 'idle', 'the answer from before the write is dropped');
+  });
+});
+
+test('config parameters (v0.79.5): a failure for a fetch the node\'s device change dropped is not stored either — no error is shown for the new device', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    const g = gate();
+    s.configGate = g;
+    s.configErr = 'node 60 is not ready';
+    r.zd.requestConfigParams(60);
+    await waitFor(() => g.arrived);
+    s.zw.removeNode(60, 'replaced');
+    s.zw.addPending(60);
+    await r.poll();
+    s.zw.interview(60, P3, 4);
+    await r.poll();
+    assert.equal(r.swaps(60), 1, 'precondition: a swap');
+    g.open();
+    await sleep(50);
+    assert.equal(r.zd.configParams(60).status, 'idle', 'the old device\'s failure is not the new one\'s');
   });
 });
