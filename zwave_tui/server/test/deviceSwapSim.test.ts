@@ -818,3 +818,35 @@ test('config parameters (v0.79.5): a failure for a fetch the node\'s device chan
     assert.equal(r.zd.configParams(60).status, 'idle', 'the old device\'s failure is not the new one\'s');
   });
 });
+
+test('config parameters (v0.79.5): a replacement starting its interview is not offered the failed product\'s parameters — a ready change drops the cache, whatever the registry shows yet', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    r.zd.requestConfigParams(60);
+    await waitFor(() => r.zd.configParams(60).status === 'ready');
+    assert.equal(r.zd.configParams(60).params[0]?.label, `param of ${HOME}-60-${P1}`, 'precondition: the failed product\'s parameters cached');
+    // replace_failed_node by another product: the new node is added and read while interviewing.
+    s.zw.removeNode(60, 'replaced');
+    s.zw.addPending(60);
+    await r.poll();
+    assert.equal(r.zd.snapshot().find((x) => x.nodeId === 60)?.ready, false, 'precondition: read while interviewing');
+    assert.equal(r.zd.configParams(60).status, 'idle', 'the failed product\'s parameters are gone at once');
+  });
+});
+
+test('config parameters (v0.79.5): parameters fetched while a node was interviewing are asked again once it reads ready', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.zw.addPending(61);
+    await r.poll();
+    r.zd.requestConfigParams(61);
+    await waitFor(() => r.zd.configParams(61).status === 'ready');
+    assert.equal(r.zd.configParams(61).params[0]?.label, 'param of none', 'precondition: fetched before its hardware ids were known');
+    s.zw.interview(61, P3, 4);
+    await r.poll();
+    assert.equal(r.zd.configParams(61).status, 'idle', 'the interview done drops what was read so far');
+    r.zd.requestConfigParams(61);
+    await waitFor(() => r.zd.configParams(61).status === 'ready');
+    assert.equal(r.zd.configParams(61).params[0]?.label, `param of ${HOME}-61-${P3}`, 'asked again: the interviewed product\'s');
+  });
+});

@@ -9136,6 +9136,18 @@ const MUTANTS = [
     find: "      if (this.configByNode.get(nodeId) !== pending) return;\n      this.configByNode.set(nodeId, { status: 'error', params: [], error: errMsg(e) });",
     repl: "      this.configByNode.set(nodeId, { status: 'error', params: [], error: errMsg(e) });",
     what: "a configuration fetch failure for a fetch the cache dropped meanwhile is not stored" },
+  { id: "config-dropped-at-ready-change", file: "src/zwave/zwaveData.ts", tests: ["deviceSwapSim"],
+    find: "        if (readyWas != null && readyWas !== n.ready) { this.configByNode.delete(n.nodeId); this.configFetchAt.delete(n.nodeId); }\n",
+    repl: "",
+    what: "a node's cached configuration parameters go with a change of its ready" },
+  { id: "config-dropped-when-interview-starts", file: "src/zwave/zwaveData.ts", tests: ["deviceSwapSim"],
+    find: "        if (readyWas != null && readyWas !== n.ready) { this.configByNode.delete(n.nodeId); this.configFetchAt.delete(n.nodeId); }\n",
+    repl: "        if (readyWas === false && n.ready) { this.configByNode.delete(n.nodeId); this.configFetchAt.delete(n.nodeId); }\n",
+    what: "a replacement starting its interview is not offered the failed product's parameters" },
+  { id: "config-dropped-when-interview-ends", file: "src/zwave/zwaveData.ts", tests: ["deviceSwapSim"],
+    find: "        if (readyWas != null && readyWas !== n.ready) { this.configByNode.delete(n.nodeId); this.configFetchAt.delete(n.nodeId); }\n",
+    repl: "        if (readyWas === true && !n.ready) { this.configByNode.delete(n.nodeId); this.configFetchAt.delete(n.nodeId); }\n",
+    what: "parameters fetched while a node was interviewing are asked again once it reads ready" },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

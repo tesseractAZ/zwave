@@ -93,12 +93,14 @@ in progress at the update is not read as a driver start. The schema of
   correct read comes before the next load. The correct read that files it
   back is no swap while the add-on runs; an add-on restart between the two
   costs a second reset.
-- A swap drops the node's cached configuration parameters too, also when
-  only the hardware id changed (the device id Home Assistant restores kept
-  them before), and an answer or a failure for a configuration fetch the
-  cache dropped meanwhile (a device change, a departure, a write) is no
-  longer stored as the node's: Detail and the Actions menu do not offer the
-  old product's parameter numbers to the new device.
+- A node's cached configuration parameters now go with any change of its
+  `ready` on the roster and with a swap, also when only the hardware id
+  changed (the device id Home Assistant restores kept them before), and an
+  answer or a failure for a configuration fetch the cache dropped meanwhile
+  (a device change, a departure, a write) is no longer stored as the node's:
+  Detail and the Actions menu do not offer a replacement, from the start of
+  its interview, the failed product's parameter numbers, and parameters read
+  mid-interview are asked again once the node reads ready.
 - After a replacement, or another product included on the freed id, the
   node's statistics and status feeds stay bound to the old node (inferred,
   below) until the next rebuild of the feeds (a Home Assistant reconnect, the
@@ -171,10 +173,10 @@ in progress at the update is not read as a driver start. The schema of
 
 ### Tests
 
-- 1,850 tests, 81 new; 1,939 mutation-harness entries (18 labelled
-  equivalent, 1 of them new): 142 new, 1 retired with the check it covered (a
-  stop cleared an open peer close), 20 re-anchored; the other 161 new and
-  re-anchored entries are all killed.
+- 1,852 tests, 83 new; 1,942 mutation-harness entries (18 labelled
+  equivalent, 1 of them new): 145 new, 1 retired with the check it covered (a
+  stop cleared an open peer close), 20 re-anchored; the full harness kills
+  every entry not labelled equivalent.
 
 ## 0.79.4
 

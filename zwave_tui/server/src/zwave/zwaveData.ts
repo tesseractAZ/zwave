@@ -349,10 +349,11 @@ interface OwnRecord {
 }
 
 /** The least time between two registry loads asked for by a node's ready
- *  false→true change or by a poll succeeding after failed ones (v0.79.5). One
- *  asked sooner waits for the first poll past it, so a node whose ready flaps,
- *  or a link that keeps failing, costs one such load a minute at most (a
- *  reconnect's own load is apart from these). */
+ *  false→true change, by a poll succeeding after failed ones, or by the first
+ *  poll that succeeds after a reconnect (v0.79.5). One asked sooner waits for
+ *  the first poll past it, so a node whose ready flaps, or a link that keeps
+ *  failing, costs one such load a minute at most (a reconnect's own load at
+ *  onReady is apart from these). */
 const ROSTER_LOAD_SPACING_MS = 60_000;
 
 /**
@@ -3088,6 +3089,13 @@ class ZwaveDataImpl implements ZwaveData {
       // ROSTER_LOAD_SPACING_MS, one asked sooner waits for the first poll
       // past it (and the engine may read the node before that load).
       for (const n of nodes) {
+        // A node's cached configuration parameters go with any change of its
+        // ready (v0.79.5): a replacement starting its interview (false) must
+        // not be offered the failed product's, and one fetched while it was
+        // interviewing holds only what was read so far, so the interview done
+        // (true) asks again. A fetch still out is discarded (fetchConfigParams).
+        const readyWas = this.prevReady.get(n.nodeId);
+        if (readyWas != null && readyWas !== n.ready) { this.configByNode.delete(n.nodeId); this.configFetchAt.delete(n.nodeId); }
         if (n.ready && this.prevReady.get(n.nodeId) === false) this.readyLoadHeld = true;
         this.prevReady.set(n.nodeId, n.ready);
       }
@@ -3690,9 +3698,11 @@ class ZwaveDataImpl implements ZwaveData {
    *  rebuild of the feeds (an HA reconnect, the self-heal or a re-arm). Home
    *  Assistant bound them to the node object it resolved when they were made,
    *  and a node replaced or included is another node object there (inferred),
-   *  so until that rebuild the new device has no statistics feed, and the
-   *  roster's flap-count fallback stays off for it, the id still reading
-   *  subscribed: a known limit. The old device's state is dropped at the
+   *  so after a replacement or an inclusion the new device has no statistics
+   *  feed until that rebuild, and the roster's flap-count fallback stays off
+   *  for it, the id still reading subscribed: a known limit. A node whose
+   *  interview misread its hardware ids is the same node object, and its
+   *  feeds keep delivering. The old device's state is dropped at the
    *  load that shows the change, so what the new device built before that
    *  load goes too: the roster asks for one when the node becomes ready
    *  (refresh). The change is one of:
