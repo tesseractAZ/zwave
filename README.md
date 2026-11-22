@@ -56,7 +56,7 @@ health endpoint.
 | --- | --- |
 | Server | about 32,000 lines of TypeScript; 9 screens; SSH, browser and Home Assistant entity interfaces |
 | Detection | 14 per-node detectors, 2 cross-node correlations, controller serial-link health |
-| Verification | 1,769 tests; a mutation-testing harness of 1,798 hand-written mutants (17 labelled equivalent), run in full on each release |
+| Verification | 1,853 tests; a mutation-testing harness of 1,942 hand-written mutants (18 labelled equivalent), run in full on each release |
 | Integration | Home Assistant Core WebSocket (roster, statistics, gated actions) plus a read-only Z-Wave JS driver WebSocket (noise floor, capabilities, log stream) |
 
 ![The Overview screen: a live node table sorted worst-health-first, with per-node health scores, SNR margin, RTT, timeout rate, hop count, data rate and triage flags](docs/screenshots/overview.svg)
@@ -405,7 +405,7 @@ re-asserted every 30 seconds:
 | `sensor.zwave_tui_engine` | `awaiting-identity-decision` / `disabled` / `no-auto-ping` / `running` / `suppressed:<why>` | `detectors_ready`, `detectors_unmeasured`, `detectors_total`, `rtt_ready`, `rtt_ceiling_only`, `paused_by`, `paused_since`, `auto_remediation`, `sleepers_watched`, `sleepers_total`, `refresh_trial` and its six counts (`refresh_trial_treated`, `…_treated_improved`, `…_treated_deaths`, `refresh_trial_held`, `…_held_improved`, `…_held_deaths`), and since v0.76.1 the driver log lane: `driver_log_level`, `s2_lane`, `silence_watchdog` |
 | `sensor.zwave_tui_summons` | count of nodes needing a person | `node_ids` |
 | `sensor.zwave_tui_symptoms` | live symptom count | `critical`, `warning`, `kinds` |
-| `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind or before the roster has loaded) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |
+| `sensor.zwave_tui_route_failures` | route failures in the last 7 days (`unknown` while the feed is blind or while the roster holds only the controller) | `links` (ranked), `node_ids`, `last_failure_at`, `lower_bound` |
 | `sensor.zwave_tui_recommendation` | `summons` / `action` / `physical` / `none` | `node_id`, `node_name`, `symptom`, `since`, `headline`, `recommendation`, `action`, `automatic` (always `false`), … |
 
 The engine sensor's states are listed in the order the code checks them:
@@ -415,11 +415,20 @@ engine is learning but auto-ping is not running, because `auto_ping_enabled` or
 `write_actions_enabled` is off — the default install), and `running` /
 `suppressed:<why>`, which appear only with both switches on.
 
-`GET /api/health` carries the same values — built from the same function, so a
-monitor polling HTTP and an automation triggering on state cannot disagree about
-the mesh. `ok` there stays a pure **transport** verdict and the HTTP status code
-still tracks it alone: a degraded mesh is not a broken add-on, and conflating
-them would make an existing uptime check flap on a single symptom.
+`GET /api/health` carries the same values — built from the same function behind
+the same gate, so a monitor polling HTTP and an automation triggering on state
+agree about the mesh, Home Assistant's copy up to one 30-second publish behind
+while its posts succeed (longer while Home Assistant answers slowly or refuses
+them). After a restart, until the first roster and the engine's first tick,
+Home Assistant is sent nothing — it keeps what it last held across a restart
+of the add-on alone, and after a host reboot or a restart of Home Assistant it
+has no state for these entities until the next publish (inferred: Home
+Assistant does not restore states posted through its REST API) — and
+`/api/health` reports `conclusionsReady: false`, `degraded: null` and an empty
+`engine` (v0.79.5). `ok` there stays a pure
+**transport** verdict and the HTTP status code still tracks it alone: a
+degraded mesh is not a broken add-on, and conflating them would make an
+existing uptime check flap on a single symptom.
 
 **`degraded` is deliberately not "any symptom exists."** A warning-level symptom
 on one node is the resting state of a real mesh, and an alert that is always on

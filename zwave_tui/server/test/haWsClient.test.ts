@@ -45,7 +45,9 @@ interface MockHa {
 
 /** A minimal mock HA Core: real WS server, real auth handshake. */
 async function mockHa(): Promise<MockHa> {
-  const wss = new WebSocketServer({ port: 0 });
+  // 127.0.0.1, the address the client dials: a wildcard bind can share its
+  // port with another process's 127.0.0.1 listener (see _driverWsMock.ts).
+  const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   await new Promise<void>((r) => wss.once('listening', () => r()));
   const m: MockHa = {
     url: `ws://127.0.0.1:${(wss.address() as { port: number }).port}`,

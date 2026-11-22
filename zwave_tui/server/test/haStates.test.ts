@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStates, startHaStates, failureReason, ENTITY_DEGRADED, ENTITY_SUMMONS, ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ENTITY_RECOMMENDATION, ROUTE_FAIL_WINDOW_MS } from '../src/haStates';
+import { buildStates, startHaStates, failureReason, conclusionsReady, healthConclusions, ENTITY_DEGRADED, ENTITY_SUMMONS, ENTITY_ENGINE, ENTITY_ROUTE_FAILURES, ENTITY_RECOMMENDATION, ROUTE_FAIL_WINDOW_MS } from '../src/haStates';
 import type { DataProvider, Symptom } from '../src/types';
 
 const AP = (over: Record<string, unknown> = {}) => ({
@@ -556,4 +556,50 @@ test('nothing is published before the first roster: the engine sensor read "0 of
     await pub.publishNow();
     assert.ok(posts > 0, 'ready: everything is sent');
   } finally { pub.stop(); }
+});
+
+test('/api/health waits for the publisher\'s gate: before the engine has run, degraded is null and the engine half empty — not off, and not on either (v0.79.5)', () => {
+  const eng = { enabled: true, ready: 3, total: 38, timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 22, rttCeiling: 0, rssiReady: 22, band: 0, bands: 6 };
+  let ran = false;
+  let syms: Symptom[] = [];
+  const d = data({ engineStatus: () => ({ ...eng, ran }), symptoms: () => syms });
+  const bo = { writeActions: false, startedAt: 0 };
+  assert.deepEqual(healthConclusions(d, 1e12, bo), { conclusionsReady: false, degraded: null, degradedReason: 'not judged yet — waiting for the first roster and engine tick', engine: {} });
+  syms = [sym({ severity: 'crit' })];
+  assert.equal(healthConclusions(d, 1e12, bo).degraded, null, 'nothing is judged before the first tick, whatever the list holds');
+  ran = true;
+  const after = healthConclusions(d, 1e12, bo);
+  assert.equal(after.conclusionsReady, true);
+  assert.equal(after.degraded, true);
+  assert.equal(after.degradedReason, '1 critical symptom(s)');
+  assert.deepEqual(Object.keys(after.engine).sort(), buildStates(d, 1e12, bo).map((s) => s.entity.split('.')[1]).sort());
+  assert.equal(after.engine.zwave_tui_degraded!.state, 'on');
+  syms = [];
+  assert.equal(healthConclusions(d, 1e12, bo).degraded, false, 'a healthy mesh, once judged');
+  assert.equal(healthConclusions(d, 1e12, bo).degradedReason, 'none');
+});
+
+test('/api/health and the publisher share one gate: the roster and the first tick, with an absent `ran` read as run (v0.79.5)', async () => {
+  const eng = { enabled: true, ready: 3, total: 38, timeoutReady: 38, timeoutWindowBlind: 0, rttReady: 22, rttCeiling: 0, rssiReady: 22, band: 0, bands: 6 };
+  const cases: Array<{ ready: boolean; ran: boolean | undefined; want: boolean }> = [
+    { ready: false, ran: true, want: false },
+    { ready: true, ran: false, want: false },
+    { ready: false, ran: false, want: false },
+    { ready: true, ran: true, want: true },
+    { ready: true, ran: undefined, want: true },
+  ];
+  for (const c of cases) {
+    const d = data({ ready: () => c.ready, engineStatus: () => (c.ran === undefined ? eng : { ...eng, ran: c.ran }) });
+    assert.equal(conclusionsReady(d), c.want, JSON.stringify(c));
+    assert.equal(healthConclusions(d, 1e12, { writeActions: false, startedAt: 0 }).conclusionsReady, c.want, JSON.stringify(c));
+    let posts = 0;
+    const pub = startHaStates({
+      data: d, baseUrl: 'http://x', token: 't', writeActions: false, intervalMs: 3_600_000,
+      fetchImpl: (async () => { posts += 1; return { ok: true } as Response; }) as never,
+    });
+    try {
+      await pub.publishNow();
+    } finally { pub.stop(); }
+    assert.equal(posts > 0, c.want, `publisher: ${JSON.stringify(c)}`);
+  }
 });

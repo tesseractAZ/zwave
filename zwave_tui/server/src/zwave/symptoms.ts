@@ -21,7 +21,7 @@ import type { SleeperWatch } from './missedReport';
 import { repeatsFrames, type Burst } from './repeatedFrames';
 import type { NodeSnapshot, ControllerSnapshot, NodeStatus } from '../types';
 import { NodeStatus as NS } from '../types';
-import { rawRttFrames, type EvidenceSample, type CoarseBucket, type ControllerSample, type NodeCoverage, type RateRun, type RttSeed, type RttFrame } from './evidenceStore';
+import { rawRttFrames, type EvidenceSample, type ControllerSample, type NodeCoverage, type RateRun, type RttSeed, type RttFrame } from './evidenceStore';
 import type { BaselineStore, ContNormal } from './baselines';
 import { medianNoiseFloor, DEFAULT_NOISE_FLOOR } from './health';
 
@@ -148,15 +148,19 @@ export interface DwellEntry {
   latched?: true;
   /** node-down (v0.79.3): judged a start death once, so it stays one — a
    *  later driver restart, or a deploy that carries only the newest, cannot
-   *  shorten its dwell to the 5-minute one. */
+   *  shorten its dwell to the 5-minute one. Its absence is a verdict too
+   *  (v0.79.5): the host's boot is judged at the death's first Dead reading
+   *  only, so a dwell without it is not judged against the boot again. */
   start?: true;
 }
 export type SymptomState = Map<string, DwellEntry>;
 
 /** A span the Z-Wave JS driver started within (v0.79.3): `from` ≤ the start ≤
  *  `to`. A host boot is a point (from = to); a restart seen over the driver
- *  link runs from the server ending the link to the next handshake. */
-export interface DriverStart { from: number; to: number }
+ *  link runs from the server ending the link to the next handshake. `boot`
+ *  marks the host's boot (v0.79.5), which node-down judges at a death's first
+ *  Dead reading only. */
+export interface DriverStart { from: number; to: number; boot?: true }
 
 /** One node's node-down dwell, carried across a restart of this add-on
  *  (v0.79.3). */
@@ -171,7 +175,6 @@ export interface DetectInput {
   latest: (nodeId: number) => EvidenceSample | undefined;
   /** Recent fine ring per node (for windowed rates + flaps). */
   recent: (nodeId: number) => EvidenceSample[];
-  coarse: (nodeId: number) => CoarseBucket[];
   controllerSamples: () => ControllerSample[];
   coverage: (nodeId: number) => NodeCoverage | null;
   /** The node's per-route rate run (v0.64.6) — what that route has carried in
@@ -213,7 +216,10 @@ export interface DetectInput {
    *  host's boot, a driver link the server ended and a later handshake, or
    *  such a span carried from the previous run on the same boot. This
    *  add-on's own start is NOT one (v0.79.2 read every handshake as a start,
-   *  its own first included). Absent or empty reads as no known start. */
+   *  its own first included), though its first handshake can close a span
+   *  the previous run opened (v0.79.5). The boot (`boot`) is judged at a
+   *  death's first Dead reading only, the other spans on every tick
+   *  (v0.79.5). Absent or empty reads as no known start. */
   driverStarts?: readonly DriverStart[];
   /** Store-level: epoch ms evidence collection began (coverage floor). */
   recordingSince: () => number | null;
@@ -224,6 +230,8 @@ export interface DetectInput {
   duplicateBursts: (nodeId: number) => Burst[];
   // No `hasRealNoise` (removed v0.75.2): whether the floor is measured is read
   // from `controller.backgroundRSSI` by the same rule that computes it.
+  // No `coarse` (removed v0.79.5): no detector read the coarse tier; it feeds
+  // the screens only (evidenceStore.ts header).
 }
 
 // ── Tunables (documented; ship as constants — shareability rule) ─────────────
@@ -789,8 +797,16 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
         if (ne.latched === true) since = ne.since;
       } else {
         const onset = ne?.since ?? now;
+        // The host's boot is judged at the first Dead reading only (v0.79.5):
+        // there the onset is `now`, so onset − boot is the host's uptime
+        // whatever the wall clock reads, and the verdict then stays both ways.
+        // Judged again on later ticks, a forward clock step during the dwell
+        // moved the boot to within the window before the onset and made a
+        // real outage a start death. A restart span is judged on every tick:
+        // its handshake can come after the first reading.
+        const known = (input.driverStarts ?? []).filter((s) => ne == null || s.boot !== true);
         const atStart = b && node.isListening !== true
-          && (ne?.start === true || (input.driverStarts ?? []).some((s) => onset >= s.from && onset - s.to <= NODE_DOWN_START_WINDOW_MS));
+          && (ne?.start === true || known.some((s) => onset >= s.from && onset - s.to <= NODE_DOWN_START_WINDOW_MS));
         since = dwell(state, nk, b, now, atStart ? NODE_DOWN_START_DWELL_MS : DWELL_MS);
         const e = state.get(nk);
         if (e != null && atStart) e.start = true;
@@ -1389,11 +1405,19 @@ export function heldSymptoms(state: SymptomState): { key: string; nodeId: number
  * node-down (`latched`) and re-armed it from the restart, so an outage already
  * known read clear until it matured again — and, while v0.79.2 read the
  * add-on's own start as a driver start, for 90 minutes on a FLiRS node.
+ *
+ * `waiting` false (v0.79.5) leaves out a dwell still on its 5-minute dwell,
+ * neither raised nor a start death: a copy of one written while the add-on
+ * runs goes stale within the dwell, and after a crash restart one that had
+ * ended came back with its old onset and was raised at once if the node read
+ * Dead again. Once the engine has taken the carry, only the shutdown save
+ * carries those.
  */
-export function nodeDownCarry(state: SymptomState): NodeDownCarry[] {
+export function nodeDownCarry(state: SymptomState, waiting = true): NodeDownCarry[] {
   const out: NodeDownCarry[] = [];
   for (const [k, e] of state) {
     if (!k.endsWith(NODE_DOWN_SUFFIX)) continue;
+    if (!waiting && e.latched !== true && e.start !== true) continue;
     const id = Number(k.slice(0, -NODE_DOWN_SUFFIX.length));
     if (Number.isInteger(id) && id > 0) out.push({ nodeId: id, since: e.since, latched: e.latched === true, start: e.start === true });
   }
@@ -1402,12 +1426,16 @@ export function nodeDownCarry(state: SymptomState): NodeDownCarry[] {
 
 /**
  * Seed carried node-down dwells (v0.79.3) for the nodes `keep` admits, never
- * over an entry this run already holds. Nothing else is trusted: the detector
- * re-judges each one on its next tick, and a node that does not read Dead
- * there drops it, as any dwell is dropped. A `since` ahead of `now` (a host
- * without a clock battery boots behind its last save) is taken as `now`; a
- * raised one is raised at once all the same, dated from the restart. Returns
- * how many were seeded.
+ * over an entry this run already holds. Their status is not trusted: the
+ * detector reads each one again on its next tick, and a node read Alive,
+ * Awake or Asleep there drops it, as any dwell is dropped (Unknown is no
+ * reading). A `since` ahead of `now` (a host without a clock battery boots
+ * behind its last save) is taken as `now`; a raised one is raised at once all
+ * the same, dated from the restart. Each keeps the boot verdict it carries
+ * (v0.79.5), the one taken at its first Dead reading, in whichever run first
+ * read it (for a dwell 0.79.3 or 0.79.4 wrote, the verdict that version last
+ * took): the boot is judged at a death's first reading only. Returns how many
+ * were seeded.
  */
 export function seedNodeDown(state: SymptomState, carried: readonly NodeDownCarry[], keep: (nodeId: number) => boolean, now: number): number {
   let n = 0;

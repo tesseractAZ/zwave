@@ -30,7 +30,7 @@ import { startAutoPing, PROBE_KILL_HOLD_MS, type AutoPingSnapshot } from './zwav
 import { buildZwaveDataSource, createTuiDataProvider, type ZwaveDataSource } from './telnet/dataProvider';
 import { registerWsConsole } from './telnet/wsConsole';
 import { startSshServer, loadOrCreateHostKey } from './telnet/server';
-import { buildStates, startHaStates, ENTITY_DEGRADED, HA_STATE_PUBLISH_MS } from './haStates';
+import { healthConclusions, startHaStates, ENTITY_DEGRADED, HA_STATE_PUBLISH_MS } from './haStates';
 import { NodeStatus, type LogEvent } from './types';
 import { appArmorLabel } from './securityLabel';
 import { createRefreshTrial, trialHandle, type RefreshTrial } from './zwave/refreshTrial';
@@ -368,9 +368,7 @@ async function main(): Promise<void> {
     // alone: a degraded mesh is not a broken add-on, and conflating them would
     // make an existing uptime check flap on a single crit symptom.
     const healthy = client.ready() && provider.ready() && !provider.lastError();
-    const conclusions = buildStates(provider, Date.now(), { writeActions: config.writeActions, startedAt: bootedAt });
-    const byEntity = new Map(conclusions.map((s) => [s.entity, s]));
-    const degraded = byEntity.get(ENTITY_DEGRADED);
+    const concl = healthConclusions(provider, Date.now(), { writeActions: config.writeActions, startedAt: bootedAt });
     reply.code(healthy ? 200 : 503).send({
       ok: healthy,
       ready: provider.ready(),
@@ -385,15 +383,12 @@ async function main(): Promise<void> {
       // names the actual cause was the one the endpoint did not print.
       haError: client.lastError(),
       // WHAT THE ENGINE CONCLUDED — the half this endpoint never carried.
-      // Same values published as HA states, so a monitor polling here and an
-      // automation triggering there agree about the mesh — except after a
-      // restart, before the engine's first tick, when HA is sent nothing yet
-      // (v0.79.3) and this endpoint already reports.
-      degraded: degraded?.state === 'on',
-      degradedReason: degraded?.attrs.reason ?? 'none',
-      engine: Object.fromEntries(
-        conclusions.map((s) => [s.entity.split('.')[1], { state: s.state, ...s.attrs }]),
-      ),
+      // The values published as HA states (HA's copy up to one 30-second
+      // publish behind), behind the same gate (v0.79.5): after a restart,
+      // until the first roster and the engine's first tick, HA is sent
+      // nothing and this reports `conclusionsReady: false`, `degraded: null`
+      // and an empty `engine`.
+      ...concl,
     });
   });
 

@@ -323,7 +323,7 @@ test('the per-node fine ring is bounded to maxSamples (oldest dropped)', () => {
   assert.deepEqual(ring.map((x) => x.t), [FIXED + 7 * TICK, FIXED + 8 * TICK, FIXED + 9 * TICK]);
 });
 
-/* ── Coarse tier (the baseline substrate) ────────────────────────────────── */
+/* ── Coarse tier (multi-day history for the screens) ─────────────────────── */
 
 test('samples fold into 30-min coarse buckets: sums of valid deltas + fresh-only rssi aggregates', () => {
   const s = mkStore(freshPath());

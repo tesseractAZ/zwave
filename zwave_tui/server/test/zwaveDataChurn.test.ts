@@ -21,6 +21,7 @@ import type { HaWsClient, HaEventHandler, HaSubscription } from '../src/ha/haWsC
 import { mockServer } from './_driverWsMock';
 import { createRefreshTrial, trialHandle } from '../src/zwave/refreshTrial';
 import type { WindowMetrics } from '../src/zwave/outcomes';
+import { createEvidenceStore, COARSE_BUCKET_MS } from '../src/zwave/evidenceStore';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
@@ -4052,4 +4053,36 @@ test('through the real engine pass: a lone normal sweep read in a held breach ow
     assert.ok(held(), 'held again once that answer leaves the window');
     assert.equal(open().length, 1, 'the SAME episode: the slowdown was not split');
   } finally { r.done(); }
+});
+
+test('routeStability sums every held bucket and spans the first bucket\'s start to the last bucket\'s end (v0.79.5)', () => {
+  // No screen test reaches it: every one mocks routeStability. This drives it
+  // through createZwaveData over a real evidence.json.
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-routestab-'));
+  const path = join(dir, 'evidence.json');
+  const base = Math.floor((Date.now() - 6 * 3_600_000) / COARSE_BUCKET_MS) * COARSE_BUCKET_MS;
+  let clock = base;
+  const stats = (tx: number) => ({ rtt: 30, rssi: -60, lwr: null, nlwr: null, commandsTX: tx, commandsRX: tx,
+    commandsDroppedTX: 0, commandsDroppedRX: 0, timeoutResponse: 0, lastSeen: null });
+  const ev = createEvidenceStore({ path, now: () => clock, uptimeMs: () => 1e9, bootGraceMs: 0 });
+  // Buckets 0, 1 and 3 (bucket 2 never sampled): 2 + 0 + 3 route changes.
+  for (const [k, rc] of [[0, 2], [1, 0], [3, 3]] as const) {
+    clock = base + k * COARSE_BUCKET_MS + 60_000;
+    ev.record(5, stats(10 + k), NodeStatus.Alive, { fresh: true, routeChanges: rc }, clock);
+  }
+  ev.save();
+  const zd = createZwaveData({
+    client: fakeHa(), entryId: ENTRY, historyPath: null, evidencePath: path, evidenceBootGraceMs: 0, uptimeMs: () => 1e9,
+    baselinesPath: join(dir, 'baselines.json'), outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null, log: () => {},
+  });
+  try {
+    // 5 changes, not 3 (the last bucket alone) nor 2 (the first alone); 2 h
+    // is 3 bucket widths from the first start to the last start plus the last
+    // bucket's own width, not 1.5 h (the last bucket's width dropped).
+    assert.deepEqual(zd.routeStability(5), { changes: 5, hours: 2 });
+    assert.deepEqual(zd.routeStability(9), { changes: 0, hours: 0 }, 'no buckets: an empty measurement');
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

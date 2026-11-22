@@ -18,8 +18,8 @@ import {
   detectSymptoms, nodeDownCarry, seedNodeDown, DWELL_MS, NODE_DOWN_START_DWELL_MS, NODE_DOWN_START_WINDOW_MS,
   type DetectInput, type DriverStart, type SymptomState,
 } from '../src/zwave/symptoms';
-import { createEvidenceStore, type EvidenceCarry, type CoarseBucket } from '../src/zwave/evidenceStore';
-import { createZwaveData } from '../src/zwave/zwaveData';
+import { createEvidenceStore, DRIVER_DROP_CARRY_MS, type EvidenceCarry } from '../src/zwave/evidenceStore';
+import { createZwaveData, type ZwaveDataOptions } from '../src/zwave/zwaveData';
 import type { BaselineStore, RateNormal, ContNormal } from '../src/zwave/baselines';
 import { NodeStatus, type NodeSnapshot, type ControllerSnapshot, type NodeStats } from '../src/types';
 import type { HaWsClient, HaEventHandler, HaSubscription } from '../src/ha/haWsClient';
@@ -55,7 +55,7 @@ function input(now: number, nodes: NodeSnapshot[], driverStarts: DriverStart[]):
     now, nodes,
     controller: { backgroundRSSI: [] } as unknown as ControllerSnapshot,
     baselines: baselineStub(),
-    latest: () => undefined, recent: () => [], coarse: () => [] as CoarseBucket[],
+    latest: () => undefined, recent: () => [],
     controllerSamples: () => [], coverage: () => null, rateRun: () => null, rttSeed: () => null,
     driverStarts,
     recordingSince: () => now - 30 * DAY,
@@ -176,6 +176,38 @@ test('node-down (v0.79.3): a start death stays one — a later driver restart ca
   assert.equal(run(st, flirs(), [{ from: T + 25 * MIN, to: T + 26 * MIN }], T + 24.5 * MIN, 70).first, 67.5, 'raised at onset + 90 min');
 });
 
+test('node-down (v0.79.5): the host\'s boot is judged at a death\'s first reading only — a forward clock step during its 5-minute dwell does not make a real outage a start death', () => {
+  // Uptime runs in true time. The wall clock is 1 min behind it until a step
+  // 1 min into a death first read 10.5 min after the boot. The boot span is
+  // now − uptime on every tick, as driverStarts() gives it, so after the step
+  // it sits 9.5 min before the onset, inside the window.
+  const behind = MIN;
+  const deadAt = 10.5 * MIN;
+  const onset = T + deadAt - behind;
+  const state: SymptomState = new Map();
+  let raised: number | null = null;
+  for (let up = deadAt; up <= deadAt + 100 * MIN && raised == null; up += TICK) {
+    const wall = T + up - (up < deadAt + MIN ? behind : 0);
+    const boot = wall - up;
+    const out = detectSymptoms(input(wall, [node(1), flirs()()], [{ from: boot, to: boot, boot: true }]), state);
+    if (out.some((s) => s.kind === 'node-down' && s.nodeId === 60)) raised = (wall - onset) / MIN;
+  }
+  assert.equal(raised, 5, 'raised at its 5-minute dwell (0.79.3 and 0.79.4: 90)');
+  assert.equal(state.get('60:node-down')?.start, undefined, 'never judged a start death');
+  // A marked boot is still judged at the first reading: a death first read 2
+  // min after it waits 90 min, not 5.
+  assert.equal(run(new Map(), flirs(), [{ from: T - MIN, to: T - MIN, boot: true }], T + MIN, 95).first, 90, 'a death 2 min after a marked boot is a start death');
+});
+
+test('node-down (v0.79.5): a driver restart span is still judged on every tick — a death first read while the link is down is a start death once the re-handshake sets the span', () => {
+  const state: SymptomState = new Map();
+  const boot: DriverStart = { from: T - 5 * DAY, to: T - 5 * DAY, boot: true };
+  // The server ended the link at T; node 60 reads Dead from T + 1 min, and the
+  // re-handshake at T + 3 min sets the span {T, T + 3 min}.
+  assert.equal(run(state, flirs(), [boot], T + MIN, 1.5).first, null, 'link down: no span yet');
+  assert.equal(run(state, flirs(), [boot, { from: T, to: T + 3 * MIN }], T + 3 * MIN, 90).first, 88, 'raised at onset + 90 min, not 5');
+});
+
 test('node-down carry (v0.79.3): the start verdict is carried — a waiting start death seeded with no start known still waits 90 min from its onset', () => {
   const before: SymptomState = new Map();
   run(before, flirs(), [{ from: T - MIN, to: T - MIN }], T, 10);
@@ -186,12 +218,31 @@ test('node-down carry (v0.79.3): the start verdict is carried — a waiting star
   assert.equal(run(after, flirs(), [], T + 12 * MIN, 80).first, 78);
 });
 
+test('node-down carry (v0.79.5): a carried dwell is not judged against the boot again — its first reading was in the run that saved it, so a clock step across the deploy does not make it a start death', () => {
+  // Saved waiting at T, 30 min after the boot. The wall clock then steps 25
+  // min ahead of uptime across the deploy, so now − uptime reads 5 min before
+  // the onset.
+  const after: SymptomState = new Map();
+  seedNodeDown(after, [{ nodeId: 60, since: T, latched: false, start: false }], () => true, T + 2 * MIN);
+  const boot: DriverStart = { from: T - 5 * MIN, to: T - 5 * MIN, boot: true };
+  assert.equal(run(after, flirs(), [boot], T + 2 * MIN, 10).first, 3, 'raised at onset + 5 min (0.79.4: 90)');
+});
+
 test('seedNodeDown (v0.79.3): a raised node-down whose since is ahead of the clock is raised on the first tick, dated from the restart', () => {
   const s: SymptomState = new Map();
   seedNodeDown(s, [{ nodeId: 60, since: T + 10 * MIN, latched: true, start: false }], () => true, T);
   const r = run(s, flirs(), [], T, 1);
   assert.equal(r.first, 0);
   assert.equal(r.since, T);
+});
+
+test('nodeDownCarry (v0.79.5): while running, a dwell still on its 5-minute dwell is left out; raised ones and start deaths are kept', () => {
+  const s: SymptomState = new Map();
+  s.set('7:node-down', { since: T - 2 * MIN, lastSeen: T, hits: 4 });
+  s.set('8:node-down', { since: T - DAY, lastSeen: T, hits: 9, latched: true });
+  s.set('9:node-down', { since: T - 20 * MIN, lastSeen: T, hits: 40, start: true });
+  assert.deepEqual(nodeDownCarry(s, false).map((c) => c.nodeId).sort(), [8, 9], 'what a flush or a prompt save writes');
+  assert.deepEqual(nodeDownCarry(s, true).map((c) => c.nodeId).sort(), [7, 8, 9], 'what the shutdown save writes');
 });
 
 /* ── Evidence store ───────────────────────────────────────────────────────── */
@@ -329,12 +380,99 @@ test('evidence carry (v0.79.3): a carry for another network than the store\'s is
 test('evidence carry (v0.79.3): malformed entries are skipped, an inverted span is not a start', () => {
   const { dir, path } = freshPath();
   try {
-    const bad = { nodeDown: [{ nodeId: 0, since: T, latched: true, start: false }, { nodeId: 5, since: -1, latched: true, start: false }, { nodeId: 6, since: T, latched: false, start: false }], driverStart: { from: T, to: T - MIN } };
+    const bad = { nodeDown: [{ nodeId: 0, since: T, latched: true, start: false }, { nodeId: 5, since: -1, latched: true, start: false }, { nodeId: 6, since: T, latched: false, start: false }], driverStart: { from: T, to: T - MIN }, driverDrop: -1 };
     const a = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T, uptimeMs: () => UP, carry: () => bad });
     a.load(); a.record(6, stats(), NodeStatus.Alive); a.save();
     const b = createEvidenceStore({ path, cadenceMs: 10_000, now: () => T, uptimeMs: () => UP });
     b.load();
+    assert.equal(b.carriedDriverDrop(), null, 'a drop before the epoch is no drop');
     assert.deepEqual(b.takeCarry(), { homeId: null, nodeDown: [{ nodeId: 6, since: T, latched: false, start: false }], driverStart: null });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('evidence carry (v0.79.5): an open driver drop is written at every save and written back until taken; it loads on the same boot within DRIVER_DROP_CARRY_MS of the save, not later, not on another boot', () => {
+  const { dir, path } = freshPath();
+  try {
+    assert.equal(DRIVER_DROP_CARRY_MS, NODE_DOWN_START_WINDOW_MS, 'one window');
+    let t = T; let up = UP;
+    const drop = T - 30_000;
+    const read = (): { driverDrop?: number; savedAt: number } => JSON.parse(readFileSync(path, 'utf8')) as { driverDrop?: number; savedAt: number };
+    const a = createEvidenceStore({ path, cadenceMs: 10_000, now: () => t, uptimeMs: () => up, carry: () => ({ ...CARRY, driverDrop: drop }) });
+    a.load(); a.takeCarry(); a.record(6, stats(), NodeStatus.Alive); a.save();
+    assert.equal(read().driverDrop, drop);
+    t += 5 * MIN; up += 5 * MIN;
+    a.save(); // no sample and the same carry: written anyway while the drop is open
+    assert.equal(read().savedAt, t, 'the save time follows the open drop, so it is the stop');
+    const at = (dt: number, upNow = up + dt) => { const s = createEvidenceStore({ path, cadenceMs: 10_000, now: () => t + dt, uptimeMs: () => upNow }); s.load(); return s; };
+    const b = at(9 * MIN);
+    assert.equal(b.carriedDriverDrop(), drop, 'down 9 minutes: carried');
+    assert.equal(at(11 * MIN).carriedDriverDrop(), null, 'down 11 minutes: not carried');
+    assert.equal(at(MIN, 40_000).carriedDriverDrop(), null, 'another boot: not carried');
+    // Until the engine takes the carry the drop written is the driver client's:
+    // seeded with the restored one, it ends it at its first handshake.
+    let liveDrop: number | null = drop;
+    let liveStart: { from: number; to: number } | null = null;
+    const c = createEvidenceStore({ path, cadenceMs: 10_000, now: () => t + MIN, uptimeMs: () => up + MIN, carry: () => ({ nodeDown: [], driverStart: liveStart, driverDrop: liveDrop }) });
+    c.load(); c.save();
+    assert.equal(read().driverDrop, drop, 'not yet taken, the client still holds it: written');
+    assert.equal(read().savedAt, t + MIN, 'with this save\'s time');
+    liveDrop = null; liveStart = { from: drop, to: t + MIN };
+    c.save();
+    const back = JSON.parse(readFileSync(path, 'utf8')) as { driverDrop?: number; driverStart?: { f: number; t: number }; nodeDown?: Record<string, unknown> };
+    assert.equal(back.driverDrop, undefined, 'the client ended it at its handshake: not written back as open');
+    assert.deepEqual(back.driverStart, { f: drop, t: t + MIN }, 'the span the handshake closed it into');
+    assert.deepEqual(Object.keys(back.nodeDown ?? {}).sort(), CARRY.nodeDown.map((d) => String(d.nodeId)).sort(), 'the dwells still the restored ones');
+    c.takeCarry(); c.record(6, stats(), NodeStatus.Alive); c.save();
+    assert.equal(read().driverDrop, undefined, 'taken: the engine\'s, closed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('evidence carry (v0.79.5): a save the open driver drop forces before the home id is bound keeps the tag the file was loaded with — the next run on another network still discards the old network\'s evidence and node-down', () => {
+  const { dir, path } = freshPath();
+  try {
+    const A = 3586281591;
+    const B = A + 1;
+    let t = T; let up = UP;
+    const drop = T - 30_000;
+    const read = (): { homeId: number | null; savedAt: number; nodeDown?: Record<string, unknown> } =>
+      JSON.parse(readFileSync(path, 'utf8')) as { homeId: number | null; savedAt: number; nodeDown?: Record<string, unknown> };
+    // Run 1, bound to A: node 60 raised, and the server ended the driver link.
+    const a = createEvidenceStore({
+      path, cadenceMs: 10_000, now: () => t, uptimeMs: () => up,
+      carry: () => ({ homeId: A, nodeDown: [{ nodeId: 60, since: T - 10 * MIN, latched: true, start: false }], driverStart: null, driverDrop: drop }),
+    });
+    a.load(); a.bindHomeId(A); a.takeCarry();
+    a.record(60, stats(), NodeStatus.Dead); a.save();
+    const f1 = read();
+    assert.equal(f1.homeId, A, 'precondition: tagged A');
+    t += MIN; up += MIN;
+    // Run 2 never binds (HA's zwave_js not loaded). The driver client holds
+    // the carried drop, so its save is forced past the dirty gate.
+    let clientDrop: number | null = null;
+    const b = createEvidenceStore({ path, cadenceMs: 10_000, now: () => t, uptimeMs: () => up, carry: () => ({ homeId: null, nodeDown: [], driverStart: null, driverDrop: clientDrop }) });
+    b.load();
+    clientDrop = b.carriedDriverDrop();
+    assert.equal(clientDrop, drop, 'precondition: the drop is carried');
+    b.save();
+    const f2 = read();
+    assert.ok(f2.savedAt > f1.savedAt, 'precondition: run 2 wrote the file');
+    assert.ok(f2.nodeDown?.['60'] != null, 'precondition: with run 1\'s node-down');
+    assert.equal(f2.homeId, A, 'the tag the file was loaded with, not null');
+    t += MIN; up += MIN;
+    // Run 3 binds another network.
+    const logs: string[] = [];
+    const c = createEvidenceStore({ path, cadenceMs: 10_000, now: () => t, uptimeMs: () => up, log: (m: string) => { logs.push(m); } });
+    c.load();
+    assert.ok(c.forNode(60).length > 0, 'precondition: restored while the identity is unknown');
+    c.bindHomeId(B);
+    assert.ok(logs.some((l) => l.includes('controller home id changed — discarding evidence for the previous network')), logs.join('\n'));
+    assert.equal(c.forNode(60).length, 0, 'network A\'s evidence is not network B\'s');
+    assert.equal(c.coverage(60), null);
+    assert.equal(c.takeCarry(), null, 'nor its node-down');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -344,7 +482,8 @@ test('evidence carry (v0.79.3): malformed entries are skipped, an inverted span 
 
 const ENTRY = 'entry-1';
 const HOME = 3586281591;
-function fakeHa(roster: Array<Record<string, unknown>>, home: () => number = () => HOME): HaWsClient & { fireReady(): void } {
+/** `down`: HA's zwave_js reports no network (the entry not loaded), so no home id is bound. */
+function fakeHa(roster: Array<Record<string, unknown>>, home: () => number = () => HOME, down: () => boolean = () => false): HaWsClient & { fireReady(): void } {
   const readyCbs: Array<() => void> = [];
   const result = (cmd: Record<string, unknown>): unknown => {
     switch (cmd.type) {
@@ -353,6 +492,7 @@ function fakeHa(roster: Array<Record<string, unknown>>, home: () => number = () 
       case 'config/entity_registry/list': return [];
       case 'get_states': return [];
       case 'zwave_js/network_status':
+        if (down()) throw new Error('not_loaded');
         return { client: { server_version: 't' }, controller: { home_id: home(), own_node_id: 1, nodes: roster } };
       default: return null;
     }
@@ -368,10 +508,11 @@ function fakeHa(roster: Array<Record<string, unknown>>, home: () => number = () 
   } as unknown as HaWsClient & { fireReady(): void };
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-async function waitFor(cond: () => boolean, ms = 8000): Promise<void> {
+/** `why`: what the failure message carries besides the timeout. */
+async function waitFor(cond: () => boolean, ms = 8000, why?: () => string): Promise<void> {
   const t0 = performance.now();
   while (!cond()) {
-    if (performance.now() - t0 > ms) throw new Error('waitFor: condition not met in time');
+    if (performance.now() - t0 > ms) throw new Error(`waitFor: condition not met in time${why ? ` — ${why()}` : ''}`);
     await sleep(20);
   }
 }
@@ -403,18 +544,20 @@ const live = new Set<() => void>();
 function stopAll(): void {
   for (const stop of [...live]) stop();
 }
-/** `bootAt` null: production's own uptime source. */
-async function startRun(dir: string, url: string, bootAt: number | null, logs: string[] = [], o: { roster?: Array<Record<string, unknown>>; uptimeMs?: () => number; home?: () => number; extra?: Record<string, unknown> } = {}): Promise<Run> {
+/** `bootAt` null: production's own uptime source. `awaitReady` false: return
+ *  as soon as it is started, without waiting for the driver link or the roster. */
+async function startRun(dir: string, url: string, bootAt: number | null, logs: string[] = [], o: { roster?: Array<Record<string, unknown>>; uptimeMs?: () => number; home?: () => number; down?: () => boolean; awaitReady?: boolean; extra?: Partial<ZwaveDataOptions> } = {}): Promise<Run> {
   const roster = o.roster ?? ROSTER;
-  const ha = fakeHa(roster, o.home);
+  const ha = fakeHa(roster, o.home, o.down);
   const uptimeMs = o.uptimeMs ?? (bootAt == null ? undefined : () => Date.now() - bootAt);
-  const zd = createZwaveData({
+  const opts: ZwaveDataOptions = {
     client: ha, entryId: ENTRY, refreshMs: 100, routePollMs: 60_000, evidenceSampleMs: 30 * MIN,
     historyPath: null, evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
-    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: url, log: (m: string) => logs.push(m),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: url, log: (m: string) => { logs.push(m); },
     ...(uptimeMs ? { uptimeMs } : {}),
     ...(o.extra ?? {}),
-  } as never);
+  };
+  const zd = createZwaveData(opts);
   let stopProvider: (() => void) | null = null;
   const stop = (): void => {
     if (!live.delete(stop)) return;
@@ -424,9 +567,15 @@ async function startRun(dir: string, url: string, bootAt: number | null, logs: s
   live.add(stop);
   zd.start();
   ha.fireReady();
-  await waitFor(() => zd.driverWsState() === 'live');
-  const want = roster.find((n) => n.node_id === 60)!.status === 3 ? NodeStatus.Dead : NodeStatus.Alive;
-  await waitFor(() => zd.snapshot().some((n) => n.nodeId === 60 && n.status === want && n.isListening === false));
+  if (o.awaitReady !== false) {
+    // The first handshake and the dump after it, under a loaded suite: room
+    // for one 5 s reconnect backoff, and what the link did if they never come.
+    // `logs` holds the run's lines whether or not the caller passed an array.
+    const linkLog = () => `driver link ${zd.driverWsState()}; ${logs.filter((l) => l.startsWith('driver-ws:')).join(' | ') || 'no driver-ws: lines'}`;
+    await waitFor(() => zd.driverWsState() === 'live', 15_000, linkLog);
+    const want = roster.find((n) => n.node_id === 60)!.status === 3 ? NodeStatus.Dead : NodeStatus.Alive;
+    await waitFor(() => zd.snapshot().some((n) => n.nodeId === 60 && n.status === want && n.isListening === false), 15_000, linkLog);
+  }
   const priv = zd as unknown as { lastOkAt: number | null; sampleEvidence: () => void };
   const tdp = createTuiDataProvider({ zwaveData: buildZwaveDataSource(zd as never), refreshMs: 60_000, log: () => {} } as never);
   const provider = tdp.provider;
@@ -560,6 +709,7 @@ test('restart (v0.79.3, production-wired): a Z-Wave JS restart seen over the lin
     assert.equal(starts.length, 2);
     assert.ok(starts[1]!.from >= dropAt && starts[1]!.to <= Date.now(), JSON.stringify(starts));
     assert.ok(starts[1]!.to - starts[1]!.from >= 4000, 'from the drop, not the re-handshake (the first retry waits 5 s)');
+    assert.deepEqual(starts[1], { from: starts[1]!.from, to: starts[1]!.to }, 'a restart is not marked as the boot: it is judged on every tick');
     assert.ok(logs.some((l) => /the link ended \d+s ago, not by this add-on, and is back — a driver start/.test(l)));
     a.tick();
     const early = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { driverStart?: { f: number; t: number } };
@@ -570,7 +720,7 @@ test('restart (v0.79.3, production-wired): a Z-Wave JS restart seen over the lin
     skip += 2 * MIN; // the host's uptime runs on with its clock
     const b = await startRun(dir, srv.url, bootAt);
     b.tick();
-    assert.deepEqual(b.zd.driverStarts().slice(1), [starts[1]], 'the next run on this boot knows it');
+    assert.deepEqual(b.zd.driverStarts().slice(1), [{ from: starts[1]!.from, to: starts[1]!.to }], 'the next run on this boot knows it, unmarked');
     // A restart that run sees itself is newer, and is what it carries on.
     srv.dropClient();
     await waitFor(() => srv.connectionCount() === 4 && b.zd.driverWsState() === 'live', 15_000);
@@ -623,6 +773,32 @@ test('restart (v0.79.3, production-wired): a death first seen after the wall clo
     roster.find((n) => n.node_id === 60)!.status = 3;
     await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Dead));
     assert.equal(ticksTo(r, 95), 90);
+    r.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.5, production-wired): a forward clock step during a death\'s 5-minute dwell does not make it a start death — the boot was judged at its first reading', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  try {
+    // Uptime runs in true time and is 10.5 min at the start; the wall clock is
+    // 1 min behind it until NTP steps it forward 1 min into node 60's death.
+    // After the step now − uptime sits 9.5 min before the death's onset.
+    let lag = MIN;
+    const trueBoot = Date.now() + lag - 10.5 * MIN;
+    const r = await startRun(dir, srv.url, null, [], { uptimeMs: () => Date.now() + lag - trueBoot });
+    let first: number | null = null;
+    for (let i = 0; i <= 95 * 2 && first == null; i++) {
+      if (i === 2) { skip += lag; lag = 0; } // the step, after 1 min of ticks
+      if (r.tick()) first = i / 2;
+    }
+    assert.equal(first, 4, 'raised at its 5-minute dwell: 4 min of ticks and the 1-min step (0.79.3 and 0.79.4: 89)');
     r.stop();
   } finally {
     stopAll();
@@ -770,22 +946,330 @@ test('restart (v0.79.3, production-wired): the prompt save is spaced a minute ap
   }
 });
 
+test('restart (v0.79.5, production-wired): a dwell still on its 5-minute dwell is not written while running — a crash restart after it ended does not bring it back', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const roster = ROSTER.map((n) => ({ ...n }));
+  const path = join(dir, 'evidence.json');
+  const bootAt = Date.now() - 5 * DAY; // no start window: the 5-minute dwell
+  try {
+    const a = await startRun(dir, srv.url, bootAt, [], { roster });
+    for (let i = 0; i < 6; i++) assert.equal(a.tick(), false, 'precondition: still waiting');
+    (a.zd as unknown as { evidenceStore: { save(): void } }).evidenceStore.save(); // the 15-minute flush lands here
+    const flushed = JSON.parse(readFileSync(path, 'utf8')) as { nodeDown?: Record<string, unknown> };
+    assert.equal(flushed.nodeDown?.['60'], undefined, 'the flush does not write it');
+    roster.find((n) => n.node_id === 60)!.status = 4;
+    await waitFor(() => a.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Alive));
+    assert.equal(a.tick(), false, 'it ended');
+    const atCrash = readFileSync(path); // the disk as a crash leaves it: no shutdown save
+    a.stop();
+    writeFileSync(path, atCrash);
+    skip += 2 * MIN; // s6 restarts the process; the death is now 5.5 min behind
+    roster.find((n) => n.node_id === 60)!.status = 3; // and the node dies again
+    const b = await startRun(dir, srv.url, bootAt, [], { roster });
+    assert.equal(b.tick(), false, 'the new death is not raised at once with the old onset');
+    assert.equal(ticksTo(b, 10), 4.5, 'it waits its own 5 minutes');
+    b.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.5, production-wired): a deploy during a 5-minute dwell keeps its onset, and the next run\'s first tick takes it off the disk', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const path = join(dir, 'evidence.json');
+  const bootAt = Date.now() - 5 * DAY;
+  try {
+    const a = await startRun(dir, srv.url, bootAt);
+    for (let i = 0; i < 6; i++) assert.equal(a.tick(), false, 'precondition: still waiting');
+    a.stop(); // SIGTERM: the shutdown save writes the waiting dwell
+    const saved = JSON.parse(readFileSync(path, 'utf8')) as { nodeDown?: Record<string, { l?: number; st?: number }> };
+    assert.deepEqual(saved.nodeDown?.['60'] && { l: saved.nodeDown['60'].l, st: saved.nodeDown['60'].st }, { l: undefined, st: undefined }, 'written at the stop, neither raised nor a start death');
+    skip += MIN;
+    const b = await startRun(dir, srv.url, bootAt);
+    assert.equal(b.tick(), false, '4 min after its onset');
+    const after = JSON.parse(readFileSync(path, 'utf8')) as { nodeDown?: Record<string, unknown> };
+    assert.equal(after.nodeDown?.['60'], undefined, 'off the disk at the first tick, so a crash from here cannot bring it back');
+    assert.equal(ticksTo(b, 10), 0.5, 'raised 5 min after its own onset, not 5 min after the deploy');
+    b.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.5, production-wired): the first tick\'s write-out of a deploy\'s carry does not start the minute — a raise right after it reaches disk at once', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const path = join(dir, 'evidence.json');
+  const nd = (): Record<string, { l?: number }> => (JSON.parse(readFileSync(path, 'utf8')) as { nodeDown?: Record<string, { l?: number }> }).nodeDown ?? {};
+  const bootAt = Date.now() - 5 * DAY;
+  try {
+    const a = await startRun(dir, srv.url, bootAt);
+    for (let i = 0; i < 8; i++) assert.equal(a.tick(), false, 'precondition: still waiting'); // onset + 4 min
+    a.stop(); // a deploy: the shutdown save writes the waiting dwell
+    skip += 30_000;
+    const b = await startRun(dir, srv.url, bootAt);
+    assert.equal(b.tick(), false, '4.5 min after its onset');
+    assert.equal(nd()['60'], undefined, 'written out at the first tick');
+    assert.equal(b.tick(), true, 'raised at onset + 5 min, 30 s after the write-out');
+    assert.equal(nd()['60']?.l, 1, 'and on disk at once, not a minute after the write-out');
+    b.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.5, production-wired): the prompt save is spaced on the host\'s uptime — a wall clock stepped back right after a save does not hold the next one off', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const roster = ROSTER.map((n) => ({ ...n }));
+  const path = join(dir, 'evidence.json');
+  const has60 = (): boolean => (JSON.parse(readFileSync(path, 'utf8')) as { nodeDown?: Record<string, unknown> }).nodeDown?.['60'] != null;
+  let up = 40_000; // the host's uptime: moved by hand, a tick at a time; it never steps
+  try {
+    const r = await startRun(dir, srv.url, null, [], { roster, uptimeMs: () => up });
+    r.tick(); up += TICK; // a start death at boot + 40 s: saved at once
+    assert.equal(has60(), true);
+    skip -= 10 * MIN; // NTP steps the wall clock back 10 minutes
+    roster.find((n) => n.node_id === 60)!.status = 4;
+    await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Alive));
+    r.tick(); up += TICK; // 30 s of uptime later: it ended, but the last save was under a minute ago
+    assert.equal(has60(), true, 'not saved again within the minute');
+    r.tick(); up += TICK; // a minute of uptime after the save, 9 minutes behind it on the wall clock
+    assert.equal(has60(), false, 'saved once the minute of uptime is up');
+    r.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('restart (v0.79.3, production-wired): a node that left the network takes its dwells with it — a device reusing the id is not raised while it reads Unknown', async () => {
   const restore = useClock();
   const srv = await mockServer({ nodes: DUMP });
   const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
   const roster = ROSTER.map((n) => ({ ...n }));
   try {
-    const r = await startRun(dir, srv.url, Date.now() - 5 * DAY, [], { roster, extra: { evictAfterMs: 1 } });
+    const logs: string[] = [];
+    const r = await startRun(dir, srv.url, Date.now() - 5 * DAY, logs, { roster, extra: { evictAfterMs: 1 } });
     assert.equal(ticksTo(r, 10), 5, 'precondition: raised');
     const i = roster.findIndex((n) => n.node_id === 60);
     const [gone] = roster.splice(i, 1);
     await waitFor(() => !r.zd.snapshot().some((n) => n.nodeId === 60));
-    await sleep(300); // two roster polls: missing, then evicted
+    // Two roster polls, missing then evicted: waited on, not timed, as a
+    // loaded host can run fewer polls than the clock allows.
+    await waitFor(() => logs.some((l) => l.startsWith('node 60 left the network')), 8000, () => logs.join(' | '));
     roster.push({ ...gone!, status: 0 }); // the id comes back, as a new device being interviewed
     await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Unknown));
     assert.equal(r.tick(), false, 'no node-down for the new device');
     r.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.5, production-wired): a deploy while Z-Wave JS is down carries the link the server ended — the next run\'s first handshake is a driver start, and a FLiRS death at it waits 90 min, not 5', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const bootAt = Date.now() - 5 * DAY;
+  const roster = ROSTER.map((n) => (n.node_id === 60 ? { ...n, status: 4 } : { ...n }));
+  const path = join(dir, 'evidence.json');
+  try {
+    const a = await startRun(dir, srv.url, bootAt, [], { roster });
+    a.tick();
+    const dropAt = Date.now();
+    srv.dropClient(); // Z-Wave JS goes down
+    await waitFor(() => a.zd.driverWsState() === 'backoff');
+    a.stop(); // the deploy, before it is back
+    const file = JSON.parse(readFileSync(path, 'utf8')) as { driverDrop?: number; savedAt: number; driverStart?: unknown };
+    assert.ok(file.driverDrop != null && file.driverDrop >= dropAt && file.driverDrop <= file.savedAt, `the open drop is on disk: ${file.driverDrop}`);
+    assert.equal(file.driverStart, undefined, 'and no closed span yet');
+    skip += MIN;
+    // Still down when the next run starts, back at its first retry; node 60
+    // then reads Dead: a FLiRS start death.
+    srv.configure({ dropBeforeVersion: 1 });
+    roster.find((n) => n.node_id === 60)!.status = 3;
+    const logs: string[] = [];
+    const b = await startRun(dir, srv.url, bootAt, logs, { roster });
+    const starts = b.zd.driverStarts();
+    assert.equal(starts.length, 2, JSON.stringify(starts));
+    assert.equal(starts[1]!.from, file.driverDrop, 'from the drop the previous run saw');
+    assert.ok(starts[1]!.to > file.savedAt + MIN, 'to this run\'s first handshake');
+    assert.ok(logs.some((l) => /had not come back when this add-on stopped/.test(l)), logs.join('\n'));
+    assert.ok(logs.some((l) => /the link ended \d+s ago, not by this add-on, and is back — a driver start/.test(l)));
+    assert.equal(ticksTo(b, 95), 90, 'a start death: 90 minutes');
+    b.stop();
+    const after = JSON.parse(readFileSync(path, 'utf8')) as { driverDrop?: number; driverStart?: { f: number; t: number } };
+    assert.equal(after.driverDrop, undefined, 'closed: no longer open');
+    assert.deepEqual(after.driverStart, { f: starts[1]!.from, t: starts[1]!.to }, 'carried on as the restart it was');
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.5, production-wired): a link the server ended is not carried past DRIVER_DROP_CARRY_MS of the add-on being down — the next run\'s own first handshake is no driver start', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const bootAt = Date.now() - 5 * DAY;
+  const roster = ROSTER.map((n) => (n.node_id === 60 ? { ...n, status: 4 } : { ...n }));
+  try {
+    const a = await startRun(dir, srv.url, bootAt, [], { roster });
+    a.tick();
+    srv.dropClient();
+    await waitFor(() => a.zd.driverWsState() === 'backoff');
+    a.stop();
+    skip += DRIVER_DROP_CARRY_MS + MIN; // down 11 minutes
+    roster.find((n) => n.node_id === 60)!.status = 3;
+    const b = await startRun(dir, srv.url, bootAt, [], { roster });
+    assert.equal(b.zd.driverStarts().length, 1, 'only the boot');
+    assert.equal(ticksTo(b, 10), 5);
+    b.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.5, production-wired): a run that ended the carried drop at its handshake and is stopped before its first engine tick writes the span, not the drop as open', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const bootAt = Date.now() - 5 * DAY;
+  const roster = ROSTER.map((n) => (n.node_id === 60 ? { ...n, status: 4 } : { ...n }));
+  const path = join(dir, 'evidence.json');
+  try {
+    const a = await startRun(dir, srv.url, bootAt, [], { roster });
+    a.tick();
+    srv.dropClient();
+    await waitFor(() => a.zd.driverWsState() === 'backoff');
+    a.stop();
+    const drop = (JSON.parse(readFileSync(path, 'utf8')) as { driverDrop: number }).driverDrop;
+    skip += MIN;
+    const b = await startRun(dir, srv.url, bootAt, [], { roster });
+    const span = b.zd.driverStarts()[1]!;
+    assert.equal(span.from, drop);
+    skip += 30 * MIN; // HA's roster stale: no engine tick in this run
+    b.stop();
+    const file = JSON.parse(readFileSync(path, 'utf8')) as { driverDrop?: number; driverStart?: { f: number; t: number } };
+    assert.equal(file.driverDrop, undefined, 'ended at the handshake: not written back as open');
+    assert.deepEqual(file.driverStart, { f: span.from, t: span.to }, 'the span the handshake closed');
+    skip += MIN;
+    roster.find((n) => n.node_id === 60)!.status = 3;
+    const c = await startRun(dir, srv.url, bootAt, [], { roster });
+    assert.equal(c.zd.driverStarts().length, 1, 'no drop carried');
+    assert.equal(ticksTo(c, 95), 5, 'the driver started 32 minutes before: the 5-minute dwell');
+    c.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('restart (v0.79.5, production-wired): a run that never binds a home id and is stopped with the driver link still down keeps the file\'s tag — the next run on another network discards the old evidence and does not raise its node-down', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const bootAt = Date.now() - 5 * DAY;
+  const path = join(dir, 'evidence.json');
+  type File = { homeId: number | null; savedAt: number; driverDrop?: number; nodeDown?: Record<string, unknown> };
+  const read = (): File => JSON.parse(readFileSync(path, 'utf8')) as File;
+  try {
+    const a = await startRun(dir, srv.url, bootAt);
+    assert.equal(ticksTo(a, 10), 5, 'precondition: node 60 raised on network HOME');
+    srv.configure({ dropBeforeVersion: 1000 }); // Z-Wave JS goes down and stays down
+    srv.dropClient();
+    await waitFor(() => a.zd.driverWsState() === 'backoff');
+    a.stop();
+    const f1 = read();
+    assert.equal(f1.homeId, HOME, 'precondition: tagged HOME');
+    skip += MIN;
+    // Restarted within DRIVER_DROP_CARRY_MS; HA's zwave_js reports no network
+    // for the whole run, so no home id is bound.
+    const logsB: string[] = [];
+    const b = await startRun(dir, srv.url, bootAt, logsB, { down: () => true, awaitReady: false });
+    await waitFor(() => logsB.some((l) => /driver-ws: a link the server ended/.test(l)));
+    await sleep(500);
+    b.stop();
+    const f2 = read();
+    assert.ok(f2.savedAt > f1.savedAt, 'precondition: the open drop forced the stop\'s save');
+    assert.ok(f2.driverDrop != null && f2.nodeDown?.['60'] != null, `precondition: the drop and node 60's node-down written back: ${JSON.stringify(f2)}`);
+    assert.equal(f2.homeId, HOME, 'the tag the file was loaded with, not null');
+    skip += MIN;
+    // A controller with another network comes up; its node 60 reads Dead.
+    srv.configure({ dropBeforeVersion: 0, homeId: HOME + 1 });
+    const logsC: string[] = [];
+    const c = await startRun(dir, srv.url, bootAt, logsC, { home: () => HOME + 1 });
+    assert.ok(logsC.some((l) => l.includes('evidence: controller home id changed — discarding evidence for the previous network')), logsC.join('\n'));
+    assert.equal(c.tick(), false, 'network HOME\'s node-down is not raised on network HOME+1');
+    c.stop();
+  } finally {
+    stopAll();
+    restore();
+    await srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('driver link (v0.79.5, production-wired): a wedged link the liveness check ends is reconnected and is no driver start — the stamp auto-ping reads moves, a death after it keeps the 5-minute dwell, and a deploy in the backoff carries no drop', async () => {
+  const restore = useClock();
+  const srv = await mockServer({ nodes: DUMP });
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-carry-wired-'));
+  const roster = ROSTER.map((n) => (n.node_id === 60 ? { ...n, status: 4 } : { ...n }));
+  try {
+    const logs: string[] = [];
+    const r = await startRun(dir, srv.url, Date.now() - 5 * DAY, logs, { roster, extra: { driverWsLivenessMs: 800 } });
+    const h0 = r.zd.driverReconnectedAt()!;
+    srv.stall(); // the server stops answering: no traffic, no pong
+    await waitFor(() => logs.some((l) => /no pong\/traffic — terminating wedged socket/.test(l)), 5000);
+    // At least 2: a reconnect handshake slower than the 800 ms handshake clock
+    // (a loaded host) is ended and retried, and that is this add-on's own end too.
+    // That retry's backoff doubles (attempts resets only at live): 5 s, about
+    // 1 s of handshake clock, then 10 s. The wait covers one slow retry.
+    await waitFor(() => srv.connectionCount() >= 2 && r.zd.driverWsState() === 'live', 25_000);
+    assert.ok(r.zd.driverReconnectedAt()! > h0, 'the handshake stamp moves (auto-ping\'s burst refusal)');
+    assert.equal(r.zd.driverStarts().length, 1, 'only the boot: a link this add-on ended is no driver start');
+    assert.ok(!logs.some((l) => /a driver start for the node-down start window/.test(l)), logs.join('\n'));
+    roster.find((n) => n.node_id === 60)!.status = 3;
+    await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Dead));
+    assert.equal(ticksTo(r, 10), 5, 'a death after the reconnect keeps the 5-minute dwell');
+    // A deploy lands in the backoff. The ticks' clock skip (5.5 min past the
+    // link's last traffic) ends the link at the next liveness check, which is
+    // this add-on's own teardown; the stall keeps a reply or a pong from
+    // moving the idle clock before that check.
+    srv.stall();
+    await waitFor(() => r.zd.driverWsState() === 'backoff', 5000);
+    assert.ok(logs.filter((l) => /no pong\/traffic — terminating wedged socket/.test(l)).length >= 2, 'the liveness check ended the link again');
+    r.stop();
+    const file = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { driverDrop?: number };
+    assert.equal(file.driverDrop, undefined, 'a link this add-on ended is not carried as a drop');
   } finally {
     stopAll();
     restore();

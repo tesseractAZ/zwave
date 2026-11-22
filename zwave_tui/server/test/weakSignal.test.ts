@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { detectSymptoms, type DetectInput, type SymptomState } from '../src/zwave/symptoms';
 import type { BaselineStore } from '../src/zwave/baselines';
 import { NodeStatus, type NodeSnapshot, type ControllerSnapshot } from '../src/types';
-import type { EvidenceSample, CoarseBucket } from '../src/zwave/evidenceStore';
+import type { EvidenceSample } from '../src/zwave/evidenceStore';
 
 const T = 1_000_000_000_000;
 const MIN = 60_000;
@@ -33,7 +33,7 @@ function sparseRing(now: number, rssi: number, events: Ev[], denseTx = 0): Evide
 }
 function inp(now: number, ring: EvidenceSample[], over: Partial<NodeSnapshot> = {}): DetectInput {
   return { now, nodes: [node(1), node(18, over)], controller: { backgroundRSSI: LIVE_FLOOR } as unknown as ControllerSnapshot, baselines: bl,
-    latest: () => ring[ring.length - 1], recent: (id) => (id === 18 ? ring : []), coarse: () => [] as CoarseBucket[], controllerSamples: () => [],
+    latest: () => ring[ring.length - 1], recent: (id) => (id === 18 ? ring : []), controllerSamples: () => [],
     coverage: () => null, rateRun: () => null, rttSeed: () => null, recordingSince: () => T - 30 * 86_400_000, sleeperWatch: () => null, duplicateBursts: () => [] } as DetectInput;
 }
 /** Tick every 10 s for `mins` minutes; return every minute a weak-signal was emitted. */

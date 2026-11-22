@@ -6,7 +6,7 @@ import { planEpisodeLifecycle } from '../src/zwave/outcomes';
 import { diffSymptomLog } from '../src/zwave/zwaveData';
 import type { RateNormal, ContNormal, BaselineStore } from '../src/zwave/baselines';
 import { NodeStatus, type NodeSnapshot, type ControllerSnapshot } from '../src/types';
-import type { EvidenceSample, CoarseBucket, ControllerSample, NodeCoverage } from '../src/zwave/evidenceStore';
+import type { EvidenceSample, ControllerSample, NodeCoverage } from '../src/zwave/evidenceStore';
 import { foldRateRun, type RateRun, type RttSeed } from '../src/zwave/evidenceStore';
 
 const T = 1_000_000_000_000;
@@ -88,7 +88,6 @@ function input(f: Fixture): DetectInput {
     baselines: f.baselines ?? baselineStub(),
     latest: (id) => { const r = f.recent.get(id); return r ? r[r.length - 1] : undefined; },
     recent: (id) => f.recent.get(id) ?? [],
-    coarse: () => [] as CoarseBucket[],
     controllerSamples: () => f.ctrl ?? [],
     coverage: (id) => f.cov?.get(id) ?? null,
     rateRun: (id) => (f.recent.get(id) ?? []).reduce<RateRun | null>(foldRateRun, null),

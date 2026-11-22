@@ -591,3 +591,14 @@ test('the backup hold reaches the archive: run script → config → createLogAr
   assert.match(read('../src/config.ts'), /holdPath: process\.env\.LOG_ARCHIVE_HOLD \|\| null,/);
   assert.match(read('../../rootfs/usr/bin/zwave-tui-backup-hook'), /^opts="\$\{LOG_ARCHIVE_OPTIONS:-\/data\/options\.json\}"$/m, 'the archive-on check reads the add-on\'s options');
 });
+
+test("index.ts: /api/health reports the engine's half through the publisher's gate (v0.79.5)", () => {
+  // A source assertion, and labelled as one: the endpoint lives inside main(),
+  // which a test cannot boot. The gate itself is pinned in haStates.test.ts.
+  const index = read('server/src/index.ts');
+  const h = index.slice(index.indexOf("app.get('/api/health'"), index.indexOf('// 7) SSH transport'));
+  assert.ok(h.length > 0 && h.length < 4000, 'the handler was found');
+  assert.match(h, /const concl = healthConclusions\(provider, Date\.now\(\), \{ writeActions: config\.writeActions, startedAt: bootedAt \}\);/);
+  assert.match(h, /\n      \.\.\.concl,\n/);
+  assert.doesNotMatch(h, /buildStates\(/, 'the endpoint builds no conclusions of its own, outside the gate');
+});

@@ -134,7 +134,8 @@ for no-RTC clocks) — plus the disciplines the design review proved necessary:
 **Two tiers, both M2 exit criteria** *(DR blocker: baselines had no substrate)*:
 
 - **Fine ring**: one sample per node per evidence tick (`route_poll_interval`, default 10 s),
-  ~40 min horizon — feeds recent-window detectors and the after-window
+  ~40 min horizon — feeds recent-window detectors, the baseline fold (each
+  engine tick folds the sample it just recorded) and the after-window
   verifier.
 - **Coarse tier**: 30-minute buckets × 14 days per node — feeds the
   INTERFERENCE screen's diurnal heatmap, measured route stability and DETAIL's
@@ -220,17 +221,23 @@ watch (M6) and the controller-degraded detector read these.
 
 **Bounds, enforced not asserted** *(DR)*: on-disk format is genuinely columnar
 (parallel arrays per field per node); rtt rounded; all-quiet coarse buckets are
-omitted (a missing bucket = no fresh observations, which is exactly what it
-contributes to a baseline). Honest math (re-measured after the
-review caught the first estimate under-populating columns): worst case ≤ 80 KB/
+omitted (a missing bucket = no fresh observations and no counter deltas, so
+the readings and delta sums the screens take from the tier are unchanged; only
+the sample and bucket counts behind DETAIL's Windows and History rows, and the
+spans measured from the first bucket, lose a quiet stretch after a restart). Honest
+math (re-measured after the review caught the first estimate under-populating
+columns): worst case ≤ 80 KB/
 node serialized (fine 240×10 s + coarse 672×30 min, every column at maximal
 width), so **≈3 MB for a 39-node mesh, scaling linearly** (a 232-node mesh
 ≈ 19 MB on /data — bounded and documented, not the old aspirational "1 MB"
 which the review showed was arithmetic fiction; typical real files run far
 smaller thanks to sparse buckets and quiet columns). A unit test enforces the
 per-node worst case. Flushes are dirty-flagged on a ~15-minute
-cadence (5 min until v0.26) plus shutdown — not a fixed full-file rewrite every 30 s (SD-card write
-amplification).
+cadence (5 min until v0.26), plus the symptom engine's prompt save (v0.79.3,
+DOCS §7.2.4) and shutdown — not a fixed full-file rewrite every 30 s (SD-card
+write amplification). A changed engine carry also writes without a new sample
+(v0.79.3), and so does every save while the carry holds a driver link the
+server ended that no handshake has followed (v0.79.5).
 
 ### 3.2 `baselines.ts` (M3 — statistics specified per series, DR)
 
@@ -279,12 +286,34 @@ node a confirmation probe can reach against a fixed 300 ms ceiling meanwhile,
 > `routeKey`: all their bands are reset when one known route changes to
 > another, and since v0.47.0 a route that cannot be seen does not count as a
 > change. A node this add-on removes (`removeFailed`), or absent from the roster
-> for 5 minutes (which covers `replace_failed_node`), loses its baselines. A
-> home-id mismatch does not decide a re-baseline on its own: the learned stores
-> wipe memory, stop saving and ask the operator to start fresh, keep, or resume
-> an archive (`homeTag.ts`, DOCS §11.13). Of the counting series only the
-> timeout rate is learned: flaps and route changes are judged on absolute
-> counts (`dead-flap`, `route-churn`, §3.3), and `dDropTx` has no baseline.
+> for 5 minutes, loses its baselines. `replace_failed_node` keeps the id on the
+> roster: since v0.79.5 a node whose own device changes in Home Assistant
+> loses the old device's baselines, evidence, dwells and open episodes at the
+> registry load that shows it while the add-on keeps running (the roster asks
+> for one when the node becomes ready; after an add-on restart before that
+> load there is nothing to compare against, and they stay). A change is the
+> device id or the hardware id (`<home_id>-<node_id>-<mfr>:<type>:<id>`)
+> differing from the record of the last load that listed the node's own
+> device: a replacement by another product, or another product included on
+> the id inside the eviction dwell (Home Assistant gives it back the device id
+> it deleted at the exclusion). One of the same product is the same device
+> and keeps them, and so does one carrying a hardware id the node already had
+> since it last left the network. An interview that misreads the hardware ids
+> is filed under a new device too, which neither Home Assistant nor the
+> add-on tells from a replacement: a reset once for each misread value while
+> the add-on runs, none when the correct read comes before the next load. The
+> device compared is the node's own (a `zwave_js` identifier exactly
+> `<home_id>-<node_id>`), whatever the list order: an endpoint child or the
+> orphan Home Assistant leaves maps its entities to the node but stands for it
+> only while the node's own device is not listed (before v0.79.5 the last
+> device listed did). Another config entry's devices are not joined, nor,
+> once the home id is known and any of that network's own devices is listed,
+> another network's (DOCS §2.3). A home-id mismatch does not decide a
+> re-baseline on its own: the learned stores wipe memory, stop saving and ask
+> the operator to start fresh, keep, or resume an archive (`homeTag.ts`, DOCS
+> §11.13). Of the counting series only the timeout rate is learned: flaps and
+> route changes are judged on absolute counts (`dead-flap`, `route-churn`,
+> §3.3), and `dDropTx` has no baseline.
 > The relative timeout test is a proxy, not a Poisson/binomial tail: the
 > window rate must reach max(3 × baseline, 7.5 %) and exceed the baseline by
 > 2 points.

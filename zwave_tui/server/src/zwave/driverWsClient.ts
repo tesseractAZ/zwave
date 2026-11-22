@@ -82,10 +82,17 @@ export interface DriverWsCallbacks {
   /** The server's homeId (from the version handshake) — caller cross-checks vs HA.
    *  `link.peerClosedAt` (v0.79.3): when a handshaken link last ended without
    *  this client ending it (the server or the network ended it), if one did
-   *  since the last handshake, else null. Then the server — and the driver in
-   *  it — went away and came back between that moment and this handshake, or
-   *  (not told apart) the server dropped this client or the network did.
-   *  Null on this client's first connection and after a link this client
+   *  since the last handshake, else null. zwave-js-server (checked at source,
+   *  3.0.0 and master) ends this client's link only when it shuts down or
+   *  rebuilds a failed driver (src/lib/server.ts: its 30 s sweep drops only
+   *  sockets already closed, and it pings no client; it also closes a client
+   *  whose message is not JSON, which this client never sends); Z-Wave JS UI, which
+   *  embeds the same server class, destroys it only with its driver (checked
+   *  in part). So the driver went away and came back between that moment and
+   *  this handshake; a link a network fault ended is not told apart and reads
+   *  the same. A stop() in between keeps it (v0.79.5), and so does a restart
+   *  of the add-on that the previous run carried (`opts.peerClosedAt`). Null
+   *  on this client's first connection otherwise, and after a link this client
    *  ended itself (a liveness or handshake timeout, a protocol error), which
    *  prove nothing about the driver. */
   onHomeId?: (homeId: number, link: { peerClosedAt: number | null }) => void;
@@ -124,6 +131,10 @@ export interface DriverWsClientOptions {
   livenessMs?: number;
   /** The storm guard's limits (v0.76.0); tests shrink them, the add-on uses LOG_GUARD. */
   logGuard?: Partial<LogGuardConfig>;
+  /** A link the server ended that the previous run of the add-on saw no
+   *  handshake after (v0.79.5, carried in evidence.json): the client starts as
+   *  if it had seen that close, so its first handshake reports it. */
+  peerClosedAt?: number | null;
 }
 
 export type DriverWsState =
@@ -197,6 +208,9 @@ export interface DriverWsClient {
   schema(): number | null;
   /** The server's homeId from the handshake (null until known). */
   homeId(): number | null;
+  /** When a link the server ended has had no handshake since, or null
+   *  (v0.79.5): what the shutdown save carries to the next run. */
+  peerClosedAt(): number | null;
   /** When the controller reported `Turning RF off` and has not yet reported
    *  `Turning RF on` (v0.65.0) — the nightly NVM backup takes the radio down
    *  for ~10 s. null once it is back, once the reading is older than
@@ -595,8 +609,9 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
    *  next handshake reports it (v0.79.3). Our own teardowns strip the close
    *  listener first, and a protocol error clears `handshook` before the close
    *  the ws library then sends itself, so only the peer's close (or the
-   *  network's) can set it. */
-  let peerClosedAt: number | null = null;
+   *  network's) can set it — or the previous run, through
+   *  `opts.peerClosedAt` (v0.79.5). */
+  let peerClosedAt: number | null = opts.peerClosedAt ?? null;
   let statusLine = url ? 'not started' : 'disabled (no driver_ws_url)';
   let msgId = 0;
   /** Log-stream state — all per-connection, reset in connect(). */
@@ -1254,14 +1269,19 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
         reconnectTimer = null;
       }
       teardownSocket('stopped');
-      // A deliberate stop is ours: the next start() proves nothing about the
-      // driver from the link it ended.
-      peerClosedAt = null;
+      // An open peer close survives a stop (v0.79.5). It is set only while no
+      // handshaken link has followed it, so this stop ended no link the driver
+      // answered on, and the next handshake — after start(), or in the next
+      // run of the add-on when it loads the shutdown save's copy (same boot,
+      // down no longer than DRIVER_DROP_CARRY_MS) — still shows the server
+      // went away and came back. A live link this stop ends sets
+      // nothing: teardownSocket strips the close listener first.
       setState(url ? 'stopped' : 'disabled', 'stopped');
     },
     state: () => state,
     status: () => statusLine,
     schema: () => negotiatedSchema,
     homeId: () => serverHomeId,
+    peerClosedAt: () => peerClosedAt,
   };
 }
