@@ -216,9 +216,10 @@ export interface DetectInput {
    *  host's boot, a driver link the server ended and a later handshake, or
    *  such a span carried from the previous run on the same boot. This
    *  add-on's own start is NOT one (v0.79.2 read every handshake as a start,
-   *  its own first included). The boot (`boot`) is judged at a death's first
-   *  Dead reading only, the other spans on every tick (v0.79.5). Absent or
-   *  empty reads as no known start. */
+   *  its own first included), though its first handshake can close a span
+   *  the previous run opened (v0.79.5). The boot (`boot`) is judged at a
+   *  death's first Dead reading only, the other spans on every tick
+   *  (v0.79.5). Absent or empty reads as no known start. */
   driverStarts?: readonly DriverStart[];
   /** Store-level: epoch ms evidence collection began (coverage floor). */
   recordingSince: () => number | null;
@@ -1409,7 +1410,8 @@ export function heldSymptoms(state: SymptomState): { key: string; nodeId: number
  * neither raised nor a start death: a copy of one written while the add-on
  * runs goes stale within the dwell, and after a crash restart one that had
  * ended came back with its old onset and was raised at once if the node read
- * Dead again. Only the shutdown save carries those.
+ * Dead again. Once the engine has taken the carry, only the shutdown save
+ * carries those.
  */
 export function nodeDownCarry(state: SymptomState, waiting = true): NodeDownCarry[] {
   const out: NodeDownCarry[] = [];
@@ -1424,14 +1426,16 @@ export function nodeDownCarry(state: SymptomState, waiting = true): NodeDownCarr
 
 /**
  * Seed carried node-down dwells (v0.79.3) for the nodes `keep` admits, never
- * over an entry this run already holds. Nothing else is trusted: the detector
- * re-judges each one on its next tick, and a node that does not read Dead
- * there drops it, as any dwell is dropped. A `since` ahead of `now` (a host
- * without a clock battery boots behind its last save) is taken as `now`; a
- * raised one is raised at once all the same, dated from the restart. Its boot
- * verdict is the carried one (v0.79.5): the boot is judged at a death's first
- * reading only, and that was in the run that saved it. Returns how many were
- * seeded.
+ * over an entry this run already holds. Their status is not trusted: the
+ * detector reads each one again on its next tick, and a node read Alive,
+ * Awake or Asleep there drops it, as any dwell is dropped (Unknown is no
+ * reading). A `since` ahead of `now` (a host without a clock battery boots
+ * behind its last save) is taken as `now`; a raised one is raised at once all
+ * the same, dated from the restart. Each keeps the boot verdict it carries
+ * (v0.79.5), the one taken at its first Dead reading, in whichever run first
+ * read it (for a dwell 0.79.3 or 0.79.4 wrote, the verdict that version last
+ * took): the boot is judged at a death's first reading only. Returns how many
+ * were seeded.
  */
 export function seedNodeDown(state: SymptomState, carried: readonly NodeDownCarry[], keep: (nodeId: number) => boolean, now: number): number {
   let n = 0;

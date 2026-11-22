@@ -88,4 +88,5 @@ test('every floor in the add-on is computed by the one rule — none re-implemen
   const code = (t: string): string => t.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
   assert.doesNotMatch(code(src('zwave/symptoms.ts')), /hasRealNoise/, 'the detectors read "measured" from the floor, not from whether a sample exists');
   assert.doesNotMatch(code(src('zwave/zwaveData.ts')), /hasRealNoise:/, 'and the data layer no longer supplies a second answer');
+  assert.doesNotMatch(code(src('zwave/zwaveData.ts')), /coarse: \(id\) => ev\.coarseForNode/, 'the detectors are not handed the coarse tier (v0.79.5)');
 });

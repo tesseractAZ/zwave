@@ -448,7 +448,8 @@ export interface EvidenceStoreOptions {
   /** What the symptom engine carries across a restart (v0.79.3), read at each
    *  save once the engine has taken the restored carry (`takeCarry`). Until
    *  then a save writes back what was restored, so a second restart before
-   *  the engine's first tick loses nothing. */
+   *  the engine's first tick loses nothing — except the driver link's part,
+   *  read from the engine at every save (v0.79.5). */
   carry?: () => EvidenceCarry;
 }
 
@@ -462,9 +463,11 @@ export interface EvidenceStoreOptions {
  * a host restart is the same outage after it until a reading says otherwise,
  * while one still waiting began before that boot's own driver start, and the
  * next Dead reading starts it again inside the boot's window. The engine
- * re-judges each dwell on its next tick. A driver link the server ended that
- * had not come back at the save (v0.79.5) loads only on the same boot, and
- * only when the add-on was down no longer than DRIVER_DROP_CARRY_MS.
+ * reads each dwell again on its next tick (a node read Alive, Awake or Asleep
+ * there drops it; Unknown is no reading); the boot verdict it carries is kept
+ * (v0.79.5). A driver link the server ended that had not come back at the
+ * save (v0.79.5) loads only on the same boot, and only when the add-on was
+ * down no longer than DRIVER_DROP_CARRY_MS.
  */
 export interface EvidenceCarry {
   /** The network the engine state belongs to; a carry for another network than
@@ -484,8 +487,10 @@ export interface EvidenceStore {
   /** Register a roster node for coverage tracking (idempotent). */
   registerNode(nodeId: number, at?: number): void;
   /**
-   * Remove ALL evidence for a node that left the network (excluded/replaced).
-   * Node-id reuse after replace_failed_node must start from a clean slate —
+   * Remove ALL evidence for a node that left the network, or whose Home
+   * Assistant device changed (a replace by another product, caught at a
+   * registry load while the add-on keeps running; v0.79.5). A same-product
+   * replace keeps its evidence. Node-id reuse must start from a clean slate —
    * inherited history would merge two physical devices' evidence and
    * pre-satisfy the ghost detector's coverage precondition (review).
    */
@@ -1524,10 +1529,10 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
             carriedLives.set(id, { at: { tx, timeout: to, dropTx: dr, rx }, seed: k0 != null && k0 >= 1 && a0 != null ? { k0, a0 } : null });
           }
         }
-        // The symptom engine's carry (v0.79.3), at any age: the engine
-        // re-judges each dwell against a live reading before it counts. On
-        // another boot only raised dwells, and no driver start: that boot is a
-        // newer start of its own.
+        // The symptom engine's carry (v0.79.3), at any age: the engine reads
+        // each dwell again at its next tick, keeping the boot verdict it
+        // carries (v0.79.5). On another boot only raised dwells, and no driver
+        // start: that boot is a newer start of its own.
         const nodeDown: EvidenceCarry['nodeDown'] = [];
         if (obj.nodeDown && typeof obj.nodeDown === 'object') {
           for (const [k, v] of Object.entries(obj.nodeDown)) {
@@ -1608,8 +1613,9 @@ export function createEvidenceStore(opts: EvidenceStoreOptions): EvidenceStore {
           nodes[String(id)] = cols;
         }
         const coarseOut: Persisted['coarse'] = {};
-        // Prune at save time too (review: prune-on-birth alone lets a node that
-        // stopped sampling serve beyond-horizon buckets forever).
+        // Prune at save time too, so the FILE never keeps a beyond-horizon
+        // bucket. Memory is pruned only when a bucket is born (foldCoarse), so a
+        // node that stopped sampling serves its old buckets until a restart.
         const saveCutoff = now() - coarseHorizonMs;
         for (const [id, ring] of coarse) {
           if (!Number.isInteger(id) || id <= 0) continue;

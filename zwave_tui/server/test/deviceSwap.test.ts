@@ -22,8 +22,9 @@ const TICK = 30_000;
 const ENTRY = 'entry-1';
 const HOME = 3586281591;
 
-type Dev = { id: string; node: number };
-interface World { roster: Array<Record<string, unknown>>; devices: Dev[] }
+/** `ids`: the device's zwave_js identifiers; default the node's own `<home>-<node>`. */
+type Dev = { id: string; node: number; ids?: string[] };
+interface World { roster: Array<Record<string, unknown>>; devices: Dev[]; entities?: Array<Record<string, unknown>> }
 
 function fakeHa(w: World): HaWsClient & { fireReady(): void } {
   const readyCbs: Array<() => void> = [];
@@ -31,8 +32,8 @@ function fakeHa(w: World): HaWsClient & { fireReady(): void } {
     switch (cmd.type) {
       case 'config_entries/get': return [{ entry_id: ENTRY, domain: 'zwave_js', state: 'loaded', title: 'Z-Wave JS' }];
       case 'config/device_registry/list':
-        return w.devices.map((d) => ({ id: d.id, identifiers: [['zwave_js', `${HOME}-${d.node}`]], name: `Dev ${d.id}`, area_id: null }));
-      case 'config/entity_registry/list': return [];
+        return w.devices.map((d) => ({ id: d.id, identifiers: (d.ids ?? [`${HOME}-${d.node}`]).map((s) => ['zwave_js', s]), name: `Dev ${d.id}`, area_id: null }));
+      case 'config/entity_registry/list': return w.entities ?? [];
       case 'get_states': return [];
       case 'zwave_js/network_status':
         return { client: { server_version: 't' }, controller: { home_id: HOME, own_node_id: 1, nodes: w.roster } };
@@ -263,5 +264,77 @@ test('device swap (v0.79.5): the old device\'s open episodes are abandoned and t
     assert.deepEqual(abandoned, [[60, 'rtt-degraded']], 'only node 60\'s');
     assert.deepEqual(dropped.map((a) => a.slice(0, 2)), [[60, 'another device took the id']]);
     assert.ok(r.events().includes("1 in-flight episode + node 60's baselines discarded — another device took the id"), r.events().join(' | '));
+  });
+});
+
+/* ── The node's own device holds its slot (v0.79.5) ───────────────────────── */
+
+/** Node 60's own device `dev-60`, identified `<home>-60`. */
+const own = (): Dev[] => [{ id: 'dev-1', node: 1 }, { id: 'dev-7', node: 7 }, { id: 'dev-60', node: 60 }];
+const joined = (r: { logs: string[] }) => waitFor(() => r.logs.some((l) => l.startsWith('registry join:')));
+
+test('device swap (v0.79.5): an endpoint child device filed under the node is no swap — appended at a reload, then pruned at a later one, the node keeps its own device and its raised node-down', async () => {
+  const w = world(own());
+  await withRun(w, async (r) => {
+    await joined(r);
+    raise(r);
+    // Home Assistant files an endpoint child device, `<home>-<node>-<endpoint>`, after its parent.
+    w.devices = [...w.devices, { id: 'dev-60-ep2', node: 60, ids: [`${HOME}-60-2`] }];
+    await r.reload();
+    assert.deepEqual(r.resetCalls, [], 'a child appearing is no replacement');
+    assert.equal(r.zd.deviceIdOf(60), 'dev-60', 'the node\'s own device holds its slot');
+    assert.equal(r.tick(), true, 'the raised node-down stays raised');
+    // A re-interview prunes the child.
+    w.devices = w.devices.filter((d) => d.id !== 'dev-60-ep2');
+    await r.reload();
+    assert.deepEqual(r.resetCalls, [], 'nor is the child going');
+    assert.equal(r.zd.deviceIdOf(60), 'dev-60');
+    assert.equal(r.tick(), true, 'still raised');
+    assert.ok(!r.events().some((t) => t.includes('another device')), r.events().join(' | '));
+  });
+});
+
+/** A replace by another product as Home Assistant's registry shows it: the old
+ *  device keeps only `<home>-<node>-<mfr>:<type>:<id>` (the stripped orphan,
+ *  kept until the integration's next setup) and the new one is added with
+ *  `<home>-<node>`. Both are filed under node 60. */
+async function replacedByAnotherProduct(orphanFirst: boolean): Promise<void> {
+  const X = `${HOME}-60-634:20548:13`;
+  const Y = `${HOME}-60-881:3:20`;
+  const w = world([{ id: 'dev-1', node: 1 }, { id: 'dev-7', node: 7 }, { id: 'dev-60', node: 60, ids: [`${HOME}-60`, X] }]);
+  await withRun(w, async (r) => {
+    await joined(r);
+    raise(r);
+    const orphan: Dev = { id: 'dev-60', node: 60, ids: [X] };
+    const fresh: Dev = { id: 'dev-60b', node: 60, ids: [`${HOME}-60`, Y] };
+    const others = w.devices.filter((d) => d.node !== 60);
+    w.devices = orphanFirst ? [...others, orphan, fresh] : [...others, fresh, orphan];
+    w.roster = w.roster.map((n) => (n.node_id === 60 ? { ...n, status: 0, ready: false } : n));
+    await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === 0));
+    await r.reload();
+    assert.deepEqual(r.resetCalls, [60], 'the swap is caught');
+    assert.equal(r.zd.deviceIdOf(60), 'dev-60b', 'the new device holds the slot, not the orphan');
+    assert.equal(r.tick(), false, 'the new device is not raised while it reads Unknown');
+  });
+}
+
+test('device swap (v0.79.5): a replace by another product with the stripped orphan listed first — the new device takes the slot and the swap is caught', async () => {
+  await replacedByAnotherProduct(true);
+});
+
+test('device swap (v0.79.5): a replace by another product with the stripped orphan listed last — the new device still takes the slot and the swap is caught', async () => {
+  await replacedByAnotherProduct(false);
+});
+
+test('device swap (v0.79.5): an entity on an endpoint child device joins its node, though the child never holds the node\'s slot', async () => {
+  const w = world([...own(), { id: 'dev-60-ep2', node: 60, ids: [`${HOME}-60-2`] }]);
+  w.entities = [{
+    entity_id: 'switch.dev_60_ep2', device_id: 'dev-60-ep2', disabled_by: null, platform: 'zwave_js',
+    original_name: 'Endpoint 2', unique_id: `${HOME}.60-37-2-currentValue`,
+  }];
+  await withRun(w, async (r) => {
+    await joined(r);
+    assert.equal(r.zd.deviceIdOf(60), 'dev-60', 'the child listed after its parent does not take the slot');
+    assert.equal(r.zd.readEntityOf(60), 'switch.dev_60_ep2', 'the child\'s switch is node 60\'s');
   });
 });

@@ -383,10 +383,11 @@ async function main(): Promise<void> {
       // names the actual cause was the one the endpoint did not print.
       haError: client.lastError(),
       // WHAT THE ENGINE CONCLUDED — the half this endpoint never carried.
-      // Same values published as HA states, behind the same gate (v0.79.5):
-      // after a restart, until the first roster and the engine's first tick,
-      // HA is sent nothing and this reports `conclusionsReady: false`,
-      // `degraded: null` and an empty `engine`.
+      // The values published as HA states (HA's copy up to one 30-second
+      // publish behind), behind the same gate (v0.79.5): after a restart,
+      // until the first roster and the engine's first tick, HA is sent
+      // nothing and this reports `conclusionsReady: false`, `degraded: null`
+      // and an empty `engine`.
       ...concl,
     });
   });

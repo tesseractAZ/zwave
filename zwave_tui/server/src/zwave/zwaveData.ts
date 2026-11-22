@@ -1152,10 +1152,11 @@ class ZwaveDataImpl implements ZwaveData {
           ...(opts.uptimeMs ? { uptimeMs: opts.uptimeMs } : {}),
           // v0.79.3: node-down dwells and the newest known driver restart
           // outlive this process, so a restart neither withdraws a raised
-          // node-down nor reads as a driver start. A dwell still on its
-          // 5-minute dwell is written by the shutdown save only (v0.79.5;
-          // stop() sets `stopped` before it saves): a flush's copy could
-          // outlive the dwell, and a crash restart brought it back.
+          // node-down nor reads as a driver start. Once the engine has taken
+          // the carry, a dwell still on its 5-minute dwell is written by the
+          // shutdown save only (v0.79.5; stop() sets `stopped` before it
+          // saves): a copy a save wrote while the engine ran could outlive the
+          // dwell, and a crash restart brought it back.
           carry: () => ({ homeId: this.lastHomeId, nodeDown: nodeDownCarry(this.symptomState, this.stopped), driverStart: this.newestDriverRestart(), driverDrop: this.driverWs?.peerClosedAt() ?? null }),
         })
       : null;
@@ -1214,7 +1215,9 @@ class ZwaveDataImpl implements ZwaveData {
               const at = Date.now();
               this.driverWsConnAt = at;
               // Only a link this add-on did not end itself shows the driver went
-              // away and came back (v0.79.3): its own first handshake does not.
+              // away and came back (v0.79.3): its own first handshake does not,
+              // unless the previous run saw the server end the link and stopped
+              // before it came back (v0.79.5, the client's peerClosedAt seed).
               if (link?.peerClosedAt != null) {
                 this.driverRestart = { from: link.peerClosedAt, to: at };
                 this.log(`driver-ws: the link ended ${Math.max(0, Math.round((at - link.peerClosedAt) / 1000))}s ago, not by this add-on, and is back — a driver start for the node-down start window`);
@@ -1564,8 +1567,9 @@ class ZwaveDataImpl implements ZwaveData {
         const onRoster = new Set(this.lastNodes.map((n) => n.nodeId));
         // As written to disk, off-roster entries included: one dropped on this
         // tick is a change, and is saved below. So is a dwell still waiting,
-        // which only the shutdown save writes (v0.79.5): the first tick's save
-        // takes it off the disk, so a crash after it cannot bring it back.
+        // which, once the engine has taken the carry, only the shutdown save
+        // writes (v0.79.5): the first tick's save takes it off the disk, so a
+        // crash after it cannot bring it back.
         this.promptSavedKey = promptCarryKey(carry.nodeDown, carry.driverStart);
         const n = seedNodeDown(this.symptomState, carry.nodeDown, (id) => onRoster.has(id), now);
         if (n > 0) {
@@ -1609,7 +1613,7 @@ class ZwaveDataImpl implements ZwaveData {
     // v0.79.3: a raised node-down, a start death or a driver restart seen —
     // what a crash restart or a power cut must not lose — reaches disk within
     // a minute, not at the next 15-minute flush. A node-down still on its
-    // 5-minute dwell is not written while the add-on runs (v0.79.5, the carry
+    // 5-minute dwell is not written while the engine runs (v0.79.5, the carry
     // getter): after a crash it starts again at the next reading. The spacing
     // keeps a flapping node from rewriting the store every tick. It is
     // measured on the host's uptime (v0.79.5): on the wall clock, a step back
@@ -2702,6 +2706,7 @@ class ZwaveDataImpl implements ZwaveData {
   }
 
   stop(): void {
+    // First: the evidence save below reads it (v0.79.5), so the shutdown save writes the dwells still waiting.
     this.stopped = true;
     this.started = false;
     if (this.pollTimer) {
@@ -2908,8 +2913,9 @@ class ZwaveDataImpl implements ZwaveData {
     // replace_failed_node does not come through here: the driver swaps the
     // node in place, so the id stays on the roster (v0.79.5). A replacement
     // that HA registers as another device is caught at the next registry
-    // load instead (forgetSwappedDevice); one HA keeps as the same device
-    // keeps the failed device's state.
+    // load instead (forgetSwappedDevice), while the add-on keeps running: an
+    // add-on restart before that load leaves nothing to compare against. One
+    // HA keeps as the same device keeps the failed device's state.
     {
       const present = new Set(nodes.map((n) => n.nodeId));
       const now = Date.now();
@@ -4093,9 +4099,13 @@ class ZwaveDataImpl implements ZwaveData {
    * previous run saw on this boot. NOT `driverReconnectedAt()`: that one also
    * moves at this add-on's own first handshake, which v0.79.2 read as a driver
    * start, so after a deploy a FLiRS node already Dead lost its raised
-   * node-down for 90 minutes. A Z-Wave JS restart this add-on did not see (it
-   * was down meanwhile, or the link never dropped) is not known, and a death
-   * then keeps the 5-minute dwell.
+   * node-down for 90 minutes. A Z-Wave JS restart this add-on did not see is
+   * not known, and a death then keeps the 5-minute dwell. Among them: one that
+   * ran entirely while the add-on was down; one whose link end it saw that
+   * the next run does not take, because the add-on was down more than
+   * DRIVER_DROP_CARRY_MS after its last save, or crashed before a save wrote
+   * that end (v0.79.5); and one that never dropped the link, such as an
+   * in-place driver re-init that keeps it (inferred: an NVM restore).
    */
   driverStarts(now = Date.now()): DriverStart[] {
     // The host's boot as of `now`, marked `boot`: the detector judges it at a

@@ -82,10 +82,12 @@ export interface DriverWsCallbacks {
   /** The server's homeId (from the version handshake) — caller cross-checks vs HA.
    *  `link.peerClosedAt` (v0.79.3): when a handshaken link last ended without
    *  this client ending it (the server or the network ended it), if one did
-   *  since the last handshake, else null. zwave-js-server ends a client's link
-   *  only when it shuts down or rebuilds a failed driver (src/lib/server.ts:
-   *  its 30 s sweep drops only sockets already closed, and it pings no
-   *  client), so the driver went away and came back between that moment and
+   *  since the last handshake, else null. zwave-js-server (checked at source,
+   *  3.0.0 and master) ends a client's link only when it shuts down or
+   *  rebuilds a failed driver (src/lib/server.ts: its 30 s sweep drops only
+   *  sockets already closed, and it pings no client); Z-Wave JS UI, which
+   *  embeds the same server class, destroys it only with its driver (checked
+   *  in part). So the driver went away and came back between that moment and
    *  this handshake; a link a network fault ended is not told apart and reads
    *  the same. A stop() in between keeps it (v0.79.5), and so does a restart
    *  of the add-on that the previous run carried (`opts.peerClosedAt`). Null

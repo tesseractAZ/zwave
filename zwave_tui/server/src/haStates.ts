@@ -420,7 +420,10 @@ export async function failureReason(res: { text?: () => Promise<string> }): Prom
  *  before the first roster (v0.76.1), nor before the symptom engine's first
  *  tick (v0.79.3) — until then a node-down carried across a restart is not
  *  raised yet, and degraded would read off. The publisher and /api/health
- *  ask this one question, so the two cannot report different conclusions. */
+ *  ask this one question and report the same conclusions, Home Assistant's
+ *  up to one publish interval (30 s) behind while its posts succeed: the
+ *  publisher posts at its start and then on its interval, not when this
+ *  opens or a conclusion changes. */
 export function conclusionsReady(data: DataProvider): boolean {
   return data.ready() && data.engineStatus().ran !== false;
 }

@@ -194,6 +194,9 @@ test('node-down (v0.79.5): the host\'s boot is judged at a death\'s first readin
   }
   assert.equal(raised, 5, 'raised at its 5-minute dwell (0.79.3 and 0.79.4: 90)');
   assert.equal(state.get('60:node-down')?.start, undefined, 'never judged a start death');
+  // A marked boot is still judged at the first reading: a death first read 2
+  // min after it waits 90 min, not 5.
+  assert.equal(run(new Map(), flirs(), [{ from: T - MIN, to: T - MIN, boot: true }], T + MIN, 95).first, 90, 'a death 2 min after a marked boot is a start death');
 });
 
 test('node-down (v0.79.5): a driver restart span is still judged on every tick — a death first read while the link is down is a start death once the re-handshake sets the span', () => {
@@ -1140,17 +1143,22 @@ test('driver link (v0.79.5, production-wired): a wedged link the liveness check 
     const h0 = r.zd.driverReconnectedAt()!;
     srv.stall(); // the server stops answering: no traffic, no pong
     await waitFor(() => logs.some((l) => /no pong\/traffic — terminating wedged socket/.test(l)), 5000);
-    await waitFor(() => srv.connectionCount() === 2 && r.zd.driverWsState() === 'live', 15_000);
+    // At least 2: a reconnect handshake slower than the 800 ms handshake clock
+    // (a loaded host) is ended and retried, and that is this add-on's own end too.
+    await waitFor(() => srv.connectionCount() >= 2 && r.zd.driverWsState() === 'live', 15_000);
     assert.ok(r.zd.driverReconnectedAt()! > h0, 'the handshake stamp moves (auto-ping\'s burst refusal)');
     assert.equal(r.zd.driverStarts().length, 1, 'only the boot: a link this add-on ended is no driver start');
     assert.ok(!logs.some((l) => /a driver start for the node-down start window/.test(l)), logs.join('\n'));
     roster.find((n) => n.node_id === 60)!.status = 3;
     await waitFor(() => r.zd.snapshot().some((n) => n.nodeId === 60 && n.status === NodeStatus.Dead));
     assert.equal(ticksTo(r, 10), 5, 'a death after the reconnect keeps the 5-minute dwell');
-    // Wedged again, and a deploy lands in the backoff (the ticks' clock skip
-    // reads as silence too; either way this add-on ends the link).
+    // A deploy lands in the backoff. The ticks' clock skip (5.5 min past the
+    // link's last traffic) ends the link at the next liveness check, which is
+    // this add-on's own teardown; the stall keeps a reply or a pong from
+    // moving the idle clock before that check.
     srv.stall();
     await waitFor(() => r.zd.driverWsState() === 'backoff', 5000);
+    assert.ok(logs.filter((l) => /no pong\/traffic — terminating wedged socket/.test(l)).length >= 2, 'the liveness check ended the link again');
     r.stop();
     const file = JSON.parse(readFileSync(join(dir, 'evidence.json'), 'utf8')) as { driverDrop?: number };
     assert.equal(file.driverDrop, undefined, 'a link this add-on ended is not carried as a drop');
