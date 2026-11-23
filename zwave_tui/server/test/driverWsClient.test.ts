@@ -12,6 +12,7 @@ import {
   rfOffActive,
   RF_OFF_MAX_MS,
   type DriverWsCallbacks,
+  type DriverWsClient,
   type LogGap,
   s2Fault,
   refreshQueriesOf,
@@ -1509,6 +1510,129 @@ test('peerClosedAt option (v0.79.5): a close the previous run carried is reporte
     assert.equal(srv.connectionCount(), 2);
     assert.deepEqual(links, [carried], 'the first handshake reports the carried close');
     assert.equal(c.peerClosedAt(), null, 'reported once');
+  } finally {
+    c.stop();
+    await srv.close();
+  }
+});
+
+/* ── v0.79.6: a callback that stops or restarts the client ───────────────── */
+
+test('a state-dump callback that stops the client leaves it stopped, not live with no socket under it; the dump hands on no further node and is not logged as processed (v0.79.6)', async () => {
+  // zwaveData's homeId cross-check stops the client from inside the dump's own
+  // callbacks when Home Assistant's home id is known first and differs. Until
+  // v0.79.6 the dump went on to declare the link live: nothing reconnected it,
+  // and its S2 lane read 'refused'.
+  for (const at of ['bg', 'node 6', 'node 44'] as const) {
+    const srv = await mockServer();
+    const logs: string[] = [];
+    const flags: number[] = [];
+    const box: { c: DriverWsClient | null } = { c: null };
+    const c = createDriverWsClient({
+      url: srv.url, reconnectBaseMs: 60, log: (l) => logs.push(l),
+      callbacks: {
+        onBgRssi: () => { if (at === 'bg') box.c?.stop(); },
+        onNodeFlags: (id) => { flags.push(id); if (at === `node ${id}`) box.c?.stop(); },
+      },
+    });
+    box.c = c;
+    try {
+      c.start();
+      await waitFor(() => logs.includes('driver-ws: stopped'));
+      await sleep(200); // past a 60 ms reconnect, were one scheduled
+      assert.equal(c.state(), 'stopped', `stopped at ${at}: ${logs.join(' | ')}`);
+      assert.equal(c.status(), 'stopped');
+      assert.equal(c.s2LaneFault(), null, 'the server refused nothing');
+      assert.equal(srv.connectionCount(), 1, 'nothing reconnects a stopped client');
+      assert.deepEqual(flags, at === 'bg' ? [] : at === 'node 6' ? [6] : [6, 44], `no node past the one whose callback stopped it (${at})`);
+      assert.ok(!logs.some((l) => l.includes('state dump processed')), `a dump a stop cut short is not logged as processed (${at})`);
+      assert.ok(!logs.some((l) => l.startsWith('driver-ws: live')), `never live (${at})`);
+    } finally {
+      c.stop();
+      await srv.close();
+    }
+  }
+});
+
+test('a state-dump callback that stops and restarts the client: the old dump does not make the new link live, and the new link comes up on its own handshake (v0.79.6)', async () => {
+  const srv = await mockServer();
+  const logs: string[] = [];
+  const flags: number[] = [];
+  const box: { c: DriverWsClient | null; restarted: boolean } = { c: null, restarted: false };
+  const c = createDriverWsClient({
+    url: srv.url, reconnectBaseMs: 60, log: (l) => logs.push(l),
+    callbacks: {
+      onBgRssi: () => {
+        if (box.restarted) return;
+        box.restarted = true;
+        box.c?.stop();
+        box.c?.start();
+      },
+      onNodeFlags: (id) => flags.push(id),
+    },
+  });
+  box.c = c;
+  try {
+    c.start();
+    await waitFor(() => c.state() === 'live' && c.s2LaneLive());
+    assert.equal(srv.connectionCount(), 2);
+    assert.deepEqual(flags, [6, 44], 'the first dump hands on no node past the restart; the second hands on every node');
+    assert.equal(logs.filter((l) => l.startsWith('driver-ws: live')).length, 1, `one link went live, the second: ${logs.join(' | ')}`);
+    assert.equal(logs.filter((l) => l.includes('state dump processed')).length, 1);
+  } finally {
+    c.stop();
+    await srv.close();
+  }
+});
+
+test('an onHomeId callback that stops the client leaves it stopped: the handshake goes no further, into neither handshake nor dormant (v0.79.6)', async () => {
+  // maxSchema 0 is a handshake with no schema range, which ends dormant.
+  for (const maxSchema of [42, 0]) {
+    const srv = await mockServer({ maxSchema });
+    const logs: string[] = [];
+    const box: { c: DriverWsClient | null } = { c: null };
+    const c = createDriverWsClient({ url: srv.url, reconnectBaseMs: 60, log: (l) => logs.push(l), callbacks: { onHomeId: () => box.c?.stop() } });
+    box.c = c;
+    try {
+      c.start();
+      await waitFor(() => logs.includes('driver-ws: stopped'));
+      await sleep(200);
+      assert.equal(c.state(), 'stopped', `server max ${maxSchema}: ${logs.join(' | ')}`);
+      assert.equal(c.status(), 'stopped');
+      assert.deepEqual(srv.commands, [], 'nothing is sent after the stop');
+      assert.equal(srv.connectionCount(), 1);
+    } finally {
+      c.stop();
+      await srv.close();
+    }
+  }
+});
+
+test('an onHomeId callback that stops and restarts the client: the old handshake does not tear the new link down into dormant (v0.79.6)', async () => {
+  // The first handshake carries no schema range; the server the new link
+  // reaches carries one. Going on past the callback, the old handshake's
+  // dormant branch would tear down the NEW socket and latch the client dormant.
+  const srv = await mockServer({ maxSchema: 0 });
+  const logs: string[] = [];
+  const box: { c: DriverWsClient | null; restarted: boolean } = { c: null, restarted: false };
+  const c = createDriverWsClient({
+    url: srv.url, reconnectBaseMs: 60, log: (l) => logs.push(l),
+    callbacks: {
+      onHomeId: () => {
+        if (box.restarted) return;
+        box.restarted = true;
+        srv.configure({ maxSchema: 42 });
+        box.c?.stop();
+        box.c?.start();
+      },
+    },
+  });
+  box.c = c;
+  try {
+    c.start();
+    await waitFor(() => c.state() === 'live' && c.s2LaneLive());
+    assert.equal(srv.connectionCount(), 2);
+    assert.ok(!logs.some((l) => l.includes('unrecognized handshake')), logs.join(' | '));
   } finally {
     c.stop();
     await srv.close();

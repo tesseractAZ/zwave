@@ -4086,3 +4086,67 @@ test('routeStability sums every held bucket and spans the first bucket\'s start 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a driver server on another network, proven in its state dump after a home-id change, leaves the driver client stopped, not live, and its S2 lane reads no refusal (v0.79.6)', async () => {
+  // The network-change path cycles the client with Home Assistant's new home
+  // id already known, so the cross-check proves the mismatch inside the dump's
+  // own callbacks and stops the client from there. Until v0.79.6 the dump went
+  // on to declare the stopped client live, and the S2 lane read 'refused'.
+  const srv = await mockServer(); // reports HOME, whatever Home Assistant says
+  const ha = fakeHa();
+  const logs: string[] = [];
+  const zd = createZwaveData({
+    client: ha, entryId: ENTRY, refreshMs: 60_000, routePollMs: 60_000,
+    historyPath: null, evidencePath: null, driverWsUrl: srv.url, log: (m: string) => logs.push(m),
+  });
+  try {
+    zd.start();
+    ha.fireReady();
+    await waitFor(() => zd.driverWsState() === 'live' && zd.controller()?.homeId === HOME);
+    homeOverride = HOME + 1;
+    await (zd as unknown as { refresh: () => Promise<void> }).refresh();
+    await waitFor(() => logs.some((l) => l.includes('telemetry PURGED')));
+    await sleep(200);
+    assert.equal(srv.connectionCount(), 2, 'the network change cycled the client once');
+    assert.equal(zd.driverWsState(), 'stopped', logs.filter((l) => l.startsWith('driver-ws')).join(' | '));
+    assert.equal(zd.driverWsStatus(), 'stopped');
+    assert.equal(zd.s2LaneFault(), null, 'the server refused nothing');
+    assert.equal(zd.driverLinkFault(), 'homeId mismatch — driver telemetry PURGED (check driver_ws_url)');
+  } finally {
+    homeOverride = null;
+    zd.stop();
+    await srv.close();
+  }
+});
+
+test('a home-id change the driver server made too: a cross-check read before the new handshake proves no mismatch on the previous server\'s home id (v0.79.6)', async () => {
+  // A stick swap or an NVM restore moves the driver server to the new network
+  // with Home Assistant. Until v0.79.6 the cycle kept the previous server's
+  // home id, so a read of the cross-check before the new handshake (the
+  // sleeper watch reads it on every call) compared it with the new one: the
+  // telemetry was purged and the client stopped for the rest of the run.
+  const srv = await mockServer();
+  const ha = fakeHa();
+  const logs: string[] = [];
+  const zd = createZwaveData({
+    client: ha, entryId: ENTRY, refreshMs: 60_000, routePollMs: 60_000,
+    historyPath: null, evidencePath: null, driverWsUrl: srv.url, log: (m: string) => logs.push(m),
+  });
+  try {
+    zd.start();
+    ha.fireReady();
+    await waitFor(() => zd.driverWsState() === 'live' && zd.controller()?.homeId === HOME);
+    homeOverride = HOME + 1;
+    srv.configure({ homeId: HOME + 1 });
+    await (zd as unknown as { refresh: () => Promise<void> }).refresh();
+    assert.notEqual(zd.driverWsState(), 'live', 'fixture guard: the cross-check is read before the new handshake');
+    zd.sleeperWatches();
+    await waitFor(() => zd.driverWsState() === 'live');
+    assert.equal(zd.driverLinkFault(), null, logs.filter((l) => l.startsWith('driver-ws')).join(' | '));
+    assert.equal(srv.connectionCount(), 2);
+  } finally {
+    homeOverride = null;
+    zd.stop();
+    await srv.close();
+  }
+});

@@ -72,6 +72,14 @@ export const DRIVER_SCHEMA_MAX = 41;
 /** Per-channel background RSSI (dBm, driver-EMA `average`), null = unknown. */
 export type BgRssiChannels = (number | null)[];
 
+/** What the client hands on. A callback may stop the client, or stop and
+ *  restart it (v0.79.6): the handshake it came with goes no further, and a
+ *  state dump hands on no further node and does not make the link live. The
+ *  other callbacks for the same node or the same event are still called.
+ *  onDriverLogGap's 'ended' note is the exception: a teardown sends it, and
+ *  that callback must do neither. A stop there sends a second 'ended' note,
+ *  and a start inside stop() leaves the client stopped, with later start()
+ *  calls doing nothing. */
 export interface DriverWsCallbacks {
   /** Controller background RSSI update (channels 0..3, nulls for absent). */
   onBgRssi?: (channels: BgRssiChannels, at: number) => void;
@@ -877,6 +885,12 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
   }
 
   function onMessage(m: Record<string, unknown>): void {
+    // The socket this message came on (v0.79.6). A callback can stop the
+    // client (zwaveData's homeId cross-check does) or stop and restart it;
+    // both replace `ws`, and what this message would do next belongs to a link
+    // that is gone. Going on would write a state over 'stopped' with no socket
+    // under it, or over the new link's.
+    const sock = ws;
     switch (m.type) {
       case 'version': {
         const v = m as unknown as VersionMsg;
@@ -888,6 +902,7 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
           const link = { peerClosedAt };
           peerClosedAt = null;
           cb.onHomeId?.(v.homeId, link);
+          if (ws !== sock) return;
         }
         if (serverMax <= 0) {
           // No usable schema range ⇒ not a zwave-js-server we understand (wrong
@@ -914,7 +929,11 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
         const success = m.success === true;
         const result = (m.result ?? null) as Record<string, unknown> | null;
         if (success && result && typeof result === 'object' && 'state' in result) {
-          onStateDump((result as { state?: unknown }).state);
+          onStateDump((result as { state?: unknown }).state, sock);
+          // Stopped from a dump callback, the client stays stopped: until
+          // v0.79.6 the lines below declared the link live with no socket
+          // under it, nothing reconnected, and the S2 lane read 'refused'.
+          if (ws !== sock) return;
           attempts = 0;
           setState('live', `live (schema ${negotiatedSchema}, home ${serverHomeId ?? '?'})`);
           // Subscribe to the log stream only once the listener is LIVE — a
@@ -1014,7 +1033,8 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     return true;
   }
 
-  function onStateDump(stateBlob: unknown): void {
+  /** `sock`: the socket the dump came on (v0.79.6, onMessage). */
+  function onStateDump(stateBlob: unknown, sock: WebSocket | null): void {
     if (!stateBlob || typeof stateBlob !== 'object') return;
     const s = stateBlob as Record<string, unknown>;
     // The driver's log level and node filter as configured at connect time
@@ -1030,9 +1050,13 @@ export function createDriverWsClient(opts: DriverWsClientOptions): DriverWsClien
     // Nodes: capability flags + initial lastSeen.
     const nodes = Array.isArray(s.nodes) ? s.nodes : [];
     let flagged = 0;
+    // A callback that stopped or restarted the client ends the dump (v0.79.6):
+    // no further node is handed on, and it is not logged as processed.
     for (const n of nodes) {
+      if (ws !== sock) return;
       if (onNodeState(n)) flagged += 1;
     }
+    if (ws !== sock) return;
     log(`driver-ws: state dump processed (${flagged} nodes, bgRSSI ${bg ? 'present' : 'absent'}, driver log level ${driverLogLevel ?? 'unknown'}${logNodeFilter ? `, log node filter ${logNodeFilter.size} node(s)` : ''})`);
   }
 
