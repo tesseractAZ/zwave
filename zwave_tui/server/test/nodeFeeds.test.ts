@@ -1138,3 +1138,246 @@ test('a re-arm\'s rebuild a reconnect superseded failing on the new connection l
     bound(s, [7, 60], 'after R2');
   });
 });
+
+/* ── an id back with no device as last loaded ──────────────────────────────── */
+
+/** Registry loads run so far. */
+const registryLoads = (r: Run): number => r.logs.filter((l) => l.startsWith('registry join:')).length;
+/** A registry load: a roster poll that succeeds after a failed one runs one, past the minute's spacing of such loads. */
+async function loadAfterFailedPoll(s: Sim, r: Run): Promise<void> {
+  skip += 61_000;
+  s.statusErr = 'HA WS error (unknown_error): boom';
+  await r.pollOnly();
+  s.statusErr = undefined;
+  await r.poll();
+}
+
+test('a node excluded and included again on its id inside the eviction dwell, a registry load run while it was away: subscribed at the poll that lists it, its feeds on the excluded node released (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.zw.removeNode(60, 'excluded');      // Home Assistant deletes its device
+    await r.poll();                       // off the roster: marked
+    s.zw.startInterview(7);               // another node re-interviewed meanwhile
+    await r.poll();
+    s.zw.interview(7, P7);
+    skip += 61_000;                       // past the roster loads' spacing
+    await r.poll();                       // node 7's ready false→true: a load, with node 60 away
+    assert.equal(r.zd.deviceIdOf(60) ?? null, null, 'precondition: the load left node 60 out');
+    assert.equal(s.zw.zombies(), 2, 'precondition: node 60\'s feeds on the excluded node object');
+    // Included again on 60, its interview running: Home Assistant restores
+    // the device it deleted. Before, nothing asked for a load (the id has an
+    // own-device record), and rearmNodeFeeds skips a node with no device.
+    s.zw.addPending(60);
+    await r.poll();
+    bound(s, [7, 60], 'back, interviewing');
+    assert.ok(r.heard(60), 'it is heard while interviewed');
+  });
+});
+
+test('an id back on the roster with a record but no device as last loaded asks one registry load, none at the polls after; so does a node whose device Home Assistant deleted while it stays on the roster (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.zw.removeNode(60, 'excluded');
+    await r.poll();
+    await loadAfterFailedPoll(s, r);      // a load while node 60 is away
+    assert.equal(r.zd.deviceIdOf(60) ?? null, null, 'precondition: no device as last loaded');
+    s.zw.addPending(60);
+    const l0 = registryLoads(r);
+    await r.poll();
+    const atReturn = registryLoads(r) - l0;
+    for (let i = 0; i < 5; i++) { skip += 2_000; await r.poll(); }
+    const after = registryLoads(r) - l0 - atReturn;
+    bound(s, [7, 60], 'back, interviewing');
+    s.reg.remove(r.zd.deviceIdOf(7)!);    // node 7's device deleted in Home Assistant, node 7 still on the roster
+    await loadAfterFailedPoll(s, r);      // the load that drops it
+    assert.equal(r.zd.deviceIdOf(7) ?? null, null, 'precondition: node 7 has no device as last loaded');
+    const l1 = registryLoads(r);
+    for (let i = 0; i < 5; i++) { skip += 2_000; await r.poll(); }
+    assert.deepEqual({ atReturn, after, node7: registryLoads(r) - l1 }, { atReturn: 1, after: 0, node7: 1 }, 'registry loads');
+  });
+});
+
+/* ── a status feed's baseline ──────────────────────────────────────────────── */
+
+test('a re-interviewed node that dies after its old status feed is released and before the new one is attached: the first poll after the new feed answered takes the death as its baseline, so a later replacement by the same product is re-subscribed (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.zw.startInterview(60);              // a re-interview: the same object, not ready, still Alive
+    s.subGate = { ...gate(), feed: 'status', dev: r.zd.deviceIdOf(60)! };
+    const g = s.subGate;
+    await r.pollOnly();                   // reads it not ready: its own re-subscribe, parked on the status subscribe
+    await waitFor(() => g.arrived);       // its old feeds released, the new statistics feed made
+    s.zw.emitStatus(60, 'dead');          // no status listener on the object: no feed hears it
+    g.open();
+    await waitFor(r.settled);
+    await sleep(5);
+    for (let i = 0; i < 3; i++) { skip += 2_000; await r.poll(); }   // reads it Dead
+    bound(s, [7, 60], 'the failed node');
+    s.zw.replacePending(60);              // replace_failed_node by the same product, between two polls
+    for (let i = 0; i < 3; i++) { skip += 2_000; await r.poll(); }
+    s.zw.interview(60, P1);
+    skip += 61_000;
+    await r.poll();
+    await r.poll();
+    assert.equal(r.logs.filter((l) => l.startsWith("node 60's device changed in Home Assistant")).length, 0, 'precondition: no swap');
+    bound(s, [7, 60], 'the replacement, ready');
+    assert.ok(r.heard(60), 'the replacement is heard');
+  });
+});
+
+test('a re-interviewed node whose death its old status feed delivers while the re-subscribe releases its statistics feed: the new feed\'s baseline is the first poll after it answered, not the older roster reading, so a later replacement by the same product is re-subscribed (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.zw.startInterview(60);
+    s.unsubGate = { ...gate(), feed: 'stats', n: 60 };
+    const u = s.unsubGate;
+    await r.pollOnly();                   // reads it Alive and not ready: its own re-subscribe
+    await waitFor(() => u.arrived);       // releasing the statistics feed; the status feed still live, as haWsClient drops only the released feed's handler
+    s.zw.emitStatus(60, 'dead');          // delivered on the old status feed, then discarded with it
+    u.open();
+    await waitFor(r.settled);
+    await sleep(5);
+    for (let i = 0; i < 3; i++) { skip += 2_000; await r.poll(); }
+    s.zw.replacePending(60);
+    for (let i = 0; i < 3; i++) { skip += 2_000; await r.poll(); }
+    s.zw.interview(60, P1);
+    skip += 61_000;
+    await r.poll();
+    await r.poll();
+    bound(s, [7, 60], 'the replacement, ready');
+  });
+});
+
+test('a re-interviewed node whose death its new status feed hears: a later replacement by the same product is re-subscribed (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.zw.startInterview(60);
+    await r.poll();                       // its own re-subscribe, done
+    s.zw.emitStatus(60, 'dead');
+    for (let i = 0; i < 3; i++) { skip += 2_000; await r.poll(); }
+    s.zw.replacePending(60);
+    for (let i = 0; i < 3; i++) { skip += 2_000; await r.poll(); }
+    s.zw.interview(60, P1);
+    skip += 61_000;
+    await r.poll();
+    await r.poll();
+    bound(s, [7, 60], 'the replacement, ready');
+  });
+});
+
+test('a node that died while the socket was down: the reconnect\'s rebuild seeds its status feed with the status before, the first poll after takes the death as its baseline, and the replacement by the same product of the failed node that read not ready is re-subscribed (v0.79.6 review)', async () => {
+  const s = baseSim();
+  s.zw.nodes.get(60)!.ready = false;      // its interview never completed: Alive and not ready
+  await withSim(s, async (r) => {
+    await r.poll();
+    s.zw.dropAll();                       // the socket drops, and node 60 dies meanwhile: no feed hears it
+    s.zw.emitStatus(60, 'dead');
+    await r.reconnect();                  // the rebuild seeds node 60's status feed from the roster: Alive
+    for (let i = 0; i < 3; i++) { skip += 2_000; await r.poll(); }   // reads it Dead
+    s.zw.replacePending(60);
+    for (let i = 0; i < 3; i++) { skip += 2_000; await r.poll(); }
+    s.zw.interview(60, P1);
+    skip += 61_000;
+    await r.poll();
+    await r.poll();
+    assert.equal(r.logs.filter((l) => l.startsWith("node 60's device changed in Home Assistant")).length, 0, 'precondition: no swap');
+    bound(s, [7, 60], 'the replacement, ready');
+  });
+});
+
+test('a roster poll while a rebuild has a node\'s status feed still out leaves that feed\'s seed to the rebuild: the revival the new feed hears clears the death the roster fallback counted (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await r.reconnect();                  // a rebuild: its status feeds answered after the last poll was sent
+    s.subGate = { ...gate(), feed: 'status', dev: r.zd.deviceIdOf(60)! };
+    const g = s.subGate;
+    r.priv.lastFeedRearmAt = 0;
+    const rearm = r.priv.rearmStatsFeeds('test');   // a re-arm: its rebuild parks on node 60's status subscribe
+    await waitFor(() => g.arrived);
+    await r.pollOnly();                   // reads node 60 Alive, with no status feed
+    s.zw.emitStatus(60, 'dead');          // its statistics feed is made, its status feed not: no feed hears it
+    skip += 2_000;
+    await r.pollOnly();                   // reads it Dead: the roster fallback counts the death
+    g.open();
+    await rearm;
+    await waitFor(r.settled);
+    await sleep(5);
+    skip += 1_000;
+    s.zw.emitStatus(60, 'alive');
+    assert.equal(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60).length, 1, 'the death is cleared by the revival');
+    bound(s, [7, 60], 'after the rebuild');
+  });
+});
+
+/** The next roster poll's answer and a status event of node `n` read together:
+ *  the `ws` client can hand each frame of one read to its handler before the
+ *  poll resumes (uncompressed frames), so the event is handled after the
+ *  poll's reading was taken and before the poll acts on it. `during` runs
+ *  while the poll is out, after its reading. */
+function readWithAnswer(r: Run, s: Sim, n: number, ev: 'dead' | 'alive', during?: () => Promise<void>): void {
+  const send = r.ha.send.bind(r.ha);
+  r.ha.send = (async (cmd: Record<string, unknown>) => {
+    const res = await send(cmd);
+    if (cmd.type !== 'zwave_js/network_status') return res;
+    r.ha.send = send;
+    if (during) await during();
+    queueMicrotask(() => s.zw.emitStatus(n, ev));
+    return res;
+  }) as typeof r.ha.send;
+}
+
+test('a status event read together with the answer of a poll after the first one since its feed answered is kept: that poll\'s older reading does not replace it, and the next poll re-subscribes nothing (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await r.poll();                       // node 60's status feed answered before this poll was sent
+    readWithAnswer(r, s, 60, 'dead');
+    skip += 2_000;
+    await r.poll();                       // reads it Alive; the death its feed delivers is handled before the poll acts
+    skip += 2_000;
+    await r.poll();                       // reads it Dead
+    assert.equal(r.resubs(), 0, 'no node re-subscribed');
+    skip += 1_000;
+    s.zw.emitStatus(60, 'alive');
+    assert.equal(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60).length, 1, 'the death is cleared by the revival');
+  });
+});
+
+test('a status feed that answers while a roster poll is out, and a status event read together with that poll\'s answer: the event is kept, so the revival after it clears the death (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.zw.startInterview(60);
+    s.subGate = { ...gate(), feed: 'status', dev: r.zd.deviceIdOf(60)! };
+    const g = s.subGate;
+    await r.pollOnly();                   // reads it not ready: its own re-subscribe, parked on the status subscribe
+    await waitFor(() => g.arrived);
+    // The next poll: its reading taken, then the status feed answers, then the death.
+    readWithAnswer(r, s, 60, 'dead', async () => {
+      g.open();
+      await waitFor(() => r.priv.statusSubbed.has(60));
+    });
+    skip += 2_000;
+    await r.poll();
+    skip += 1_000;
+    s.zw.emitStatus(60, 'alive');         // the revival, heard by the new status feed
+    assert.equal(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60).length, 1, 'the death is cleared by the revival');
+    bound(s, [7, 60], 'after');
+  });
+});
+
+test('a replacement\'s death and revival its new status feed hears before the next poll are counted: the feed diffs against the roster\'s status from its answer, not the failed node\'s last event (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.zw.emitStatus(60, 'dead');          // node 60 failed: its feed last heard Dead
+    await r.poll();
+    s.zw.replacePending(60);              // replace_failed_node by the same product, Alive at once
+    await r.poll();                       // reads it not ready: re-subscribed
+    assert.equal(r.resubs(), 1, 'precondition: re-subscribed');
+    // Before the next poll, whose reading would be the new feed's baseline.
+    skip += 1_000;
+    const t0 = Date.now();
+    s.zw.emitStatus(60, 'dead');
+    s.zw.emitStatus(60, 'alive');
+    const deaths = r.zd.drainDeadEvents().filter((d) => d.nodeId === 60 && d.at >= t0);
+    assert.equal(deaths.length, 1, 'the replacement\'s Dead crossing is counted');
+  });
+});

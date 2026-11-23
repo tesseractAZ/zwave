@@ -18,25 +18,30 @@ the run as a driver server on another network. Nothing stored on disk changes.
   and its Dead/Alive crossings were counted by neither the feed nor the roster
   fallback until a Home Assistant reconnect, the self-heal or a re-arm, while
   Detail's EVIDENCE badges read its feeds live. A node's two feeds are now
-  released and made again on their own after the roster poll that reads it
-  not ready after it read ready, shows a status change its status feed did
-  not deliver (the replacement of a failed node that read not ready), shows
-  its device changed, or lists it again after a poll found it off the roster.
-  A re-interview of the same node is re-subscribed too, as Home Assistant's
-  websocket does not tell the two apart: one release and subscribe more.
+  released and made again on their own after the roster poll that reads it not
+  ready after it read ready, shows a status change its status feed did not
+  deliver (the replacement of a failed node that read not ready; a new status
+  feed's baseline is the first poll sent after it answered), shows its device
+  changed, or lists it again after a poll found it off the roster (an id back
+  with no device as last loaded asks for a registry load). A re-interview of
+  the same node is re-subscribed too, as Home Assistant's websocket does not
+  tell the two apart: one release and subscribe more.
 - A node included after the feed set was built, or an evicted id back on the
   roster, had no feeds until a rebuild either: it is subscribed after the poll
   that lists it. An evicted node's feeds are released at the eviction, and
   feeds a re-arm released are not released again.
 - A driver restart costs no per-node re-subscribe: the nodes wait for the
   re-arm its entry reload latches, and a status feed made since the previous
-  poll is not judged by a change it may have missed. A per-node subscribe
-  that resolves after a re-arm began, or on another connection, is released
-  and not kept. Neither a node's own re-subscribe nor the retry runs beside a
-  reconnect's rebuild, and a rebuild it superseded that fails on the new
-  connection no longer lets a roster poll start a second one beside it. Feeds
-  a node's own re-subscribe or the retry makes never stamp the fleet's
-  liveness clock, so the dead-feed watchdog and
+  poll is not judged by a change it may have missed, so a replacement by the
+  same product of a failed node that read not ready, landing between the
+  node's two subscribes, leaves its statistics feed on the removed node until
+  a later interview start, absence or swap re-subscribes it, or the feed set
+  is rebuilt. A per-node subscribe that resolves after a re-arm began, or on
+  another connection, is released and not kept. Neither a node's own
+  re-subscribe nor the retry runs beside a reconnect's rebuild, and a rebuild
+  it superseded that fails on the new connection no longer lets a roster poll
+  start a second one beside it. Feeds a node's own re-subscribe or the retry
+  makes never stamp the fleet's liveness clock, so the dead-feed watchdog and
   `binary_sensor.zwave_tui_degraded` still see the rest of the feed set, the
   controller's included, fall silent.
 
@@ -78,11 +83,11 @@ the run as a driver server on another network. Nothing stored on disk changes.
 
 ### Tests
 
-- 1,883 tests, 30 new: 24 in `nodeFeeds.test.ts`, a model of Home
+- 1,894 tests, 41 new: 34 in `nodeFeeds.test.ts`, a model of Home
   Assistant's node feeds bound to zwave-js-server-python node objects, 4 in
-  `driverWsClient.test.ts` and 2 in `zwaveDataChurn.test.ts`; 2,001
-  mutation-harness entries (19 labelled equivalent, 1 of them new): 59 new, 2
-  re-anchored.
+  `driverWsClient.test.ts`, 2 in `zwaveDataChurn.test.ts` and 1 in
+  `deviceSwapSim.test.ts`; 2,008 mutation-harness entries (20 labelled
+  equivalent, 2 of them new): 66 new, 2 re-anchored.
 
 ## 0.79.5
 

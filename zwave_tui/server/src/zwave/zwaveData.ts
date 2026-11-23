@@ -983,8 +983,9 @@ class ZwaveDataImpl implements ZwaveData {
    *  hwSeenByNode when the node's eviction is consumed at a load, and for
    *  every node when the registry's config entry or network changes. */
   private readonly ownByNode = new Map<number, OwnRecord>();
-  /** Roster ids with no own-device record of this network that asked for a
-   *  registry load (v0.79.5): one ask per id while it stays on the roster. */
+  /** Roster ids with no own-device record of this network, or with one but
+   *  no device as last loaded (v0.79.6 review), that asked for a registry
+   *  load (v0.79.5): one ask per id while it stays on the roster. */
   private readonly askedUnrecorded = new Set<number>();
   /** Each roster id's `ready` at the last poll (v0.79.5); an id off the
    *  roster reads false, so it coming back ready inside the eviction dwell is
@@ -3132,6 +3133,15 @@ class ZwaveDataImpl implements ZwaveData {
           if (crossedDead) this.noteDeadCrossing(n.nodeId, n.status === NodeStatus.Dead);
         }
       }
+      // The first poll sent after a node's status feed answered (v0.79.6
+      // review): the feed's seed is an older reading, and a change made
+      // before its listener was attached reached no feed (or was discarded by
+      // the node's own re-subscribe), so the seed may be stale. Not judged
+      // above; this reading is the feed's baseline from here. Kept stale, a
+      // later replacement that reads as the seed (a failed node's same-product
+      // replacement, Alive) would never be judged.
+      const seededAt = this.statusLiveAt.get(n.nodeId);
+      if (this.statusSubbed.has(n.nodeId) && seededAt != null && seededAt >= this.rosterSentSeq && seededAt < rosterSent) this.subStatus.set(n.nodeId, n.status);
       this.prevStatus.set(n.nodeId, n.status);
     }
     this.rosterSentSeq = rosterSent;
@@ -3171,9 +3181,14 @@ class ZwaveDataImpl implements ZwaveData {
       // included since the last load, or one whose eviction a load consumed
       // while it was away. Recorded now, a later replace on it is a swap. One
       // ask per id while it stays on the roster, so a node Home Assistant
-      // never registers does not refetch every poll.
+      // never registers does not refetch every poll. A roster id with a
+      // record but no device as last loaded asks once too (v0.79.6 review): a
+      // node excluded and included again on its id inside the eviction dwell,
+      // a load run while it was away. Its feeds stay on the excluded node's
+      // object until a load gives it its device back (rearmNodeFeeds skips a
+      // node with none).
       for (const n of nodes) {
-        if (this.ownRecordOf(n.nodeId, homeNow) != null || this.askedUnrecorded.has(n.nodeId)) continue;
+        if ((this.ownRecordOf(n.nodeId, homeNow) != null && this.deviceByNodeId.has(n.nodeId)) || this.askedUnrecorded.has(n.nodeId)) continue;
         this.askedUnrecorded.add(n.nodeId);
         ask = true;
       }
