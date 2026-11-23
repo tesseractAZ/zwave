@@ -869,3 +869,22 @@ test('config parameters (v0.79.5): another product included on the freed id whil
     assert.equal(r.zd.configParams(60).status, 'idle', 'the swap drops the old product\'s parameters');
   });
 });
+
+test('registry loads (v0.79.6 review): a roster node whose own-device record is another home id\'s asks for one load though a device is listed for it, and none after', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    // Every device re-spelled under another home id while the roster still
+    // reports HOME, and a load that admits them (none of HOME's is listed):
+    // the records it makes are another home id's.
+    for (const d of s.reg.devices.values()) d.ids = d.ids.map((i) => i.replace(String(HOME), String(HOME_K)));
+    skip += 61_000;
+    s.statusErr = 'HA WS error (unknown_error): boom';
+    await r.poll();
+    s.statusErr = undefined;
+    await r.poll();                       // succeeds after a failed one: the load runs in it
+    assert.equal(r.zd.deviceIdOf(60), 'dev-3', 'precondition: a device listed for node 60');
+    const n = r.joins();
+    for (let i = 0; i < 4; i++) { skip += 2_000; await r.poll(); }
+    assert.equal(r.joins() - n, 1, 'one load for the ids with no record of this network, then none');
+  });
+});

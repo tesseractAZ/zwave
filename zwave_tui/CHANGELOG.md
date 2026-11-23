@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.79.6
+
+A node replaced with `replace_failed_node`, or included on a freed id, has its
+statistics and status feeds made again on its new node object in Home
+Assistant, and the 60-second retry of a failed node subscribe now subscribes.
+A driver server on another network leaves the driver link stopped, not
+reading live, and a stick swap no longer stops the driver link for the rest of
+the run as a driver server on another network. Nothing stored on disk changes.
+
+### Fixed — a replaced node's feeds stayed on the failed node until the next rebuild
+
+- Home Assistant binds each node's statistics and status feed to the node
+  object it resolves at subscribe time, and a node replaced (by the same
+  product or another) or included on a freed id is a new object there, which
+  no earlier feed hears. Through 0.79.5 the new device had no statistics feed
+  and its Dead/Alive crossings were counted by neither the feed nor the roster
+  fallback until a Home Assistant reconnect, the self-heal or a re-arm, while
+  Detail's EVIDENCE badges read its feeds live. A node's two feeds are now
+  released and made again on their own after the roster poll that reads it not
+  ready after it read ready, shows a status change its status feed did not
+  deliver (the replacement of a failed node that read not ready; a new status
+  feed's baseline is the first poll sent after it answered), shows its device
+  changed, or lists it again after a poll found it off the roster (an id back
+  with no device as last loaded asks for a registry load). A re-interview of
+  the same node is re-subscribed too, as Home Assistant's websocket does not
+  tell the two apart: one release and subscribe more.
+- A node included after the feed set was built, or an evicted id back on the
+  roster, had no feeds until a rebuild either: it is subscribed after the poll
+  that lists it. An evicted node's feeds are released at the eviction, and
+  feeds a re-arm released are not released again.
+- A driver restart costs no per-node re-subscribe: the nodes wait for the
+  re-arm its entry reload latches, and a status feed made since the previous
+  poll is not judged by a change it may have missed, so a replacement by the
+  same product of a failed node that read not ready, landing between the
+  node's two subscribes, leaves its statistics feed on the removed node until
+  a later interview start, absence or swap re-subscribes it, or the feed set
+  is rebuilt. A per-node subscribe that resolves after a re-arm began, or on
+  another connection, is released and not kept. Neither a node's own
+  re-subscribe nor the retry runs beside a reconnect's rebuild, and a rebuild
+  it superseded that fails on the new connection no longer lets a roster poll
+  start a second one beside it. Feeds a node's own re-subscribe or the retry
+  makes never stamp the fleet's liveness clock, so the dead-feed watchdog and
+  `binary_sensor.zwave_tui_degraded` still see the rest of the feed set, the
+  controller's included, fall silent.
+
+### Fixed — a failed node subscribe was never retried (0.26.0)
+
+- The 60 s retry passed no list for the handles, and the optional-chained push
+  skipped the subscribe with it: a node whose subscribe failed was marked
+  subscribed with no feed made, its EVIDENCE badges reading live. The retry
+  now subscribes, by the node's device as last loaded, keeps the handles where
+  a re-arm releases them, stands aside while a rebuild runs, the feed set is
+  down or a node's own re-subscribe is out, and drops from its queue a node
+  the roster has shown gone (it is subscribed once it is back) or one with no
+  device as last loaded, such as one queued by an old network's device the
+  boot load admitted (it is subscribed once a load gives it one).
+
+### Fixed — a driver server on another network could leave the driver link reading live after it was stopped
+
+- When the homeId cross-check proved a mismatch inside the driver's state
+  dump (Home Assistant's home id already known when the dump landed, as after
+  a home-id change), it stopped the driver client, and the rest of the dump
+  then declared the stopped client live: DRIVER LINK read `live` with no
+  connection under it, the S2 lane read `refused` (`s2_lane` too), and
+  nothing reconnected it until the next home-id change or restart. The
+  client now stays `stopped`, beside the homeId mismatch row, and a dump cut
+  short by a stop hands on no further node and is not logged as processed. A
+  stop from the handshake's home-id callback ends the handshake the same way;
+  nothing in the add-on stops the client there today.
+
+### Fixed — a stick swap could stop the driver link for the rest of the run
+
+- A home-id change cycles the driver client, and kept the previous server's
+  home id until the new handshake: a read of the cross-check in between (the
+  sleeper watch reads it on every call) compared it with the new id, purged
+  the driver telemetry and stopped the client for the rest of the run, though
+  the driver server had moved to the new network too. The cycle forgets it now.
+  A driver link back on the new network before Home Assistant reports the new
+  home id still reads as one on another network, telemetry purged and client
+  stopped, until the roster poll that reads the new id runs the cycle.
+
+### Tests
+
+- 1,894 tests, 41 new: 34 in `nodeFeeds.test.ts`, a model of Home
+  Assistant's node feeds bound to zwave-js-server-python node objects, 4 in
+  `driverWsClient.test.ts`, 2 in `zwaveDataChurn.test.ts` and 1 in
+  `deviceSwapSim.test.ts`; 2,008 mutation-harness entries (20 labelled
+  equivalent, 2 of them new): 66 new, 2 re-anchored.
+
 ## 0.79.5
 
 A forward clock step no longer makes a real outage a 90-minute start death, a
@@ -397,96 +486,6 @@ start waits 90 minutes before it is a critical outage.
   confirmation staying owed through the real engine pass.
 - 23 new mutation-harness entries, one declared equivalent; 19 existing
   entries re-anchored to the rewritten lines.
-
-## 0.79.1
-
-One slowdown on a node only the sweep talks to is held as one `rtt-degraded`
-episode, not one every 27 minutes, until a reading ends the hold (see 0.79.2),
-and one tick's probes no longer go out in the same millisecond.
-
-### Fixed — one slowdown re-opened an episode about every 27 minutes
-
-- RTT is read only when something talks to the node, and a breach was judged
-  on its newest reading in a 10-minute window. On a node only the 2-hourly
-  liveness sweep talks to, that reading left the window long before the next
-  one came, and the symptom cleared as if the node had recovered. The
-  episode's confirmation burst then found the node still slow, and a new
-  breach started: one slowdown became an episode about every 27 minutes,
-  10 probes each.
-- In the first 47 hours of 0.79.0 on the reference mesh, 15 of the 22
-  `rtt-degraded` episodes were re-opened this way. One 4.75-hour slowdown on
-  one node became 10 episodes and 113 probes, and Home Assistant's symptom
-  count read 0 for 43 % of it.
-- A matured breach with no fresh reading left in the window is now held on
-  its last slow round trip, judged against the line of now, for at most the
-  configured sweep cadence plus `RTT_HOLD_MARGIN_MS` (30 min) after it. A newer
-  slow round trip continues the same breach and episode. A newer normal one
-  ends the hold, so the breach clears on the next silence as before and its
-  closing burst measures the node.
-- Only a slow round trip carries the hold. The driver's average falls by a
-  quarter per transmission, so a recovered sweep-only node still reads over
-  the line for several sweeps on its average alone, and holding on the
-  average would show it degraded for hours.
-- Nothing is held with the sweep off, on a node no confirmation probe can
-  reach, or on a Dead node, and a breach still arming clears on silence as
-  before. A read that comes after the deadline finds the breach let go, and
-  the pair rule starts it again.
-- While held, the symptom stays shown: on the TUI's card with its round
-  trip's age (`RTT 378ms · 40m ago`) and a sentence saying it is held, and in
-  Home Assistant's symptom count. It keeps its episode open and can open none,
-  and the refresh trial does not decide on it. A slowdown the sweep reads
-  within the hold, with no reading that ends it, spends its opening and
-  closing bursts, 10 probes, plus any confirmations (corrected in 0.79.2).
-
-### Fixed — a probe sent right behind another node's read measured that node
-
-- A tick sent every probe it owed in the same millisecond. Measured on the
-  reference mesh with read-only routed reads: a node that reads about 25 ms
-  alone or first read 589–1,214 ms (median about 660; 9 clean trials of 11)
-  when its read went out right behind a 9.6 kbps node's, and 24.7–25.6 ms
-  when it went 10 s after (5 of 5). At 2 s only 2 of 5 trials gave a clean
-  reading, both about 25 ms: too few to judge.
-- On 2026-11-17 a direct 100 kbps node was booked `rtt-degraded` twice that
-  way: first on a slow frame of its own traffic paired with a confirmation
-  sent right behind a 9.6 kbps node's read, then on burst readings taken the
-  same way.
-- One tick's sends now leave `PROBE_SPACING_MS` (10 s) apart, the step
-  shrinking so they all leave within three quarters of the tick. Each probe
-  is pended at its slot and noted when it leaves, so its answer is judged
-  from then, and the line of one that waits says so (`— waits 10 s for its
-  slot`).
-- A slot re-checks the gates the decision applied: the autonomy pause, the
-  controller's receiver off, an operator action, Home Assistant not ready, a
-  route rebuild, a dead-node storm and, for a measurement probe, its node
-  gone, Dead or in a post-kill hold. If one is shut the slot sends nothing.
-  It is withdrawn with an info line and is not a failed launch: a ladder ping
-  gives back its attempt and its backoff, a dead-lane routed read is owed
-  again, and no read falls back to the NoOp ping. A verification probe
-  withdrawn this way counts as taken, like one dropped at its tick.
-
-### Corrected
-
-- 0.79.0's cost figure was wrong. Its replay charged each ceiling breach one
-  5-probe burst, but every episode sends two, and the re-opening above
-  multiplied them. Live, the ceiling spent 211 probes in the first 47 hours,
-  206 on 5 breaches and 5 confirmations that started none: about 109 a day,
-  a quarter of the sweep's probes, not 17 a day and 3.5 %.
-- DOCS: the controller's 30-minute background-noise tier has gone above
-  −98 dBm (to −95.4) since a rise that began on 2026-11-12; the sentence
-  that said it never had is corrected.
-
-### Tests
-
-- 26 new tests: the hold in the detector (13), the hold through the real
-  engine pass (one slowdown is one episode: held for 100 minutes, a slow
-  sweep read continues it, one normal sweep read ends it within the hour),
-  the refresh trial skipping a held breach, probe spacing (10: slots, each
-  gate at the slot, a node gone or Dead, a storm, stop, a transport failure
-  at a later slot, the step, the ladder's attempt and backoff given back, a
-  re-owed dead-lane read, the burst gap between slots, production's default
-  timer), and a contract pin that production keeps the default spacing.
-- 48 new mutation-harness entries, three of them declared equivalent; 31
-  existing entries re-anchored to the rewritten lines.
 
 ## Older releases
 
