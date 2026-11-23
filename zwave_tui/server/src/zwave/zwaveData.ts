@@ -1042,7 +1042,8 @@ class ZwaveDataImpl implements ZwaveData {
    *  ready (an interview started: a re-interview, or a node added), when the
    *  roster shows a status change the node's status feed did not deliver (a
    *  node added on the id that no poll read not ready), when an id leaves the
-   *  roster, and at a device swap. A node whose feeds were sent before its
+   *  roster, at a device swap, and when the retry drops a node with no device
+   *  as last loaded (v0.79.6 review). A node whose feeds were sent before its
    *  mark is re-subscribed (rearmNodeFeeds). */
   private readonly feedSuspect = new Map<number, number>();
   /** The order mark taken when each node's status feed answered its subscribe
@@ -1214,8 +1215,15 @@ class ZwaveDataImpl implements ZwaveData {
    *  same epoch, so `superseded()` is false for both and neither stands down,
    *  which is how the re-arm reproduced the v0.26 double subscribe. Set and
    *  cleared in a `finally` around a body whose every await is bounded by the WS
-   *  client's 10 s command timeout, so it cannot stick. */
+   *  client's 10 s command timeout, so it cannot stick. Cleared only by the
+   *  newest run (`rebuildRun`, v0.79.6 review): a run a reconnect superseded
+   *  can stand down while the new connection's run is still building. Before,
+   *  its `finally` cleared it there too, which let a node's re-subscribe or
+   *  the retry run beside that run and keep handles in the map the run then
+   *  replaced, where nothing released them. */
   private rebuildInFlight = false;
+  /** The newest rebuild's number (v0.79.6 review): see rebuildInFlight. */
+  private rebuildRun = 0;
   /** A (re)subscribe REPLAYS every node's snapshot, so events inside this
    *  window prove nothing about the feed being alive (v0.67.0). */
   private statsReplayUntil = 0;
@@ -4020,6 +4028,7 @@ class ZwaveDataImpl implements ZwaveData {
     if (this.statsSubscribed) return;
     this.statsSubscribed = true;
     const epoch = this.connEpoch;
+    const runId = ++this.rebuildRun;
     // Every subscription this run creates, so a stand-down can RELEASE them
     // all. Releasing only the most recent one still left the controller feed
     // and both per-node feeds live on the socket (v0.26 review), and their
@@ -4101,19 +4110,27 @@ class ZwaveDataImpl implements ZwaveData {
       // re-arm has to release them or it doubles them instead.
       //
       // An ASSIGNMENT is safe only because a re-arm stands aside while a
-      // rebuild is in flight (`rebuildInFlight`): no second run can be holding
-      // handles this one would discard. A node's own re-subscribe and the
-      // retry stand aside too, and one still out releases what it makes
-      // (v0.79.6). Anything still on the books here belongs to a previous
-      // SOCKET, where the handles died with it, or was released by a re-arm.
+      // rebuild is in flight (`rebuildInFlight`, which only the newest run
+      // clears): no second run can be holding handles this one would discard.
+      // A node's own re-subscribe and the retry stand aside too, so none runs
+      // beside this run, and one still out from before it releases what it
+      // makes (v0.79.6). Anything still on the books here belongs to a
+      // previous SOCKET, where the handles died with it, or was released by a
+      // re-arm.
       this.ownedStatsSubs = owned.slice();
       this.nodeFeedSubs = nodeOwned;
       void this.fetchEntityStates();
     } catch (e) {
-      this.statsSubscribed = false;
+      // Only the newest run's failure says no feed set is up (v0.79.6 review):
+      // a run a reconnect superseded that failed on the new connection cleared
+      // it under the run that superseded it, and a roster poll started a second
+      // rebuild on that connection, beside it, where neither stood down.
+      if (this.rebuildRun === runId) this.statsSubscribed = false;
       this.log(`subscribeStatistics failed: ${errMsg(e)}`);
     } finally {
-      this.rebuildInFlight = false;
+      // Only the newest run clears it: one a reconnect superseded can end
+      // while the new connection's run is still building (v0.79.6 review).
+      if (this.rebuildRun === runId) this.rebuildInFlight = false;
     }
   }
 
@@ -4284,6 +4301,14 @@ class ZwaveDataImpl implements ZwaveData {
       // poll none is known, and a node with one feed made and the other queued
       // has a record, so the drain would not pick it up.
       for (const id of [...this.pendingNodeSubs.keys()]) if (this.missingSince.has(id)) this.pendingNodeSubs.delete(id);
+      // Nor one with no device as last loaded (v0.79.6 review): an old
+      // network's device the boot load admitted names a node id this network
+      // may lack, and once the load that bound the home id left it out, its
+      // subscribe by the queued device id failed at every tick. Marked, so
+      // rearmNodeFeeds makes its feeds once a load gives it a device and the
+      // roster shows it: one with a feed made has a record, and the mark is
+      // what re-subscribes it; one with none is subscribed as having none.
+      for (const id of [...this.pendingNodeSubs.keys()]) if (!this.deviceByNodeId.has(id)) { this.pendingNodeSubs.delete(id); this.markFeedSuspect(id); }
       const pending = [...this.pendingNodeSubs.entries()];
       await Promise.all(pending.map(([nodeId, deviceId]) =>
         this.subscribeNode(nodeId, this.deviceByNodeId.get(nodeId)?.id ?? deviceId, run)));

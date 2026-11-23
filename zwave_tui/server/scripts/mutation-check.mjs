@@ -9365,6 +9365,32 @@ const MUTANTS = [
     find: "        this.driverHomeId = null;\n        this.driverWs?.stop();\n        this.driverWs?.start();",
     repl: "        this.driverWs?.stop();\n        this.driverWs?.start();",
     what: "a network change forgets the previous server's home id, so a cross-check read before the new handshake proves no mismatch on it" },
+  // v0.79.6 review: the rebuild flag left to the newest run, and the retry's
+  // drop of a node with no device as last loaded.
+  { id: "node-feeds-rebuild-flag-newest-clears", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "      if (this.rebuildRun === runId) this.rebuildInFlight = false;\n",
+    repl: "      if (true) this.rebuildInFlight = false;\n",
+    what: "only the newest rebuild clears the in-flight flag: a run a reconnect superseded leaves it set, so no node's re-subscribe or retry runs beside the rebuild that superseded it and keeps handles in the map that rebuild replaces" },
+  { id: "node-feeds-rebuild-run-numbered", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "    const runId = ++this.rebuildRun;\n",
+    repl: "    const runId = this.rebuildRun;\n",
+    what: "each rebuild takes a number of its own, so a run a reconnect superseded is not taken for the newest" },
+  { id: "node-feeds-rebuild-flag-not-stuck", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "      if (this.rebuildRun === runId) this.rebuildInFlight = false;\n",
+    repl: "      if (this.rebuildRun === runId) this.rebuildInFlight = false;\n      else this.rebuildInFlight = true;\n",
+    what: "a run a reconnect superseded that stands down after the newer run ended leaves no rebuild in flight: a node's re-subscribe runs at the next poll" },
+  { id: "node-feeds-retry-drops-no-device", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "      for (const id of [...this.pendingNodeSubs.keys()]) if (!this.deviceByNodeId.has(id)) { this.pendingNodeSubs.delete(id); this.markFeedSuspect(id); }\n",
+    repl: "",
+    what: "the retry drops a node with no device as last loaded (an old network's device the boot load admitted), rather than failing its subscribe every minute" },
+  { id: "node-feeds-retry-marks-no-device", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "      for (const id of [...this.pendingNodeSubs.keys()]) if (!this.deviceByNodeId.has(id)) { this.pendingNodeSubs.delete(id); this.markFeedSuspect(id); }\n",
+    repl: "      for (const id of [...this.pendingNodeSubs.keys()]) if (!this.deviceByNodeId.has(id)) { this.pendingNodeSubs.delete(id); }\n",
+    what: "a node the retry drops for having no device is marked, so one with a feed made and the other queued is re-subscribed once a load gives its device back" },
+  { id: "node-feeds-superseded-fail-leaves-subscribed", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "      if (this.rebuildRun === runId) this.statsSubscribed = false;\n      this.log(`subscribeStatistics failed: ${errMsg(e)}`);\n",
+    repl: "      this.statsSubscribed = false;\n      this.log(`subscribeStatistics failed: ${errMsg(e)}`);\n",
+    what: "only the newest rebuild's failure says no feed set is up: a run a reconnect superseded failing on the new connection leaves statsSubscribed to the run that superseded it, so a roster poll starts no second rebuild on its connection" },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

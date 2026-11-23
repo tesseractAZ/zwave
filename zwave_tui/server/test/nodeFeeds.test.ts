@@ -305,8 +305,9 @@ function baseSim(): Sim {
   return { reg, zw, failSubs: new Set(), failFeed: new Set(), subCalls: [], released: new Map(), ctrlGen: 0, ctrlFeeds: [] };
 }
 
-/** `bootPolled` false: the body starts once the feed set is up, whether or not a roster poll has succeeded. */
-async function withSim(s: Sim, body: (r: Run) => Promise<void>, opts: { evictAfterMs?: number; bootPolled?: boolean } = {}): Promise<void> {
+/** `bootPolled` false: the body starts once the feed set is up, whether or not a roster poll has succeeded.
+ *  `boot`: the body starts once it holds instead (a boot rebuild parked, say). */
+async function withSim(s: Sim, body: (r: Run) => Promise<void>, opts: { evictAfterMs?: number; bootPolled?: boolean; boot?: (priv: Priv) => boolean } = {}): Promise<void> {
   skip = 0;
   Date.now = () => realNow() + skip;
   const logs: string[] = [];
@@ -329,7 +330,8 @@ async function withSim(s: Sim, body: (r: Run) => Promise<void>, opts: { evictAft
   try {
     zd.start();
     ha.fireReady();
-    const booted = opts.bootPolled === false ? settled : () => zd.snapshot().length > 0 && priv.lastHomeId != null && settled();
+    const booted = opts.boot != null ? () => opts.boot!(priv)
+      : opts.bootPolled === false ? settled : () => zd.snapshot().length > 0 && priv.lastHomeId != null && settled();
     await waitFor(booted, 15_000, () => logs.join(' | '));
     await sleep(5);
     await body({
@@ -912,4 +914,227 @@ test('a node\'s re-subscribe waits for a rebuild running or about to, and runs o
       assert.equal(r.calls(7, 'stats'), 2);
     });
   }
+});
+
+/* ── a rebuild a reconnect superseded, and the one that superseded it ──────── */
+
+/** Per-node subscribe lines in the log: a node's own re-subscribe, or one with none subscribed. */
+const perNodeLines = (r: Run): number => r.logs.filter((l) => /^live statistics: node \d+'s feeds: /.test(l)).length;
+/** The device each node of the sim is filed under in Home Assistant's registry. */
+const devOf = (s: Sim, n: number): string => s.reg.getEntry([s.zw.H(n)], s.zw.entry)!.id;
+
+test('a boot rebuild a reconnect superseded, a roster poll landing inside the per-node step of the rebuild that superseded it: no node is subscribed beside that rebuild, and each keeps one feed per node object (v0.79.6 review)', async () => {
+  // Before, the superseded run's `finally` cleared rebuildInFlight while the
+  // new connection's run still built: the poll subscribed every node into
+  // the boot's empty map, which that run then replaced, and every node was
+  // left with two feeds of each kind that no re-arm could release.
+  const s = baseSim();
+  // The boot rebuild (A) parks on node 60's status subscribe.
+  s.subGate = { ...gate(), feed: 'status', dev: devOf(s, 60) };
+  const ga = s.subGate;
+  await withSim(s, async (r) => {
+    // The boot poll succeeded while A ran, and stood aside for it.
+    assert.equal(perNodeLines(r), 0, 'precondition: no node subscribed beside A');
+    // The Core drops the socket. On re-auth the new rebuild (B) parks inside
+    // its per-node step, on node 7's status subscribe.
+    s.zw.dropAll();
+    s.subGate = { ...gate(), feed: 'status', dev: devOf(s, 7) };
+    const gb = s.subGate;
+    r.ha.fireReady();
+    await waitFor(() => gb.arrived);
+    // A wakes on the new connection, superseded, and stands down.
+    ga.open();
+    await waitFor(() => r.logs.some((l) => l === 'subscribe: superseded by a reconnect mid-run — standing down'));
+    await sleep(20);
+    // A roster poll that answers while B is still subscribing the nodes
+    // (network_status awaits the driver; the subscribes answer at once).
+    await r.pollOnly();
+    await waitFor(() => !r.priv.nodeSubsBusy);
+    await sleep(20);
+    const beside = perNodeLines(r);
+    gb.open();
+    await waitFor(r.settled);
+    await sleep(5);
+    bound(s, [7, 60], 'after B');
+    assert.equal(beside, 0, 'no node subscribed beside B');
+    // A re-arm releases every handle the books hold.
+    r.priv.lastFeedRearmAt = 0;
+    await r.priv.rearmStatsFeeds('test');
+    await waitFor(r.settled);
+    await sleep(5);
+    bound(s, [7, 60], 'after a re-arm');
+  }, { boot: (p) => ga.arrived && p.lastHomeId != null });
+});
+
+test('a re-arm\'s rebuild a reconnect superseded, a roster poll landing inside the per-node step of the rebuild that superseded it: no node is subscribed beside that rebuild, one feed per node object (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    // The re-arm's rebuild (R1) parks on node 7's statistics subscribe, once
+    // its node 60 subscribes are made.
+    s.subGate = { ...gate(), feed: 'stats', dev: r.zd.deviceIdOf(7)! };
+    const g1 = s.subGate;
+    r.priv.lastFeedRearmAt = 0;
+    const rearm = r.priv.rearmStatsFeeds('test');
+    await waitFor(() => g1.arrived && r.calls(60, 'status') === 2);
+    // A reconnect: its rebuild (R2) parks inside its per-node step, on node
+    // 60's status subscribe.
+    s.subGate = { ...gate(), feed: 'status', dev: r.zd.deviceIdOf(60)! };
+    const g2 = s.subGate;
+    s.zw.dropAll();
+    r.ha.fireReady();
+    await waitFor(() => g2.arrived);
+    g1.open();
+    await rearm;                  // R1 superseded, stood down
+    await r.pollOnly();
+    await waitFor(() => !r.priv.nodeSubsBusy);
+    await sleep(5);
+    const beside = perNodeLines(r);
+    g2.open();
+    await waitFor(r.settled);
+    await sleep(5);
+    bound(s, [7, 60], 'after R2');
+    assert.equal(beside, 0, 'no node subscribed beside R2');
+  });
+});
+
+test('the retry timer firing while a reconnect\'s rebuild superseded a re-arm\'s: it stands aside for the rebuild that superseded it, which subscribes the node once (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.subGate = { ...gate(), feed: 'stats', dev: r.zd.deviceIdOf(7)! };
+    const g1 = s.subGate;
+    s.failSubs.add(60);           // the re-arm's rebuild (R1) queues node 60 for the retry
+    r.priv.lastFeedRearmAt = 0;
+    const rearm = r.priv.rearmStatsFeeds('test');
+    await waitFor(() => g1.arrived);
+    // A reconnect: its rebuild (R2) parks before it subscribes the nodes.
+    s.ctrlGate = gate();
+    const cg = s.ctrlGate;
+    s.zw.dropAll();
+    r.ha.fireReady();
+    await waitFor(() => cg.arrived);
+    g1.open();
+    await rearm;                  // R1 superseded, stood down
+    s.failSubs.clear();
+    assert.equal(r.priv.pendingNodeSubs.has(60), true, 'precondition: node 60 queued');
+    const c0 = r.calls(60, 'stats');
+    await r.priv.retryNodeSubs();
+    await sleep(5);
+    assert.equal(r.calls(60, 'stats') - c0, 0, 'the retry stood aside');
+    cg.open();
+    await waitFor(r.settled);
+    await sleep(5);
+    bound(s, [7, 60], 'after R2');
+  });
+});
+
+test('a reconnect\'s rebuild that ends before the re-arm\'s it superseded stands down leaves no rebuild in flight once that one has: a node\'s re-subscribe runs at the next poll (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    s.subGate = { ...gate(), feed: 'stats', dev: r.zd.deviceIdOf(7)! };
+    const g1 = s.subGate;
+    r.priv.lastFeedRearmAt = 0;
+    const rearm = r.priv.rearmStatsFeeds('test');
+    await waitFor(() => g1.arrived);
+    const n = r.logs.filter((l) => l.startsWith('live statistics: subscribed')).length;
+    s.zw.dropAll();
+    r.ha.fireReady();
+    await waitFor(() => r.logs.filter((l) => l.startsWith('live statistics: subscribed')).length > n && !r.priv.rebuildInFlight);
+    g1.open();
+    await rearm;                  // the superseded run stands down last
+    assert.equal(r.priv.rebuildInFlight, false, 'no rebuild in flight');
+    s.zw.startInterview(7);
+    await r.poll();
+    assert.equal(r.resubs(), 1, 'node 7 re-subscribed at the poll that read it not ready');
+    bound(s, [7, 60], 'after');
+  });
+});
+
+/* ── the retry, a node with no device as last loaded ───────────────────────── */
+
+test('the retry drops a node with no device as last loaded: an old network\'s device the boot load admitted is not retried every minute, the timer stops, and a node later included on its id is subscribed (v0.79.6 review)', async () => {
+  const s = baseSim();
+  // An unknown controller: Home Assistant keeps the old network's devices
+  // under the entry (its orphan sweep is skipped), and node 90 is not on this one.
+  s.reg.getOrCreate('E1', ['1111111111-90']);
+  await withSim(s, async (r) => {
+    const fails = () => r.logs.filter((l) => /subscribe failed \(node 90\)/.test(l)).length;
+    assert.equal(r.priv.pendingNodeSubs.has(90), true, 'precondition: the boot rebuild queued node 90');
+    await r.poll();
+    await r.poll();
+    assert.equal(r.zd.deviceIdOf(90) ?? null, null, 'precondition: the load that bound the home id left node 90 out');
+    const f0 = fails();
+    for (let i = 0; i < 3; i++) { await r.priv.retryNodeSubs(); await sleep(5); }
+    assert.equal(fails() - f0, 0, 'no subscribe for an id with no device');
+    assert.equal(r.priv.pendingNodeSubs.has(90), false, 'it left the queue');
+    assert.equal(r.priv.subRetryTimer, null, 'the timer stopped');
+    s.zw.add(90, P3);             // a node of this network included on id 90
+    await r.poll();
+    await r.poll();
+    bound(s, [7, 60, 90], 'included on 90');
+  });
+});
+
+test('the retry marks a node it drops for having no device: one with a feed made and the other queued is re-subscribed once a load gives its device back (v0.79.6 review)', async () => {
+  const s = baseSim();
+  s.failFeed.add('60:status');    // the feed set makes node 60's statistics feed and queues its status feed
+  await withSim(s, async (r) => {
+    assert.equal(r.priv.pendingNodeSubs.has(60), true, 'precondition: its status feed queued');
+    const dev60 = r.zd.deviceIdOf(60)!;
+    // A load: a poll that succeeds after a failed one runs one, past the
+    // minute's spacing of such loads.
+    const load = async (): Promise<void> => {
+      skip += 61_000;
+      s.statusErr = 'HA WS error (unknown_error): boom';
+      await r.pollOnly();
+      s.statusErr = undefined;
+      await r.poll();
+    };
+    s.reg.remove(dev60);
+    await load();
+    assert.equal(r.zd.deviceIdOf(60) ?? null, null, 'precondition: no device as last loaded');
+    s.failFeed.clear();
+    await r.priv.retryNodeSubs();
+    await sleep(5);
+    assert.equal(r.priv.pendingNodeSubs.has(60), false, 'it left the queue');
+    s.zw.register(60);            // Home Assistant restores the device it deleted
+    await load();
+    assert.equal(r.zd.deviceIdOf(60), dev60, 'precondition: the same device back, no swap');
+    bound(s, [7, 60], 'its device back');
+    assert.equal(r.resubs(), 1, 'its feeds re-subscribed once');
+  });
+});
+
+test('a re-arm\'s rebuild a reconnect superseded failing on the new connection leaves the feed set to the rebuild that superseded it: a roster poll starts no second rebuild beside it, one feed per node object (v0.79.6 review)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    // The re-arm's rebuild (R1) parks on its controller subscribe, which
+    // then fails on the new connection (the entry not loaded yet).
+    let fail!: (e: Error) => void;
+    const wait = new Promise<void>((_, j) => { fail = j; });
+    wait.catch(() => {});
+    const g1: Gate = { wait, open: () => fail(new Error(NOT_LOADED)), arrived: false };
+    s.ctrlGate = g1;
+    r.priv.lastFeedRearmAt = 0;
+    const rearm = r.priv.rearmStatsFeeds('test');
+    await waitFor(() => g1.arrived);
+    // A reconnect: its rebuild (R2) parks inside its per-node step.
+    s.subGate = { ...gate(), feed: 'status', dev: r.zd.deviceIdOf(7)! };
+    const g2 = s.subGate;
+    s.zw.dropAll();
+    r.ha.fireReady();
+    await waitFor(() => g2.arrived);
+    const ctrl0 = s.ctrlFeeds.length;
+    g1.open();
+    await rearm;                  // R1 failed, superseded
+    assert.equal(r.priv.statsSubscribed, true, 'R2 still owns the feed set');
+    await r.pollOnly();
+    await waitFor(() => !r.priv.nodeSubsBusy);
+    await sleep(5);
+    assert.equal(s.ctrlFeeds.length - ctrl0, 0, 'no second rebuild beside R2');
+    assert.equal(r.priv.rebuildInFlight, true, 'R2 still in flight');
+    g2.open();
+    await waitFor(r.settled);
+    await sleep(5);
+    bound(s, [7, 60], 'after R2');
+  });
 });

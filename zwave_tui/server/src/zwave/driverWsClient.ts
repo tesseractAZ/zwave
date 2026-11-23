@@ -77,9 +77,10 @@ export type BgRssiChannels = (number | null)[];
  *  state dump hands on no further node and does not make the link live. The
  *  other callbacks for the same node or the same event are still called.
  *  onDriverLogGap's 'ended' note is the exception: a teardown sends it, and
- *  that callback must do neither. A stop there sends a second 'ended' note,
- *  and a start inside stop() leaves the client stopped, with later start()
- *  calls doing nothing. */
+ *  that callback must do neither. A stop there runs the teardown again before
+ *  the lane is reset, which sends the note again, so an unguarded stop there
+ *  recurses until the stack overflows. A start inside stop() leaves the
+ *  client stopped, with later start() calls doing nothing until a stop(). */
 export interface DriverWsCallbacks {
   /** Controller background RSSI update (channels 0..3, nulls for absent). */
   onBgRssi?: (channels: BgRssiChannels, at: number) => void;

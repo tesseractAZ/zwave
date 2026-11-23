@@ -6,8 +6,8 @@ A node replaced with `replace_failed_node`, or included on a freed id, has its
 statistics and status feeds made again on its new node object in Home
 Assistant, and the 60-second retry of a failed node subscribe now subscribes.
 A driver server on another network leaves the driver link stopped, not
-reading live, and a stick swap no longer reads as a driver server on another
-network. Nothing stored on disk changes.
+reading live, and a stick swap no longer stops the driver link for the rest of
+the run as a driver server on another network. Nothing stored on disk changes.
 
 ### Fixed — a replaced node's feeds stayed on the failed node until the next rebuild
 
@@ -20,10 +20,10 @@ network. Nothing stored on disk changes.
   Detail's EVIDENCE badges read its feeds live. A node's two feeds are now
   released and made again on their own after the roster poll that reads it
   not ready after it read ready, shows a status change its status feed did
-  not deliver (the replacement of a failed node that read not ready), finds
-  it off the roster, or shows its device changed. A re-interview of the same
-  node is re-subscribed too, as Home Assistant's websocket does not tell the
-  two apart: one release and subscribe more.
+  not deliver (the replacement of a failed node that read not ready), shows
+  its device changed, or lists it again after a poll found it off the roster.
+  A re-interview of the same node is re-subscribed too, as Home Assistant's
+  websocket does not tell the two apart: one release and subscribe more.
 - A node included after the feed set was built, or an evicted id back on the
   roster, had no feeds until a rebuild either: it is subscribed after the poll
   that lists it. An evicted node's feeds are released at the eviction, and
@@ -32,8 +32,11 @@ network. Nothing stored on disk changes.
   re-arm its entry reload latches, and a status feed made since the previous
   poll is not judged by a change it may have missed. A per-node subscribe
   that resolves after a re-arm began, or on another connection, is released
-  and not kept. Feeds a node's own re-subscribe or the retry makes never
-  stamp the fleet's liveness clock, so the dead-feed watchdog and
+  and not kept. Neither a node's own re-subscribe nor the retry runs beside a
+  reconnect's rebuild, and a rebuild it superseded that fails on the new
+  connection no longer lets a roster poll start a second one beside it. Feeds
+  a node's own re-subscribe or the retry makes never stamp the fleet's
+  liveness clock, so the dead-feed watchdog and
   `binary_sensor.zwave_tui_degraded` still see the rest of the feed set, the
   controller's included, fall silent.
 
@@ -44,8 +47,10 @@ network. Nothing stored on disk changes.
   subscribed with no feed made, its EVIDENCE badges reading live. The retry
   now subscribes, by the node's device as last loaded, keeps the handles where
   a re-arm releases them, stands aside while a rebuild runs, the feed set is
-  down or a node's own re-subscribe is out, and drops a node the roster has
-  shown gone from its queue (it is subscribed once it is back).
+  down or a node's own re-subscribe is out, and drops from its queue a node
+  the roster has shown gone (it is subscribed once it is back) or one with no
+  device as last loaded, such as one queued by an old network's device the
+  boot load admitted (it is subscribed once a load gives it one).
 
 ### Fixed — a driver server on another network could leave the driver link reading live after it was stopped
 
@@ -60,20 +65,23 @@ network. Nothing stored on disk changes.
   stop from the handshake's home-id callback ends the handshake the same way;
   nothing in the add-on stops the client there today.
 
-### Fixed — a stick swap could read as a driver server on another network
+### Fixed — a stick swap could stop the driver link for the rest of the run
 
 - A home-id change cycles the driver client, and kept the previous server's
   home id until the new handshake: a read of the cross-check in between (the
   sleeper watch reads it on every call) compared it with the new id, purged
   the driver telemetry and stopped the client for the rest of the run, though
   the driver server had moved to the new network too. The cycle forgets it now.
+  A driver link back on the new network before Home Assistant reports the new
+  home id still reads as one on another network, telemetry purged and client
+  stopped, until the roster poll that reads the new id runs the cycle.
 
 ### Tests
 
-- 1,876 tests, 23 new: 17 in `nodeFeeds.test.ts`, a model of Home
+- 1,883 tests, 30 new: 24 in `nodeFeeds.test.ts`, a model of Home
   Assistant's node feeds bound to zwave-js-server-python node objects, 4 in
-  `driverWsClient.test.ts` and 2 in `zwaveDataChurn.test.ts`; 1,995
-  mutation-harness entries (19 labelled equivalent, 1 of them new): 53 new, 2
+  `driverWsClient.test.ts` and 2 in `zwaveDataChurn.test.ts`; 2,001
+  mutation-harness entries (19 labelled equivalent, 1 of them new): 59 new, 2
   re-anchored.
 
 ## 0.79.5
