@@ -4586,9 +4586,9 @@ class ZwaveDataImpl implements ZwaveData {
   /**
    * Move a node's count to an observed status (v0.79.8): a crossing of the
    * Dead boundary from the status it stands at (countedStatus) is counted
-   * into flapAccum and the auto-ping runner's queue. The first observation
+   * into flapAccum and the auto-ping runner's queue. The first known status
    * of a node (at boot, after its eviction, after a home id change) only
-   * sets it. Every observation comes through here, so a status two sources
+   * sets it, and an Unknown reading moves nothing (below). Every observation comes through here, so a status two sources
    * deliver (an event and the roster reading that reflects it, or one event
    * on two feeds while a release is out) counts once.
    */

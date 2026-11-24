@@ -5,9 +5,9 @@
 Each node's Dead and alive crossings are counted against one status that every
 observation moves, whichever status feed or roster poll made it, so a change
 made while the connection to Home Assistant was down, a replacement of a failed
-node and a driver restart that reads a Dead node Unknown are counted, and a
-crossing a status feed counted is not counted again after a reconnect, a re-arm
-or a failed status subscribe. A node evicted from the roster no longer leaves
+node and a Dead node a restarted driver reads Alive are counted, and a crossing
+a status feed counted is not counted again after a reconnect, a re-arm, a failed
+status subscribe or a driver restart. A node evicted from the roster no longer leaves
 deaths queued for the auto-ping runner, a re-interview or a failed-node removal
 no longer leaves a subscription on the connection, and a state read no longer
 waits on a connection that is down. Nothing stored on disk changes.
@@ -24,14 +24,18 @@ waits on a connection that is down. Nothing stored on disk changes.
   subscribe that failed took the node out of the feeds' set, a revival as well
   as a death. A status event read together with its own feed's subscribe
   answer, or heard by a feed a re-arm was still releasing, counted nothing.
-  And a replacement of a failed node by one that reads Alive, or a driver
-  restart that reads a Dead node Unknown, was not counted for a node whose
-  status feed was live, so the failed node's death stayed queued for the
-  auto-ping runner. Every status event, on any of the node's feeds, and every
+  A replacement of a failed node by one that reads Alive was not counted for a
+  node whose status feed was live, so the failed node's death stayed queued
+  for the auto-ping runner, and a Dead node a restarted driver read Unknown
+  kept its death queued when it was read Alive, and had a second death queued
+  when it was read Dead again. Every status event, on any of the node's feeds, and every
   roster reading not overtaken by a status event heard since the poll was sent,
   now moves one counted status per node, kept across reconnects, re-arms, a
   node's own re-subscribe and failed subscribes; a crossing from it is counted
-  once, whichever source saw it. The status carried past a node's own
+  once, whichever source saw it. An Unknown reading moves nothing: a restarted
+  driver reads a node it has not yet heard from Unknown, which says nothing
+  about the Dead boundary, so the node's next known status counts against its
+  last. The status carried past a node's own
   re-subscribe (0.79.7) and the new feed's seed are gone with it.
 - A roster poll that shows another network (a home id change) counts nothing
   against this network's statuses: through 0.79.7 it counted a crossing for a
@@ -68,12 +72,12 @@ waits on a connection that is down. Nothing stored on disk changes.
 
 ### Tests
 
-- 1,969 tests, 18 new: 10 in `nodeFeeds.test.ts`, 4 in
+- 1,970 tests, 19 new: 11 in `nodeFeeds.test.ts`, 4 in
   `haWsClientSubscriptionCommands.test.ts`, a model of Home Assistant's
   subscription commands over a real socket, 2 in `zwaveActions.test.ts` and 2
   in `activityFeeds.test.ts`; 5 earlier tests assert the true counts where
-  they had pinned the old ones. 2,064 mutation-harness entries (19 labelled
-  equivalent): 22 new, 5 re-anchored, and 19 removed with the code they pinned.
+  they had pinned the old ones. 2,065 mutation-harness entries (19 labelled
+  equivalent): 23 new, 5 re-anchored, and 19 removed with the code they pinned.
 
 ## 0.79.7
 
