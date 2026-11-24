@@ -192,6 +192,15 @@ const STATS_FEED_DEAD_MS = 10 * 60_000;
  *  nodes land within seconds; generous, and bounded so a wedged rebuild cannot
  *  suppress the liveness stamp indefinitely (v0.67.0). */
 const STATS_REPLAY_GRACE_MS = 15_000;
+/** The two activity feeds (v0.8), both `subscribe_events` on Home Assistant's
+ *  core event bus: the value log and the live-state cache, and the
+ *  notification log. */
+type ActivityFeed = 'state_changed' | 'zwave_js_notification';
+const ACTIVITY_FEEDS: readonly ActivityFeed[] = ['state_changed', 'zwave_js_notification'];
+/** The least time between two attempts at an activity feed the feed set was
+ *  left without (v0.79.7, retryActivityFeeds), on the host's uptime: the
+ *  per-node retry's period. */
+const ACTIVITY_RETRY_MS = 60_000;
 const COARSE_INTERVAL_MS = 60_000;
 /** v0.22: min gap before a FAILED config-param fetch is retried, so a Detail
  *  screen that re-requests every frame can't hammer a flaky device. */
@@ -954,7 +963,12 @@ class ZwaveDataImpl implements ZwaveData {
   /** Nodes with a live `subscribe_node_status` subscription (flap source).
    *  Nodes NOT in this set fall back to the 2 s roster diff for flap counting. */
   private statusSubbed = new Set<number>();
-  /** Last status seen by the node-status SUBSCRIPTION (not the roster poll). */
+  /** The status a node's status SUBSCRIPTION holds: its last event, its seed
+   *  (the roster's last reading, or the status the node's old status feed
+   *  carried past its own re-subscribe's release: releaseHeard), or the
+   *  roster reading a poll gave it as its baseline (v0.79.6 review; each poll
+   *  since v0.79.7, unless a status event was heard after both the poll and
+   *  the node's live status feed were sent: statusHeardAt). */
   private subStatus = new Map<number, NodeStatus>();
   /** Freshness signature at the previous evidence sample: fresh requires BOTH
    *  a new stats event (lastSeen advanced) AND counter movement — a
@@ -1028,10 +1042,11 @@ class ZwaveDataImpl implements ZwaveData {
    *  re-subscribe, its eviction and a re-arm release them. */
   private nodeFeedSubs = new Map<number, NodeFeedRec>();
   /** Order marks (v0.79.6): taken at each per-node subscribe sent, at each
-   *  status feed's answer, at each roster poll's send, and at each roster poll
+   *  status feed's answer, at each roster poll's send, at each roster poll
    *  or registry load that shows a node's Home Assistant node object may have
-   *  changed. A count, not a clock, so a wall-clock step cannot reorder a send
-   *  and a mark. */
+   *  changed, and at each status event that sets a node's status (v0.79.7).
+   *  A count, not a clock, so a wall-clock step cannot reorder a send and a
+   *  mark. */
   private feedSeq = 0;
   /** Nodes whose node object in Home Assistant may be another than the one
    *  their feeds were bound to (v0.79.6): node → the mark of the poll or load
@@ -1050,6 +1065,51 @@ class ZwaveDataImpl implements ZwaveData {
   /** The order mark taken when each node's status feed answered its subscribe
    *  (v0.79.6): Home Assistant attached the listener before that answer. */
   private readonly statusLiveAt = new Map<number, number>();
+  /** The order mark taken at each node's latest status event that set its
+   *  status (v0.79.7): alive, dead, sleep or wake up. A ready event sets none,
+   *  and takes none. A roster poll compares it with its own send's mark and
+   *  with the send of the node's live status feed (statusSentAt): an event
+   *  heard after both may be newer than the poll's reading, as `ws` hands
+   *  each uncompressed frame of one read to its handler before the poll
+   *  resumes, and it is the status the live feed holds. Never pruned, as
+   *  statusLiveAt: a mark is only compared with sends, and every poll or feed
+   *  sent after an event has a later one. */
+  private readonly statusHeardAt = new Map<number, number>();
+  /** The order mark of the send of each node's live status feed (v0.79.7),
+   *  recorded when it answers. A roster poll acts on its reading with that
+   *  feed live only once the feed's answer was handled, and the poll's own
+   *  answer then came after the feed was sent: an event heard before the
+   *  send (an earlier feed of the node delivered it) is in the reading, while
+   *  the live feed may hold an older seed in its place. */
+  private readonly statusSentAt = new Map<number, number>();
+  /** What a node's old status feed held once the node's own re-subscribe had
+   *  released it, when that feed heard a status event after the roster poll
+   *  the re-subscribe followed was sent (v0.79.7 review). Not one a feed a
+   *  re-arm is still releasing set, on a node with no status feed of its
+   *  own, by an event with no status before it, or by one after it that
+   *  counted no crossing (statusUncounted): the first event counted no
+   *  crossing, and carried, the roster diff would not count it either. One
+   *  the feed holds once a later event of it counted a crossing is carried,
+   *  or the roster diff would count that crossing again. That poll's
+   *  reading is the feed's status unless the feed heard one since its send
+   *  (heardSince), so the status carried is no older than the reading: an
+   *  event read together with the poll's answer, or one the old feed
+   *  delivered after the poll acted, as during the release of the statistics
+   *  feed, which goes first unless the 60 s retry made it after the status
+   *  feed, while the client drops the status feed's handler only as that
+   *  feed's release starts. While the id is out of statusSubbed
+   *  the roster fallback diffs against it, so a crossing the old feed counted
+   *  is not counted again, and the new status feed is seeded with it. The
+   *  next roster reading clears it: Home Assistant sends one connection's
+   *  answers and events in order, so a reading acted on after the releases
+   *  came after the old feed's event. So do the new status feed's answer, the
+   *  eviction and a home id change. */
+  private readonly releaseHeard = new Map<number, NodeStatus>();
+  /** Nodes whose status (subStatus) a status event set with none before it,
+   *  so it counted no crossing, and no event has counted one since (v0.79.7
+   *  review): a feed a re-arm is still releasing, on a node with no status
+   *  feed of its own. A node's own re-subscribe does not carry it. */
+  private readonly statusUncounted = new Set<number>();
   /** The order mark taken as the last roster poll that read statuses sent its
    *  `network_status` (v0.79.6). A status feed live before it hears every
    *  status change the next poll shows; one made after it may have missed a
@@ -1195,6 +1255,20 @@ class ZwaveDataImpl implements ZwaveData {
    *  they can be RELEASED and rebuilt without tearing down the socket: the
    *  controller and activity feeds' (the nodes' are in nodeFeedSubs, v0.79.6). */
   private ownedStatsSubs: HaSubscription[] = [];
+  /** The activity feeds the feed set on this connection was left without
+   *  (v0.79.7): a subscribe that failed (no answer within the client's
+   *  timeout, a connection down or closed under it, or an error answer) while
+   *  the rest of the rebuild stood, and with the connection down, the feeds
+   *  after it, not tried (v0.79.7 review). Through
+   *  v0.79.6 nothing made them before the next rebuild (a reconnect, the
+   *  self-heal or a re-arm), and a failed state_changed subscribe skipped the
+   *  notification one. Set by each rebuild that keeps its feeds; emptied by
+   *  retryActivityFeeds as it makes them. */
+  private activityOwed = new Set<ActivityFeed>();
+  /** The host's uptime at the last attempt at the activity feeds (v0.79.7). */
+  private activityTriedAt = 0;
+  /** A retry of the activity feeds is out (v0.79.7): one at a time. */
+  private activityRetryBusy = false;
   /** A zwave_js config-entry reload was seen; re-arm the feeds once the roster
    *  poll succeeds again (v0.65.0). Consumed INSIDE `rearmStatsFeeds`, past the
    *  throttle — clearing it at the call site swallowed a second reload that
@@ -2994,6 +3068,9 @@ class ZwaveDataImpl implements ZwaveData {
       // One node's feeds, when its node object may be new (v0.79.6). It stands
       // aside while the feed set is being rebuilt or owed a rebuild.
       void this.rearmNodeFeeds();
+      // An activity feed the feed set was left without (v0.79.7). It stands
+      // aside while the feed set is being rebuilt or is down.
+      void this.retryActivityFeeds();
       this.scheduleNext(this.refreshMs);
     } else {
       // Back off on repeated failure (e.g. dev without token, HA restarting) so
@@ -3102,6 +3179,27 @@ class ZwaveDataImpl implements ZwaveData {
     // Diff status vs the previous poll → log alive/dead/asleep transitions.
     for (const n of nodes) {
       const prev = this.prevStatus.get(n.nodeId);
+      // A status event heard since this poll was sent (v0.79.7). Home
+      // Assistant sends it before or after the answer; `ws` hands each
+      // uncompressed frame of one read to its handler before this function
+      // resumes, so one sent right after the answer and read with it is
+      // handled before the reading is acted on, and may be newer than it.
+      // Neither the judge below nor the baseline takes this reading against
+      // it: the event came from the node object Home Assistant held when it
+      // was sent, and the feed's status is that event's. Only an event heard
+      // after the node's live status feed was sent counts. One heard before
+      // that came from an earlier feed of the node (a node's own
+      // re-subscribe or a re-arm still releasing it while this poll is out),
+      // and this reading reflects it: the live feed answered before this poll
+      // was acted on, so this poll's answer came after the feed was sent.
+      // After a re-arm the live feed may hold an older seed in its place,
+      // which this reading replaces (statusSentAt); after a node's own
+      // re-subscribe its seed is that event's status (releaseHeard). A
+      // replacement completed between such an event of the failed node and
+      // this reading (inside one round trip) is left to another mark or to the
+      // next status change of the new node that a poll reads.
+      const heardAt = this.statusHeardAt.get(n.nodeId) ?? 0;
+      const heardSince = heardAt > rosterSent && heardAt > (this.statusSentAt.get(n.nodeId) ?? 0);
       if (prev !== undefined && prev !== n.status) {
         const sev = n.status === NodeStatus.Dead ? 'error' : 'info';
         this.pushEvent('net', sev, 'status', n.nodeId, `${n.name} → ${n.statusLabel}`);
@@ -3121,27 +3219,53 @@ class ZwaveDataImpl implements ZwaveData {
         // counted here, as a driver restart's readings would count too. A
         // feed made after the previous poll was sent may have missed a change
         // made before its listener was attached (a rebuild while the
-        // restarted driver marks the nodes alive), so it is not judged by it.
+        // restarted driver marks the nodes alive): its baseline, the previous
+        // reading, may predate the listener, so it is not judged by it. Nor
+        // is a feed that heard a status event since this poll was sent
+        // (heardSince, v0.79.7).
         const liveAt = this.statusLiveAt.get(n.nodeId);
-        if (this.statusSubbed.has(n.nodeId) && liveAt != null && liveAt < this.rosterSentSeq && this.subStatus.get(n.nodeId) !== n.status) this.markFeedSuspect(n.nodeId);
-        // Flap-count FALLBACK for nodes without a live node-status subscription
-        // (subscribe failed + retry pending). The event feed is the primary
-        // source — feeding both would double-count the same transition.
-        if (!this.statusSubbed.has(n.nodeId)) {
-          const crossedDead = (prev === NodeStatus.Dead) !== (n.status === NodeStatus.Dead);
-          if (crossedDead) this.flapAccum.set(n.nodeId, (this.flapAccum.get(n.nodeId) ?? 0) + 1);
-          if (crossedDead) this.noteDeadCrossing(n.nodeId, n.status === NodeStatus.Dead);
-        }
+        if (this.statusSubbed.has(n.nodeId) && !heardSince && liveAt != null && liveAt < this.rosterSentSeq && this.subStatus.get(n.nodeId) !== n.status) this.markFeedSuspect(n.nodeId);
       }
-      // The first poll sent after a node's status feed answered (v0.79.6
-      // review): the feed's seed is an older reading, and a change made
-      // before its listener was attached reached no feed (or was discarded by
-      // the node's own re-subscribe), so the seed may be stale. Not judged
-      // above; this reading is the feed's baseline from here. Kept stale, a
-      // later replacement that reads as the seed (a failed node's same-product
-      // replacement, Alive) would never be judged.
-      const seededAt = this.statusLiveAt.get(n.nodeId);
-      if (this.statusSubbed.has(n.nodeId) && seededAt != null && seededAt >= this.rosterSentSeq && seededAt < rosterSent) this.subStatus.set(n.nodeId, n.status);
+      // Flap-count FALLBACK for nodes without a live node-status subscription
+      // (subscribe failed + retry pending, or a node's own re-subscribe
+      // running). The event feed is the primary source — feeding both would
+      // double-count the same transition. It diffs against the status the
+      // node's old status feed carried past its own re-subscribe's release,
+      // when there is one (releaseHeard, v0.79.7 review), and the previous
+      // reading otherwise. Through v0.79.6 it diffed against the previous
+      // reading alone: a death that feed counted was counted again by a poll
+      // that read it before the new status feed answered, and a revival no
+      // feed heard after it, read as the previous reading, was not counted.
+      const base = this.releaseHeard.get(n.nodeId) ?? prev;
+      if (!this.statusSubbed.has(n.nodeId) && base !== undefined) {
+        const crossedDead = (base === NodeStatus.Dead) !== (n.status === NodeStatus.Dead);
+        if (crossedDead) this.flapAccum.set(n.nodeId, (this.flapAccum.get(n.nodeId) ?? 0) + 1);
+        if (crossedDead) this.noteDeadCrossing(n.nodeId, n.status === NodeStatus.Dead);
+      }
+      // This reading is the live status feed's baseline (v0.79.6 review;
+      // every poll since v0.79.7): a new feed's seed is an older reading, or
+      // the status the node's old feed last heard (releaseHeard), and a
+      // change made before its listener was attached reached no feed, so the
+      // seed may be stale. Kept stale, a later replacement that reads as the
+      // seed (a failed node's same-product replacement, Alive) would never be
+      // judged.
+      // For a feed that heard every change the reading is the status it holds
+      // already, as the reading reflects each event Home Assistant sent
+      // before its answer (inferred, as for the judge above). Not when the
+      // feed heard an event since this poll was sent (heardSince): the event
+      // may be the newer. Until v0.79.7 only the first poll sent after the
+      // feed answered took it, and a death read together with that poll's
+      // answer gave way to the older reading, which left the death queued
+      // when the node revived before the next poll. A node outside
+      // statusSubbed gets none: an event a status handler delivers meanwhile
+      // (one read together with its own feed's subscribe answer, or one of a
+      // feed a re-arm is still releasing) finds no baseline from the roster,
+      // as before v0.79.7.
+      if (this.statusSubbed.has(n.nodeId) && !heardSince) this.subStatus.set(n.nodeId, n.status);
+      // Newer than what a node's old status feed heard before its release
+      // ended: acted on after that release, so answered after the event
+      // (releaseHeard).
+      this.releaseHeard.delete(n.nodeId);
       this.prevStatus.set(n.nodeId, n.status);
     }
     this.rosterSentSeq = rosterSent;
@@ -3297,6 +3421,8 @@ class ZwaveDataImpl implements ZwaveData {
           this.ourTxReport.delete(id);
           this.measurementReroutes.delete(id);
           this.subStatus.delete(id);
+          this.statusUncounted.delete(id);
+          this.releaseHeard.delete(id);
           this.statusSubbed.delete(id);
           this.statsSubbedNodes.delete(id);
           this.pendingNodeSubs.delete(id);
@@ -3446,6 +3572,8 @@ class ZwaveDataImpl implements ZwaveData {
         this.measurementReroutes.clear();
         this.deadEvents = [];
         this.subStatus.clear();
+        this.statusUncounted.clear();
+        this.releaseHeard.clear();
         this.prevSampleSig.clear();
         this.missingSince.clear();
         // The controller cache belongs to the OLD network — post-reset samples
@@ -4093,6 +4221,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.statusSubbed.clear();
       this.statsSubbedNodes.clear();
       this.subStatus.clear();
+      this.statusUncounted.clear();
       this.pendingNodeSubs.clear();
       // A per-node subscribe still out from before this run is released when
       // it resolves (v0.79.6): this run subscribes every node.
@@ -4112,7 +4241,14 @@ class ZwaveDataImpl implements ZwaveData {
       // the re-arm rebuilds on the SAME socket, so without this every re-arm
       // left a live whole-house `state_changed` fanout behind and every
       // activity row was logged twice more.
-      await this.subscribeActivityEvents(owned);
+      //
+      // A feed it cannot make does not fail the rebuild (v0.79.7): the
+      // controller and node feeds stand, and retryActivityFeeds makes it.
+      // Failed, the rebuild would run again at the next roster poll (2 s by
+      // default) and make the controller's feed and every node's two again,
+      // each replaying its statistics and holding the replay window open, at
+      // every poll for as long as the subscribe failed.
+      const unmade = await this.subscribeActivityEvents(ACTIVITY_FEEDS, (sub) => { owned.push(sub); return true; });
       // FINAL check: subscribeActivityEvents releases its OWN feed when it
       // wakes superseded, but this run still holds the controller + per-node
       // handles it created before parking. Without this the stand-down never
@@ -4129,11 +4265,15 @@ class ZwaveDataImpl implements ZwaveData {
       // clears): no second run can be holding handles this one would discard.
       // A node's own re-subscribe and the retry stand aside too, so none runs
       // beside this run, and one still out from before it releases what it
-      // makes (v0.79.6). Anything still on the books here belongs to a
-      // previous SOCKET, where the handles died with it, or was released by a
-      // re-arm.
+      // makes (v0.79.6); so does the retry of the activity feeds (v0.79.7).
+      // Anything still on the books here belongs to a previous SOCKET, where
+      // the handles died with it, or was released by a re-arm.
       this.ownedStatsSubs = owned.slice();
       this.nodeFeedSubs = nodeOwned;
+      // What this feed set was left without (v0.79.7), and the first attempt.
+      this.activityOwed = unmade;
+      this.activityTriedAt = this.uptimeMs();
+      this.announceActivityFeeds();
       void this.fetchEntityStates();
     } catch (e) {
       // Only the newest run's failure says no feed set is up (v0.79.6 review):
@@ -4205,6 +4345,7 @@ class ZwaveDataImpl implements ZwaveData {
     this.statusSubbed.clear();
     this.statsSubbedNodes.clear();
     this.subStatus.clear();
+    this.statusUncounted.clear();
     this.pendingNodeSubs.clear();
     // The cached counters STAY. They are this network's, and clearing them
     // re-baselines every delta guard for nothing (the v0.26 lesson); the first
@@ -4273,12 +4414,27 @@ class ZwaveDataImpl implements ZwaveData {
         // Seed the event-feed state from the roster so the FIRST event after
         // subscribing diffs against the node's known status instead of being
         // swallowed (review: a real Alive→Dead as the first event counted 0).
-        if (!this.subStatus.has(nodeId)) {
-          const known = this.prevStatus.get(nodeId);
+        // The status the node's old feed carried past its own re-subscribe's
+        // release, when there is one, is no older than the roster's last
+        // reading (releaseHeard, v0.79.7 review): through v0.79.6 the seed was
+        // that reading, and a death the old feed counted stayed queued when
+        // the new feed heard the revival.
+        // A status the node holds from before both this subscribe's send and
+        // the last roster poll's is older than that poll's reading, and stands
+        // in for no seed: one a feed a re-arm was still releasing set on a
+        // node whose status subscribe then failed, which no reading replaces
+        // while the node has no status feed (v0.79.7 review). Through v0.79.6
+        // the retry's feed kept it, and a death it heard as its first event
+        // was not counted.
+        const heldAt = this.statusHeardAt.get(nodeId) ?? 0;
+        if (!this.subStatus.has(nodeId) || (heldAt < at && heldAt < this.rosterSentSeq)) {
+          const known = this.releaseHeard.get(nodeId) ?? this.prevStatus.get(nodeId);
           if (known != null) this.subStatus.set(nodeId, known);
         }
+        this.releaseHeard.delete(nodeId);
         this.statusSubbed.add(nodeId);
         this.statusLiveAt.set(nodeId, ++this.feedSeq);
+        this.statusSentAt.set(nodeId, at);
       } catch (e) {
         ok = false;
         this.statusSubbed.delete(nodeId);
@@ -4388,15 +4544,35 @@ class ZwaveDataImpl implements ZwaveData {
     try {
       await Promise.all(due.map(async ({ id, devId, stale }) => {
         this.log(`live statistics: node ${id}'s feeds: ${stale ? 're-subscribe (its node object may be new in Home Assistant)' : 'subscribe (it had none)'}`);
+        // The send of the roster poll this follows. Its reading is the old
+        // status feed's status unless the feed heard a status event after that
+        // send (heardSince); what the feed holds then, heard together with
+        // the poll's answer, during a registry load the poll ran or while the
+        // statistics feed is released, is carried (releaseHeard, v0.79.7
+        // review). A status held from before that send is not: a live feed's
+        // is that poll's reading, and one a feed a re-arm was still releasing
+        // set on a node whose status subscribe then failed is older than it,
+        // as no reading replaces it.
+        const lastRead = this.rosterSentSeq;
         // Released before the new ones are made, so no event is heard twice.
         const old = this.nodeFeedSubs.get(id);
         this.nodeFeedSubs.delete(id);
         for (const sub of old?.subs ?? []) await sub.unsubscribe().catch(() => {});
         // A rebuild begun meanwhile owns the bookkeeping and subscribes the node.
         if (gen !== this.feedGen || epoch !== this.connEpoch) return;
+        // Not one a feed a re-arm is still releasing set, on a node with no
+        // status feed of its own, by an event with no status before it, or by
+        // one after it that counted no crossing (statusUncounted): the first
+        // event counted no crossing, and carried, the roster diff would not
+        // count it either. One the feed holds once a later event of it
+        // counted a crossing is carried, or the roster diff would count that
+        // crossing again (v0.79.7 review).
+        const heard = this.subStatus.get(id);
+        if (heard != null && (this.statusSubbed.has(id) || !this.statusUncounted.has(id)) && (this.statusHeardAt.get(id) ?? 0) > lastRead) this.releaseHeard.set(id, heard);
         this.statsSubbedNodes.delete(id);
         this.statusSubbed.delete(id);
         this.subStatus.delete(id);
+        this.statusUncounted.delete(id);
         this.pendingNodeSubs.delete(id);
         await this.subscribeNode(id, devId, { sink: this.nodeFeedSubs, gen, epoch, fleet: false });
       }));
@@ -4424,10 +4600,15 @@ class ZwaveDataImpl implements ZwaveData {
       : name === 'wake up' ? NodeStatus.Awake
       : null; // 'ready' and unknown events are not status transitions
     if (next == null) return;
+    // In order with the roster polls' sends (v0.79.7, statusHeardAt).
+    this.statusHeardAt.set(nodeId, ++this.feedSeq);
     const prev = this.subStatus.get(nodeId);
     this.subStatus.set(nodeId, next);
-    if (prev == null) return; // first observation — no transition yet
+    if (prev == null) { this.statusUncounted.add(nodeId); return; } // first observation — no transition yet
     const crossedDead = (prev === NodeStatus.Dead) !== (next === NodeStatus.Dead);
+    // Only a crossing ends the mark: a sleep after a wake up counts none,
+    // and the first event's crossing is still uncounted (v0.79.7 review).
+    if (crossedDead) this.statusUncounted.delete(nodeId);
     if (crossedDead) this.flapAccum.set(nodeId, (this.flapAccum.get(nodeId) ?? 0) + 1);
     if (crossedDead) this.noteDeadCrossing(nodeId, next === NodeStatus.Dead);
   }
@@ -4517,53 +4698,158 @@ class ZwaveDataImpl implements ZwaveData {
    * v0.8 activity log: subscribe to device value changes (`state_changed`,
    * filtered to this mesh's entities) + `zwave_js_notification`. Re-established
    * on every (re)auth via the same `subscribeStatistics` path, so a reconnect
-   * resumes the live feed. Notifications are best-effort (the event type may
-   * never fire on a given mesh); the state feed is the primary source.
+   * resumes the live feed. The state feed is the primary source; a mesh may
+   * never emit a notification.
+   *
+   * Each feed of `want` is a try of its own (v0.79.7), and the feeds it could
+   * not make are returned, for the caller to owe (activityOwed). Through
+   * v0.79.6 one try held both: a failed state_changed subscribe skipped the
+   * notification one, and a failed notification subscribe was dropped
+   * unlogged, the log line still naming it subscribed. Home Assistant's
+   * `subscribe_events` registers a bus listener and answers in the same step
+   * (websocket_api commands.py), refusing only a user who is not an
+   * administrator an event type off its allowlist; the add-on's roster poll
+   * and statistics subscribes (network_status, subscribe_controller_statistics
+   * and subscribe_node_statistics) need an administrator already (zwave_js
+   * api.py), and the Supervisor's proxy connects as one (hassio __init__.py).
+   * What fails it for the add-on is an answer that did not come within the
+   * client's timeout, or a connection that was down or closed under it, and a
+   * later try can succeed.
+   *
+   * `keep` takes each handle as it is made, before the next subscribe is
+   * sent; one it declines is released and the rest are not tried. Nor are
+   * they after a failure with the connection down (v0.79.7 review): they are
+   * returned with it.
    */
-  private async subscribeActivityEvents(owned: HaSubscription[]): Promise<void> {
+  private async subscribeActivityEvents(
+    want: readonly ActivityFeed[],
+    keep: (sub: HaSubscription, feed: ActivityFeed) => boolean,
+  ): Promise<Set<ActivityFeed>> {
     // Epoch pinned at entry and RE-CHECKED after every await: the caller's
     // pre-call check cannot help a run that was already parked inside one of
     // these subscribes when the reconnect happened — it would wake on the NEW
     // connection and land a duplicate feed beside the onReady-launched run
     // (v0.26; the churn test constructs exactly this interleaving).
     const epoch = this.connEpoch;
+    const unmade = new Set<ActivityFeed>();
+    for (const feed of want) {
+      try {
+        // Both handles are CAPTURED, not discarded (v0.65.0 review): a re-arm
+        // recreates them on the same live socket and must release these.
+        const sub = await this.client.subscribe(
+          { type: 'subscribe_events', event_type: feed },
+          feed === 'state_changed'
+            ? (msg) => { if (epoch === this.connEpoch) this.onStateChanged(msg.event); }
+            : (msg) => { if (epoch === this.connEpoch) this.onZwaveNotification(msg.event); },
+        );
+        if (epoch !== this.connEpoch) {
+          // The subscribe RESOLVED on the new connection — release it, don't
+          // just mute it: a zombie server-side feed costs HA a fanout per state
+          // change in the whole house for the life of the socket. The caller
+          // stands down for the rest; the feeds are the new run's to make.
+          void sub.unsubscribe().catch(() => {});
+          this.log('activity subscribe: superseded by a reconnect mid-run — standing down');
+          break;
+        }
+        // Registered on the KEEP path only, so a handle this function already
+        // released itself can never be in the caller's release list twice.
+        if (!keep(sub, feed)) { void sub.unsubscribe().catch(() => {}); break; }
+      } catch (e) {
+        unmade.add(feed);
+        this.log(`activity subscribe failed (${feed}): ${errMsg(e)}`);
+        // With the socket gone (v0.79.7 review), the next subscribe would only
+        // wait its own 10 s for one: the feeds after this one are owed with it,
+        // and the reconnect's rebuild makes them all.
+        if (!this.client.ready()) {
+          for (const rest of want.slice(want.indexOf(feed) + 1)) unmade.add(rest);
+          break;
+        }
+      }
+    }
+    return unmade;
+  }
+
+  /**
+   * Make the activity feeds the feed set was left without (v0.79.7,
+   * activityOwed), after a roster poll that succeeds and no sooner than
+   * ACTIVITY_RETRY_MS after the last attempt, measured on the host's uptime,
+   * which a wall-clock step does not move. Only the owed feeds are subscribed:
+   * a live one made again would log every event twice. Each handle joins
+   * ownedStatsSubs as it is made, where a re-arm releases it: a re-arm that
+   * begins while the second subscribe is still out releases the first feed
+   * with the rest, so it is not heard beside the one that re-arm's rebuild
+   * makes. A feed that fails again is tried again ACTIVITY_RETRY_MS later.
+   *
+   * Not while a rebuild of the feed set runs or the feed set is down (a
+   * reconnect, the self-heal, a re-arm releasing it, a failed rebuild): the
+   * rebuild makes the feeds itself. A re-arm an entry reload latched does not
+   * hold it: a reload leaves the activity feeds, on Home Assistant's core
+   * event bus, as they are, and the re-arm's window can hold it off for up to
+   * ten minutes. A feed made after another rebuild began, or while the feed
+   * set was down, is released, not kept, and the feeds after it are not
+   * tried. A subscribe the client gave up on delivers nothing here
+   * (haWsClient drops its handler, and releases it on the socket it went out
+   * on), so the retry's feed is the only one heard, and the only one Home
+   * Assistant holds once that release lands.
+   */
+  private async retryActivityFeeds(): Promise<void> {
+    if (this.activityOwed.size === 0 || this.activityRetryBusy) return;
+    if (this.rebuildInFlight || !this.statsSubscribed) return;
+    if (this.uptimeMs() - this.activityTriedAt < ACTIVITY_RETRY_MS) return;
+    this.activityRetryBusy = true;
+    const run = this.rebuildRun;
+    const want = ACTIVITY_FEEDS.filter((f) => this.activityOwed.has(f));
+    // Every rebuild takes a new run number as it starts (a reconnect's at
+    // onReady), and a re-arm marks the feed set down before it releases it:
+    // either way the feeds are that rebuild's to make, and a handle kept
+    // here after it began would be left out of the list it keeps.
+    const ours = (): boolean => run === this.rebuildRun && this.statsSubscribed;
     try {
-      const sub = await this.client.subscribe(
-        { type: 'subscribe_events', event_type: 'state_changed' },
-        (msg) => { if (epoch === this.connEpoch) this.onStateChanged(msg.event); },
-      );
-      if (epoch !== this.connEpoch) {
-        // The subscribe RESOLVED on the new connection — release it, don't
-        // just mute it: a zombie server-side feed costs HA a fanout per state
-        // change in the whole house for the life of the socket.
-        void sub.unsubscribe().catch(() => {});
-        this.log('activity subscribe: superseded by a reconnect mid-run — standing down');
-        return;
-      }
-      // Registered on the KEEP path only, so a handle this function already
-      // released itself can never be in the caller's release list twice.
-      owned.push(sub);
-      // The notification handle is CAPTURED, not discarded (v0.65.0 review):
-      // an unreleasable feed is exactly what the comment above refuses for the
-      // state feed, and a re-arm recreates this one on the same live socket.
-      const notif = await this.client
-        .subscribe(
-          { type: 'subscribe_events', event_type: 'zwave_js_notification' },
-          (msg) => { if (epoch === this.connEpoch) this.onZwaveNotification(msg.event); },
-        )
-        .catch(() => null); // best-effort — some meshes never emit notifications
-      if (epoch !== this.connEpoch) {
-        if (notif) void notif.unsubscribe().catch(() => {});
-        this.log('activity subscribe: superseded by a reconnect mid-run — standing down');
-        return;
-      }
-      if (notif) owned.push(notif);
+      const unmade = await this.subscribeActivityEvents(want, (sub) => {
+        if (!ours()) return false;
+        this.ownedStatsSubs.push(sub);
+        return true;
+      });
+      if (!ours()) return;
+      this.activityOwed = unmade;
+      this.activityTriedAt = this.uptimeMs();
+      if (unmade.size === want.length) return;
+      this.announceActivityFeeds();
+      // What changed while no state feed was live: the live-state cache and
+      // the owner's pause toggle.
+      if (want.includes('state_changed') && !unmade.has('state_changed')) void this.fetchEntityStates();
+    } finally {
+      this.activityRetryBusy = false;
+    }
+  }
+
+  /**
+   * The activity feeds' state, on the Log screen where their rows land and in
+   * the add-on log (v0.79.7): at each rebuild that keeps its feeds, and when
+   * the retry makes an owed one. A failed retry adds no row, and neither
+   * adds one once the connection is down.
+   */
+  private announceActivityFeeds(): void {
+    // Not once the socket the feeds rode is gone (v0.79.7 review): no retry
+    // runs while it is down, and the reconnect's rebuild makes the feeds and
+    // announces them. Through v0.79.6 a rebuild whose state_changed
+    // subscribe failed that way added no row, and one whose notification
+    // subscribe did added `activity feed live`.
+    if (!this.client.ready()) return;
+    const owed = this.activityOwed;
+    const n = this.entityIndex.size;
+    if (owed.has('state_changed')) {
+      const what = owed.has('zwave_js_notification') ? 'its state_changed and notification subscribes' : 'its state_changed subscribe';
+      this.pushEvent('net', 'warn', 'system', null, `activity feed down — ${what} failed; retried after a minute`);
+      this.log(`activity log: ${[...owed].join(' + ')} not subscribed — retried after a minute`);
+    } else if (owed.size > 0) {
+      this.pushEvent('net', 'info', 'system', null, `activity feed live — watching ${n} device entities; notifications down, retried after a minute`);
+      this.log(`activity log: subscribed state_changed (${n} entities); zwave_js_notification not subscribed — retried after a minute`);
+    } else {
       // A visible marker in the activity log itself so a (re)connect is legible
       // right where the user is watching — useful given the WS can wedge.
-      this.pushEvent('net', 'info', 'system', null, `activity feed live — watching ${this.entityIndex.size} device entities`);
-      this.log(`activity log: subscribed state_changed + notifications (${this.entityIndex.size} entities)`);
-    } catch (e) {
-      this.log(`activity subscribe failed: ${errMsg(e)}`);
+      this.pushEvent('net', 'info', 'system', null, `activity feed live — watching ${n} device entities`);
+      this.log(`activity log: subscribed state_changed + notifications (${n} entities)`);
     }
   }
 
