@@ -9652,6 +9652,10 @@ const MUTANTS = [
     find: " && this.client.ready()) void this.fetchEntityStates();\n",
     repl: ") void this.fetchEntityStates();\n",
     what: "a retry whose notification subscribe failed with the connection down, after it made the state feed, starts no state read" },
+  { id: "count-unknown-moves-nothing", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "    if (next === NodeStatus.Unknown) return;\n",
+    repl: "",
+    what: "an Unknown reading moves no count: a Dead node a restarted driver reads Unknown and then Dead again counts no revival and no second death, and one read Alive clears its death" },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

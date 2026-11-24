@@ -2198,26 +2198,51 @@ test('a failed node replaced by a node object that reads Alive, its status feed 
   });
 });
 
-test('a driver restart that reads a Dead node Unknown, its status feed live on the old node object: the poll that reads it counts the crossing out of Dead and clears the death (v0.79.8)', async () => {
+/** Node 60 Dead with its death queued; a driver restart (the entry reloading,
+ *  every node a new object) whose first reading of node 60 is Unknown. */
+async function deadThenRestartUnknown(s: Sim, r: Run): Promise<void> {
+  await r.poll();
+  s.zw.emitStatus(60, 'dead');
+  skip += 2_000;
+  await r.poll();                         // reads it Dead
+  assert.deepEqual(books(r, 60), { flaps: 1, queued: 1, cleared: 0 }, 'precondition: the death is queued');
+  s.statusErr = NOT_LOADED;
+  s.unloaded = true;
+  skip += 2_000;
+  await r.pollOnly();                     // the entry reloading
+  s.zw.restartDriver();
+  s.zw.nodes.get(60)!.st = 0;             // the restarted driver has not heard from it yet
+  s.statusErr = undefined;
+  s.unloaded = false;
+  skip += 2_000;
+  await r.poll();                         // reads it Unknown and not ready
+  assert.deepEqual(books(r, 60), { flaps: 1, queued: 1, cleared: 0 }, 'an Unknown reading moves nothing: the death stays queued');
+}
+
+test('a driver restart that reads a Dead node Unknown, then Dead again: no revival and no second death are counted (v0.79.8)', async () => {
   const s = baseSim();
   await withSim(s, async (r) => {
-    await r.poll();
-    s.zw.emitStatus(60, 'dead');
+    const deaths: number[] = [];
+    r.zd.attachRefreshTrial({ onDead: (n: number) => { deaths.push(n); }, dropOpen: () => {}, view: () => null, tick: () => {} } as never, { writeActions: false });
+    await deadThenRestartUnknown(s, r);
+    s.zw.emitStatus(60, 'dead');          // the restarted driver marks it Dead
     skip += 2_000;
     await r.poll();                       // reads it Dead
-    assert.deepEqual(books(r, 60), { flaps: 1, queued: 1, cleared: 0 }, 'precondition: the death is queued');
-    s.statusErr = NOT_LOADED;
-    s.unloaded = true;
+    assert.deepEqual(books(r, 60), { flaps: 1, queued: 1, cleared: 0 }, 'one death, still queued, never cleared');
+    assert.deepEqual(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60), [], 'nothing handed to the runner as cleared');
+    assert.deepEqual(deaths, [60], 'one death reached the refresh trial');
+  });
+});
+
+test('a driver restart that reads a Dead node Unknown, then Alive: the revival is counted against the death and clears it (v0.79.8)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await deadThenRestartUnknown(s, r);
+    s.zw.emitStatus(60, 'alive');         // the restarted driver hears it
     skip += 2_000;
-    await r.pollOnly();                   // the entry reloading
-    s.zw.restartDriver();
-    s.zw.nodes.get(60)!.st = 0;           // the restarted driver reads it Unknown
-    s.statusErr = undefined;
-    s.unloaded = false;
-    skip += 2_000;
-    await r.poll();                       // reads it Unknown and not ready
+    await r.poll();                       // reads it Alive
     assert.equal(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60).length, 1, 'the death is cleared (through v0.79.7 it stayed queued)');
-    assert.deepEqual(books(r, 60), { flaps: 2, queued: 0, cleared: 0 }, 'the crossing out of Dead counted once');
+    assert.deepEqual(books(r, 60), { flaps: 2, queued: 0, cleared: 0 }, 'the revival counted once');
   });
 });
 

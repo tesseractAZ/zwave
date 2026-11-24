@@ -3223,7 +3223,8 @@ class ZwaveDataImpl implements ZwaveData {
       // it, counts nothing more; a change that reached no feed counts here:
       // one made while the connection was down or before a new feed's
       // listener was attached, a replacement of a failed node (Alive at once)
-      // and a driver restart that reads a Dead node Unknown. Through v0.79.7
+      // and a Dead node a restarted driver reads Alive (an Unknown reading in
+      // between moves nothing: countStatus). Through v0.79.7
       // only a node outside statusSubbed was counted here, against the
       // previous reading (or the status its old feed carried past its own
       // re-subscribe): a change that reached no feed was lost once a new
@@ -4592,6 +4593,12 @@ class ZwaveDataImpl implements ZwaveData {
    * on two feeds while a release is out) counts once.
    */
   private countStatus(nodeId: number, next: NodeStatus): void {
+    // Unknown says nothing about the Dead boundary: a restarted driver reads
+    // a node it has not yet heard from Unknown, a Dead one included, and then
+    // Dead again or Alive. It moves nothing, so the node's next known status
+    // counts against its last: a Dead node read Unknown and then Dead counts
+    // no revival and no second death, and one read Alive clears its death.
+    if (next === NodeStatus.Unknown) return;
     const prev = this.countedStatus.get(nodeId);
     this.countedStatus.set(nodeId, next);
     if (prev == null) return;
