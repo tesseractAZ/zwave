@@ -739,3 +739,59 @@ test('a retry of both feeds whose notification subscribe fails as Core goes down
     noReleasedTwice(ha, 'end');
   });
 });
+
+/* ── a state read needs a socket (v0.79.8) ─────────────────────────────────── */
+
+/** get_states asked of the client, answered or not. */
+function countStateReads(ha: Ha): { n: number } {
+  const asks = { n: 0 };
+  const send = ha.client.send.bind(ha.client);
+  ha.client.send = ((c: Record<string, unknown>, t?: unknown) => {
+    if (c.type === 'get_states') asks.n += 1;
+    return (send as (c: Record<string, unknown>, t?: unknown) => Promise<unknown>)(c, t);
+  }) as typeof ha.client.send;
+  return asks;
+}
+
+test('Core going down while a reconnect\'s rebuild has a node statistics subscribe out: the rebuild, ending on the dead socket, starts no state read; the rebuild after the reconnect reads once (v0.79.8)', async () => {
+  const ha = fakeHa();
+  await withHa(ha, async (r) => {
+    const asks = countStateReads(ha);
+    const lines = r.logs.length;
+    await downDuringRebuild(r, 'zwave_js/subscribe_node_statistics');
+    const said = r.logs.slice(lines);
+    assert.ok(said.includes(`activity subscribe failed (state_changed): ${NOT_READY}`), 'precondition: the state feed failed waiting for a socket');
+    await sleep(10);
+    assert.equal(asks.n, 0, 'no state read started on a socket that is gone');
+    assert.deepEqual(r.logs.slice(lines).filter((l) => l.startsWith('entity states fetch failed')), [], 'no failed read logged (through v0.79.7 the read waited for a socket and failed)');
+    await coreBack(r);
+    await sleep(10);
+    assert.equal(asks.n, 1, 'the rebuild after the reconnect reads the states once');
+  });
+});
+
+test('a retry of both feeds whose notification subscribe fails as Core goes down, after it made the state feed: it starts no state read on the dead socket; the rebuild after the reconnect reads once (v0.79.8)', async () => {
+  const ha = fakeHa();
+  ha.fail.set('state_changed', 1);
+  ha.fail.set('zwave_js_notification', 1);
+  await withHa(ha, async (r) => {
+    r.later(MIN);
+    const g = gate();
+    ha.gates.set('zwave_js_notification', g);
+    await r.pollOnly();
+    await waitFor(() => g.arrived, 2000, () => r.logs.join(' | '));
+    assert.equal(r.live('state_changed'), 1, 'precondition: the retry made the state feed');
+    const asks = countStateReads(ha);
+    const lines = r.logs.length;
+    ha.down();
+    g.open();
+    await waitFor(() => !r.priv.activityRetryBusy, 2000, () => r.logs.join(' | '));
+    await sleep(10);
+    assert.ok(r.logs.includes(`activity subscribe failed (zwave_js_notification): ${CLOSED}`), 'precondition: the held subscribe failed with its socket');
+    assert.equal(asks.n, 0, 'no state read started on a socket that is gone');
+    assert.deepEqual(r.logs.slice(lines).filter((l) => l.startsWith('entity states fetch failed')), [], 'no failed read logged (through v0.79.7 the read waited for a socket and failed)');
+    await coreBack(r);
+    await sleep(10);
+    assert.equal(asks.n, 1, 'the rebuild after the reconnect reads the states once');
+  });
+});

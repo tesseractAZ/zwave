@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { createActionRunner, isNotFailedRefusal, zwaveErrorCode } from '../src/zwave/zwaveActions';
 import type { HaWsClient } from '../src/ha/haWsClient';
 
+/** A fake client whose send() also answers sendSubscription(): the two
+ *  commands Home Assistant registers as subscriptions go through it (v0.79.8). */
+const viaBoth = <T extends { send: unknown }>(c: T): T & { sendSubscription: T['send'] } => ({ ...c, sendSubscription: c.send });
+
 interface MkOpts { reject?: boolean; noDevice?: boolean; noPing?: boolean; noRead?: boolean; entry?: string | null }
 function mk(enabled: boolean, opts: MkOpts = {}) {
   const sent: any[] = [];
@@ -10,9 +14,10 @@ function mk(enabled: boolean, opts: MkOpts = {}) {
   const outcomes: Array<{ kind: string; nodeId: number | null; ok: boolean }> = [];
   const configWritten: number[] = [];
   const removed: number[] = [];
-  const client = {
-    send: async (cmd: any) => { sent.push(cmd); if (opts.reject) throw new Error('boom'); return null; },
-  } as unknown as HaWsClient;
+  /** Which client method each command went through (v0.79.8). */
+  const via: Array<{ type: string; via: 'send' | 'sendSubscription' }> = [];
+  const call = (how: 'send' | 'sendSubscription') => async (cmd: any) => { sent.push(cmd); via.push({ type: cmd.type, via: how }); if (opts.reject) throw new Error('boom'); return null; };
+  const client = { send: call('send'), sendSubscription: call('sendSubscription') } as unknown as HaWsClient;
   const runner = createActionRunner({
     client,
     entryId: () => (opts.entry === undefined ? 'entry-1' : opts.entry),
@@ -25,7 +30,7 @@ function mk(enabled: boolean, opts: MkOpts = {}) {
     onNodeRemoved: (n) => removed.push(n),
     enabled,
   });
-  return { runner, sent, logs, outcomes, configWritten, removed };
+  return { runner, sent, logs, outcomes, configWritten, removed, via };
 }
 
 const param = (over: Partial<import('../src/types').ConfigParam> = {}): import('../src/types').ConfigParam => ({
@@ -66,6 +71,42 @@ test('node-scoped commands use the resolved device_id', async () => {
   assert.ok(has('zwave_js/refresh_node_info'), 're-interview → refresh_node_info');
   assert.ok(has('zwave_js/refresh_node_values'), 'refresh → refresh_node_values');
   assert.ok(has('zwave_js/remove_failed_node'), 'remove → remove_failed_node');
+});
+
+test('re-interview and remove failed go through sendSubscription, which releases what Home Assistant registers for them; every other verb through send() (v0.79.8)', async () => {
+  const { runner, via } = mk(true);
+  await runner.ping(5);
+  await runner.routedRead(5);
+  await runner.refreshValues(5);
+  await runner.reInterview(5);
+  await runner.healNode(5);
+  await runner.removeFailed(5);
+  await runner.rebuildAll();
+  await runner.stopRebuild();
+  const by = new Map(via.map((v) => [v.type === 'call_service' ? 'call_service' : v.type, v.via]));
+  assert.deepEqual(Object.fromEntries(by), {
+    call_service: 'send',
+    'zwave_js/refresh_node_values': 'send',
+    'zwave_js/refresh_node_info': 'sendSubscription',
+    'zwave_js/rebuild_node_routes': 'send',
+    'zwave_js/remove_failed_node': 'sendSubscription',
+    'zwave_js/begin_rebuilding_routes': 'send',
+    'zwave_js/stop_rebuilding_routes': 'send',
+  });
+  assert.equal(via.filter((v) => v.type === 'call_service').every((v) => v.via === 'send'), true, 'every service call through send()');
+});
+
+test('a remove failed node given up on at its reply timeout through sendSubscription is still an unknown outcome, not a failure, and its 3-minute bound is kept (v0.79.8)', async () => {
+  const seen: Array<{ cmd: any; timeout: unknown }> = [];
+  const client = {
+    send: async () => null,
+    sendSubscription: async (cmd: any, timeout: unknown) => { seen.push({ cmd, timeout }); throw new Error(`HA WS timeout (id 7, ${cmd.type})`); },
+  } as unknown as HaWsClient;
+  const runner = createActionRunner({ client, entryId: () => 'entry-1', deviceIdOf: (n: number) => `dev-${n}`, pingEntityOf: () => null, log: () => {}, enabled: true } as never);
+  const r = await runner.removeFailed(5);
+  assert.equal(r.ok, false);
+  assert.equal(r.unknown, true, 'outcome unknown');
+  assert.deepEqual(seen.map((x) => x.timeout), [{ readyMs: READY_TIMEOUT_MS, replyMs: REMOVE_FAILED_TIMEOUT_MS }]);
 });
 
 test('network-wide commands use the entry_id', async () => {
@@ -215,7 +256,7 @@ test('ping() stamps sentAt before the service call resolves, not after (v0.64.5)
   const seen: Array<{ ok: boolean; sentAt?: number }> = [];
   const runner = createActionRunner({
     // The call takes 250 ms on the injected clock.
-    client: { send: async () => { clockAtSend = clock; clock += 250; return null; } } as unknown as HaWsClient,
+    client: viaBoth({ send: async () => { clockAtSend = clock; clock += 250; return null; } }) as unknown as HaWsClient,
     entryId: () => 'entry-1',
     deviceIdOf: (n) => `dev-${n}`,
     pingEntityOf: (n) => `button.node${n}_ping`,
@@ -237,7 +278,7 @@ test('the default launch clock is the WALL clock auto-ping judges with (v0.64.5)
   // before any `lastSeen`, and every manual ping would be credited as answered.
   const seen: Array<number | undefined> = [];
   const runner = createActionRunner({
-    client: { send: async () => null } as unknown as HaWsClient,
+    client: viaBoth({ send: async () => null }) as unknown as HaWsClient,
     entryId: () => 'entry-1',
     deviceIdOf: (n) => `dev-${n}`,
     pingEntityOf: (n) => `button.node${n}_ping`,
@@ -302,7 +343,7 @@ test('removeFailed refused on a live node is classified `refused`; everything el
   // run() by making the service call throw the driver's exact text.
   const { createActionRunner } = await import('../src/zwave/zwaveActions');
   const build = (throwText: string) => createActionRunner({
-    client: { send: async () => { throw new Error(throwText); } } as never,
+    client: viaBoth({ send: async () => { throw new Error(throwText); } }) as never,
     entryId: () => 'entry-1',
     deviceIdOf: (n: number) => `dev-${n}`,
     pingEntityOf: (n: number) => `button.node${n}_ping`,
@@ -415,7 +456,7 @@ test('an unmatched remove-failed failure LOGS its wording so the family can be c
     // A real ZW0360 whose REASON is one the families do not yet cover. Gating
     // on the code is what stops this firing for a dropped socket, where no
     // driver ever spoke and there is nothing to add.
-    client: { send: async () => { throw new Error('HA WS error (zwave_error): Z-Wave error 360 - The node removal process could not be started due to the following reasons:\n· Some reason nobody predicted (ZW0360)'); } } as never,
+    client: viaBoth({ send: async () => { throw new Error('HA WS error (zwave_error): Z-Wave error 360 - The node removal process could not be started due to the following reasons:\n· Some reason nobody predicted (ZW0360)'); } }) as never,
     entryId: () => 'entry-1',
     deviceIdOf: (n: number) => `dev-${n}`,
     pingEntityOf: (n: number) => `button.node${n}_ping`,
@@ -440,7 +481,7 @@ test('the self-capture does NOT fire when no driver ever spoke (v0.44.0)', () =>
   // for a transport fault is an instruction nobody can act on.
   const logs: string[] = [];
   const runner = createActionRunner({
-    client: { send: async () => { throw new Error('HA WS error (timeout): Timeout waiting for a response'); } } as never,
+    client: viaBoth({ send: async () => { throw new Error('HA WS error (timeout): Timeout waiting for a response'); } }) as never,
     entryId: () => 'entry-1',
     deviceIdOf: (n: number) => `dev-${n}`,
     pingEntityOf: (n: number) => `button.node${n}_ping`,
@@ -502,7 +543,7 @@ function rig(reply: (cmd: any) => unknown, over: { status?: NodeStatus | null; l
   let status: NodeStatus | null = over.status === undefined ? NodeStatus.Alive : over.status;
   let clock = 1_000;
   let inFlightSeen: unknown = 'unread';
-  const client = {
+  const client = viaBoth({
     send: async (cmd: any, timeout?: unknown) => {
       sent.push({ cmd, timeout });
       inFlightSeen = runner.operatorActionInFlight();
@@ -512,7 +553,7 @@ function rig(reply: (cmd: any) => unknown, over: { status?: NodeStatus | null; l
       if (r instanceof Error) throw r;
       return r;
     },
-  } as unknown as HaWsClient;
+  }) as unknown as HaWsClient;
   const runner = createActionRunner({
     client, entryId: () => 'entry-1', deviceIdOf: (n) => `dev-${n}`, pingEntityOf: (n) => `button.node${n}_ping`,
     log: (sev, _n, text, origin) => logs.push({ sev, text, origin }),
@@ -633,9 +674,9 @@ function deferredRig() {
   const pending: Array<{ cmd: any; resolve: (v: unknown) => void; reject: (e: Error) => void }> = [];
   const hooks: string[] = [];
   let clock = 1_000;
-  const client = {
+  const client = viaBoth({
     send: (cmd: any) => new Promise((resolve, reject) => { pending.push({ cmd, resolve, reject }); }),
-  } as unknown as HaWsClient;
+  }) as unknown as HaWsClient;
   const runner = createActionRunner({
     client, entryId: () => 'entry-1', deviceIdOf: (n) => `dev-${n}`, pingEntityOf: (n) => `button.node${n}_ping`,
     log: () => {}, statusOf: () => NodeStatus.Alive, now: () => clock, enabled: true,
@@ -693,7 +734,7 @@ test('launch comes before the await for every learned verb and never for device 
 test('each settle says what the action may have done: ok, none (never sent / refused) or maybe (second review)', async () => {
   const eff = async (reply: (cmd: any) => unknown, verb: (r: ReturnType<typeof createActionRunner>) => Promise<unknown>, over: { noDevice?: boolean } = {}) => {
     const effects: string[] = [];
-    const client = { send: async (cmd: any) => { const r = reply(cmd); if (r instanceof Error) throw r; return r; } } as unknown as HaWsClient;
+    const client = viaBoth({ send: async (cmd: any) => { const r = reply(cmd); if (r instanceof Error) throw r; return r; } }) as unknown as HaWsClient;
     const runner = createActionRunner({
       client, entryId: () => 'e', deviceIdOf: (n) => (over.noDevice ? null : `dev-${n}`), pingEntityOf: () => 'button.p', log: () => {},
       statusOf: () => NodeStatus.Alive, enabled: true, onSettled: (_k, _n, _o, _a, _s, e) => effects.push(e),
@@ -713,7 +754,7 @@ test('each settle says what the action may have done: ok, none (never sent / ref
 test('the HA client\'s own pre-send failures are "none", not "maybe" (third review)', async () => {
   for (const [err, want] of [['HA WS not open', 'none'], ['HA WS client not configured (SUPERVISOR_TOKEN absent)', 'none'], ['HA WS client stopped', 'maybe']] as const) {
     const effects: string[] = [];
-    const client = { send: async () => { throw new Error(err); } } as unknown as HaWsClient;
+    const client = viaBoth({ send: async () => { throw new Error(err); } }) as unknown as HaWsClient;
     const runner = createActionRunner({ client, entryId: () => 'e', deviceIdOf: (n) => `dev-${n}`, pingEntityOf: () => 'b', log: () => {},
       statusOf: () => NodeStatus.Alive, enabled: true, onSettled: (_k, _n, _o, _a, _s, e) => effects.push(e) });
     await runner.healNode(5);

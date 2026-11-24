@@ -388,7 +388,7 @@ test('an action failure message is sanitized before it reaches the result card',
   // U+009B is the 8-bit CSI and U+009D the 8-bit OSC — xterm.js EXECUTES both.
   const nasty = 'device said \x1b[31mred\x9b2J\x9dtitle\x07 and \n a newline';
   const runner = createActionRunner({
-    client: { send: async () => { throw new Error(nasty); } } as never,
+    client: { send: async () => { throw new Error(nasty); }, sendSubscription: async () => { throw new Error(nasty); } } as never,
     entryId: () => 'entry',
     deviceIdOf: () => 'dev-1',
     pingEntityOf: () => null,
@@ -396,7 +396,7 @@ test('an action failure message is sanitized before it reaches the result card',
     enabled: true,
   } as never);
 
-  // reInterview goes through deviceCmd → client.send, so the thrown text is
+  // reInterview goes through deviceSubCmd → client.sendSubscription, so the thrown text is
   // what the operator would actually see. (ping short-circuits on a missing
   // ping-button entity and never reaches the client.)
   const res = await runner.reInterview(8);

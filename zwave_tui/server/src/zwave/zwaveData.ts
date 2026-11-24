@@ -3162,6 +3162,11 @@ class ZwaveDataImpl implements ZwaveData {
       return false;
     }
     let nodes = ctrl.nodes.map((n) => this.buildNode(n)).sort((a, b) => a.nodeId - b.nodeId);
+    // Another network's roster (v0.79.8): its node ids name other devices, so
+    // its readings count nothing against this network's (countStatus). The
+    // home id change below clears the counts; the next poll is each node's
+    // first observation.
+    const otherNet = this.lastHomeId != null && ctrl.home_id != null && ctrl.home_id !== this.lastHomeId;
     // Diff status vs the previous poll → log alive/dead/asleep transitions.
     for (const n of nodes) {
       const prev = this.prevStatus.get(n.nodeId);
@@ -3225,7 +3230,7 @@ class ZwaveDataImpl implements ZwaveData {
       // status feed answered, and a crossing a live feed counted after the
       // last reading was counted again when a reconnect, a re-arm or a failed
       // status subscribe took the node out of statusSubbed.
-      if (!heardSince) this.countStatus(n.nodeId, n.status);
+      if (!heardSince && !otherNet) this.countStatus(n.nodeId, n.status);
       // This reading is the live status feed's baseline (v0.79.6 review;
       // every poll since v0.79.7), for the missed-status judge above: a new
       // feed holds no status until this, and a change made before its
