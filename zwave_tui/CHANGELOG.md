@@ -1,5 +1,90 @@
 # Changelog
 
+## 0.79.7
+
+A subscribe Home Assistant answers after the add-on's 10-second timeout is
+released on its socket instead of staying live with no handle, an activity
+feed the statistics rebuild could not make is subscribed again a minute on
+instead of staying dark until the next rebuild, and a status event read
+together with a roster poll's answer is no longer replaced by the poll's older
+reading. Nothing stored on disk changes.
+
+### Fixed — a subscribe Home Assistant answered after the client's timeout stayed live with no handle
+
+- Home Assistant handles one connection's commands in order, with no cancel,
+  and registers a subscription while it handles the subscribe. A subscribe the
+  client gave up on at its 10 s reply timeout therefore still registered when
+  Home Assistant reached it, under an id the client no longer routed, for the
+  life of the socket: a node's statistics or status listener (in 0.79.6 beside
+  the one the 60 s retry then made), a second controller feed beside the next
+  rebuild's, a `state_changed` feed of the whole house, or a
+  `zwave_js_notification` feed. The client now sends `unsubscribe_events` for
+  it in the turn the timeout passes, on the same socket, where Home Assistant
+  reaches it after the subscribe (`not_found` when the subscribe failed);
+  events sent under the id before it lands reach no handler, and a socket that
+  has closed, or is closing, takes the subscription with it. Other commands
+  are unchanged: an action Home Assistant has not answered in time still reads
+  as an unknown outcome.
+
+### Fixed — an activity feed a rebuild could not make stayed dark until the next rebuild (0.8.0)
+
+- A rebuild of the statistics feeds whose `state_changed` subscribe failed (no
+  answer within the client's 10-second timeout, or a connection closed under
+  it) kept its controller and node feeds and logged the failure, and nothing
+  made the feed before a Home Assistant reconnect, the self-heal or a re-arm:
+  no value or notification rows on the Log screen, Detail's LIVE ENTITIES and
+  the device menu's `now:` from the 10-minute full state read, and the pause
+  toggle turned on in Home Assistant read only there. The
+  `zwave_js_notification` subscribe, in the same try, was not sent, and one
+  that failed on its own was dropped without a line while the log named it
+  subscribed. Each activity feed is now a try of its own, and one a rebuild
+  could not make is subscribed after the first roster poll that succeeds a
+  minute after the attempt (on the host's uptime): only the feeds not made,
+  one attempt at a time, and again a minute after each that fails; the attempt
+  that makes the state feed reads the states again. Each handle it makes is
+  kept with the feed set's as it is made, so a re-arm releases it, one begun
+  while its second subscribe is out included; one answered after another
+  rebuild began, or while a re-arm releases the feed set, is released and not
+  kept. It stands aside while a rebuild runs or the feed set is down, but not
+  for a re-arm an entry reload latched, which leaves the activity feeds as
+  they are. The Log screen reads `activity feed down — its state_changed
+  subscribe failed; retried after a minute` until it is made, and the add-on
+  log names each failed feed (`activity subscribe failed (state_changed): …`).
+- A failed activity subscribe does not fail the rebuild: failed, the rebuild
+  would run again at every roster poll, making the controller's feed and every
+  node's two again each time.
+
+### Fixed — a status event read together with a roster poll's answer was taken as older than the poll's reading (0.79.6)
+
+- Over uncompressed frames the client can hand a status event Home Assistant
+  sent right after a `network_status` answer to its handler before the poll
+  that awaited the answer resumes, so the poll acted on its older reading
+  after the event. A revival read that way, after a poll that reads the node
+  Dead, re-subscribed its feeds for nothing; a death read with the first poll
+  since the node's status feed answered gave way to that poll's reading, which
+  left the death queued when the node revived before the next poll, or had
+  the next poll re-subscribe the node for nothing when it stayed dead. Each
+  alive, dead, sleep or wake up event now takes an order mark: a node whose
+  live status feed heard one after both the poll and the feed were sent is
+  neither judged by that poll nor given its reading as a baseline, and every
+  other poll's reading is the live feed's baseline (0.79.6: only the first
+  poll sent after the feed answered). With permessage-deflate, which the
+  client offers, Home Assistant's and the Supervisor's sockets compress every
+  frame (inferred from the aiohttp sources), and the poll acted first there.
+
+### Tests
+
+- 1,928 tests, 34 new: 13 in `activityFeeds.test.ts`, a model of Home
+  Assistant's core event bus; 8 in `haWsClientLateSubscribe.test.ts`, a model
+  of its per-connection command order; 7 in `nodeFeeds.test.ts`, 3 of them
+  pins that pass on 0.79.6 too; 3 in `realClient.lateSubscribe.test.ts`, the
+  data layer over the real client and a mock Core with node objects
+  (`_realHa.ts`, `_realRun.ts`); 2 in `statusOrderRealClient.test.ts`, the
+  real client with frames uncompressed and compressed; and 1 in
+  `activityFeedsLate.test.ts`. 2,041 mutation-harness entries (19 labelled
+  equivalent): 36 new, 6 re-anchored, 1 re-described, and 3 removed with the
+  code they pinned, one of them labelled equivalent.
+
 ## 0.79.6
 
 A node replaced with `replace_failed_node`, or included on a freed id, has its
@@ -409,83 +494,6 @@ death still waiting at the update.
   entries re-anchored to the rewritten lines, and 1 retired with the check it
   covered (a raised node-down is now raised at once whatever its flags ask
   for, pinned by its own entry).
-
-## 0.79.2
-
-A held `rtt-degraded` breach now ends on two normal round trips, as a breach
-starts on two slow ones; an episode is not scored while a probe of its node is
-still waiting for its slot; and a FLiRS node read Dead right after a driver
-start waits 90 minutes before it is a critical outage.
-
-### Fixed — an episode was scored while a probe of its node waited for its slot (0.79.1)
-
-- Since 0.79.1 one tick's probes leave 10 s apart, the last up to 45 s after
-  the tick, and the guard that keeps an episode open until its last probe has
-  settled (0.75.3) saw a probe only once it had left. On the reference mesh 2
-  of 5 episodes in 21 hours closed on four of their five closing readings, the
-  fifth still waiting for its slot.
-- A probe's slot now reaches the guard when the probe is pended, kept apart
-  from the probe sent before it. A burst probe not yet planned when the window
-  ends (a suppressed tick) is not waited for. Attribution still waits for the
-  frame to leave.
-
-### Changed — a hold ends on two normal round trips
-
-- In 0.79.1 one round trip under the line ended a held breach. On the
-  reference mesh two such reads ended holds on nodes still slow (one measured:
-  178 ms against a closing median of 493), the closing burst found each node
-  still slow, and a new episode opened minutes later: two slowdowns became
-  five episodes and cost 23 and 31 probes.
-- Where a hold can still matter (the sweep on, the kept reading inside its
-  deadline), one normal round trip now owes one confirmation probe. A slow
-  answer keeps the hold; a second normal one ends it. While it is owed the
-  breach is not held, so one that never comes lets it go at the window's end,
-  as before. Each doubt costs at most one probe per round trip asked about.
-- A slow round trip read across a route change (one the driver reports, or
-  the add-on's own routed read failing over) no longer refreshes a hold. It owes a
-  confirmation, and the reading before it holds to its own deadline
-  meanwhile. A 1194 ms read taken as a node re-routed to 100 kbps had carried
-  a hold for two more hours; whether the node was still slow, the data cannot
-  tell. A slow round trip refreshes the hold only once 15 s old, so a route
-  change on the next sample is seen first.
-- An average falling to the line still ends a breach at once; in those 21
-  hours that split one slowdown.
-
-### Changed — a FLiRS node read Dead right after a driver start
-
-- A node auto-ping does not probe (FLiRS, sleeping, or capability not yet
-  known) that reads Dead within 10 minutes of the driver's start must read
-  Dead for `NODE_DOWN_START_DWELL_MS` (90 min) before `node-down`. Any other
-  death keeps the 5-minute dwell, and a node-down already raised stays raised.
-- On the reference mesh one FLiRS motion sensor read Dead after each of four
-  driver restarts in eight days and was back 13, 38, 46 and 48 minutes later,
-  another once for 9 minutes. Each time `node-down` raised a critical card and
-  `binary_sensor.zwave_tui_degraded`.
-- The cost: a real outage of such a node right at a driver start is raised
-  after 90 minutes instead of 5. Home Assistant's own zwave_js status shows it
-  Dead meanwhile.
-
-### Corrected
-
-- 0.79.1's "one episode per slowdown" and "10 probes plus confirmations" held
-  only for a slowdown with no reading that ends the hold. Live, 0.79.1 still
-  cut burst probes per breach-hour from 22.3 to 4.6, and probes the ceiling
-  caused from about 109 to 66 a day.
-- A held symptom's round-trip age is on the TUI's card; Home Assistant's
-  symptom sensor carries the count and kinds only.
-
-### Tests
-
-- 13 new tests: the hold confirmed both ways (a lone normal round trip owes a
-  confirmation, a slow answer keeps the hold, an unanswered doubt lets go, two
-  normal round trips release it, two in one tick at once, nothing asked with
-  the sweep off), re-route reads (a reported route change, the add-on's own failover,
-  the span's bounds, a normal answer ending the doubt), node-down's
-  start-scoped dwell and its latch, the settle guard waiting for a planned
-  probe kept apart from the sent one, the planned stamp at each slot, and the
-  confirmation staying owed through the real engine pass.
-- 23 new mutation-harness entries, one declared equivalent; 19 existing
-  entries re-anchored to the rewritten lines.
 
 ## Older releases
 

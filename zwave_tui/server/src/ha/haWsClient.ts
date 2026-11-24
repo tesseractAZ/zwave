@@ -18,7 +18,9 @@
  *      the pending-request map, `event` frames go to the handler registered in
  *      `eventHandlers` under that id — this is what makes `subscribe_*` pushes
  *      reachable. `subscribe()` wires the two together (allocate id → register
- *      handler → send the subscribe command under that id).
+ *      handler → send the subscribe command under that id). A subscribe not
+ *      answered in time is released on its socket (v0.79.7): Home Assistant
+ *      still registers it when it gets to it.
  *
  * Auth handshake: on connect HA sends `{type:'auth_required'}`; we reply with
  * `{type:'auth', access_token: SUPERVISOR_TOKEN}` and wait for `{type:'auth_ok'}`.
@@ -100,7 +102,10 @@ export interface HaWsClient {
    *  rebuild must not also wait 20 minutes for a socket, or a command confirmed
    *  during an outage would fire unattended when the connection returns. */
   send<T = unknown>(cmd: Record<string, unknown>, timeoutMs?: number | SendTimeouts): Promise<T>;
-  /** Subscribe helper: registers an event handler then sends the subscribe command. */
+  /** Subscribe helper: registers an event handler then sends the subscribe command.
+   *  One not answered within `timeoutMs` rejects (`HA WS timeout`) and is
+   *  released on the socket it went out on, unless that socket is closing
+   *  (v0.79.7, releaseUnanswered). */
   subscribe(cmd: Record<string, unknown>, onEvent: HaEventHandler, timeoutMs?: number): Promise<HaSubscription>;
   /** Called after every successful (re)authentication — the re-subscribe hook. */
   onReady(cb: () => void): void;
@@ -245,7 +250,7 @@ class HaWebSocketClient implements HaWsClient {
     const id = this.nextId++;
     this.eventHandlers.set(id, onEvent);
     try {
-      await this.dispatch(id, cmd, timeoutMs);
+      await this.dispatch(id, cmd, timeoutMs, () => this.releaseUnanswered(id));
     } catch (e) {
       this.eventHandlers.delete(id);
       throw e;
@@ -595,7 +600,42 @@ class HaWebSocketClient implements HaWsClient {
     });
   }
 
-  private dispatch<T>(id: number, cmd: Record<string, unknown>, timeoutMs: number): Promise<T> {
+  /**
+   * Release a subscribe given up on at its reply timeout (v0.79.7). Home
+   * Assistant handles one connection's commands in the order they arrive and
+   * has no command to cancel one, and its subscribe handlers register the
+   * subscription while they handle the command (websocket_api
+   * `connection.async_handle`, which starts an `async_response` handler
+   * eagerly; `handle_subscribe_events`; the zwave_js `subscribe_*` handlers
+   * in `api.py`, which do not suspend before registering). A subscribe it
+   * reaches after the timeout therefore still registers, under an id no
+   * handle holds, for the life of the connection. The release goes on the
+   * socket the subscribe went out on, which puts it after the subscribe:
+   * Home Assistant answers `not_found` when that one failed. Events it sends
+   * under the id before the release lands reach no handler, as subscribe()
+   * drops the handler with the rejection. A socket that has closed or is
+   * closing needs none: Home Assistant drops a closed connection's
+   * subscriptions (`async_handle_close`). Nothing waits for the answer.
+   *
+   * The socket is the client's current one: a close rejects every command in
+   * flight and clears its timer (handleClose, stop) before another socket is
+   * opened, and dispatch() sends only on an open, authenticated socket, so
+   * one closing when the timer runs gets nothing. dispatch() takes the next
+   * id as it sends, so ids still leave in increasing order.
+   */
+  private releaseUnanswered(subscription: number): void {
+    this.dispatch(this.nextId++, { type: 'unsubscribe_events', subscription }, DEFAULT_TIMEOUT_MS).catch(() => {});
+  }
+
+  /** `onReplyTimeout` runs when the reply bound passes, in the same turn as
+   *  the rejection, so before its caller hears of it; only subscribe() passes
+   *  one, so a command send() gives up on is followed by nothing. */
+  private dispatch<T>(
+    id: number,
+    cmd: Record<string, unknown>,
+    timeoutMs: number,
+    onReplyTimeout?: () => void,
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const ws = this.ws;
       if (!ws || ws.readyState !== WebSocket.OPEN || !this.authenticated) {
@@ -605,6 +645,7 @@ class HaWebSocketClient implements HaWsClient {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`HA WS timeout (id ${id}, ${String(cmd.type)})`));
+        onReplyTimeout?.();
       }, timeoutMs);
       this.pending.set(id, {
         resolve: (v: unknown) => resolve(v as T),

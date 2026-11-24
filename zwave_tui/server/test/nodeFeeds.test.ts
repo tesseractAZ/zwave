@@ -1364,6 +1364,168 @@ test('a status feed that answers while a roster poll is out, and a status event 
   });
 });
 
+test('a death read together with the answer of the first poll sent since its status feed answered, the node revived before the next poll: the revival clears the death, and nothing is re-subscribed (v0.79.7)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await r.reconnect();                  // a rebuild: its status feeds answered after the last poll was sent
+    readWithAnswer(r, s, 60, 'dead');
+    skip += 2_000;
+    await r.poll();                       // reads node 60 Alive; the death its feed delivers is handled before the poll acts
+    skip += 500;
+    s.zw.emitStatus(60, 'alive');         // the revival, heard by its feed
+    skip += 1_500;
+    await r.poll();
+    assert.equal(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60).length, 1, 'the death is cleared by the revival');
+    assert.equal(r.resubs(), 0, 'no node re-subscribed');
+  });
+});
+
+test('a revival read together with the answer of a poll that reads the node Dead: its feed delivered both changes, so nothing is re-subscribed (v0.79.7)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await r.poll();                       // node 60's status feed answered before this poll was sent
+    s.zw.emitStatus(60, 'dead');          // heard by its feed
+    readWithAnswer(r, s, 60, 'alive');
+    skip += 2_000;
+    await r.poll();                       // reads it Dead; the revival its feed delivers is handled before the poll acts
+    skip += 2_000;
+    await r.poll();                       // reads it Alive
+    assert.equal(r.resubs(), 0, 'no node re-subscribed');
+    assert.equal(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60).length, 1, 'the death, cleared by the revival');
+    bound(s, [7, 60], 'after');
+  });
+});
+
+test('a node\'s own re-subscribe whose status subscribe fails, the node dying before the retry: the retried status feed is seeded from the roster\'s latest reading, so a revival before the next poll clears the death the roster fallback counted; a pin of v0.79.6 behaviour, as each poll now re-baselines a live feed (v0.79.7)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await r.poll();
+    s.zw.startInterview(60);              // a re-interview: re-subscribed after the next poll
+    s.failFeed.add('60:status');
+    await r.poll();                       // reads it Alive and not ready; its status re-subscribe fails
+    assert.equal(r.priv.pendingNodeSubs.has(60), true, 'precondition: queued for the retry');
+    s.zw.emitStatus(60, 'dead');          // no status feed hears it
+    skip += 2_000;
+    await r.poll();                       // reads it Dead: the roster fallback counts the death
+    s.failFeed.clear();
+    await r.priv.retryNodeSubs();
+    await waitFor(() => r.priv.statusSubbed.has(60));
+    skip += 1_000;
+    s.zw.emitStatus(60, 'alive');         // heard by the retried status feed, before the next poll
+    assert.equal(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60).length, 1, 'the death is cleared by the revival');
+  });
+});
+
+test('a death delivered by a status feed a re-arm is still releasing, after a roster poll read the node and before the rebuild made its new status feed: counted once, by the roster fallback; a pin of v0.79.6 behaviour, as each poll now re-baselines a live feed (v0.79.7)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await r.poll();
+    s.unsubGate = { ...gate(), feed: 'stats', n: 60 };  // the re-arm's releases park on node 60's statistics feed: its status feed is still held
+    const u = s.unsubGate;
+    s.ctrlGate = gate();                  // the rebuild a roster poll starts parks before its node subscribes
+    const cg = s.ctrlGate;
+    r.priv.lastFeedRearmAt = 0;
+    const rearm = r.priv.rearmStatsFeeds('test');
+    await waitFor(() => u.arrived);
+    skip += 2_000;
+    await r.pollOnly();                   // reads node 60 Alive, with no status feed of the feed set; starts the rebuild
+    await waitFor(() => cg.arrived);
+    assert.equal(r.priv.statusSubbed.has(60), false, 'precondition: no status feed of the feed set');
+    assert.equal(s.zw.live(60, 'status'), 1, 'precondition: the old status feed still delivers');
+    s.zw.emitStatus(60, 'dead');
+    skip += 2_000;
+    await r.pollOnly();                   // reads it Dead: the roster fallback counts the death
+    const priv = r.priv as unknown as { flapAccum: Map<number, number>; deadEvents: Array<{ nodeId: number }> };
+    const counted = { flaps: priv.flapAccum.get(60) ?? 0, queued: priv.deadEvents.filter((e) => e.nodeId === 60).length };
+    u.open();
+    cg.open();
+    await rearm;
+    await waitFor(r.settled);
+    await sleep(5);
+    assert.deepEqual(counted, { flaps: 1, queued: 1 }, 'the death is counted once');
+    bound(s, [7, 60], 'after the rebuild');
+  });
+});
+
+/** The next network_status: `during` runs after the poll was sent and before
+ *  Home Assistant reads the roster for its answer. */
+function beforeReading(r: Run, during: () => Promise<void> | void): void {
+  const send = r.ha.send.bind(r.ha);
+  r.ha.send = (async (cmd: Record<string, unknown>) => {
+    if (cmd.type !== 'zwave_js/network_status') return send(cmd);
+    r.ha.send = send;
+    await during();
+    return send(cmd);
+  }) as typeof r.ha.send;
+}
+
+test('a re-interviewed node whose death its old status feed delivers after a roster poll was sent, its re-subscribe\'s new status feed answering before that poll: the poll\'s reading is the new feed\'s baseline, so a revival before the next poll clears the death (v0.79.7)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await r.poll();
+    s.zw.startInterview(60);              // a re-interview: the same node object reads not ready
+    s.unsubGate = { ...gate(), feed: 'stats', n: 60 };  // the re-subscribe's release parks on node 60's statistics feed: its old status feed still delivers
+    const u = s.unsubGate;
+    skip += 2_000;
+    await r.pollOnly();                   // reads it Alive and not ready: its own re-subscribe starts, and parks
+    await waitFor(() => u.arrived);
+    const made = r.calls(60, 'status');
+    beforeReading(r, async () => {
+      s.zw.emitStatus(60, 'dead');        // the old status feed hears it: the death is queued
+      u.open();                           // the release ends; the new status feed is seeded from the reading before this poll
+      await waitFor(() => r.calls(60, 'status') > made && r.priv.statusSubbed.has(60));
+    });
+    skip += 2_000;
+    await r.poll();                       // reads it Dead
+    const priv = r.priv as unknown as { deadEvents: Array<{ nodeId: number; cleared: boolean }> };
+    assert.equal(priv.deadEvents.filter((e) => e.nodeId === 60 && !e.cleared).length, 1, 'precondition: the death its old status feed delivered is queued');
+    skip += 1_000;
+    s.zw.emitStatus(60, 'alive');         // heard by the new status feed, before the next poll
+    assert.equal(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60).length, 1, 'the death is cleared by the revival');
+    assert.equal(r.resubs(), 1, 'one re-subscribe, at the interview\'s start');
+    s.zw.interview(60, P1);
+    skip += 2_000;
+    await r.poll();
+    bound(s, [7, 60], 'after the interview');
+  });
+});
+
+test('a death read together with the answer of the first roster poll that succeeds, its status feed made before with no reading to seed it: the death is kept as the feed\'s status, and the poll that reads the node Dead re-subscribes nothing (v0.79.7)', async () => {
+  const s = baseSim();
+  s.statusErr = 'HA WS error (unknown_error): network status';
+  await withSim(s, async (r) => {
+    await waitFor(() => r.logs.some((l) => l.startsWith('refresh failed: ')));
+    const priv = r.priv as unknown as { subStatus: Map<number, number> };
+    assert.equal(r.priv.statusSubbed.has(60), true, 'precondition: its status feed answered');
+    assert.equal(priv.subStatus.has(60), false, 'precondition: no roster reading to seed it with');
+    s.statusErr = undefined;
+    readWithAnswer(r, s, 60, 'dead');
+    skip += 2_000;
+    await r.poll();                       // reads it Alive; the death, its feed's first event, is handled before the poll acts
+    skip += 2_000;
+    await r.poll();                       // reads it Dead
+    assert.equal(r.resubs(), 0, 'no node re-subscribed');
+    bound(s, [7, 60], 'after');
+  }, { bootPolled: false });
+});
+
+test('a failed node that read not ready, whose death its status feed hears while a roster poll is out and before Home Assistant reads the roster: that poll reads it Dead, and the next one, reading its replacement by the same product Alive, judges the feed and re-subscribes it; a pin: only an event heard after this poll was sent is set against its reading (v0.79.7)', async () => {
+  const s = baseSim();
+  s.zw.nodes.get(60)!.ready = false;      // its interview never completed: Alive and not ready
+  await withSim(s, async (r) => {
+    await r.poll();                       // its status feed answered before this poll was sent
+    beforeReading(r, () => { s.zw.emitStatus(60, 'dead'); });
+    skip += 2_000;
+    await r.poll();                       // reads it Dead: its feed delivered the death before the answer
+    assert.equal(r.resubs(), 0, 'precondition: nothing re-subscribed');
+    s.zw.replacePending(60);              // the same product, Alive at once and not ready, between two polls
+    skip += 2_000;
+    await r.poll();                       // reads it Alive: a change its feed did not deliver
+    assert.equal(r.resubs(), 1, 'one re-subscribe, at the poll that reads the replacement Alive');
+    bound(s, [7, 60], 'read interviewing');
+  });
+});
+
 test('a replacement\'s death and revival its new status feed hears before the next poll are counted: the feed diffs against the roster\'s status from its answer, not the failed node\'s last event (v0.79.6 review)', async () => {
   const s = baseSim();
   await withSim(s, async (r) => {
