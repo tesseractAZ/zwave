@@ -29,6 +29,10 @@ const ENTRY = 'E1';
 const SWITCH = 'switch.node_seven';
 const NOT_LOADED = 'HA WS error (not_loaded): Config entry E1 not loaded';
 const TIMEOUT = 'HA WS timeout (id 41, subscribe_events)';
+/** haWsClient's rejections once the socket is gone: a command out on it, and
+ *  one that waited for a socket longer than its bound. */
+const CLOSED = 'HA WS connection closed';
+const NOT_READY = 'HA WS not ready (auth timeout)';
 
 type Gate = { wait: Promise<void>; open: () => void; arrived: boolean };
 function gate(): Gate {
@@ -41,8 +45,16 @@ interface Ha {
   client: HaWsClient & { fireReady(): void };
   /** Handlers Home Assistant delivers to now, by feed. */
   live: Map<string, Set<HaEventHandler>>;
-  /** Subscribes sent, by feed. */
+  /** Subscribes asked of the client, by feed (one while the socket is down included). */
   tries: Map<string, number>;
+  /** The socket is up and authenticated: the client's ready(). */
+  up: boolean;
+  /** Core goes down (v0.79.7 review): the socket closes and its subscriptions
+   *  die, a subscribe parked on it fails as closed once let go, and every
+   *  command until a reconnect fails as the client's wait for a socket would
+   *  once its bound passed (at once here, standing for an outage longer than
+   *  it). `up = true` and a reconnect bring it back. */
+  down(): void;
   /** Failures still to come, by feed: each fails one subscribe. */
   fail: Map<string, number>;
   /** Parks the next subscribe of a feed until opened. */
@@ -67,11 +79,14 @@ interface Ha {
 function fakeHa(): Ha {
   const readyCbs: Array<() => void> = [];
   let sid = 0;
+  /** Sockets Core's going down has closed. */
+  let downs = 0;
   const ha: Ha = {
     client: null as never,
     live: new Map(), tries: new Map(), fail: new Map(), gates: new Map(), unsubGate: null,
-    released: new Map(), reads: 0, states: new Map([[SWITCH, 'on']]), statusErr: null,
+    released: new Map(), reads: 0, states: new Map([[SWITCH, 'on']]), statusErr: null, up: true,
     dropAll: () => { for (const s of ha.live.values()) s.clear(); },
+    down: () => { ha.up = false; downs += 1; ha.dropAll(); },
     emitState: (entity, from, to) => {
       for (const h of [...(ha.live.get('state_changed') ?? [])]) {
         h({ type: 'event', event: { data: { entity_id: entity, old_state: { state: from }, new_state: { state: to, last_changed: new Date().toISOString() } } } } as never);
@@ -85,6 +100,7 @@ function fakeHa(): Ha {
   };
   const feedOf = (c: Record<string, unknown>): string => (c.type === 'subscribe_events' ? String(c.event_type) : String(c.type));
   const send = async (cmd: Record<string, unknown>): Promise<unknown> => {
+    if (!ha.up) throw new Error(NOT_READY);
     switch (cmd.type) {
       case 'config_entries/get': return [{ entry_id: ENTRY, domain: 'zwave_js', state: 'loaded', title: 'Z-Wave JS' }];
       case 'config/device_registry/list':
@@ -106,15 +122,18 @@ function fakeHa(): Ha {
   ha.client = {
     fireReady: () => { for (const cb of [...readyCbs]) cb(); },
     start: () => {}, stop: () => {}, reconnect: () => {},
-    ready: () => true, whenReady: () => Promise.resolve(),
+    ready: () => ha.up, whenReady: () => Promise.resolve(),
     onReady: (cb: () => void) => { readyCbs.push(cb); },
     lastError: () => null,
     send,
     subscribe: async (c: Record<string, unknown>, on: HaEventHandler): Promise<HaSubscription> => {
       const feed = feedOf(c);
       ha.tries.set(feed, (ha.tries.get(feed) ?? 0) + 1);
+      if (!ha.up) throw new Error(NOT_READY);
+      const sock = downs;
       const g = ha.gates.get(feed);
       if (g) { ha.gates.delete(feed); g.arrived = true; await g.wait; }
+      if (sock !== downs) throw new Error(CLOSED);
       const left = ha.fail.get(feed) ?? 0;
       if (left > 0) { ha.fail.set(feed, left - 1); throw new Error(TIMEOUT); }
       const set = ha.live.get(feed) ?? new Set<HaEventHandler>();
@@ -149,7 +168,7 @@ type Priv = {
   tick: () => Promise<void>; pollTimer: ReturnType<typeof setTimeout> | null;
   registriesInFlight: Promise<void> | null; rebuildInFlight: boolean; statsSubscribed: boolean;
   nodeSubsBusy: boolean; activityRetryBusy: boolean; lastHomeId: number | null;
-  statusSubbed: Set<number>; statsSubbedNodes: Set<number>;
+  statusSubbed: Set<number>; statsSubbedNodes: Set<number>; activityOwed: Set<string>;
 };
 
 interface Run {
@@ -611,6 +630,112 @@ test('a retry that fails after a re-arm rebuilt the feed set leaves what that re
     assert.equal(r.tries('state_changed'), tries, 'nothing owed: the live state feed is not made again');
     assert.equal(r.live('state_changed'), 1);
     heardOnce(r, 'end');
+    noReleasedTwice(ha, 'end');
+  });
+});
+
+/* ── Core down under a rebuild or a retry (v0.79.7 review) ───────────────── */
+
+const LIVE_ROW = [['info', 'activity feed live — watching 1 device entities']];
+/** The activity feeds' Log-screen rows since `from`. */
+const feedRows = (r: Run, from: number): string[][] =>
+  r.rows('system', from).filter((e) => e.text.startsWith('activity feed')).map((e) => [e.severity, e.text]);
+
+/** A reconnect whose rebuild is held at `feed`'s subscribe; Core goes down
+ *  there, the held subscribe is let go, and the rebuild ends on the dead socket. */
+async function downDuringRebuild(r: Run, feed: string): Promise<void> {
+  const g = gate();
+  r.ha.gates.set(feed, g);
+  r.ha.dropAll();
+  r.ha.client.fireReady();
+  await waitFor(() => g.arrived, 2000, () => r.logs.join(' | '));
+  r.ha.down();
+  g.open();
+  await waitFor(() => !r.priv.rebuildInFlight, 2000, () => r.logs.join(' | '));
+  await sleep(5);
+}
+
+/** Core back: a reconnect, its rebuild made on the new socket. */
+async function coreBack(r: Run): Promise<void> {
+  r.ha.up = true;
+  await r.reconnect();
+}
+
+test('Core going down while a reconnect\'s rebuild has its state_changed subscribe out, and staying down: the notification feed is not tried on the dead socket, both are owed, and no Log row names a retry; the rebuild after the reconnect makes both and says so (v0.79.7 review)', async () => {
+  const ha = fakeHa();
+  await withHa(ha, async (r) => {
+    const from = lastSeq(r);
+    const lines = r.logs.length;
+    const notif = r.tries('zwave_js_notification');
+    await downDuringRebuild(r, 'state_changed');
+    const said = r.logs.slice(lines);
+    assert.ok(said.includes(`activity subscribe failed (state_changed): ${CLOSED}`), `precondition: the held subscribe failed with its socket — ${said.join(' | ')}`);
+    assert.ok(!said.some((l) => /superseded/.test(l)), 'precondition: the rebuild ended on the dead socket, not superseded');
+    assert.equal(r.tries('zwave_js_notification'), notif, 'the notification feed is not tried on a socket that is gone');
+    assert.deepEqual([...r.priv.activityOwed], ['state_changed', 'zwave_js_notification'], 'both feeds are owed');
+    assert.deepEqual(feedRows(r, from), [], 'no row while the socket is down: no retry runs then');
+    assert.deepEqual(said.filter((l) => l.startsWith('activity log:')), [], 'no add-on log line names a retry');
+    await coreBack(r);
+    assert.deepEqual(feedRows(r, from), LIVE_ROW, 'the rebuild after the reconnect makes both feeds, and its row is the only one');
+    assert.equal(r.live('state_changed'), 1);
+    assert.equal(r.live('zwave_js_notification'), 1);
+    assert.equal(r.priv.activityOwed.size, 0, 'nothing owed on the new connection');
+    heardOnce(r, 'after the reconnect');
+    noReleasedTwice(ha, 'end');
+  });
+});
+
+test('Core going down while a reconnect\'s rebuild has a node statistics subscribe out, and staying down: the state feed fails on the dead socket, the notification feed is not tried, and no Log row names a retry; the rebuild after the reconnect makes every feed and says so (v0.79.7 review)', async () => {
+  const ha = fakeHa();
+  await withHa(ha, async (r) => {
+    const from = lastSeq(r);
+    const lines = r.logs.length;
+    const state = r.tries('state_changed');
+    const notif = r.tries('zwave_js_notification');
+    await downDuringRebuild(r, 'zwave_js/subscribe_node_statistics');
+    const said = r.logs.slice(lines);
+    assert.ok(said.includes(`node-stats subscribe failed (node 7): ${CLOSED}`), `precondition: the held node subscribe failed with its socket — ${said.join(' | ')}`);
+    assert.ok(said.includes(`activity subscribe failed (state_changed): ${NOT_READY}`), 'precondition: the state feed failed waiting for a socket');
+    assert.ok(!said.some((l) => /superseded/.test(l)), 'precondition: the rebuild ended on the dead socket, not superseded');
+    assert.equal(r.tries('state_changed'), state + 1, 'precondition: the state feed was asked once');
+    assert.equal(r.tries('zwave_js_notification'), notif, 'the notification feed is not tried on a socket that is gone');
+    assert.deepEqual([...r.priv.activityOwed], ['state_changed', 'zwave_js_notification'], 'both feeds are owed');
+    assert.deepEqual(feedRows(r, from), [], 'no row while the socket is down: no retry runs then');
+    assert.deepEqual(said.filter((l) => l.startsWith('activity log:')), [], 'no add-on log line names a retry');
+    await coreBack(r);
+    assert.deepEqual(feedRows(r, from), LIVE_ROW, 'the rebuild after the reconnect makes both feeds, and its row is the only one');
+    assert.ok(r.priv.statsSubbedNodes.has(7) && r.priv.statusSubbed.has(7), 'node 7\'s feeds are made');
+    assert.equal(r.live('state_changed'), 1);
+    assert.equal(r.live('zwave_js_notification'), 1);
+    heardOnce(r, 'after the reconnect');
+    noReleasedTwice(ha, 'end');
+  });
+});
+
+test('a retry of both feeds whose notification subscribe fails as Core goes down, after it made the state feed: no row says the state feed is live on the dead socket; the rebuild after the reconnect makes both and says so (v0.79.7 review)', async () => {
+  const ha = fakeHa();
+  ha.fail.set('state_changed', 1);
+  ha.fail.set('zwave_js_notification', 1);
+  await withHa(ha, async (r) => {
+    r.later(MIN);
+    const g = gate();
+    ha.gates.set('zwave_js_notification', g);
+    await r.pollOnly();
+    await waitFor(() => g.arrived, 2000, () => r.logs.join(' | '));
+    assert.equal(r.live('state_changed'), 1, 'precondition: the retry made the state feed');
+    const from = lastSeq(r);
+    ha.down();
+    g.open();
+    await waitFor(() => !r.priv.activityRetryBusy, 2000, () => r.logs.join(' | '));
+    await sleep(5);
+    assert.ok(r.logs.includes(`activity subscribe failed (zwave_js_notification): ${CLOSED}`), 'precondition: the held subscribe failed with its socket');
+    assert.deepEqual(feedRows(r, from), [], 'no row says a feed is live on a socket that is gone');
+    await coreBack(r);
+    assert.deepEqual(feedRows(r, from), LIVE_ROW, 'the rebuild after the reconnect makes both feeds, and its row is the only one');
+    assert.equal(r.live('state_changed'), 1);
+    assert.equal(r.live('zwave_js_notification'), 1);
+    assert.equal(r.priv.activityOwed.size, 0, 'nothing owed on the new connection');
+    heardOnce(r, 'after the reconnect');
     noReleasedTwice(ha, 'end');
   });
 });

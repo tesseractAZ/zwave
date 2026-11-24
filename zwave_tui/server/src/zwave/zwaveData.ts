@@ -1084,13 +1084,20 @@ class ZwaveDataImpl implements ZwaveData {
   private readonly statusSentAt = new Map<number, number>();
   /** What a node's old status feed held once the node's own re-subscribe had
    *  released it, when that feed heard a status event after the roster poll
-   *  the re-subscribe followed was sent (v0.79.7 review). That poll's reading
-   *  is the feed's status unless the feed heard one since its send
+   *  the re-subscribe followed was sent (v0.79.7 review). Not one a feed a
+   *  re-arm is still releasing set, on a node with no status feed of its
+   *  own, by an event with no status before it, or by one after it that
+   *  counted no crossing (statusUncounted): the first event counted no
+   *  crossing, and carried, the roster diff would not count it either. One
+   *  the feed holds once a later event of it counted a crossing is carried,
+   *  or the roster diff would count that crossing again. That poll's
+   *  reading is the feed's status unless the feed heard one since its send
    *  (heardSince), so the status carried is no older than the reading: an
    *  event read together with the poll's answer, or one the old feed
    *  delivered after the poll acted, as during the release of the statistics
-   *  feed, which goes first while the client drops the status feed's handler
-   *  only as that feed's release starts. While the id is out of statusSubbed
+   *  feed, which goes first unless the 60 s retry made it after the status
+   *  feed, while the client drops the status feed's handler only as that
+   *  feed's release starts. While the id is out of statusSubbed
    *  the roster fallback diffs against it, so a crossing the old feed counted
    *  is not counted again, and the new status feed is seeded with it. The
    *  next roster reading clears it: Home Assistant sends one connection's
@@ -1098,6 +1105,11 @@ class ZwaveDataImpl implements ZwaveData {
    *  came after the old feed's event. So do the new status feed's answer, the
    *  eviction and a home id change. */
   private readonly releaseHeard = new Map<number, NodeStatus>();
+  /** Nodes whose status (subStatus) a status event set with none before it,
+   *  so it counted no crossing, and no event has counted one since (v0.79.7
+   *  review): a feed a re-arm is still releasing, on a node with no status
+   *  feed of its own. A node's own re-subscribe does not carry it. */
+  private readonly statusUncounted = new Set<number>();
   /** The order mark taken as the last roster poll that read statuses sent its
    *  `network_status` (v0.79.6). A status feed live before it hears every
    *  status change the next poll shows; one made after it may have missed a
@@ -1246,7 +1258,8 @@ class ZwaveDataImpl implements ZwaveData {
   /** The activity feeds the feed set on this connection was left without
    *  (v0.79.7): a subscribe that failed (no answer within the client's
    *  timeout, a connection down or closed under it, or an error answer) while
-   *  the rest of the rebuild stood. Through
+   *  the rest of the rebuild stood, and with the connection down, the feeds
+   *  after it, not tried (v0.79.7 review). Through
    *  v0.79.6 nothing made them before the next rebuild (a reconnect, the
    *  self-heal or a re-arm), and a failed state_changed subscribe skipped the
    *  notification one. Set by each rebuild that keeps its feeds; emptied by
@@ -3408,6 +3421,7 @@ class ZwaveDataImpl implements ZwaveData {
           this.ourTxReport.delete(id);
           this.measurementReroutes.delete(id);
           this.subStatus.delete(id);
+          this.statusUncounted.delete(id);
           this.releaseHeard.delete(id);
           this.statusSubbed.delete(id);
           this.statsSubbedNodes.delete(id);
@@ -3558,6 +3572,7 @@ class ZwaveDataImpl implements ZwaveData {
         this.measurementReroutes.clear();
         this.deadEvents = [];
         this.subStatus.clear();
+        this.statusUncounted.clear();
         this.releaseHeard.clear();
         this.prevSampleSig.clear();
         this.missingSince.clear();
@@ -4206,6 +4221,7 @@ class ZwaveDataImpl implements ZwaveData {
       this.statusSubbed.clear();
       this.statsSubbedNodes.clear();
       this.subStatus.clear();
+      this.statusUncounted.clear();
       this.pendingNodeSubs.clear();
       // A per-node subscribe still out from before this run is released when
       // it resolves (v0.79.6): this run subscribes every node.
@@ -4329,6 +4345,7 @@ class ZwaveDataImpl implements ZwaveData {
     this.statusSubbed.clear();
     this.statsSubbedNodes.clear();
     this.subStatus.clear();
+    this.statusUncounted.clear();
     this.pendingNodeSubs.clear();
     // The cached counters STAY. They are this network's, and clearing them
     // re-baselines every delta guard for nothing (the v0.26 lesson); the first
@@ -4543,11 +4560,19 @@ class ZwaveDataImpl implements ZwaveData {
         for (const sub of old?.subs ?? []) await sub.unsubscribe().catch(() => {});
         // A rebuild begun meanwhile owns the bookkeeping and subscribes the node.
         if (gen !== this.feedGen || epoch !== this.connEpoch) return;
+        // Not one a feed a re-arm is still releasing set, on a node with no
+        // status feed of its own, by an event with no status before it, or by
+        // one after it that counted no crossing (statusUncounted): the first
+        // event counted no crossing, and carried, the roster diff would not
+        // count it either. One the feed holds once a later event of it
+        // counted a crossing is carried, or the roster diff would count that
+        // crossing again (v0.79.7 review).
         const heard = this.subStatus.get(id);
-        if (heard != null && (this.statusHeardAt.get(id) ?? 0) > lastRead) this.releaseHeard.set(id, heard);
+        if (heard != null && (this.statusSubbed.has(id) || !this.statusUncounted.has(id)) && (this.statusHeardAt.get(id) ?? 0) > lastRead) this.releaseHeard.set(id, heard);
         this.statsSubbedNodes.delete(id);
         this.statusSubbed.delete(id);
         this.subStatus.delete(id);
+        this.statusUncounted.delete(id);
         this.pendingNodeSubs.delete(id);
         await this.subscribeNode(id, devId, { sink: this.nodeFeedSubs, gen, epoch, fleet: false });
       }));
@@ -4579,8 +4604,11 @@ class ZwaveDataImpl implements ZwaveData {
     this.statusHeardAt.set(nodeId, ++this.feedSeq);
     const prev = this.subStatus.get(nodeId);
     this.subStatus.set(nodeId, next);
-    if (prev == null) return; // first observation — no transition yet
+    if (prev == null) { this.statusUncounted.add(nodeId); return; } // first observation — no transition yet
     const crossedDead = (prev === NodeStatus.Dead) !== (next === NodeStatus.Dead);
+    // Only a crossing ends the mark: a sleep after a wake up counts none,
+    // and the first event's crossing is still uncounted (v0.79.7 review).
+    if (crossedDead) this.statusUncounted.delete(nodeId);
     if (crossedDead) this.flapAccum.set(nodeId, (this.flapAccum.get(nodeId) ?? 0) + 1);
     if (crossedDead) this.noteDeadCrossing(nodeId, next === NodeStatus.Dead);
   }
@@ -4689,7 +4717,9 @@ class ZwaveDataImpl implements ZwaveData {
    * later try can succeed.
    *
    * `keep` takes each handle as it is made, before the next subscribe is
-   * sent; one it declines is released and the rest are not tried.
+   * sent; one it declines is released and the rest are not tried. Nor are
+   * they after a failure with the connection down (v0.79.7 review): they are
+   * returned with it.
    */
   private async subscribeActivityEvents(
     want: readonly ActivityFeed[],
@@ -4727,6 +4757,13 @@ class ZwaveDataImpl implements ZwaveData {
       } catch (e) {
         unmade.add(feed);
         this.log(`activity subscribe failed (${feed}): ${errMsg(e)}`);
+        // With the socket gone (v0.79.7 review), the next subscribe would only
+        // wait its own 10 s for one: the feeds after this one are owed with it,
+        // and the reconnect's rebuild makes them all.
+        if (!this.client.ready()) {
+          for (const rest of want.slice(want.indexOf(feed) + 1)) unmade.add(rest);
+          break;
+        }
       }
     }
     return unmade;
@@ -4789,9 +4826,16 @@ class ZwaveDataImpl implements ZwaveData {
   /**
    * The activity feeds' state, on the Log screen where their rows land and in
    * the add-on log (v0.79.7): at each rebuild that keeps its feeds, and when
-   * the retry makes an owed one. A failed retry adds no row.
+   * the retry makes an owed one. A failed retry adds no row, and neither
+   * adds one once the connection is down.
    */
   private announceActivityFeeds(): void {
+    // Not once the socket the feeds rode is gone (v0.79.7 review): no retry
+    // runs while it is down, and the reconnect's rebuild makes the feeds and
+    // announces them. Through v0.79.6 a rebuild whose state_changed
+    // subscribe failed that way added no row, and one whose notification
+    // subscribe did added `activity feed live`.
+    if (!this.client.ready()) return;
     const owed = this.activityOwed;
     const n = this.entityIndex.size;
     if (owed.has('state_changed')) {

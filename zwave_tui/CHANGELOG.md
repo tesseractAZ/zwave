@@ -50,6 +50,8 @@ reading. Nothing stored on disk changes.
   they are. The Log screen reads `activity feed down — its state_changed
   subscribe failed; retried after a minute` until it is made, and the add-on
   log names each failed feed (`activity subscribe failed (state_changed): …`).
+  A failure on a connection that is down adds no row, and the feeds after it
+  are not tried: the reconnect's rebuild makes them and adds the row.
 - A failed activity subscribe does not fail the rebuild: failed, the rebuild
   would run again at every roster poll, making the controller's feed and every
   node's two again each time.
@@ -72,10 +74,11 @@ reading. Nothing stored on disk changes.
   client offers, Home Assistant's and the Supervisor's sockets compress every
   frame (inferred from the aiohttp sources), and the poll acted first there.
 - A status a node's old status feed hears while the node's own re-subscribe
-  releases it (the statistics feed goes first) is counted once and kept as
-  the newer: through 0.79.6 a poll that read such a death before the new
-  status feed answered counted it again, and the new feed was seeded with the
-  older reading, which left the death queued when it heard the revival.
+  releases it (the statistics feed goes first, unless the 60 s retry made it
+  after the status feed) is counted once and kept as the newer: through
+  0.79.6 a poll that read such a death before the new status feed answered
+  counted it again, and the new feed was seeded with the older reading, which
+  left the death queued when it heard the revival.
 - A status a feed a re-arm is still releasing sets on a node whose rebuild
   status subscribe fails no longer seeds the status feed the 60 s retry makes
   once a roster poll has read the node since: in 0.79.6 the retry's feed kept
@@ -83,17 +86,16 @@ reading. Nothing stored on disk changes.
 
 ### Tests
 
-- 1,941 tests, 47 new: 18 in `nodeFeeds.test.ts`, 5 of them pins that pass
-  on 0.79.6 too; 13 in `activityFeeds.test.ts`, a model of Home Assistant's
+- 1,951 tests, 57 new: 25 in `nodeFeeds.test.ts`, 10 of them pins that pass
+  on 0.79.6 too; 16 in `activityFeeds.test.ts`, a model of Home Assistant's
   core event bus; 8 in `haWsClientLateSubscribe.test.ts`, a model of its
   per-connection command order; 3 in `realClient.lateSubscribe.test.ts`, the
   data layer over the real client and a mock Core with node objects
   (`_realHa.ts`, `_realRun.ts`); 2 in `statusOrderRealClient.test.ts` and 2
   in `statusReleaseRealClient.test.ts`, the real client with frames
-  uncompressed and compressed; and 1 in `activityFeedsLate.test.ts`. 2,053
-  mutation-harness entries (19 labelled equivalent): 48 new, 7 re-anchored, 1
-  re-described, and 3 removed with the code they pinned, one of them labelled
-  equivalent.
+  uncompressed and compressed; and 1 in `activityFeedsLate.test.ts`. 2,061
+  mutation-harness entries (19 labelled equivalent): 56 new, 8 re-anchored,
+  and 3 removed with the code they pinned, one of them labelled equivalent.
 
 ## 0.79.6
 
