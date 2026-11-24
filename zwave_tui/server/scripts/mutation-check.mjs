@@ -9652,10 +9652,18 @@ const MUTANTS = [
     find: " && this.client.ready()) void this.fetchEntityStates();\n",
     repl: ") void this.fetchEntityStates();\n",
     what: "a retry whose notification subscribe failed with the connection down, after it made the state feed, starts no state read" },
-  { id: "count-unknown-moves-nothing", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
-    find: "    if (next === NodeStatus.Unknown) return;\n",
-    repl: "",
-    what: "an Unknown reading moves no count: a Dead node a restarted driver reads Unknown and then Dead again counts no revival and no second death, and one read Alive clears its death" },
+  { id: "count-unknown-keeps-a-known-status", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "    if (next === NodeStatus.Unknown) { if (prev == null) this.countedStatus.set(nodeId, next); return; }\n",
+    repl: "    if (next === NodeStatus.Unknown && prev == null) { this.countedStatus.set(nodeId, next); return; }\n",
+    what: "an Unknown reading never replaces a known status: a Dead node a restarted driver reads Unknown and then Dead counts no revival and no second death" },
+  { id: "count-unknown-is-a-start", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "    if (next === NodeStatus.Unknown) { if (prev == null) this.countedStatus.set(nodeId, next); return; }\n",
+    repl: "    if (next === NodeStatus.Unknown) return;\n",
+    what: "before any known status an Unknown reading is the node's start, not Dead: a node first read Unknown and then Dead counts its death, which the refresh trial's kill check sees" },
+  { id: "count-unknown-is-not-dead", file: "src/zwave/zwaveData.ts", tests: ["nodeFeeds"],
+    find: "    if (next === NodeStatus.Unknown) { if (prev == null) this.countedStatus.set(nodeId, next); return; }\n",
+    repl: "    if (next === NodeStatus.Unknown) next = NodeStatus.Dead;\n",
+    what: "Unknown is not Dead: an Alive node a restarted driver reads Unknown and then Alive counts nothing and hands the runner no death" },
 ];
 
 const only = process.argv.find((a) => a.startsWith('--only='))?.slice('--only='.length);

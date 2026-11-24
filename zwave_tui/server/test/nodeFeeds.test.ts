@@ -2246,6 +2246,43 @@ test('a driver restart that reads a Dead node Unknown, then Alive: the revival i
   });
 });
 
+test('a driver restart that reads an Alive node Unknown, then Alive again: nothing is counted, and no death is handed to the runner (v0.79.8)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await r.poll();                       // reads node 60 Alive
+    s.statusErr = NOT_LOADED;
+    s.unloaded = true;
+    skip += 2_000;
+    await r.pollOnly();
+    s.zw.restartDriver();
+    s.zw.nodes.get(60)!.st = 0;           // the restarted driver has not heard from it yet
+    s.statusErr = undefined;
+    s.unloaded = false;
+    skip += 2_000;
+    await r.poll();                       // reads it Unknown
+    s.zw.emitStatus(60, 'alive');         // the restarted driver hears it
+    skip += 2_000;
+    await r.poll();                       // reads it Alive
+    assert.deepEqual(books(r, 60), { flaps: 0, queued: 0, cleared: 0 }, 'no crossing: Unknown is not Dead, and not a status either');
+    assert.deepEqual(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60), [], 'nothing handed to the runner');
+  });
+});
+
+test('a node whose first reading is Unknown, then marked Dead: its death is counted and reaches the refresh trial, as through v0.79.7 (v0.79.8)', async () => {
+  const s = baseSim();
+  s.zw.nodes.get(60)!.st = 0;             // Z-Wave JS starting with the add-on: not heard from yet
+  await withSim(s, async (r) => {
+    const deaths: number[] = [];
+    r.zd.attachRefreshTrial({ onDead: (n: number) => { deaths.push(n); }, dropOpen: () => {}, view: () => null, tick: () => {} } as never, { writeActions: false });
+    assert.equal(r.zd.snapshot().find((n) => n.nodeId === 60)?.status, 0, 'precondition: read Unknown');
+    s.zw.emitStatus(60, 'dead');          // the driver marks it Dead, heard by its status feed
+    skip += 2_000;
+    await r.poll();                       // reads it Dead
+    assert.deepEqual(books(r, 60), { flaps: 1, queued: 1, cleared: 0 }, 'one death, counted once');
+    assert.deepEqual(deaths, [60], 'the refresh trial sees it');
+  });
+});
+
 test('a node evicted with a death queued: the death is dropped, so no revival of a node later included on the id hands it to the auto-ping runner (v0.79.8)', async () => {
   const s = baseSim();
   await withSim(s, async (r) => {

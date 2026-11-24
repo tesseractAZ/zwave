@@ -4586,20 +4586,23 @@ class ZwaveDataImpl implements ZwaveData {
   /**
    * Move a node's count to an observed status (v0.79.8): a crossing of the
    * Dead boundary from the status it stands at (countedStatus) is counted
-   * into flapAccum and the auto-ping runner's queue. The first known status
+   * into flapAccum and the auto-ping runner's queue. The first observation
    * of a node (at boot, after its eviction, after a home id change) only
-   * sets it, and an Unknown reading moves nothing (below). Every observation comes through here, so a status two sources
+   * sets it, and an Unknown reading never replaces a known status (below). Every observation comes through here, so a status two sources
    * deliver (an event and the roster reading that reflects it, or one event
    * on two feeds while a release is out) counts once.
    */
   private countStatus(nodeId: number, next: NodeStatus): void {
+    const prev = this.countedStatus.get(nodeId);
     // Unknown says nothing about the Dead boundary: a restarted driver reads
     // a node it has not yet heard from Unknown, a Dead one included, and then
-    // Dead again or Alive. It moves nothing, so the node's next known status
-    // counts against its last: a Dead node read Unknown and then Dead counts
-    // no revival and no second death, and one read Alive clears its death.
-    if (next === NodeStatus.Unknown) return;
-    const prev = this.countedStatus.get(nodeId);
+    // Dead again or Alive. It never replaces a known status, so the node's
+    // next known status counts against its last: a Dead node read Unknown and
+    // then Dead counts no revival and no second death, and one read Alive
+    // clears its death. Before any known status it is the node's start, not
+    // Dead, so a node first read Unknown and then Dead counts its death (the
+    // refresh trial's kill check sees it), as through v0.79.7.
+    if (next === NodeStatus.Unknown) { if (prev == null) this.countedStatus.set(nodeId, next); return; }
     this.countedStatus.set(nodeId, next);
     if (prev == null) return;
     const crossedDead = (prev === NodeStatus.Dead) !== (next === NodeStatus.Dead);
