@@ -2263,3 +2263,20 @@ test('a roster poll that shows another network (a home id change) counts no cros
     assert.deepEqual(deaths, [], 'no death of this network\'s nodes read from the other network\'s roster (through v0.79.7, one for a node with no status feed)');
   });
 });
+
+test('a node evicted with a death its revival cleared, not yet drained: the cleared death stays for the auto-ping runner\'s next drain, as the node did revive (v0.79.8)', async () => {
+  const s = baseSim();
+  await withSim(s, async (r) => {
+    await r.poll();
+    s.zw.emitStatus(60, 'dead');
+    s.zw.emitStatus(60, 'alive');         // the death cleared, not drained
+    assert.deepEqual(books(r, 60), { flaps: 2, queued: 0, cleared: 1 }, 'precondition');
+    s.zw.removeNode(60, 'excluded');
+    skip += 2_000;
+    await r.poll();
+    skip += 6_000;
+    await r.poll();
+    assert.ok(r.logs.some((l) => l === 'node 60 left the network — evicting its evidence + caches'), 'precondition: evicted');
+    assert.equal(r.zd.drainDeadEvents().filter((d) => d.nodeId === 60).length, 1, 'the cleared death is handed over');
+  }, { evictAfterMs: 5_000 });
+});

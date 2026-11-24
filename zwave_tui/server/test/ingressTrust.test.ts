@@ -396,7 +396,7 @@ test('an action failure message is sanitized before it reaches the result card',
     enabled: true,
   } as never);
 
-  // reInterview goes through deviceSubCmd → client.sendSubscription, so the thrown text is
+  // reInterview goes through deviceCmd → client.sendSubscription, so the thrown text is
   // what the operator would actually see. (ping short-circuits on a missing
   // ping-button entity and never reaches the client.)
   const res = await runner.reInterview(8);

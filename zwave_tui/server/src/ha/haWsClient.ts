@@ -244,9 +244,7 @@ class HaWebSocketClient implements HaWsClient {
   }
 
   send<T = unknown>(cmd: Record<string, unknown>, timeoutMs: number | SendTimeouts = DEFAULT_TIMEOUT_MS): Promise<T> {
-    const readyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.readyMs;
-    const replyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.replyMs;
-    return this.waitReady(readyMs).then(() => this.dispatch<T>(this.nextId++, cmd, replyMs));
+    return this.command<T>(cmd, timeoutMs, false);
   }
 
   /**
@@ -268,10 +266,17 @@ class HaWebSocketClient implements HaWsClient {
    * or the timeout exactly as from send().
    */
   sendSubscription<T = unknown>(cmd: Record<string, unknown>, timeoutMs: number | SendTimeouts = DEFAULT_TIMEOUT_MS): Promise<T> {
+    return this.command<T>(cmd, timeoutMs, true);
+  }
+
+  /** send() and sendSubscription(): the socket wait, then the command under
+   *  the next id; `registers` releases that id once it answers or times out. */
+  private command<T>(cmd: Record<string, unknown>, timeoutMs: number | SendTimeouts, registers: boolean): Promise<T> {
     const readyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.readyMs;
     const replyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.replyMs;
     return this.waitReady(readyMs).then(() => {
       const id = this.nextId++;
+      if (!registers) return this.dispatch<T>(id, cmd, replyMs);
       const release = (): void => this.releaseUnanswered(id);
       return this.dispatch<T>(id, cmd, replyMs, release, release);
     });
