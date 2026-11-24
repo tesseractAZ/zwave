@@ -19,6 +19,9 @@
  * `queued` is not confirmed on a listening device. The two long verbs wait 20
  * and 3 minutes for their reply (10 s for the socket), and a timeout there is
  * "outcome unknown", never learned. Every learned verb carries its origin.
+ * Home Assistant registers re-interview and remove failed as subscriptions on
+ * the connection; since v0.79.8 each is released once it answers or times
+ * out (haWsClient.sendSubscription).
  */
 
 import type { HaWsClient } from '../ha/haWsClient';
@@ -230,6 +233,18 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
     if (!dev) throw new Error(`node ${nodeId} has no device`);
     return o.client.send({ type, device_id: dev }, replyMs == null ? undefined : { readyMs: READY_TIMEOUT_MS, replyMs });
   };
+  /** A device command Home Assistant registers as a subscription while it
+   *  runs and keeps after it answers (v0.79.8): `refresh_node_info` (the
+   *  node's interview events) and `remove_failed_node` (the controller's
+   *  "node removed"). Released once it answers or times out
+   *  (haWsClient.sendSubscription); the answer, and a reply timeout's
+   *  `HA WS timeout`, read exactly as from deviceCmd. Through v0.79.7 each
+   *  left a subscription live for the life of the socket. */
+  const deviceSubCmd = async (type: string, nodeId: number, replyMs?: number): Promise<unknown> => {
+    const dev = o.deviceIdOf(nodeId);
+    if (!dev) throw new Error(`node ${nodeId} has no device`);
+    return o.client.sendSubscription({ type, device_id: dev }, replyMs == null ? undefined : { readyMs: READY_TIMEOUT_MS, replyMs });
+  };
   const entryCmd = async (type: string): Promise<unknown> => {
     const entry = o.entryId();
     if (!entry) throw new Error('no zwave_js entry');
@@ -418,7 +433,7 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
         if (!ent) throw new Error(`node ${n} has no switch/light value to read`);
         await o.client.send({ type: 'call_service', domain: 'zwave_js', service: 'refresh_value', service_data: { entity_id: ent, refresh_all_values: false } });
       }, /* learn: never, see above */ false, /* origin */ 'engine'),
-    reInterview: (n, origin = 'you') => run('reInterview', n, `re-interview node ${n}`, () => deviceCmd('zwave_js/refresh_node_info', n), true, origin),
+    reInterview: (n, origin = 'you') => run('reInterview', n, `re-interview node ${n}`, () => deviceSubCmd('zwave_js/refresh_node_info', n), true, origin),
     healNode: (n, origin = 'you') => run('healNode', n, `rebuild routes node ${n}`,
       () => deviceCmd('zwave_js/rebuild_node_routes', n, HEAL_TIMEOUT_MS), true, origin,
       { interpret: boolResult(HEAL_FALSE, HEAL_TRUE_NOTE), unknownAfterMs: HEAL_TIMEOUT_MS, busy: 'healNode' }),
@@ -428,7 +443,7 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
       () => entryCmd('zwave_js/stop_rebuilding_routes'), true, origin, { interpret: boolResult(STOP_FALSE) }),
     removeFailed: async (n, origin = 'you') => {
       const res = await run('removeFailed', n, `remove failed node ${n}`,
-        () => deviceCmd('zwave_js/remove_failed_node', n, REMOVE_FAILED_TIMEOUT_MS), true, origin,
+        () => deviceSubCmd('zwave_js/remove_failed_node', n, REMOVE_FAILED_TIMEOUT_MS), true, origin,
         { unknownAfterMs: REMOVE_FAILED_TIMEOUT_MS, busy: 'removeFailed' });
       // Only on success — a failed removal leaves the node, and its history, in
       // place; and an UNKNOWN one (v0.72.0) may not have happened at all.

@@ -107,6 +107,13 @@ export interface HaWsClient {
    *  released on the socket it went out on, unless that socket is closing
    *  (v0.79.7, releaseUnanswered). */
   subscribe(cmd: Record<string, unknown>, onEvent: HaEventHandler, timeoutMs?: number): Promise<HaSubscription>;
+  /** A command Home Assistant registers as a subscription while it runs, and
+   *  keeps registered after it answers (v0.79.8): zwave_js `refresh_node_info`
+   *  and `remove_failed_node`. Resolves and rejects as send() does, a reply
+   *  timeout included (`HA WS timeout`); its id is then released on the
+   *  socket it went out on, once any answer arrives or at the reply timeout,
+   *  and not after a close. Its events reach no handler. */
+  sendSubscription<T = unknown>(cmd: Record<string, unknown>, timeoutMs?: number | SendTimeouts): Promise<T>;
   /** Called after every successful (re)authentication — the re-subscribe hook. */
   onReady(cb: () => void): void;
   /** True once authenticated with HA Core. */
@@ -124,6 +131,9 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Runs when Home Assistant's answer arrives, success or error, before the
+   *  caller hears it (v0.79.8, sendSubscription). */
+  onAnswer?: () => void;
 }
 
 interface ReadyWaiter {
@@ -237,6 +247,34 @@ class HaWebSocketClient implements HaWsClient {
     const readyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.readyMs;
     const replyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.replyMs;
     return this.waitReady(readyMs).then(() => this.dispatch<T>(this.nextId++, cmd, replyMs));
+  }
+
+  /**
+   * A command that registers a subscription (v0.79.8). Home Assistant's
+   * zwave_js `refresh_node_info` and `remove_failed_node` handlers set
+   * `connection.subscriptions[msg id]` and attach their listeners (the
+   * node's interview events; the controller's "node removed") before they
+   * await the driver, and nothing removes the entry when they answer: an
+   * error answer only drops the listeners (`async_handle_failed_command`).
+   * Sent through send(), each left a subscription on the connection for its
+   * life, and a re-interview's listeners forwarded every later interview of
+   * the node. Released by `unsubscribe_events` on the socket it went out on,
+   * which Home Assistant handles after the command (one connection's
+   * commands in order): after the answer, or at the reply timeout while the
+   * driver may still be working, when the release drops the listeners and
+   * the command runs on (zwave-js-server-python's unsubscribe callables are
+   * idempotent). A socket that closed needs none (`async_handle_close`).
+   * Nothing waits for the release's answer, and the caller hears the answer
+   * or the timeout exactly as from send().
+   */
+  sendSubscription<T = unknown>(cmd: Record<string, unknown>, timeoutMs: number | SendTimeouts = DEFAULT_TIMEOUT_MS): Promise<T> {
+    const readyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.readyMs;
+    const replyMs = typeof timeoutMs === 'number' ? timeoutMs : timeoutMs.replyMs;
+    return this.waitReady(readyMs).then(() => {
+      const id = this.nextId++;
+      const release = (): void => this.releaseUnanswered(id);
+      return this.dispatch<T>(id, cmd, replyMs, release, release);
+    });
   }
 
   async subscribe(
@@ -476,6 +514,7 @@ class HaWebSocketClient implements HaWsClient {
     if (!p) return;
     clearTimeout(p.timer);
     this.pending.delete(msg.id);
+    p.onAnswer?.();
     if (msg.success === false) {
       const err = msg.error;
       p.reject(new Error(`HA WS error (${err?.code ?? 'unknown'}): ${err?.message ?? JSON.stringify(msg.error)}`));
@@ -601,7 +640,9 @@ class HaWebSocketClient implements HaWsClient {
   }
 
   /**
-   * Release a subscribe given up on at its reply timeout (v0.79.7). Home
+   * Release a subscribe given up on at its reply timeout (v0.79.7), and a
+   * command that registers a subscription once it answers or times out
+   * (v0.79.8, sendSubscription). Home
    * Assistant handles one connection's commands in the order they arrive and
    * has no command to cancel one, and its subscribe handlers register the
    * subscription while they handle the command (websocket_api
@@ -628,13 +669,16 @@ class HaWebSocketClient implements HaWsClient {
   }
 
   /** `onReplyTimeout` runs when the reply bound passes, in the same turn as
-   *  the rejection, so before its caller hears of it; only subscribe() passes
-   *  one, so a command send() gives up on is followed by nothing. */
+   *  the rejection, so before its caller hears of it; only subscribe() and
+   *  sendSubscription() pass one, so a command send() gives up on is followed
+   *  by nothing. `onAnswer` runs as the answer arrives, before the caller
+   *  hears it (sendSubscription, v0.79.8); a close runs neither. */
   private dispatch<T>(
     id: number,
     cmd: Record<string, unknown>,
     timeoutMs: number,
     onReplyTimeout?: () => void,
+    onAnswer?: () => void,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const ws = this.ws;
@@ -651,6 +695,7 @@ class HaWebSocketClient implements HaWsClient {
         resolve: (v: unknown) => resolve(v as T),
         reject,
         timer,
+        onAnswer,
       });
       try {
         ws.send(JSON.stringify({ id, ...cmd }));
