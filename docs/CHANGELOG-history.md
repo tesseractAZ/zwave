@@ -3,6 +3,99 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.79.3
+
+A deploy, update or restart of this add-on no longer withdraws a raised
+`node-down` or reads as a driver start: raised node-downs and waiting start
+deaths outlive the add-on, and only a driver start the add-on can show opens
+node-down's start window, where a death waits 90 minutes. The update from
+0.79.2 itself carries nothing, since 0.79.2 wrote no carry: a node-down raised
+at the update is raised again 5 minutes after it, and so is a FLiRS start
+death still waiting at the update.
+
+### Fixed — a restart of this add-on held back a FLiRS node's node-down for 90 minutes (0.79.2)
+
+- 0.79.2 took the driver's start from every driver-WS handshake, this add-on's
+  own first one included, and kept its dwell state in memory. After a deploy,
+  update or restart, a node auto-ping does not probe that was already Dead,
+  its `node-down` raised, read as a new start death: the critical card and
+  `binary_sensor.zwave_tui_degraded` cleared and came back 90 minutes later.
+  Reproduced through the real data layer; it did not occur on the reference
+  mesh, where nothing was Dead at the 0.79.2 deploy.
+- Only a known driver start opens the window: the host's boot, as now minus
+  uptime on each tick (a start verdict, once taken, stays; a forward clock
+  step during a death's 5-minute dwell can still make it one); or a
+  driver-WS link this add-on did not end itself followed by a new handshake,
+  read as a driver start between the two, with the window running to 10
+  minutes after the handshake
+  (a network drop, or the server dropping this client, is not told apart from
+  a restart); or such a restart carried from the previous run on the same
+  boot. The add-on's own first handshake, and a link it ended itself (a
+  liveness or handshake timeout, or a malformed frame its WebSocket library
+  closes on), are not driver starts. A Z-Wave JS restart the add-on did not
+  see keeps the 5-minute dwell.
+- A death judged a start death stays one: a later driver restart, or a deploy
+  that carries only the newest restart, no longer cuts its 90 minutes to 5.
+- Node-down dwells are carried in `evidence.json` (optional `nodeDown` and
+  `driverStart` fields; the schema is unchanged) and seeded at the next run's
+  first engine tick, for nodes still on the roster. On the same boot every
+  dwell is carried: a raised node-down is raised again on that tick, dated
+  from the outage, and a start death still waiting keeps its own onset. After
+  a host reboot only raised node-downs are carried, without a driver start; a
+  dwell still waiting began before that boot's own start, and the next Dead
+  reading starts it again, so a FLiRS node's real outage under 5 minutes old
+  at a reboot is raised 90 minutes after the reboot's first Dead reading.
+- A carried dwell is judged again on that tick: a node that reads Alive,
+  Awake or Asleep drops it. A raised node-down is raised at once while the
+  node reads Dead. A host without a clock battery that boots behind its last
+  save keeps the carry only when the add-on starts within its 180-second boot
+  grace (the outage is then dated from the restart); started later, a save
+  dated ahead of the clock is discarded, the carry with it.
+- Unknown is no reading: a driver restart reads its nodes Unknown for seconds,
+  and that no longer ends a node-down dwell or withdraws a raised one. Its
+  card counts Dead time only and says the status is Unknown.
+- Home Assistant is sent nothing until the engine's first tick after a
+  restart, so `binary_sensor.zwave_tui_degraded` is not sent off before a
+  carried node-down is raised again.
+- A raised node-down, a start death and a newly seen driver restart are saved
+  within a minute rather than at the next 15-minute flush, so a power cut or
+  crash restart does not lose them, at most one such save a minute. A change
+  in the carry saves the store even when no sample was recorded; an unchanged
+  carry writes nothing. A carry of another network is not written, also after
+  a change of network while running, and a node that leaves the network
+  takes its dwells with it.
+- Auto-ping's driver-restart burst refusal (0.65.0) still reads every
+  handshake: right after this add-on's start no probe has been sent, so it
+  withholds nothing there.
+
+### Corrected
+
+- 0.79.2's "a node-down already raised stays raised" held only within one run
+  of the add-on. From 0.79.3 it holds across restarts of the add-on and host
+  reboots, and through an Unknown reading.
+
+### Tests
+
+- 32 new tests: the start window over a span and its bounds; a start death
+  staying one through a later restart; Unknown as no reading; a raised
+  node-down carried and raised on the next first tick, clamped or not; a
+  start death still waiting across a deploy, with and without a known start;
+  a carried dwell judged again; the carry in the evidence store (same boot,
+  another boot, boot grace, another network, malformed entries, a carry change
+  alone saving the store, the same carry in another order writing nothing);
+  the driver link reporting only a link this add-on did not end; and, through
+  the real data layer and a mock driver server, a deploy with a raised FLiRS
+  node, a deploy with nothing carried, a host reboot with a start death and
+  with a raised node-down saved at once, a Z-Wave JS restart seen over the
+  link and carried, a wall clock jumping ahead of uptime before and after a
+  death's first reading, the default uptime source, a carried node-down that
+  ends on the first tick saved at once, the prompt save's spacing, a node that
+  left the network, and nothing published before the engine's first tick.
+- 70 new mutation-harness entries, none declared equivalent; 4 existing
+  entries re-anchored to the rewritten lines, and 1 retired with the check it
+  covered (a raised node-down is now raised at once whatever its flags ask
+  for, pinned by its own entry).
+
 ## 0.79.2
 
 A held `rtt-degraded` breach now ends on two normal round trips, as a breach

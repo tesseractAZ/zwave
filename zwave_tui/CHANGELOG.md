@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.79.8
+
+Each node's Dead and alive crossings are counted against one status that every
+observation moves, whichever status feed or roster poll made it, so a change
+made while the connection to Home Assistant was down, a replacement of a failed
+node and a Dead node a restarted driver reads Alive are counted, and a crossing
+a status feed counted is not counted again after a reconnect, a re-arm, a failed
+status subscribe or a driver restart. A node evicted from the roster no longer leaves
+deaths queued for the auto-ping runner, a re-interview or a failed-node removal
+no longer leaves a subscription on the connection, and a state read no longer
+waits on a connection that is down. Nothing stored on disk changes.
+
+### Fixed — Dead crossings counted twice, or not at all, around reconnects, re-arms and replacements (0.12.0)
+
+- Each status feed counted against a status of its own, seeded from the
+  roster's last reading, and the roster counted only a node with no live
+  status feed. A status change made while the connection was down, or before a
+  new feed's listener was attached, reached no feed and was counted only by a
+  roster poll that read it before the node's new status feed answered. A
+  crossing a live feed counted after the last reading was counted again by the
+  first poll that read it after a reconnect's teardown, a re-arm or a status
+  subscribe that failed took the node out of the feeds' set, a revival as well
+  as a death. A status event read together with its own feed's subscribe
+  answer, or heard by a feed a re-arm was still releasing, counted nothing.
+  A replacement of a failed node by one that reads Alive was not counted for a
+  node whose status feed was live, so the failed node's death stayed queued
+  for the auto-ping runner, and a Dead node a restarted driver read Unknown
+  kept its death queued when it was read Alive, and had a second death queued
+  when it was read Dead again. Every status event, on any of the node's feeds, and every
+  roster reading not overtaken by a status event heard since the poll was sent,
+  now moves one counted status per node, kept across reconnects, re-arms, a
+  node's own re-subscribe and failed subscribes; a crossing from it is counted
+  once, whichever source saw it. An Unknown reading never replaces a known
+  status: a restarted driver reads a node it has not yet heard from Unknown,
+  which says nothing about the Dead boundary, so the node's next known status
+  counts against its last; a node first read Unknown and then Dead still counts
+  its death. The status carried past a node's own
+  re-subscribe (0.79.7) and the new feed's seed are gone with it.
+- A roster poll that shows another network (a home id change) counts nothing
+  against this network's statuses: through 0.79.7 it counted a crossing for a
+  node without a live status feed, and a death read there reached the refresh
+  trial's kill check, which the network reset does not undo.
+
+### Fixed — deaths queued for an evicted node were never cleared or dropped (0.71.0)
+
+- A node off the roster for five minutes is evicted; a death still queued for
+  the auto-ping runner stayed queued, and the revival of a node later included
+  on the id handed it over as that node's. The eviction now drops it; a death
+  its revival had cleared stays for the runner's next drain.
+
+### Fixed — a re-interview or a failed-node removal left a subscription on the connection (0.3.0)
+
+- Home Assistant registers `zwave_js/refresh_node_info` and
+  `zwave_js/remove_failed_node` as subscriptions on the connection before it
+  awaits the driver, and keeps them after it answers (an error answer drops
+  only their listeners), so each one sent left a subscription live for the
+  life of the socket, a re-interview's forwarding every later interview of the
+  node. Both now go through `sendSubscription()`, which releases the id on the
+  same socket once any answer arrives, or at the reply timeout while the
+  driver may still be working. The answer and a timeout read as before: a
+  removal Home Assistant has not answered in 3 minutes is still an unknown
+  outcome.
+
+### Fixed — a state read started on a connection that was down (0.79.7)
+
+- A rebuild, or an activity-feed retry that had made the state feed, whose
+  next activity subscribe failed with the connection down still read the
+  states, which waited 10 s for a socket and then logged `entity states fetch
+  failed`, or ran on the reconnect's socket beside its rebuild's own read. It
+  is no longer started then; the reconnect's rebuild reads the states.
+
+### Tests
+
+- 1,972 tests, 21 new: 13 in `nodeFeeds.test.ts`, 4 in
+  `haWsClientSubscriptionCommands.test.ts`, a model of Home Assistant's
+  subscription commands over a real socket, 2 in `zwaveActions.test.ts` and 2
+  in `activityFeeds.test.ts`; 5 earlier tests assert the true counts where
+  they had pinned the old ones. 2,067 mutation-harness entries (19 labelled
+  equivalent): 25 new, 5 re-anchored, and 19 removed with the code they pinned.
+
 ## 0.79.7
 
 A subscribe Home Assistant answers after the add-on's 10-second timeout is
@@ -413,99 +493,6 @@ the impersonal register.
 
 - The pin on the frozen history (`changelogContract.test.ts`) is updated for
   the reworded older releases.
-
-## 0.79.3
-
-A deploy, update or restart of this add-on no longer withdraws a raised
-`node-down` or reads as a driver start: raised node-downs and waiting start
-deaths outlive the add-on, and only a driver start the add-on can show opens
-node-down's start window, where a death waits 90 minutes. The update from
-0.79.2 itself carries nothing, since 0.79.2 wrote no carry: a node-down raised
-at the update is raised again 5 minutes after it, and so is a FLiRS start
-death still waiting at the update.
-
-### Fixed — a restart of this add-on held back a FLiRS node's node-down for 90 minutes (0.79.2)
-
-- 0.79.2 took the driver's start from every driver-WS handshake, this add-on's
-  own first one included, and kept its dwell state in memory. After a deploy,
-  update or restart, a node auto-ping does not probe that was already Dead,
-  its `node-down` raised, read as a new start death: the critical card and
-  `binary_sensor.zwave_tui_degraded` cleared and came back 90 minutes later.
-  Reproduced through the real data layer; it did not occur on the reference
-  mesh, where nothing was Dead at the 0.79.2 deploy.
-- Only a known driver start opens the window: the host's boot, as now minus
-  uptime on each tick (a start verdict, once taken, stays; a forward clock
-  step during a death's 5-minute dwell can still make it one); or a
-  driver-WS link this add-on did not end itself followed by a new handshake,
-  read as a driver start between the two, with the window running to 10
-  minutes after the handshake
-  (a network drop, or the server dropping this client, is not told apart from
-  a restart); or such a restart carried from the previous run on the same
-  boot. The add-on's own first handshake, and a link it ended itself (a
-  liveness or handshake timeout, or a malformed frame its WebSocket library
-  closes on), are not driver starts. A Z-Wave JS restart the add-on did not
-  see keeps the 5-minute dwell.
-- A death judged a start death stays one: a later driver restart, or a deploy
-  that carries only the newest restart, no longer cuts its 90 minutes to 5.
-- Node-down dwells are carried in `evidence.json` (optional `nodeDown` and
-  `driverStart` fields; the schema is unchanged) and seeded at the next run's
-  first engine tick, for nodes still on the roster. On the same boot every
-  dwell is carried: a raised node-down is raised again on that tick, dated
-  from the outage, and a start death still waiting keeps its own onset. After
-  a host reboot only raised node-downs are carried, without a driver start; a
-  dwell still waiting began before that boot's own start, and the next Dead
-  reading starts it again, so a FLiRS node's real outage under 5 minutes old
-  at a reboot is raised 90 minutes after the reboot's first Dead reading.
-- A carried dwell is judged again on that tick: a node that reads Alive,
-  Awake or Asleep drops it. A raised node-down is raised at once while the
-  node reads Dead. A host without a clock battery that boots behind its last
-  save keeps the carry only when the add-on starts within its 180-second boot
-  grace (the outage is then dated from the restart); started later, a save
-  dated ahead of the clock is discarded, the carry with it.
-- Unknown is no reading: a driver restart reads its nodes Unknown for seconds,
-  and that no longer ends a node-down dwell or withdraws a raised one. Its
-  card counts Dead time only and says the status is Unknown.
-- Home Assistant is sent nothing until the engine's first tick after a
-  restart, so `binary_sensor.zwave_tui_degraded` is not sent off before a
-  carried node-down is raised again.
-- A raised node-down, a start death and a newly seen driver restart are saved
-  within a minute rather than at the next 15-minute flush, so a power cut or
-  crash restart does not lose them, at most one such save a minute. A change
-  in the carry saves the store even when no sample was recorded; an unchanged
-  carry writes nothing. A carry of another network is not written, also after
-  a change of network while running, and a node that leaves the network
-  takes its dwells with it.
-- Auto-ping's driver-restart burst refusal (0.65.0) still reads every
-  handshake: right after this add-on's start no probe has been sent, so it
-  withholds nothing there.
-
-### Corrected
-
-- 0.79.2's "a node-down already raised stays raised" held only within one run
-  of the add-on. From 0.79.3 it holds across restarts of the add-on and host
-  reboots, and through an Unknown reading.
-
-### Tests
-
-- 32 new tests: the start window over a span and its bounds; a start death
-  staying one through a later restart; Unknown as no reading; a raised
-  node-down carried and raised on the next first tick, clamped or not; a
-  start death still waiting across a deploy, with and without a known start;
-  a carried dwell judged again; the carry in the evidence store (same boot,
-  another boot, boot grace, another network, malformed entries, a carry change
-  alone saving the store, the same carry in another order writing nothing);
-  the driver link reporting only a link this add-on did not end; and, through
-  the real data layer and a mock driver server, a deploy with a raised FLiRS
-  node, a deploy with nothing carried, a host reboot with a start death and
-  with a raised node-down saved at once, a Z-Wave JS restart seen over the
-  link and carried, a wall clock jumping ahead of uptime before and after a
-  death's first reading, the default uptime source, a carried node-down that
-  ends on the first tick saved at once, the prompt save's spacing, a node that
-  left the network, and nothing published before the engine's first tick.
-- 70 new mutation-harness entries, none declared equivalent; 4 existing
-  entries re-anchored to the rewritten lines, and 1 retired with the check it
-  covered (a raised node-down is now raised at once whatever its flags ask
-  for, pinned by its own entry).
 
 ## Older releases
 
