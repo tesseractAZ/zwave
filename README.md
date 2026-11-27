@@ -591,9 +591,8 @@ releasing anything — docs and tooling changes ride along until the next releas
 plus an AppArmor-profile compile) and `codeql.yml` (CodeQL `security-extended`;
 results are uploaded to the Security tab, and `check-sarif.mjs` fails the job
 on actionable findings) run on every PR to `main`, and every job of both is a
-required status check except the AppArmor compile, which is not yet in that
-set. Every job, CodeQL included, runs on a pinned `ubuntu-26.04` image (native
-`ubuntu-26.04-arm` for aarch64 builds).
+required status check. Every job, CodeQL included, runs on a pinned
+`ubuntu-26.04` image (native `ubuntu-26.04-arm` for aarch64 builds).
 
 ## Local development
 
