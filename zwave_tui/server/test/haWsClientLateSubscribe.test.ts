@@ -350,41 +350,52 @@ test('the release leaves in the same turn as the timeout: ahead of anything the 
 });
 
 test('a reply bound that passes while the socket is closing (terminated, its close event not yet run) sends no release, on that socket or the next (v0.79.7)', async () => {
-  const h = await core();
-  const never = new Promise<void>(() => {});
-  h.plan = (_ci, m) => (m.type === 'subscribe_events' ? { hold: never } : null);
-  const c = client(h.url);
-  const cpriv = c as unknown as { ws: { readyState: number } | null; pending: Map<number, unknown> };
-  const u = unhandled();
-  try {
-    c.start();
-    await waitFor(() => c.ready());
-    // Two timers of one duration set in one turn run in one pass of the timers
-    // phase, in the order set: the terminate first, then the subscribe's reply
-    // bound, before the socket's close callback can run (libuv's close phase).
-    let stateAtTimeout = -1;
-    setTimeout(() => { c.reconnect(); stateAtTimeout = cpriv.ws?.readyState ?? -1; }, 120);
-    await assert.rejects(c.subscribe({ type: 'subscribe_events', event_type: 'state_changed' }, () => {}, 120), /^Error: HA WS timeout/,
-      'the reply bound ran before the close event: the gap was reached');
-    assert.equal(stateAtTimeout, 2, 'precondition: the socket was CLOSING when the bound passed');
-    await waitFor(() => h.conns.length === 2 && c.ready(), 8000, 'reconnected');
-    const c1 = h.conns[1];
-    await c.send({ type: 'ping-ish' }, 2000);
-    await sleep(50);
-    assert.deepEqual(releasesSent(h.conns[0]), [], 'nothing went out on the closing socket');
-    assert.deepEqual(releasesSent(c1), [], 'and nothing on the next one');
-    assert.equal(cpriv.pending.size, 0);
-    // The control: on an open socket, a subscribe given up on is released.
-    await assert.rejects(c.subscribe({ type: 'subscribe_events', event_type: 'state_changed' }, () => {}, 80), /HA WS timeout/);
-    const s1 = subscribes(c1)[0].id as number;
-    await waitFor(() => releasesSent(c1).length === 1, 2000, 'released on the open socket');
-    assert.equal(releasesSent(c1)[0].subscription, s1);
-    assert.deepEqual(h.idReuse, []);
-    assert.deepEqual(u.seen, []);
-  } finally {
-    u.off();
-    c.stop();
-    await h.close();
+  // Two timers of one duration set in one turn run in one pass of the timers
+  // phase, in the order set: the terminate first, then the subscribe's reply
+  // bound, before the socket's close callback can run (libuv's close phase).
+  // On a loaded machine the close event can still run between them; that
+  // trial rejects with the connection closed and never reached the order this
+  // test is about, so it is run again. A trial that reaches it is judged in
+  // full.
+  for (let attempt = 1; ; attempt++) {
+    const h = await core();
+    const never = new Promise<void>(() => {});
+    h.plan = (_ci, m) => (m.type === 'subscribe_events' ? { hold: never } : null);
+    const c = client(h.url);
+    const cpriv = c as unknown as { ws: { readyState: number } | null; pending: Map<number, unknown> };
+    const u = unhandled();
+    try {
+      c.start();
+      await waitFor(() => c.ready());
+      let stateAtTimeout = -1;
+      setTimeout(() => { c.reconnect(); stateAtTimeout = cpriv.ws?.readyState ?? -1; }, 120);
+      const err = await c.subscribe({ type: 'subscribe_events', event_type: 'state_changed' }, () => {}, 120)
+        .then(() => null, (e: unknown) => e);
+      if (!(/^Error: HA WS timeout/.test(String(err)) && stateAtTimeout === 2)) {
+        assert.ok(attempt < 5,
+          `the reply bound never passed while the socket was CLOSING in 5 trials (last: ${String(err)}, state ${stateAtTimeout})`);
+        continue;
+      }
+      await waitFor(() => h.conns.length === 2 && c.ready(), 8000, 'reconnected');
+      const c1 = h.conns[1];
+      await c.send({ type: 'ping-ish' }, 2000);
+      await sleep(50);
+      assert.deepEqual(releasesSent(h.conns[0]), [], 'nothing went out on the closing socket');
+      assert.deepEqual(releasesSent(c1), [], 'and nothing on the next one');
+      assert.equal(cpriv.pending.size, 0);
+      // The control: on an open socket, a subscribe given up on is released.
+      await assert.rejects(c.subscribe({ type: 'subscribe_events', event_type: 'state_changed' }, () => {}, 80), /HA WS timeout/);
+      const s1 = subscribes(c1)[0].id as number;
+      await waitFor(() => releasesSent(c1).length === 1, 2000, 'released on the open socket');
+      assert.equal(releasesSent(c1)[0].subscription, s1);
+      assert.deepEqual(h.idReuse, []);
+      assert.deepEqual(u.seen, []);
+      return;
+    } finally {
+      u.off();
+      c.stop();
+      await h.close();
+    }
   }
 });
 

@@ -31,7 +31,23 @@ const TEST_HOST_KEY = generateHostKey().key;
 import { mkNode, mockData } from './_logHelpers';
 
 /** Fixed high port for the telnet cap probe (0 gives no discoverable port). */
-const TELNET_TEST_PORT = 24391;
+/** A free loopback port for one test's server. A fixed port collided when
+ *  two suites ran at once on one machine (a mutation run beside a review's
+ *  suite): one server could not bind, and its client reached the other
+ *  process's server, which never logged its accept and closed under it. The
+ *  port is released before the server binds it; nothing else on loopback
+ *  takes it in between. */
+async function freePort(): Promise<number> {
+  const { createServer } = await import('node:net');
+  return new Promise<number>((resolve, reject) => {
+    const s = createServer();
+    s.once('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address() as import('node:net').AddressInfo;
+      s.close(() => resolve(port));
+    });
+  });
+}
 
 /** The composition used in index.ts — kept verbatim so this tests the real rule. */
 const isIngressTrusted = (req: { headers: Record<string, unknown>; ip: string }): boolean =>
@@ -250,23 +266,22 @@ test('one host cannot take every SSH slot', async () => {
   const { startSshServer } = await import('../src/telnet/server');
   const { connect } = await import('node:net');
 
+  const port = await freePort();
   const srv = startSshServer({
     hostKey: TEST_HOST_KEY,
     data: mockData({ nodes: [mkNode()] }),
     host: '127.0.0.1',
-    port: TELNET_TEST_PORT,
+    port,
     log: () => {},
     signalDisplay: 'margin',
   } as never);
 
-  // startTelnetServer does not surface the bound port, so probe the fixed one
-  // only when it is actually listening; otherwise assert the rule directly.
   const results: string[] = [];
   await new Promise<void>((done) => {
     let settled = 0;
     const N = 6;
     for (let i = 0; i < N; i++) {
-      const s = connect({ host: '127.0.0.1', port: TELNET_TEST_PORT });
+      const s = connect({ host: '127.0.0.1', port });
       let got = '';
       s.setEncoding('utf8');
       s.on('data', (d) => { got += d; });
@@ -306,18 +321,19 @@ test('a silent socket is reclaimed by the idle timeout', async () => {
   const { connect } = await import('node:net');
 
   const logs: string[] = [];
+  const port = await freePort();
   const srv = startSshServer({
     hostKey: TEST_HOST_KEY,
     data: mockData({ nodes: [mkNode()] }),
     host: '127.0.0.1',
-    port: TELNET_TEST_PORT + 1,
+    port,
     log: (m: string) => { logs.push(m); },
     signalDisplay: 'margin',
     idleTimeoutMs: 250,
   } as never);
 
   const closedWithin = await new Promise<boolean>((done) => {
-    const s = connect({ host: '127.0.0.1', port: TELNET_TEST_PORT + 1 });
+    const s = connect({ host: '127.0.0.1', port });
     const timer = setTimeout(() => { s.destroy(); done(false); }, 3000);
     // Send nothing at all — this is the abusive case. But DO read: a socket
     // with no 'data' listener stays paused, so the server's FIN is never
@@ -352,20 +368,31 @@ test('accepted sockets get TCP keepalive, to catch half-open peers', async () =>
   } as typeof original;
 
   try {
+    // Hang up once the server has accepted the socket, not after a fixed
+    // delay: under a loaded event loop the accept handler could run after a
+    // 250 ms hang-up, and the test failed with no call seen. The accept
+    // handler logs "client connected" right after it sets keepalive, in the
+    // same synchronous step; the deadline only bounds a server that never
+    // accepts, which then fails the assertion below.
+    let accepted!: () => void;
+    const acceptedP = new Promise<void>((resolve) => { accepted = resolve; });
+    const port = await freePort();
     const srv = startSshServer({
     hostKey: TEST_HOST_KEY,
       data: mockData({ nodes: [mkNode()] }),
       host: '127.0.0.1',
-      port: TELNET_TEST_PORT + 2,
-      log: () => {},
+      port,
+      log: (m: string) => { if (String(m).startsWith('ssh: client connected')) accepted(); },
       signalDisplay: 'margin',
       keepAliveMs: 12_345,
     } as never);
 
     await new Promise<void>((done) => {
-      const s = net.connect({ host: '127.0.0.1', port: TELNET_TEST_PORT + 2 });
-      s.on('connect', () => setTimeout(() => { s.destroy(); done(); }, 250));
-      s.on('error', () => done());
+      const s = net.connect({ host: '127.0.0.1', port });
+      const finish = () => { clearTimeout(deadline); s.destroy(); done(); };
+      const deadline = setTimeout(finish, 10_000);
+      void acceptedP.then(finish);
+      s.on('error', finish);
     });
     srv.stop();
   } finally {
@@ -430,18 +457,19 @@ test('an ACTIVE operator is never evicted by the idle sweep', async () => {
   const { startSshServer } = await import('../src/telnet/server');
   const { connect } = await import('node:net');
 
+  const port = await freePort();
   const srv = startSshServer({
     hostKey: TEST_HOST_KEY,
     data: mockData({ nodes: [mkNode()] }),
     host: '127.0.0.1',
-    port: TELNET_TEST_PORT + 3,
+    port,
     log: () => {},
     signalDisplay: 'margin',
     idleTimeoutMs: 300,
   } as never);
 
   const survived = await new Promise<boolean>((done) => {
-    const s = connect({ host: '127.0.0.1', port: TELNET_TEST_PORT + 3 });
+    const s = connect({ host: '127.0.0.1', port });
     s.resume();
     // Type something harmless well inside every sweep window.
     const typing = setInterval(() => { if (!s.destroyed) s.write(' '); }, 80);
