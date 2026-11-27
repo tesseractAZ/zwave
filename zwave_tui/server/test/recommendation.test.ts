@@ -65,6 +65,19 @@ test('a summons headline says what the ladder did, never that a ping often reviv
   assert.match(String(paused.attrs.headline), /a ping often revives it/);
 });
 
+test('a summons whose launches ran out after a ping went unanswered says how many, never that the node was not tested (v0.79.9)', () => {
+  // `attempts` counts only pings that left (a failed launch gives its attempt
+  // back), and launchFailures is cleared only by a recovery or a departure: one
+  // unanswered ping, then three failed launches, is launchGaveUp at attempts 1.
+  const down = sym('node-down', 7, 2 * 3_600_000, { severity: 'crit' });
+  const head = (attempts: number): string => String(buildRecommendation(inp({ symptoms: [down],
+    ap: AP([apNode(7, { deadSinceMs: NOW - 3_600_000, attempts, launchFailures: 3, launchGaveUp: true })]) })).attrs.headline);
+  assert.equal(head(1), 'Node is DOWN — auto-ping could not send its pings after 1 unanswered attempt');
+  assert.equal(head(2), 'Node is DOWN — auto-ping could not send its pings after 2 unanswered attempts');
+  // Control: none left, so the node itself was not tested.
+  assert.equal(head(0), 'Node is DOWN — auto-ping could not send its pings, so the node itself was not tested');
+});
+
 test('the first step is never destructive and never blocked: signal problems and a ghost are physical (v0.72.0)', () => {
   for (const kind of ['rate-fallback', 'chatty-device', 'ghost-suspect'] as SymptomKind[]) {
     const r = buildRecommendation(inp({ symptoms: [sym(kind, 7, 61 * 60_000)] }));

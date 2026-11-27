@@ -19,14 +19,41 @@
  * Pure render: exactly `view.rows` lines, each ≤ `view.cols`.
  */
 
-import { c, truncate, padStart } from '../ansi';
+import { c, truncate, padStart, clipWords, visLen } from '../ansi';
 import { MIN_HOUR_TX } from '../../zwave/interference';
 import { sparkline, heatCell, chartRows } from '../gauges';
 import { noiseColor, timeoutPctColor } from '../bands';
-import type { ScreenCtx, InterferenceView } from '../../types';
-import { frame, shedLine } from '../chrome';
+import type { ScreenCtx, InterferenceView, DataProvider } from '../../types';
+import { frame, shedLine, wrapWords } from '../chrome';
 
 type ColorFn = (s: string) => string;
+
+/** How a driver link with no background-RSSI reading reads, by state
+ *  (v0.79.9): a sentence form and a short form. `disabled` has its own
+ *  sentence on each screen; `live` here is a live link with a fault. */
+const LINK_STATE_WORDS: Record<string, readonly [string, string]> = {
+  connecting: ['is still connecting', 'connecting'],
+  handshake: ['is still starting up', 'starting'],
+  backoff: ['failed and is retrying', 'retrying'],
+  dormant: ['is dormant', 'dormant'],
+  stopped: ['is stopped', 'stopped'],
+  live: ['is live', 'live'],
+};
+
+/**
+ * Why the Controller screen's per-channel row is empty, as one token (v0.79.9).
+ * HA never carries the field, so "not reported by HA" is true there and says
+ * nothing of the driver link that would carry it. A live link is only named:
+ * that row is also empty when a reading lacks channel 0 (`leadingRun`).
+ */
+export function driverLinkGap(data: Pick<DataProvider, 'driverWsState' | 'driverLinkFault'>): string {
+  const st = data.driverWsState?.() ?? 'disabled';
+  const fault = data.driverLinkFault?.() ?? null;
+  if (st === 'disabled') return 'driver-WS client not configured';
+  if (fault) return `${fault.split(' — ')[0]} (see ENGINE)`;
+  if (st === 'live') return 'driver link live (see INTERFERENCE)';
+  return `driver link ${(LINK_STATE_WORDS[st] ?? [st, st])[1]} (see ENGINE)`;
+}
 
 /** Absolute heat scale for the diurnal map: 0 → 5% maps across the four shades.
  *  Above ~5% per-command timeout is well beyond a healthy mesh's ~2%. Absolute,
@@ -136,8 +163,54 @@ export function renderInterference(ctx: ScreenCtx): string[] {
     // truncate cut it at 80 columns, and it is the case this state is for.
     for (const l of shedLine('  ', c.grey('◷ no floor yet'), [c.grey('≤ −120 = "no signal detected"'), c.grey('0 = "no value yet" or saturated')], W)) push(l);
   } else if (!iv.noise.real) {
-    push('  ' + c.grey('◷ unavailable — the read-only driver-WS client is not connected.'));
-    push('  ' + c.grey('    (HA strips backgroundRSSI; set driver_ws_url to enable this.)'));
+    // NAME THE LINK'S STATE (v0.79.9). This branch means no fresh reading
+    // from this network reached the view (bgChannels null), in every link
+    // state, and it said "not connected … set driver_ws_url" in all of them —
+    // while driver_ws_url ships set (ws://core-zwave-js:3000). The option is
+    // named as something to set only where it is empty (`disabled`), and as
+    // something to check only where a wrong one can be the cause.
+    const st = data.driverWsState?.() ?? 'disabled';
+    const fault = data.driverLinkFault?.() ?? null;
+    // Longest whole form that fits; clipWords is the floor, never a blind cut.
+    const fit = (forms: string[]): string => clipWords(forms.find((f) => visLen(f) <= W) ?? forms[forms.length - 1], W);
+    if (st === 'disabled') {
+      push(c.grey(fit([
+        '  ◷ unavailable — the read-only driver-WS client is not configured.',
+        '  ◷ unavailable — the driver-WS client is not configured.',
+        '  ◷ unavailable — no driver-WS client.',
+      ])));
+      push(c.grey(fit([
+        '      (HA strips backgroundRSSI; set driver_ws_url to enable this.)',
+        '      (set driver_ws_url to enable this.)',
+        '      (set driver_ws_url.)',
+      ])));
+    } else if (st === 'live' && fault == null) {
+      push(c.grey(fit([
+        '  ◷ unavailable — no background-RSSI reading from the driver in 90 s.',
+        '  ◷ unavailable — no background-RSSI reading in 90 s.',
+        '  ◷ no background-RSSI reading in 90 s.',
+      ])));
+    } else {
+      const [long, short] = LINK_STATE_WORDS[st] ?? [`is ${st}`, st];
+      push(c.grey(fit([
+        `  ◷ unavailable — the driver link ${long} (see ENGINE).`,
+        `  ◷ unavailable — driver link ${short} (ENGINE).`,
+        `  ◷ n/a — link ${short} (ENGINE).`,
+      ])));
+      // The fault whole where it fits; narrower, its trailing "(check …)"
+      // advice moves to a row of its own rather than being clipped away, and
+      // where the rest still does not fit it wraps at its own " — ", then at
+      // words, onto rows at the advice's indent: at 40 columns a clip lost
+      // "telemetry PURGED", the half that says what the fault did.
+      const advice = fault ? /^(.*\S)\s*\(([^()]+)\)$/.exec(fault) : null;
+      if (fault && (advice == null || visLen(`    ⚠ ${fault}`) <= W)) push('    ' + c.yellow(clipWords(`⚠ ${fault}`, W - 4)));
+      else if (advice) {
+        const said = visLen(`⚠ ${advice[1]}`) <= W - 4 ? [advice[1]]
+          : advice[1].split(' — ').flatMap((clause) => wrapWords(clause, W - 6));
+        said.forEach((l, i) => push(i === 0 ? '    ' + c.yellow(`⚠ ${l}`) : '      ' + c.yellow(l)));
+        push(c.grey(`      (${advice[2]}.)`));
+      } else if (st === 'backoff' || st === 'stopped') push(c.grey('      (check driver_ws_url.)'));
+    }
   } else {
     const nc = NOISE_COLOR[iv.noise.band];
     // The NUMBER is coloured by the shared dBm bands (bands.ts) so the same

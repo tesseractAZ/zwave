@@ -778,3 +778,61 @@ test('REFRESH TRIAL: off, latched, in flight and the counts, each in words (v0.7
   assert.match(at(view({ exclusions: [{ nodeId: 12, until: NOW + 86_400_000 }] })), /#12 excluded to/);
   assert.doesNotMatch(plain(renderEngine(ctx(140, 60))), /REFRESH TRIAL/, 'no trial attached, no block');
 });
+
+test('LEARNED shows the refusal tally of a kind SCORED_KINDS omits — ghost-suspect — on its own two rows, at every width (v0.79.9)', () => {
+  // ghost-suspect is the ONE kind a driver refusal indicts (REFUSAL_INDICTS),
+  // and LEARNED iterated only SCORED_KINDS, which never held it: the tally
+  // reached REMEDY's card and no row here. The only fp test above feeds
+  // rtt-degraded, which production can never refuse.
+  const ghost: Partial<DataProvider> = { falsePositives: (k) => (k === 'ghost-suspect' ? 2 : 0) };
+  for (const cols of [40, 60, 80, 120]) {
+    for (const rows of [24, 60]) {
+      const lines = renderEngine(ctx(cols, rows, ghost));
+      assert.equal(lines.length, rows, `${cols}x${rows}`);
+      lines.forEach((l, i) => assert.ok(visLen(l) <= cols, `${cols}x${rows} row ${i}: ${visLen(l)} > ${cols}`));
+    }
+    // Room to show the whole LEARNED block: the tally is a whole bit, never cut.
+    const shown = plain(renderEngine(ctx(cols, 60, ghost)));
+    assert.match(shown, /\n {2}ghost-suspect\n {4}○ 2 refused as misdiagnosis\n/, `${cols}`);
+    assert.doesNotMatch(shown, /nothing learned yet/, `${cols}: a refusal is something learned`);
+  }
+  // Silent at zero, like every tally: a clean detector says nothing.
+  const clean = plain(renderEngine(ctx(120, 60)));
+  assert.doesNotMatch(clean, /ghost-suspect/);
+  assert.match(clean, /nothing learned yet/, 'control: an empty ledger still says so');
+});
+
+test('the n≈ legend needs a weight on screen: a refusal-only or tallies-only LEARNED block gets none (v0.79.9)', () => {
+  // The legend keyed on anyLearned, which a refusal tally or a kind with only
+  // unscoreable tallies sets with no n≈ anywhere in LEARNED.
+  // Every whole form's head, the 40-column one included; a weight (n≈6.2) is not one.
+  const legend = /n≈ (?:is recent-weighted|decays, )/;
+  const ghost: Partial<DataProvider> = { falsePositives: (k) => (k === 'ghost-suspect' ? 2 : 0) };
+  const tallies: Partial<DataProvider> = { unverifiableCount: (k) => (k === 'rtt-degraded' ? 3 : 0) };
+  for (const cols of [40, 60, 80, 120]) {
+    // Tallies first: they render on the base too, so the case fails on its own reason.
+    const t = plain(renderEngine(ctx(cols, 60, tallies)));
+    assert.match(t, /3 unscoreable/, `${cols}: fixture guard: the tallies row`);
+    assert.doesNotMatch(t, legend, `${cols}: tallies-only, no legend`);
+    const g = plain(renderEngine(ctx(cols, 60, ghost)));
+    assert.match(g, /2 refused as misdiagnosis/, `${cols}: fixture guard: the refusal row`);
+    assert.doesNotMatch(g, /n≈\d/, `${cols}: fixture guard: no weight drawn`);
+    assert.doesNotMatch(g, legend, `${cols}: refusal-only, no legend`);
+  }
+  // Control: a weight on screen brings the legend, with the refusal rows beside it,
+  // and the legend is one of its whole forms at every width, 40 included.
+  const weighted: Partial<DataProvider> = { ...ghost,
+    controlArm: (k) => (k === 'rtt-degraded' ? { n: 6.2, ok: 5.1, bad: 0, nodes: 3, minN: 4 } : null) };
+  const both = plain(renderEngine(ctx(120, 60, weighted)));
+  assert.match(both, /n≈6\.2/);
+  assert.match(both, legend);
+  const forms = [
+    'n≈ is recent-weighted and saturates near 33; node counts are cumulative',
+    'n≈ decays, saturates ~33; nodes cumulative',
+    'n≈ decays, caps ~33; nodes cumulative',
+  ];
+  for (const cols of [40, 60, 80, 120]) {
+    const row = plain(renderEngine(ctx(cols, 60, weighted))).split('\n').find((l) => /^ {2}n≈ /.test(l)) ?? '';
+    assert.ok(forms.includes(row.trim()), `${cols}: "${row}" is a whole legend form`);
+  }
+});

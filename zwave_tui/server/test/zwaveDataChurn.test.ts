@@ -22,8 +22,23 @@ import { mockServer } from './_driverWsMock';
 import { createRefreshTrial, trialHandle } from '../src/zwave/refreshTrial';
 import type { WindowMetrics } from '../src/zwave/outcomes';
 import { createEvidenceStore, COARSE_BUCKET_MS } from '../src/zwave/evidenceStore';
+import { renderRemedy } from '../src/telnet/screens/remedy';
+import { renderDetail } from '../src/telnet/screens/detail';
+import { renderEngine } from '../src/telnet/screens/engine';
+import { mockData, mkView } from './_logHelpers';
+import type { DataProvider, Symptom } from '../src/types';
+import type { AutoPingSnapshot } from '../src/zwave/autoPing';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** A running auto-ping's snapshot, every field set (v0.79.9): non-null is what
+ *  "a runner exists" means to ZwaveData. A partial one makes the engine pass
+ *  throw where it reads `config.staleMs`; 0 is no sweep cadence. */
+const runningAutoPing = (): AutoPingSnapshot => ({
+  lastTickMs: null, suppressed: 'none', listening: 0, deadListening: 0, capabilityUnknown: 0,
+  staleDue: null, stalestMs: null, verifyOwed: null,
+  config: { enabled: true, writeActions: true, afterMs: 10 * 60_000, maxAttempts: 3, staleMs: 0 },
+  nodes: [],
+});
 async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
   const t0 = Date.now();
   while (!cond()) {
@@ -539,6 +554,7 @@ test('drainVerifyRequests hands out ONE node per tick, spaced, and stops after t
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const q = zd as unknown as { requestVerification: (n: number) => void };
     q.requestVerification(7);
@@ -567,6 +583,7 @@ test('repeated requests CAP the outstanding budget — a flapping symptom cannot
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const q = zd as unknown as { requestVerification: (n: number) => void };
     const t0 = 1_800_000_000_000;
@@ -580,9 +597,103 @@ test('repeated requests CAP the outstanding budget — a flapping symptom cannot
   }
 });
 
+test('with no auto-ping runner no verification probe is booked: nothing would send it, so neither REMEDY nor DETAIL shows a debt (v0.79.9)', async () => {
+  // Only the runner drains verifyOwed, and index.ts hands its snapshot over
+  // only when it starts one (auto-ping AND write actions on). Both default
+  // off, and every episode on a listening node booked a five-probe burst no
+  // lane would ever send — which REMEDY called "the score is pending".
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-norunner-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+    const listening = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+    const shadow = zd as unknown as { snapshot: () => NodeSnapshot[]; updateEpisodes: (s: unknown[], now: number) => void };
+    shadow.snapshot = () => listening;
+    assert.equal(zd.autoPingState(), null, 'fixture guard: no runner');
+    const t0 = 1_800_000_000_000;
+    const symptom = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+    shadow.updateEpisodes([symptom], t0);
+    assert.equal((zd.openEpisodes() ?? []).filter((e) => e.nodeId === 7).length, 1, 'fixture guard: the episode opened');
+    assert.equal(zd.verifyOwedFor(7), 0, 'no runner, no debt');
+    // The two screens that show a node's debt, over the engine's own answers.
+    const live = { ...symptom, sinceMs: Date.now() - 20 * 60_000, narrative: 'Node 7 round trip is above its own normal.' } as Symptom;
+    const cov = { firstSeenAt: 2_000, samples: 500, freshSamples: 480, statusFeedLive: true, statsFeedLive: true,
+      probesAsked: 40, probesAnswered: 31, probesSelfProven: 9, probesEchoOnly: 20, probesAttribUnknown: 0, probesUnheard: 11,
+      probesReadAsked: 0, probesReadAnswered: 0, laneEpoch: 1_000, creditEpoch: 1_000 };
+    const data = (): DataProvider => ({
+      ...mockData({ nodes: listening }), symptoms: () => [live], evidenceCoverage: () => cov as never,
+      probeable: (id: number) => zd.probeable(id), verifyOwedFor: (id: number) => zd.verifyOwedFor(id),
+      autoPingState: () => zd.autoPingState(),
+    } as DataProvider);
+    const strip = (ls: string[]): string => ls.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+    const remedy = (): string => strip(renderRemedy({ view: mkView({ screen: 'remedy', cols: 160, rows: 40 }), data: data(), visibleNodes: listening, filtering: false, actionsEnabled: true }));
+    const detail = (): string => strip(renderDetail({ view: mkView({ screen: 'detail', cols: 140, rows: 80, selected: listening.findIndex((n) => n.nodeId === 7) }), data: data(), visibleNodes: listening, filtering: false, actionsEnabled: true }));
+    assert.doesNotMatch(remedy(), /still owed|score is pending/);
+    assert.match(remedy(), /○ auto-ping is off — no verification probes are sent/);
+    assert.doesNotMatch(detail(), /verification probes? owed/);
+    // Control: with a runner the same request is booked, and both screens show it.
+    zd.setAutoPingSnapshot(runningAutoPing);
+    assert.equal((zd as unknown as { requestVerification: (n: number) => boolean }).requestVerification(7), true);
+    assert.equal(zd.verifyOwedFor(7), 5, 'a runner books the burst as before');
+    assert.match(remedy(), /5 verification probes still owed — the score is pending, not absent/);
+    assert.match(detail(), /5 verification probes owed — episode evidence is not yet confirmed/);
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('with no auto-ping runner an episode on a node whose own traffic fills both windows is still scored (v0.79.9)', async () => {
+  // Why REMEDY's card of a kind with a recovery metric says "any score must
+  // come from the node's other traffic" and not that no score can come: each
+  // kind's evidence floor counts readings of its own signal from any traffic,
+  // not only probe replies (here rtt-degraded's round trips). A control — it
+  // holds before and after the runner guard.
+  const ha = fakeHa();
+  const dir = mkdtempSync(join(tmpdir(), 'zwtui-norunner-chatty-'));
+  const zd = await bootedZwaveData(ha, {
+    refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+    evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+    outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+  });
+  try {
+    await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+    const listening = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+    const shadow = zd as unknown as { snapshot: () => NodeSnapshot[]; updateEpisodes: (s: unknown[], now: number) => void; evidenceStore: { forNode: (id: number) => unknown[] } };
+    shadow.snapshot = () => listening;
+    assert.equal(zd.autoPingState(), null, 'fixture guard: no runner');
+    const t0 = 1_800_000_000_000;
+    // The node's own traffic every 30 s: slow until a minute past the clear, fast after.
+    const samples: unknown[] = [];
+    for (let t = t0 - 10 * 60_000; t <= t0 + 13 * 60_000; t += 30_000) {
+      samples.push({ t, dTx: 1, dTimeout: 0, dDropTx: 0, dRx: 1, dFlaps: 0, dRouteChanges: 0, dS2Resync: null,
+        fresh: true, rtt: t <= t0 + 60_000 ? 340 : 30, rssi: -60, rateKbps: 100, routeKey: 'direct', status: NodeStatus.Alive,
+        lastSeen: null, isListening: true, isFrequentListening: true });
+    }
+    const realForNode = shadow.evidenceStore.forNode.bind(shadow.evidenceStore);
+    shadow.evidenceStore.forNode = (id: number) => (id === 7 ? samples : realForNode(id));
+    const symptom = { kind: 'rtt-degraded', nodeId: 7, severity: 'warn', sinceMs: t0 - 5 * 60_000, basis: 'measured', evidence: [], narrative: '' };
+    shadow.updateEpisodes([symptom], t0);
+    shadow.updateEpisodes([], t0 + 60_000);
+    shadow.updateEpisodes([], t0 + 12 * 60_000);
+    const closed = zd.events().filter((e) => e.nodeId === 7 && /rtt-degraded closed/.test(e.text)).map((e) => e.text);
+    assert.ok(closed.some((t) => /closed improved/.test(t)), `scored with no probe lane at all: ${JSON.stringify(closed)}`);
+    assert.equal(zd.unverifiableCount('rtt-degraded'), 0);
+  } finally {
+    zd.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('with no engine configured the queue is inert — no probes requested at all', async () => {
   const ha = fakeHa();
   const zd = await bootedZwaveData(ha, { refreshMs: 80, routePollMs: 120, driverWsUrl: null });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const q = zd as unknown as { requestVerification: (n: number) => void };
     q.requestVerification(7);
@@ -607,6 +718,7 @@ test('a verification burst carries MARGIN over the evidence floor (v0.37.2)', as
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const q = zd as unknown as { requestVerification: (n: number) => void };
     q.requestVerification(7);
@@ -636,6 +748,7 @@ test('a burst SPANS LESS than the window it must fill — the check that was mis
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const TICK = 60_000, WINDOW = 5 * 60_000;
     const q = zd as unknown as { requestVerification: (n: number) => void };
@@ -672,6 +785,7 @@ test('every contending node STARTS its burst promptly — a delayed burst misses
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const TICK = 60_000;
     const q = zd as unknown as { requestVerification: (n: number) => void };
@@ -707,6 +821,7 @@ test('CONTENTION does not stretch a burst past its window', async () => {
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const TICK = 60_000, WINDOW = 5 * 60_000;
     const q = zd as unknown as { requestVerification: (n: number) => void };
@@ -818,6 +933,7 @@ test('the first-of-burst flag is true EXACTLY once per burst (v0.38.2)', async (
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const q = zd as unknown as { requestVerification: (n: number) => void };
     q.requestVerification(7);
@@ -1017,6 +1133,45 @@ test('a refused removeFailed reaches the ledger as refused-misdiagnosis; a trans
   } finally {
     zd.stop();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a refused removeFailed after a ping on the same episode still files refused-misdiagnosis, and ENGINE shows it (v0.79.9)', async () => {
+  // First action wins for CREDIT, and a refusal claims none: it is the driver
+  // saying the diagnosis was wrong. The ladder pings a Dead mains ghost after its
+  // dwell, usually before an operator reaches `x`, and an operator may ping it
+  // first: either way the stamp was taken and the refusal dropped without a trace.
+  for (const origin of ['you', 'engine'] as const) {
+    const ha = fakeHa();
+    const dir = mkdtempSync(join(tmpdir(), 'zwtui-refusal-after-'));
+    const zd = await bootedZwaveData(ha, {
+      refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+      evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+      outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+    });
+    try {
+      await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
+      const asListening = zd.snapshot().map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+      const shadow = zd as unknown as { snapshot: () => NodeSnapshot[]; updateEpisodes: (s: unknown[], now: number) => void };
+      shadow.snapshot = () => asListening;
+      const t0 = 1_800_000_000_000;
+      const sym = { kind: 'ghost-suspect', nodeId: 7, severity: 'warn', sinceMs: t0, basis: 'measured', evidence: [], narrative: '' };
+      shadow.updateEpisodes([sym], t0);
+      zd.recordActionOutcome('ping', 7, true, undefined, origin, t0 + 1_000, false);
+      zd.recordActionOutcome('removeFailed', 7, false, 'refused', 'you', t0 + 2_000);
+      shadow.updateEpisodes([], t0 + 60_000);
+      shadow.updateEpisodes([], t0 + 12 * 60_000);
+      assert.equal(zd.falsePositives('ghost-suspect'), 1, `${origin} ping first: the refusal still indicts the detector`);
+      const engine = renderEngine({
+        view: mkView({ screen: 'engine', cols: 80, rows: 60 }),
+        data: { ...mockData(), falsePositives: (k: string) => zd.falsePositives(k as never) } as DataProvider,
+        visibleNodes: [], filtering: false, actionsEnabled: true,
+      }).map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+      assert.match(engine, /\n {2}ghost-suspect\n {4}○ 1 refused as misdiagnosis\n/, `${origin}: ENGINE's LEARNED block shows it`);
+    } finally {
+      zd.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1353,6 +1508,7 @@ test('in-flight episodes discarded by a mesh-identity change are COUNTED, not dr
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     // Two open episodes, then the identity flips underneath them.
     const oc = (zd as unknown as { outcomes: OutcomeStore }).outcomes;
@@ -2679,6 +2835,7 @@ test('each Alive→Dead transition reaches the runner once — from the status f
 
 test('drainVerifyRequests leaves a SKIPPED node\'s burst owed, and hands it out once the skip lifts (v0.71.0)', async () => {
   const R = await rerouteZd('zwtui-verify-skip-');
+  R.zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     (R.zd as unknown as { requestVerification: (n: number) => void }).requestVerification(7);
     const t0 = 1_800_000_000_000;
@@ -2964,6 +3121,7 @@ test('FLiRS counts as listening for commands; a sleeper does not; unknown stays 
 
 test('entering a pause clears what verification owed, and nothing is owed while paused (v0.72.0)', async () => {
   const R = await rerouteZd('zwtui-pause-owed-');
+  R.zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const req = (R.zd as unknown as { requestVerification: (n: number) => boolean }).requestVerification.bind(R.zd);
     assert.equal(req(7), true);
@@ -3002,6 +3160,7 @@ test('an episode open during a pause is confounded — it got none of the checks
 
 test('a check burst the pause refused is still owed when the pause lifts inside its window (v0.72.0)', async () => {
   const R = await rerouteZd('zwtui-pause-burst-');
+  R.zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const real = R.priv.snapshot();
     const asAlive = real.map((n) => (n.nodeId === 7 ? { ...n, status: NodeStatus.Alive, isListening: true } : n));
@@ -3141,6 +3300,7 @@ test('a mesh-wide rebuild holds every episode open and confounds it (second revi
 
 test('an after-window burst sent while an action ran is sent again once it settles (second review)', async () => {
   const E = await episodeRig('zwtui-burst-hold-');
+  E.R.zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     // Probes are spaced per node, so each drain call must move the clock on.
     const drain = () => { let t = Date.now() + 10 * 86_400_000; while (E.R.zd.drainVerifyRequests(t).length) t += 3_600_000; };
@@ -3212,6 +3372,7 @@ test('an episode that opens while an UNKNOWN heal may still be running is confou
 
 test('a quick action between two ticks still re-arms the after-window burst (third review)', async () => {
   const E = await episodeRig('zwtui-quick-burst-');
+  E.R.zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     const drain = () => { let t = Date.now() + 10 * 86_400_000; while (E.R.zd.drainVerifyRequests(t).length) t += 3_600_000; };
     E.R.priv.updateEpisodes([], E.t0 + 60_000);
@@ -3271,6 +3432,7 @@ test('an episode is not scored while its last confirmation probe can still time 
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
     const MIN = 60_000;
@@ -3319,6 +3481,7 @@ test('the refresh trial rides the engine tick: decided at 10 minutes live, froze
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
     const MIN = 60_000;
@@ -3391,6 +3554,7 @@ test('the trial\'s live gates reach it from the data layer: the refresh profile,
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
     const MIN = 60_000;
@@ -3986,6 +4150,7 @@ test('an episode is not scored while a probe of its node is still waiting for it
     evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
     outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
   });
+  zd.setAutoPingSnapshot(runningAutoPing); // auto-ping running
   try {
     await waitFor(() => zd.snapshot().some((n: NodeSnapshot) => n.nodeId === 7), 4000);
     const MIN = 60_000;

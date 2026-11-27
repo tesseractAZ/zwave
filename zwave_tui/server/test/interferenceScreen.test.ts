@@ -430,3 +430,74 @@ test('the QUIETEST floor is published and rendered, not averaged away (v0.62.0)'
   const joined = lines.join(' ').replace(/\s+/g, ' ');
   assert.match(joined, /quietest -112 dBm/, `the quietest reading must render: ${joined.slice(0, 500)}`);
 });
+
+/* ── v0.79.9: the missing floor names the driver link's state ──────────── */
+
+const NO_FLOOR = cleanView({ noise: { channels: [null, null, null, null], floor: null, real: false, trend: [], trendCoarse: [], trendCoarseMax: [], trendCoarseMin: [], trendCoarseDays: 0, band: 'unknown' } });
+const FAULT = 'homeId mismatch — driver telemetry PURGED (check driver_ws_url)';
+const linkLines = (cols: number, rows: number, st: string, fault: string | null = null): string[] =>
+  renderInterference({ ...ctx(cols, rows, NO_FLOOR), data: { ...data(NO_FLOOR), driverWsState: () => st, driverLinkFault: () => fault } as unknown as DataProvider })
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+const STATES = ['connecting', 'handshake', 'backoff', 'dormant', 'stopped', 'live'];
+
+test('the driver_ws_url hint appears only where the option is unset, and every link state names itself (v0.79.9)', () => {
+  // driver_ws_url ships SET (ws://core-zwave-js:3000), and this branch means
+  // only that no fresh reading reached the view — in every link state. "Not
+  // connected … set driver_ws_url" was right for exactly one of them.
+  const at80 = (st: string): string => linkLines(80, 24, st).join('\n');
+  assert.match(at80('disabled'), /◷ unavailable — the read-only driver-WS client is not configured\./);
+  assert.match(at80('disabled'), /\(HA strips backgroundRSSI; set driver_ws_url to enable this\.\)/);
+  const said: Record<string, RegExp> = {
+    connecting: /◷ unavailable — the driver link is still connecting \(see ENGINE\)\./,
+    handshake: /◷ unavailable — the driver link is still starting up \(see ENGINE\)\./,
+    backoff: /◷ unavailable — the driver link failed and is retrying \(see ENGINE\)\./,
+    dormant: /◷ unavailable — the driver link is dormant \(see ENGINE\)\./,
+    stopped: /◷ unavailable — the driver link is stopped \(see ENGINE\)\./,
+    live: /◷ unavailable — no background-RSSI reading from the driver in 90 s\./,
+  };
+  for (const st of STATES) {
+    const j = at80(st);
+    assert.doesNotMatch(j, /set driver_ws_url|not connected|not configured/, `${st}: the option is set and the client exists`);
+    assert.match(j, said[st], st);
+  }
+  // A wrong URL can be the cause of a backoff or a stop, and of nothing else.
+  for (const st of ['backoff', 'stopped']) assert.match(at80(st), /\(check driver_ws_url\.\)/, st);
+  for (const st of ['connecting', 'handshake', 'dormant', 'live']) assert.doesNotMatch(at80(st), /driver_ws_url/, st);
+});
+
+test('a homeId mismatch is named on the Interference screen, its row whole-token at every width (v0.79.9)', () => {
+  // ENGINE named the purge since v0.47.0; this screen still said "set
+  // driver_ws_url" over it. The fault carries its own "check driver_ws_url".
+  for (const cols of [40, 60, 80, 120]) {
+    for (const st of ['stopped', 'live']) {
+      const ls = linkLines(cols, 24, st, FAULT);
+      const row = ls.find((l) => l.includes('⚠ homeId mismatch')) ?? '';
+      assert.ok(row, `${cols} ${st}: the fault row renders`);
+      assert.ok(/(?:mismatch|PURGED|\(check driver_ws_url\))$/.test(row), `${cols} ${st}: whole words: "${row}"`);
+      // What the fault did survives every width: in the row, or wrapped below it.
+      assert.match(ls.join('\n'), /driver telemetry PURGED/, `${cols} ${st}: the fault is never clipped`);
+      // Its advice survives every width: in the row, or on its own row below it.
+      assert.match(ls.join('\n'), /\(check driver_ws_url\.?\)/, `${cols} ${st}: the advice is never clipped away`);
+      assert.doesNotMatch(ls.join('\n'), /no background-RSSI reading|set driver_ws_url/, `${cols} ${st}: a refused reading is not a missing one`);
+    }
+  }
+  assert.match(linkLines(80, 24, 'stopped', FAULT).join('\n'), /the driver link is stopped \(see ENGINE\)\.\n {4}⚠ homeId mismatch — driver telemetry PURGED \(check driver_ws_url\)/);
+  assert.match(linkLines(80, 24, 'live', FAULT).join('\n'), /the driver link is live \(see ENGINE\)\./);
+  // At 40 the fault wraps at its own " — ", onto rows at the advice's indent.
+  assert.match(linkLines(40, 24, 'stopped', FAULT).join('\n'),
+    /\n {2}◷ n\/a — link stopped \(ENGINE\)\.\n {4}⚠ homeId mismatch\n {6}driver telemetry PURGED\n {6}\(check driver_ws_url\.\)\n/);
+});
+
+test('every link-state line is one whole form at 40/60/80/120 columns and 24/40 rows (v0.79.9)', () => {
+  for (const [st, fault] of [['disabled', null], ...STATES.map((s) => [s, null]), ['stopped', FAULT]] as Array<[string, string | null]>) {
+    for (const cols of [40, 60, 80, 120]) {
+      for (const rows of [24, 40]) {
+        const ls = linkLines(cols, rows, st, fault);
+        assert.equal(ls.length, rows, `${st} ${cols}x${rows}: exactly ${rows} rows`);
+        ls.forEach((l, i) => assert.ok(visLen(l) <= cols, `${st} ${cols}x${rows} row ${i}: ${visLen(l)} > ${cols}`));
+        const row = ls.find((l) => l.includes('◷')) ?? '';
+        assert.ok(row.endsWith('.'), `${st} ${cols}: the state line ends whole: "${row}"`);
+      }
+    }
+  }
+});

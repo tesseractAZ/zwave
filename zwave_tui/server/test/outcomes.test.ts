@@ -8,6 +8,7 @@ import { wilsonLower, createOutcomeStore, windowMetrics, degradedSpan, confirmBu
 import type { EvidenceSample } from '../src/zwave/evidenceStore';
 import type { SymptomKind } from '../src/zwave/symptoms';
 import { metricOf } from '../src/zwave/outcomes';
+import { REFUSAL_INDICTS } from '../src/zwave/planner';
 import { unscoreableReason } from '../src/telnet/ledgerText';
 
 // A window with plenty of traffic; rate = timeouts/tx. Extra recovery signals
@@ -1848,4 +1849,49 @@ test('rtt is scored on raw round trips, so more commands cannot manufacture a re
   assert.equal(after.rttMedian, 40, 'the commands after the slow one were all 40 ms');
   assert.equal(after.rttN, 6, 'every sample in the window gives an estimate, the first one through the seed');
   assert.equal(rttSeedBefore(ring, ring[2].t), ring[1].rtt, 'the seed is the average just before the window');
+});
+
+test('a refusal replaces an earlier unrefused stamp on its episode; first action still wins for credit (v0.79.9)', () => {
+  // A refusal is no credit claim: it is the driver saying the diagnosis was
+  // wrong. Under first-action-wins a ping first — the operator's, or the
+  // ladder's on a Dead mains ghost after its dwell — dropped it without a trace.
+  const o = store();
+  const ghostOnly = new Set<SymptomKind>(['ghost-suspect']);
+  for (const [id, origin] of [[10, 'you'], [11, 'engine']] as const) {
+    o.open(id, 'ghost-suspect', 1000, W(100, 40));
+    o.recordAction(id, 'ping', false, 1200, undefined, undefined, { origin });
+    o.recordAction(id, 'removeFailed', true /* refused */, 1500, undefined, ghostOnly, { origin: 'you' });
+    const ep = o.resolve(id, 'ghost-suspect', 2000, W(100, 1));
+    assert.equal(ep?.verdict, 'refused-misdiagnosis', `${origin} ping first`);
+    assert.equal(ep?.action?.kind, 'removeFailed');
+  }
+  assert.equal(o.falsePositives('ghost-suspect'), 2, 'both refusals indict the detector');
+  // Control: two successes — the first is still the one credited.
+  o.open(20, 'return-path-degraded', 1000, W(100, 40));
+  o.recordAction(20, 'ping', false, 1200);
+  o.recordAction(20, 'healNode', false, 1500);
+  assert.equal(o.resolve(20, 'return-path-degraded', 2000, W(100, 1))?.action?.kind, 'ping', 'first action wins for credit');
+  // Control: a second refusal does not replace the first.
+  o.open(21, 'ghost-suspect', 1000, W(100, 40));
+  o.recordAction(21, 'removeFailed', true, 1200, undefined, ghostOnly);
+  o.recordAction(21, 'removeFailed', true, 1500, undefined, ghostOnly);
+  assert.equal(o.resolve(21, 'ghost-suspect', 2000, W(100, 1))?.action?.atMs, 1200, 'the first refusal keeps its stamp');
+  // Control: a refusal stays inside its scope — the node's other episode keeps the ping.
+  o.open(22, 'ghost-suspect', 1000, W(100, 40));
+  o.open(22, 'return-path-degraded', 1000, W(100, 40));
+  o.recordAction(22, 'ping', false, 1200);
+  o.recordAction(22, 'removeFailed', true, 1500, undefined, ghostOnly);
+  assert.equal(o.resolve(22, 'return-path-degraded', 2000, W(100, 1))?.action?.kind, 'ping', 'outside the scope, nothing moves');
+});
+
+test('every kind a refusal can indict has no recovery metric, so the stamp a refusal replaces scored nothing (v0.79.9)', () => {
+  // recordAction lets a refusal replace an earlier unrefused stamp without
+  // checking the kind's metric. That moves no credited closure out of the
+  // action arm only while every kind in REFUSAL_INDICTS has metric 'none': a
+  // scored kind added there fails here until the replacement rule is revisited.
+  const kinds = Object.values(REFUSAL_INDICTS).flatMap((s) => [...s]);
+  assert.ok(kinds.length > 0, 'fixture guard: the table indicts some kind');
+  for (const k of kinds) {
+    assert.equal(metricOf(k), 'none', `${k} is refusal-indictable and scored: a refusal would move its credited closure`);
+  }
 });

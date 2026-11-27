@@ -248,7 +248,8 @@ export interface OutcomeStore {
   open(nodeId: number | null, kind: SymptomKind, onsetMs: number, before: WindowMetrics | null, opts?: { dwellStartMs?: number }): void;
   /** Attribute an operator action to EVERY open episode on this node (the
    *  operator picks an action for a node, not a specific symptom). First action
-   *  per episode wins the attribution. `skip(key)` excludes episodes whose
+   *  per episode wins the attribution, except that a refusal replaces an
+   *  unrefused stamp (v0.79.9). `skip(key)` excludes episodes whose
    *  symptom has already gone absent (in the caller's confirmation window) — an
    *  action taken after the symptom already cleared must NOT be credited for the
    *  spontaneous recovery. */
@@ -962,7 +963,8 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
       }
       // Attribute to EVERY open episode on this node (an action targets a node;
       // any of its active symptoms could be the one it addresses). First action
-      // per episode wins — a later action can't cleanly be credited. Skip
+      // per episode wins — a later action can't cleanly be credited — except a
+      // refusal, which replaces an unrefused stamp (below). Skip
       // episodes whose symptom already went absent (confirmation window): an
       // action there would steal credit for a spontaneous recovery.
       const prefix = `${nodeId ?? 'mesh'}:`;
@@ -1002,7 +1004,15 @@ export function createOutcomeStore(opts: OutcomeStoreOptions = {}): OutcomeStore
           ep.confounded = true;
           continue;
         }
-        if (ep.action == null) {
+        // A REFUSAL REPLACES AN EARLIER UNREFUSED STAMP (v0.79.9). First action
+        // wins for credit, but a refusal is no credit claim: it is the driver
+        // saying this episode's diagnosis was wrong. Under first-wins a ping
+        // (the operator's, or the ladder's on a Dead mains ghost) before `x`
+        // dropped the refusal without a trace. It reaches only the kinds in
+        // `onlyKinds` — today ghost-suspect alone (REFUSAL_INDICTS), whose
+        // metric is 'none' — so the stamp it replaces scored nothing. A test
+        // in outcomes.test.ts holds every REFUSAL_INDICTS kind to metric 'none'.
+        if (ep.action == null || (refused && !ep.action.refused)) {
           ep.action = {
             kind: actionKind, atMs, refused,
             ...(meta?.origin != null ? { origin: meta.origin } : {}),

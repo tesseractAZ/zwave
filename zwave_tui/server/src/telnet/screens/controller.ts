@@ -34,7 +34,8 @@ import {
   type ScreenCtx,
 } from '../../types';
 import { centeredNotice } from './overview';
-import { frame } from '../chrome';
+import { driverLinkGap } from './interference';
+import { frame, shedLine } from '../chrome';
 import { noiseColor, shownDbm } from '../bands';
 
 type ColorFn = (s: string) => string;
@@ -363,9 +364,23 @@ function backgroundBlock(
     );
     lines.push(...packTokens(tokens, W, 2));
   } else {
-    lines.push(
+    // AND WHY THE DRIVER DID NOT SUPPLY IT (v0.79.9): its link's state, as
+    // one whole token, shed with +1 where the row has no room for it. The
+    // head has a whole short form, taken where only it carries the token, or
+    // where the long one leaves no room for the +1: cut blind at 40 columns,
+    // the long head lost both its last word and the token, undisclosed.
+    const gap = c.grey(driverLinkGap(data));
+    const heads = [
       c.grey('per-channel noise floor: ') + c.yellow('not reported by HA'),
-    );
+      c.grey('per-channel floor: ') + c.yellow('not from HA'),
+    ];
+    const headFits = (h: string, extra: number): boolean => visLen(h) + extra <= W;
+    lines.push(...shedLine(
+      '',
+      heads.find((h) => headFits(h, 2 + visLen(gap))) ?? heads.find((h) => headFits(h, 3)) ?? heads[heads.length - 1],
+      [gap],
+      W,
+    ));
   }
 
   // The representative floor the SNR-margin math actually uses (data.noiseFloor),

@@ -35,6 +35,7 @@ import { ADMISSION_SUMMARY } from '../../zwave/admission';
 import { PAUSE_ENTITY } from '../../zwave/autonomyPause';
 import { c, truncate, visLen } from '../ansi';
 import { provenance, weight, unscoreableReason } from '../ledgerText';
+import { REFUSAL_INDICTS } from '../../zwave/planner';
 import { frame } from '../chrome';
 import type { ScreenCtx, SymptomKind, ActionKind } from '../../types';
 
@@ -61,6 +62,12 @@ const SCORED_KINDS: SymptomKind[] = [
  * a future unscoreable kind cannot be silently omitted here.
  */
 const UNSCORED_KINDS: SymptomKind[] = ['node-down', 'missed-report', 'repeated-frames'];
+
+/** Kinds a driver refusal can indict that SCORED_KINDS omits (today
+ *  ghost-suspect); LEARNED shows only their refusal tally (v0.79.9). Derived
+ *  from the planner's own table, so a kind added there is listed here. */
+const REFUSAL_ONLY_KINDS: SymptomKind[] = [...new Set(Object.values(REFUSAL_INDICTS).flatMap((s) => [...s]))]
+  .filter((k) => !SCORED_KINDS.includes(k));
 
 /**
  * Roll-up wording, longest first for `pick`.
@@ -659,6 +666,17 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     if (tallies.length) push(fitBits('    ' + c.grey('○ '), tallies.map((t) => c.grey(t)), view.cols));
     if (liveRow) push('    ' + c.grey('○ ' + liveRow));
   }
+  // REFUSALS OF A KIND NO ROW ABOVE LISTS (v0.79.9). `ghost-suspect` is the one
+  // kind a driver refusal indicts, and SCORED_KINDS never held it, so its tally
+  // reached REMEDY's card and no row here. Two rows, like every kind above, so
+  // the tally survives 40 columns.
+  for (const kind of REFUSAL_ONLY_KINDS) {
+    const fp = data.falsePositives?.(kind) ?? 0;
+    if (fp <= 0) continue;
+    anyLearned = true;
+    push('  ' + c.white(kind));
+    push(fitBits('    ' + c.grey('○ '), [c.yellow(`${fp} refused as misdiagnosis`)], view.cols));
+  }
   // POSSIBLE HARM, per action (v0.72.0): a route-kind symptom that opened soon
   // after an action on the same node. Not per kind — the new symptom is rarely
   // the kind the action was aimed at.
@@ -675,18 +693,28 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     push('  ' + c.white(kind));
     push('    ' + c.grey(pick(view.cols - 4, UNSCORED_FORMS[kind] ?? UNSCORED_NOTE_FORMS)));
   }
+  // WHETHER A WEIGHT IS SHOWN (v0.79.9), read from the LEARNED rows themselves:
+  // weight() is the only source of `n≈` in them. anyLearned is not it: a
+  // refusal-only or tallies-only kind sets it with no weight in its rows, and
+  // a narrow row can shed the bits that carried one.
+  const weightShown = body.slice(legendAt).some((l) => l.includes('n≈'));
   if (!anyLearned) {
     push('  ' + c.grey('○ nothing learned yet — no episode of any scored kind has closed.'));
-  } else {
+  } else if (weightShown) {
     // The only place either screen says what these two numbers ARE (v0.43.1):
     // one is a decaying weight, the other a running total, printed side by side
     // in identical styling with nothing to tell them apart. Inserted rather
     // than pushed so it sits under the LEARNED label — and only when a weight
     // is actually on screen, since explaining an absent notation is noise.
     // The short form keeps the saturation figure, which is the part a
-    // truncating terminal was cutting off.
-    const full = '  n≈ is recent-weighted and saturates near 33; node counts are cumulative';
-    body.splice(legendAt, 0, c.grey(visLen(full) <= view.cols ? full : '  n≈ decays, saturates ~33; nodes cumulative'));
+    // truncating terminal was cutting off. The shortest is whole at 40
+    // columns (v0.79.9), where the short one read "nodes cumula".
+    const legend = [
+      '  n≈ is recent-weighted and saturates near 33; node counts are cumulative',
+      '  n≈ decays, saturates ~33; nodes cumulative',
+      '  n≈ decays, caps ~33; nodes cumulative',
+    ];
+    body.splice(legendAt, 0, c.grey(legend.find((f) => visLen(f) <= view.cols) ?? legend[legend.length - 1]));
   }
 
   return frame(view, data, {

@@ -2257,10 +2257,11 @@ class ZwaveDataImpl implements ZwaveData {
     // This branch used to be a blanket `if (!ok) return;`, justified by the
     // hook being unable to tell "the driver rejected the premise" from "a WS
     // error stopped us trying". That was true — and it made the ledger's
-    // `refused-misdiagnosis` verdict, and the `falsePositives` counter two
-    // screens gate a warning on, structurally unreachable in production. The
+    // `refused-misdiagnosis` verdict, and the `falsePositives` counter REMEDY
+    // gates a warning on, structurally unreachable in production. The
     // classification now happens in zwaveActions.run(), where the driver's own
-    // words are still in hand.
+    // words are still in hand. (ENGINE's LEARNED rows did not list
+    // `ghost-suspect`, the one kind a refusal indicts, until v0.79.9.)
     //
     // DESIGN.md gave TWO reasons for deferring this, and the second one is not
     // fixed by classification: a node-scoped stamp would wrongly mark non-ghost
@@ -2568,6 +2569,10 @@ class ZwaveDataImpl implements ZwaveData {
     if (nodeId == null || !this.outcomes) return false;
     // Paused (v0.72.0): nothing is owed from a paused period.
     if (this.autonomy.state() != null) return false;
+    // No runner (v0.79.9). Only auto-ping's runner drains this map, and index.ts
+    // hands its snapshot over only when it starts one: with no runner a booked
+    // debt is never paid, and REMEDY and DETAIL would call the score pending.
+    if (this.autoPingSnapshotFn == null) return false;
     const cur = this.verifyOwed.get(nodeId);
     this.verifyOwed.set(nodeId, {
       left: Math.max(cur?.left ?? 0, probes),
@@ -2588,7 +2593,7 @@ class ZwaveDataImpl implements ZwaveData {
    * It rides the verification lane, so it passes every gate a burst probe
    * does (write actions, boot window, rebuild, radio off, storm, operator
    * action, the post-kill hold) and requestVerification's own refusals (no
-   * ledger, the owner's pause). A node already owed any probe is left alone:
+   * ledger, the owner's pause, no runner). A node already owed any probe is left alone:
    * that probe answers the same question, and a confirmation must never cut a
    * burst short. At most one is handed out per slow round trip
    * (RTT_CONFIRM_COOLDOWN_MS); the owed entry carries the round trip's time.

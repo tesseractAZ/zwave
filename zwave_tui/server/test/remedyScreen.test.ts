@@ -4,6 +4,8 @@ import { renderRemedy } from '../src/telnet/screens/remedy';
 import { visLen } from '../src/telnet/ansi';
 import { NodeStatus } from '../src/types';
 import type { DataProvider, NodeSnapshot, ControllerSnapshot, ScreenCtx, ViewState, Symptom, SymptomKind } from '../src/types';
+import type { AutoPingSnapshot, AutoPingNodeState } from '../src/zwave/autoPing';
+import { buildRecommendation } from '../src/zwave/recommendation';
 
 const now = Date.now();
 function node(id: number): NodeSnapshot {
@@ -960,7 +962,7 @@ test('an UNPROBEABLE node says its evidence can never be filled (v0.47.0)', () =
 
 test('a node with probes OWED says the score is pending, not absent (v0.47.0)', () => {
   const ctxO: ScreenCtx = { view: mkView(200, 40),
-    data: { ...data([sym()]), probeable: () => true, verifyOwedFor: () => 3 },
+    data: { ...data([sym()]), probeable: () => true, verifyOwedFor: () => 3, autoPingState: () => ({ suppressed: 'none', nodes: [] }) as never },
     visibleNodes: nodes, filtering: false, actionsEnabled: true };
   const joined = plain(renderRemedy(ctxO));
   assert.match(joined, /3 verification probes still owed — the score is pending, not absent/);
@@ -1075,5 +1077,250 @@ test('the open-episode disclosure keeps its ENGINE pointer at every width (v0.55
     assert.match(row, /ENGINE/,
       `${cols}: the pointer is the actionable half — it must survive: "${row.trim()}"`);
     assert.doesNotMatch(row, /— se$|windo$/, `${cols}: no mid-word cut: "${row.trim()}"`);
+  }
+});
+
+/* ── v0.79.9: class-F re-check — what REMEDY says it measured ─────────── */
+
+/** A ladder entry for one node; every field the runner reports. */
+const apNode = (o: Partial<AutoPingNodeState>): AutoPingNodeState => ({
+  nodeId: 6, deadSinceMs: null, attempts: 0, nextEligibleMs: null, missStreak: 0, launchFailures: 0, pending: 0,
+  gaveUp: false, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0,
+  probeKills24h: 0, probeHeldUntilMs: null, ...o,
+});
+/** A running auto-ping's snapshot — non-null is what "a runner exists" means. */
+const apSnap = (nodes: AutoPingNodeState[] = [], suppressed: AutoPingSnapshot['suppressed'] = 'none'): AutoPingSnapshot => ({
+  lastTickMs: now - 30_000, suppressed, listening: 2, deadListening: 0, capabilityUnknown: 0,
+  staleDue: 1, stalestMs: 3_600_000, verifyOwed: 0,
+  config: { enabled: true, writeActions: true, afterMs: 10 * 60_000, maxAttempts: 3, staleMs: 120 * 60_000 },
+  nodes,
+});
+const ctxWith = (cols: number, rows: number, syms: Symptom[], over: Partial<DataProvider> = {}): ScreenCtx =>
+  ({ view: mkView(cols, rows), data: { ...data(syms), ...over }, visibleNodes: nodes, filtering: false, actionsEnabled: true });
+const fits = (lines: string[], cols: number, label: string): void =>
+  lines.forEach((l, i) => assert.ok(visLen(l) <= cols, `${label} row ${i}: width ${visLen(l)} > ${cols}`));
+
+test('with no auto-ping runner a card says no verification probe is sent, never that its score is pending (v0.79.9)', () => {
+  // Only the runner drains the verification queue, and index.ts starts it only
+  // with auto-ping AND write actions on. "Pending" promised probes nothing sends.
+  // Each kind's evidence floor counts readings of its own signal from any
+  // traffic, not only probe replies, so an episode of a kind with a recovery
+  // metric can still be scored.
+  const owed = (cols: number, s: Symptom, over: Partial<DataProvider> = {}): string[] =>
+    renderRemedy(ctxWith(cols, 40, [s], { probeable: () => true, verifyOwedFor: () => 3, ...over }));
+  const j = plain(owed(200, sym()));
+  assert.match(j, /○ auto-ping is off — no verification probes are sent; any score must come from the node’s other traffic/);
+  assert.doesNotMatch(j, /score is pending/, 'no runner: nothing will pay the debt');
+  // Control: with a runner the owed line is the true one, unchanged.
+  const run = plain(owed(200, sym(), { autoPingState: () => apSnap() }));
+  assert.match(run, /3 verification probes still owed — the score is pending, not absent/);
+  assert.doesNotMatch(run, /auto-ping is off/);
+  // A kind the ledger never scores keeps its own reason, and is not blamed on auto-ping.
+  const down = plain(owed(200, sym({ kind: 'node-down', severity: 'crit' })));
+  assert.match(down, /not measured by the ledger/);
+  assert.doesNotMatch(down, /auto-ping is off/);
+  // Whole at every width: one of its three forms, never a cut sentence.
+  const forms = [
+    '○ auto-ping is off — no verification probes are sent; any score must come from the node’s other traffic',
+    '○ auto-ping off — any score must come from other traffic',
+    '○ auto-ping off: no verify probes',
+  ];
+  for (const cols of [40, 60, 80, 120]) {
+    const lines = owed(cols, sym());
+    fits(lines, cols, `${cols}`);
+    const row = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).find((l) => l.includes('○ auto-ping')) ?? '';
+    assert.ok(forms.includes(row.trim()), `${cols}: "${row}" is a whole form`);
+  }
+});
+
+test('with no auto-ping runner only a card of a kind with a recovery metric says auto-ping is off (v0.79.9)', () => {
+  // ghost-suspect, chatty-device and edge-cluster have metric 'none': no
+  // traffic scores their recovery, so "any score must come from the node's
+  // other traffic" was false on every such card of the default install. No
+  // runner books no debt, so verifyOwedFor is 0 here.
+  const card = (s: Symptom): string =>
+    plain(renderRemedy(ctxWith(200, 40, [s], { probeable: () => true, verifyOwedFor: () => 0 })));
+  for (const kind of ['ghost-suspect', 'chatty-device', 'edge-cluster'] as const) {
+    const j = card(sym({ kind, nodeId: 6 }));
+    assert.match(j, new RegExp(kind), `fixture guard: the ${kind} card rendered`);
+    assert.doesNotMatch(j, /auto-ping is off|auto-ping off/, `${kind}: no recovery metric, no claim a score can come`);
+    assert.doesNotMatch(j, /score is pending/, `${kind}`);
+  }
+  // Control: a kind with a recovery metric still says it, with no debt booked.
+  assert.match(card(sym({ kind: 'return-path-degraded' })),
+    /○ auto-ping is off — no verification probes are sent; any score must come from the node’s other traffic/);
+});
+
+test('with no runner the summary line sheds its advisory tail whole, never cut mid-claim (v0.79.9)', () => {
+  // Cut blind, one warning's row read "the engine only recommends; you run the acti" at 60 columns.
+  const summary = (lines: string[]): string =>
+    lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).find((l) => /critical|warning/.test(l)) ?? '';
+  const one = [sym()];
+  const three = [sym({ kind: 'node-down', severity: 'crit' }), sym({ nodeId: 7 }), sym({ nodeId: 7, kind: 'route-churn', severity: 'watch' })];
+  assert.match(summary(renderRemedy(ctxWith(60, 30, one))), /^ {2}1 warning {2}— {2}the engine only recommends$/);
+  assert.match(summary(renderRemedy(ctxWith(80, 30, three))), /^ {2}1 critical · 1 warning · 1 watch {2}— {2}the engine only recommends$/);
+  assert.match(summary(renderRemedy(ctxWith(40, 30, one))), /^ {2}1 warning$/, 'no room for the claim: the whole tail goes');
+  assert.match(summary(renderRemedy(ctxWith(120, 30, three))), /1 watch {2}— {2}the engine only recommends; you run the actions$/);
+  for (const cols of [40, 60, 80, 120]) {
+    for (const syms of [one, three]) {
+      const lines = renderRemedy(ctxWith(cols, 30, syms));
+      fits(lines, cols, `${cols}`);
+      const l = summary(lines);
+      assert.ok(/(?:warning|watch|critical)(?: {2}— {2}the engine only recommends(?:; you run the actions)?)?$/.test(l), `${cols}: whole or absent: "${l}"`);
+    }
+  }
+});
+
+test('with a runner the summary line says the engine can also write on its own, paused too, never that it only recommends (v0.79.9)', () => {
+  // Auto-ping's ladder and sweep, and the refresh trial, write with no keypress.
+  // A capability, so it is as true while paused as while running.
+  const down = sym({ kind: 'node-down', severity: 'crit' });
+  const summary = (lines: string[]): string =>
+    lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).find((l) => /critical/.test(l)) ?? '';
+  // Control: no runner, the anchored advisory line, byte for byte.
+  assert.match(summary(renderRemedy(ctxWith(120, 30, [down]))), /1 critical {2}— {2}the engine only recommends; you run the actions$/);
+  for (const ap of [apSnap(), apSnap([], 'paused')]) {
+    const line = summary(renderRemedy(ctxWith(100, 24, [down], { autoPingState: () => ap })));
+    assert.match(line, /1 critical {2}— {2}the engine can also write on its own; see ENGINE$/, `${ap.suppressed}: ${line}`);
+    assert.doesNotMatch(line, /only recommends/);
+  }
+  // At the modal 80 columns with all three severities the tail sheds its
+  // pointer whole; narrower, the whole tail goes, never half of it.
+  const three = [down, sym({ nodeId: 7 }), sym({ nodeId: 7, kind: 'route-churn', severity: 'watch' })];
+  const at80 = summary(renderRemedy(ctxWith(80, 30, three, { autoPingState: () => apSnap() })));
+  assert.match(at80, /1 critical · 1 warning · 1 watch {2}— {2}the engine can also write on its own$/);
+  for (const cols of [40, 60]) {
+    for (const syms of [[down], three]) {
+      const lines = renderRemedy(ctxWith(cols, 30, syms, { autoPingState: () => apSnap() }));
+      fits(lines, cols, `${cols}`);
+      const l = summary(lines);
+      assert.ok(/the engine can also write on its own$/.test(l) || !/engine/.test(l), `${cols}: whole or absent: "${l}"`);
+    }
+  }
+});
+
+test('the all-clear claims what its branch checked: no symptom firing, thin timeout windows counted, and no "nothing is acted on" under a runner (v0.79.9)', () => {
+  // The branch tests `symptoms.length === 0`. "None is currently anomalous" was
+  // a judgment no detector made on a node whose 10-minute window held fewer
+  // than MIN_WINDOW_TX sends: both return-path detectors skip it.
+  const blind = plain(renderRemedy(engCtx(80, 30, { ...ENG, timeoutWindowBlind: 2 })));
+  assert.match(blind, /✓ All clear — 3 nodes learned, no symptoms detected\./, 'fixture guard: the green branch');
+  assert.doesNotMatch(blind, /anomalous/);
+  assert.match(blind, /for the 12:00–16:00 band, and no symptom is firing\./);
+  assert.match(blind, /\(2 of 3: too little traffic in 10 min to rate timeouts\.\)/, 'a count, no verdict word');
+  assert.doesNotMatch(blind, /not clear/);
+  // Control: no thin window, no note.
+  assert.doesNotMatch(plain(renderRemedy(engCtx(80, 30, ENG))), /too little traffic|too quiet/);
+  // Under a runner "nothing is acted on" is false; without one it stays.
+  const clear = (cols: number, over: Partial<DataProvider>): string[] =>
+    renderRemedy({ view: mkView(cols, 30), data: { ...data([]), engineStatus: () => ENG, ...over }, visibleNodes: nodes, filtering: false, actionsEnabled: true });
+  const ran = plain(clear(80, { autoPingState: () => apSnap() }));
+  assert.doesNotMatch(ran, /nothing is acted on/);
+  assert.match(ran, /New symptoms surface here; the engine can also write on its own \(ENGINE\)\./);
+  assert.match(plain(clear(80, {})), /New symptoms will surface here — advisory-first, nothing is acted on\./, 'control: no runner');
+  // Every new row is one of its whole forms at every width, 38 thin of 38.
+  const eng38 = { ...ENG, total: 38, timeoutReady: 38, rttReady: 38, rssiReady: 38, timeoutWindowBlind: 38 };
+  for (const cols of [40, 60, 80, 120]) {
+    const lines = clear(cols, { engineStatus: () => eng38, autoPingState: () => apSnap() });
+    fits(lines, cols, `${cols}`);
+    const txt = plain(lines);
+    assert.doesNotMatch(txt, /…/, `${cols}: nothing clipped mid-claim`);
+    assert.match(txt, /\(38(?: of |\/)38:? too (?:little traffic in 10 min|quiet in 10 min|quiet) to rate timeouts\.\)/, `${cols}`);
+    assert.match(txt, /(?:the )?engine can (?:also )?write on its own/i, `${cols}`);
+  }
+});
+
+test('a node-down card whose ladder gave up says what the ladder did, in the HA summons words (v0.79.9)', () => {
+  // "A ping often revives it" is true before the ladder runs and false once it
+  // has spent its attempts. The recommendation sensor already swaps it.
+  const down = sym({ kind: 'node-down', severity: 'crit', nodeId: 6 });
+  const card = (cols: number, ap: AutoPingSnapshot | null): string[] =>
+    renderRemedy(ctxWith(cols, 30, [down], { autoPingState: () => ap })).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  // What sensor.zwave_tui_recommendation publishes for the same input.
+  const sensor = (ap: AutoPingSnapshot): string => String(buildRecommendation({
+    symptoms: [down], nodeOf: (id) => nodes.find((n) => n.nodeId === id), writeActions: true, ap, startedAt: now - 86_400_000, now,
+  }).attrs.headline);
+  const gave = apNode({ deadSinceMs: now - 90 * 60_000, attempts: 3, gaveUp: true });
+  const g = card(80, apSnap([gave]));
+  assert.ok(g.some((l) => l.includes('▎ ' + sensor(apSnap([gave])))), 'the summons headline, verbatim');
+  assert.ok(g.some((l) => /▎ Node is DOWN — auto-ping gave up after 3 unanswered attempts$/.test(l)));
+  assert.ok(!g.some((l) => /a ping often revives it/.test(l)));
+  const sent = apNode({ deadSinceMs: now - 90 * 60_000, attempts: 0, launchGaveUp: true });
+  assert.ok(card(120, apSnap([sent])).some((l) => l.includes('▎ ' + sensor(apSnap([sent])))), 'a ladder that could not send says so');
+  // Launches that ran out after a ping went unanswered: that ping did test the
+  // node, so the card, like the sensor, says how many, never "not tested".
+  const after = apNode({ deadSinceMs: now - 90 * 60_000, attempts: 1, launchGaveUp: true });
+  const a = card(120, apSnap([after]));
+  assert.ok(a.some((l) => l.includes('▎ ' + sensor(apSnap([after])))), 'the summons headline, verbatim');
+  assert.ok(a.some((l) => /▎ Node is DOWN — auto-ping could not send its pings after 1 unanswered attempt$/.test(l)));
+  assert.doesNotMatch(a.join('\n'), /not tested/);
+  // Narrower, one whole form of the same claim: never a clipped one.
+  const one = apNode({ deadSinceMs: now - 90 * 60_000, attempts: 1, gaveUp: true });
+  const forms: Array<[AutoPingNodeState, Record<number, string>]> = [
+    [sent, { 40: 'DOWN — auto-ping pings not sent', 60: 'Node is DOWN — auto-ping could not send its pings',
+      80: 'Node is DOWN — auto-ping could not send its pings; node not tested' }],
+    [after, { 40: 'DOWN — 1 unanswered, then unsent', 60: 'Node is DOWN — 1 unanswered, then pings not sent',
+      80: 'Node is DOWN — auto-ping could not send its pings; 1 went unanswered' }],
+    [gave, { 40: 'DOWN — auto-ping gave up (3 tries)', 60: 'Node is DOWN — auto-ping gave up after 3 attempts',
+      80: 'Node is DOWN — auto-ping gave up after 3 unanswered attempts' }],
+    [one, { 40: 'DOWN — auto-ping gave up (1 try)', 60: 'Node is DOWN — auto-ping gave up after 1 attempt',
+      80: 'Node is DOWN — auto-ping gave up after 1 unanswered attempt' }],
+  ];
+  for (const [ap, at] of forms) {
+    for (const cols of [40, 60, 80]) {
+      const lines = renderRemedy(ctxWith(cols, 30, [down], { autoPingState: () => apSnap([ap]) }));
+      fits(lines, cols, `${cols}`);
+      const row = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).find((l) => /▎ (?:Node is )?DOWN — (?:auto-ping|\d+ unanswered)/.test(l)) ?? '';
+      assert.equal(row.slice(row.indexOf('▎ ') + 2), at[cols], `${cols} attempts=${ap.attempts}${ap.gaveUp ? ' gave up' : ''}: "${row}"`);
+    }
+  }
+  // Once a ping went unanswered, no width says that none left, with a count
+  // too wide for the short forms included.
+  for (const attempts of [1, 2, 12]) {
+    const ap = apNode({ deadSinceMs: now - 90 * 60_000, attempts, launchGaveUp: true });
+    for (const cols of [40, 60, 80, 120]) {
+      const lines = renderRemedy(ctxWith(cols, 30, [down], { autoPingState: () => apSnap([ap]) }));
+      fits(lines, cols, `${cols} attempts=${attempts}`);
+      const text = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+      assert.doesNotMatch(text, /DOWN — auto-ping pings not sent|could not send its pings$|not tested/m, `${cols} attempts=${attempts}`);
+      assert.match(text, new RegExp(`${attempts} (?:went )?unanswered`), `${cols} attempts=${attempts}: the count`);
+    }
+  }
+  // Controls: a ladder still working, no runner, and another node's give-up.
+  for (const ap of [apSnap([apNode({ deadSinceMs: now - 20 * 60_000, attempts: 1 })]), null, apSnap([apNode({ nodeId: 7, attempts: 3, gaveUp: true })])]) {
+    assert.ok(card(80, ap).some((l) => /▎ Node is DOWN — the driver proved it, a ping often revives it/.test(l)), JSON.stringify(ap?.nodes ?? null));
+  }
+});
+
+test('with no runner the all-clear ends on one whole form at every width, never cut blind (v0.79.9)', () => {
+  // Pushed unfitted, the frame cut it to "— adv" at 40 columns and to
+  // "nothing" at 60, as it cut the summary's tail to "you run the acti".
+  const at: Record<number, string> = {
+    40: '    Advisory-first: nothing is acted on.',
+    60: '    New symptoms surface here; nothing is acted on.',
+    80: '    New symptoms will surface here — advisory-first, nothing is acted on.',
+    120: '    New symptoms will surface here — advisory-first, nothing is acted on.',
+  };
+  for (const cols of [40, 60, 80, 120]) {
+    const lines = renderRemedy({ view: mkView(cols, 30), data: { ...data([]), engineStatus: () => ENG }, visibleNodes: nodes, filtering: false, actionsEnabled: true });
+    fits(lines, cols, `${cols}`);
+    const txt = lines.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    assert.ok(txt.some((l) => /✓ All clear/.test(l)), `${cols}: fixture guard: the green branch`);
+    const row = txt.find((l) => /nothing is acted on/.test(l)) ?? '';
+    assert.equal(row, at[cols], `${cols}: "${row}"`);
+  }
+});
+
+test('the quiet-node card grounds itself on what the detector checked, not on traffic never attempted (v0.79.9)', () => {
+  // With the sweep on every mains node is asked once a cadence, and quiet-node
+  // fires only after three cadences: traffic WAS attempted, and the ladder may
+  // already count misses. The detector's own test is `status !== Dead`.
+  const q = sym({ kind: 'quiet-node', nodeId: 6, evidence: [{ label: 'last heard', value: '8.1h ago' }] });
+  for (const cols of [80, 200]) {
+    const lines = renderRemedy(ctxWith(cols, 40, [q], { autoPingState: () => apSnap([apNode({ missStreak: 2 })]) }))
+      .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    assert.doesNotMatch(lines.join('\n'), /no traffic was attempted/);
+    const row = lines.find((l) => /hasn’t communicated/.test(l)) ?? '';
+    assert.match(row, /The node hasn’t communicated in a while, yet it is not marked Dead/, `${cols}: "${row}"`);
   }
 });

@@ -65,11 +65,12 @@ export function renderLog(ctx: ScreenCtx): string[] {
             // operator to press a key that can REMOVE the evidence they came for.
             c.grey(filterSummary(view) + ' — press ') + c.cyanB('D') + c.grey('/') + c.cyanB('O') + c.grey(' to change'),
             // The ring is in-memory and session-scoped (LOG_MAX entries, no
-            // disk), so a wide date range can be empty because the evidence was
-            // EVICTED or never survived a restart — not because the filter is
-            // too narrow. Blaming the filter sends the operator to widen one
-            // that is already at maximum (v0.41).
-            ...(view.logRange === 'yesterday' || view.logRange === '7d' || view.logRange === '24h'
+            // disk). When it does not reach back to the range start (or the
+            // range has none), an empty list can mean the evidence was evicted
+            // or never survived a restart, not that the filter is too narrow
+            // (v0.41; keyed on the ring's reach since v0.79.9, not a list of
+            // wide ranges — an empty ring after a restart empties TODAY too).
+            ...(ringOldest == null || lo == null || ringOldest > lo
               // TWO FORMS: the long one is 84 visible columns and `center()`
               // falls through to a blind truncate at the modal 80, so the
               // disclosure that the ring is VOLATILE was itself silently cut to

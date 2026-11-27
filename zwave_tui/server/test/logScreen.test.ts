@@ -281,3 +281,20 @@ test('the volatile-ring disclosure is not itself cut at the modal terminal (v0.5
     assert.ok(visLen(row) <= cols, `${cols}: over width`);
   }
 });
+
+test('the in-memory disclosure follows the ring\'s reach, not a list of wide ranges (v0.79.9)', () => {
+  // An empty ring — a restart, or Home Assistant unreachable at boot — empties
+  // TODAY, LAST HOUR and an errors-only ALL TIME too, and they blamed only the
+  // filters. A ring that covers the whole range needs no volatility excuse.
+  const out = (events: ReturnType<typeof mkEvent>[], v: Record<string, unknown>): string =>
+    renderLog(ctx({ events, view: mkView({ cols: 100, rows: 24, ...v }) })).map(strip).join('\n');
+  for (const v of [{ logRange: 'today' }, { logRange: 'hour' }, { logRange: 'all', errorsOnly: true }]) {
+    assert.match(out([], v), /in memory only/, JSON.stringify(v));
+  }
+  const now = Date.now();
+  assert.doesNotMatch(out([mkEvent({ ts: now - 10_000 }), mkEvent({ ts: now - 2 * 3600_000 })], { logRange: 'hour', errorsOnly: true }), /in memory only/,
+    'a ring reaching back two hours covers the last hour');
+  assert.match(out([mkEvent({ ts: now - 3 * 3600_000 })], { logRange: '7d', errorsOnly: true }), /in memory only/, 'three hours of ring under seven days');
+  assert.doesNotMatch(out([mkEvent({ ts: now - 8 * 86_400_000 })], { logRange: '7d', errorsOnly: true }), /in memory only/,
+    'eight days of ring cover seven: the filter really did match nothing');
+});

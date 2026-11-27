@@ -532,6 +532,41 @@ test('the per-channel noise gauge fills with its own band colour', () => {
   assert.equal(bar[1], want, 'the gauge fill uses a different band than its own number');
 });
 
+test('an empty per-channel row names the driver link\'s state beside "not reported by HA" (v0.79.9)', () => {
+  // HA never carries the field, so "not reported by HA" is true — and silent
+  // about the driver link that would. The state rides as one whole token.
+  const row = (st: string | null, fault: string | null = null, cols = 120): string => {
+    const data: DataProvider = { ...mockData(), controller: () => mkCtrl(NO_ERRORS),
+      ...(st ? { driverWsState: () => st as never, driverLinkFault: () => fault } : {}) };
+    const out = renderController({ view: mkView({ screen: 'controller', cols, rows: 40 }), data, visibleNodes: [], filtering: false } as ScreenCtx);
+    return out.map(strip).find((l) => /^per-channel (?:noise )?floor/.test(l)) ?? '';
+  };
+  assert.equal(row('disabled'), 'per-channel noise floor: not reported by HA  driver-WS client not configured');
+  assert.equal(row('backoff'), 'per-channel noise floor: not reported by HA  driver link retrying (see ENGINE)');
+  assert.equal(row('dormant'), 'per-channel noise floor: not reported by HA  driver link dormant (see ENGINE)');
+  // The longest state token still fits the modal 80 columns whole.
+  assert.equal(row('handshake', null, 80), 'per-channel noise floor: not reported by HA  driver link starting (see ENGINE)');
+  assert.equal(row('stopped', 'homeId mismatch — driver telemetry PURGED (check driver_ws_url)'),
+    'per-channel noise floor: not reported by HA  homeId mismatch (see ENGINE)');
+  // A live link is named, not judged: this row is also empty when a reading lacks channel 0.
+  assert.equal(row('live'), 'per-channel noise floor: not reported by HA  driver link live (see INTERFERENCE)');
+  // Shed whole where it does not fit, disclosed with +1, never cut.
+  assert.equal(row('connecting', null, 60), 'per-channel noise floor: not reported by HA +1');
+  // The head's whole short form (v0.79.9): taken where only it carries the
+  // token, and at 40 columns, where the long head cut blind lost both its
+  // last word and the token, with no +1.
+  assert.equal(row('backoff', null, 70), 'per-channel floor: not from HA  driver link retrying (see ENGINE)');
+  assert.equal(row('connecting', null, 40), 'per-channel floor: not from HA +1');
+  assert.equal(row('disabled', null, 40), 'per-channel floor: not from HA +1');
+  for (const cols of [40, 60, 80, 120]) {
+    const out = renderController({ view: mkView({ screen: 'controller', cols, rows: 24 }),
+      data: { ...mockData(), controller: () => mkCtrl(NO_ERRORS), driverWsState: () => 'handshake' as never, driverLinkFault: () => null },
+      visibleNodes: [], filtering: false } as ScreenCtx);
+    assert.equal(out.length, 24, `${cols}`);
+    out.forEach((l, i) => assert.ok(strip(l).length <= cols, `${cols} row ${i}: ${strip(l)}`));
+  }
+});
+
 test('the weakest cell survives overflow truncation', () => {
   // renderCells() truncates the TAIL, so the intra-rank sort must be ASCENDING
   // (weakest first). It was written descending when the rank tiers were added,
