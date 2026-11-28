@@ -344,8 +344,9 @@ export function createActionRunner(o: ActionRunnerOptions): ActionRunner {
       // `refused-misdiagnosis` verdict — and with it `falsePositives`, the one
       // number that argues AGAINST the card it sits on — was unreachable in
       // production because this catch discarded the driver's own words and
-      // reported a bare `false`. Two screens gate a warning on that counter
-      // and neither could ever fire.
+      // reported a bare `false`, so REMEDY's warning on that counter could
+      // never fire. (ENGINE's LEARNED rows did not list `ghost-suspect`, the
+      // one kind a refusal indicts, until v0.79.9.)
       //
       // Deliberately NARROW: only a DIAGNOSIS-VERIFYING action can be refused
       // in a way that indicts the detector. `removeFailed` on a node the

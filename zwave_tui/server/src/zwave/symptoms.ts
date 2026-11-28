@@ -700,8 +700,9 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
     // quiet-node — heard from far past the sweep's cadence (v0.38). The sweep
     // asks every listening node every staleMs and an answered probe refreshes
     // lastSeen, so silence this long means probes are not landing — yet the
-    // driver still says Alive, because Dead is set only on a failed
-    // transmission it actually attempted.
+    // driver has not marked it Dead, because Dead is set only on a failed
+    // transmission it actually attempted. With no sweep the bar is the
+    // QUIET_MS floor alone.
     {
       const seen = node.stats?.lastSeen ?? null;
       // Mains only, and never for a node already Dead — node-down owns that,
@@ -719,7 +720,10 @@ export function detectSymptoms(input: DetectInput, state: SymptomState): Symptom
         out.push({
           kind: 'quiet-node', nodeId: id, severity: 'warn', sinceMs: since, basis: 'measured',
           evidence: [{ label: 'last heard', value: `${silentH}h ago` }],
-          narrative: `${node.name} is a mains node that has not been heard from in ${silentH}h, far past the liveness sweep's cadence. The driver still reports it Alive because it marks a node Dead only when a transmission it attempted fails. Silence this long on a device that never sleeps is the earlier signal.`,
+          // The sweep is named only when one runs (v0.79.9): with no sweep the
+          // threshold is the bare QUIET_MS floor, and nothing asked the node.
+          // "Not marked Dead", not "Alive": eligibility admits Unknown too.
+          narrative: `${node.name} is a mains node that has not been heard from in ${silentH}h${input.sweepMs ? ", far past the liveness sweep's cadence" : ''}. The driver has not marked it Dead, because it does so only when a transmission it attempted fails. Silence this long on a device that never sleeps is the earlier signal.`,
         });
       }
     }

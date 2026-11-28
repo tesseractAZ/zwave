@@ -13,7 +13,9 @@ import { provenance, weight, unscoreableReason, subsumptionLabel } from '../ledg
 import { c, clipWords, truncate, visLen } from '../ansi';
 import { frame, fieldStrip, shedLine } from '../chrome';
 import { planFor, type PlanCandidate } from '../../zwave/planner';
-import { wilsonLower } from '../../zwave/outcomes';
+import { summonsHeadline } from '../../zwave/recommendation';
+import type { AutoPingNodeState } from '../../zwave/autoPing';
+import { wilsonLower, metricOf } from '../../zwave/outcomes';
 import { RTT_CEILING_MS } from '../../zwave/symptoms';
 
 /** One-line learned-efficacy note for an executable candidate (M5): a green
@@ -263,6 +265,11 @@ interface Ledger {
   probeable: (nodeId: number) => boolean | null;
   /** Verification probes still owed for THIS node (v0.47.0). */
   verifyOwedFor: (nodeId: number) => number;
+  /** An auto-ping runner exists (v0.79.9). Without one no verification probe
+   *  is sent, and none is booked (zwaveData.requestVerification). */
+  laneLive: boolean;
+  /** The dead-node ladder's per-node state; empty with no runner (v0.79.9). */
+  apNodes: () => readonly AutoPingNodeState[];
 }
 
 /**
@@ -385,6 +392,20 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       rows.push(truncate('    ' + c.grey(
         '○ this device cannot be probed (sleeping/FLiRS) — its evidence windows ' +
         'can never be filled, so outcomes here stay unscoreable'), W));
+    } else if (!ledger.laneLive && unscoreableReason(sym.kind) == null && metricOf(sym.kind) !== 'none') {
+      // NO RUNNER, NO VERIFICATION LANE (v0.79.9): index.ts starts both
+      // together. Each kind's evidence floor counts readings of its own signal
+      // from any traffic, not only probe replies, so an episode of a kind with
+      // a recovery metric can still be scored: unaided, not ruled out. A kind
+      // whose metric is 'none' (ghost-suspect, chatty-device, edge-cluster)
+      // has no recovery for any traffic to score, so its card gets no such
+      // line. "Pending" would promise probes nothing sends.
+      const forms = [
+        '    ○ auto-ping is off — no verification probes are sent; any score must come from the node’s other traffic',
+        '    ○ auto-ping off — any score must come from other traffic',
+        '    ○ auto-ping off: no verify probes',
+      ];
+      rows.push(c.grey(clipWords(forms.find((f) => visLen(f) <= W) ?? forms[forms.length - 1], W)));
     } else if (owed > 0) {
       rows.push(truncate('    ' + c.grey(
         `○ ${owed} verification probe${owed === 1 ? '' : 's'} still owed — the score is pending, not absent`), W));
@@ -408,7 +429,36 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
   // symptoms stays readable without scrolling.
   if (sym.subsumedBy == null) {
     const plan = planFor(sym, sym.nodeId != null ? nodeOf(sym.nodeId) : undefined, { writeActions, efficacyFor });
-    rows.push(truncate('    ' + c.label('▎ ') + c.white(plan.headline), W));
+    // A LADDER THAT SPENT ITS ATTEMPTS (v0.79.9). The planner's node-down
+    // headline says a ping often revives the node: true before the ladder
+    // runs, false once it gave up. The HA sensor's summons says what the
+    // ladder did, and so does this card now, in the same words.
+    const spent = sym.kind === 'node-down'
+      ? ledger.apNodes().find((n) => n.nodeId === sym.nodeId && (n.gaveUp || n.launchGaveUp))
+      : undefined;
+    // The sensor's words where they fit, then shorter whole forms of the same
+    // claim; clipWords is only the floor. "Not tested", and the forms that say
+    // no ping left, only where none did: once a ping went unanswered, every
+    // width says so.
+    const tried = spent?.attempts ?? 0;
+    const spentForms = spent == null ? [] : spent.launchGaveUp && !spent.gaveUp
+      ? (tried === 0
+        ? [summonsHeadline(spent),
+          'Node is DOWN — auto-ping could not send its pings; node not tested',
+          'Node is DOWN — auto-ping could not send its pings',
+          'DOWN — auto-ping pings not sent']
+        : [summonsHeadline(spent),
+          `Node is DOWN — auto-ping could not send its pings; ${tried} went unanswered`,
+          `Node is DOWN — ${tried} unanswered, then pings not sent`,
+          `DOWN — ${tried} unanswered, then unsent`,
+          `DOWN — ${tried} unanswered`])
+      : [summonsHeadline(spent),
+        `Node is DOWN — auto-ping gave up after ${tried} attempt${tried === 1 ? '' : 's'}`,
+        `DOWN — auto-ping gave up (${tried} ${tried === 1 ? 'try' : 'tries'})`,
+        'DOWN — auto-ping gave up'];
+    rows.push(spent
+      ? '    ' + c.label('▎ ') + c.white(clipWords(spentForms.find((f) => visLen(f) <= W - 6) ?? spentForms[spentForms.length - 1], W - 6))
+      : truncate('    ' + c.label('▎ ') + c.white(plan.headline), W));
     plan.candidates.slice(0, 3).forEach((cand, i) => {
       const runnable = cand.action != null && cand.blocked == null;
       const marker = cand.action != null ? (runnable ? c.green('▸') : c.grey('▸')) : c.grey('·');
@@ -571,6 +621,10 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
   const symptoms = data.symptoms();
   const nameOf = (id: number): string => data.nodeById(id)?.name ?? `Node ${id}`;
   const nodeOf = (id: number): NodeSnapshot | undefined => data.nodeById(id);
+  // An auto-ping runner exists (v0.79.9): its snapshot is null exactly when
+  // index.ts started none. A CAPABILITY, so it stays true while paused or
+  // suppressed — the runner can write again without a keypress.
+  const autonomous = (data.autoPingState?.() ?? null) != null;
   const ledger: Ledger = {
     efficacyFor: (kind, action) => data.efficacyFor(kind, action),
     // Optional on the provider (older/mock providers predate it) — absent means
@@ -587,6 +641,8 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     // nobody established.
     probeable: (nodeId) => data.probeable?.(nodeId) ?? null,
     verifyOwedFor: (nodeId) => data.verifyOwedFor?.(nodeId) ?? 0,
+    laneLive: autonomous,
+    apNodes: () => data.autoPingState?.()?.nodes ?? [],
   };
 
   /**
@@ -775,19 +831,48 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         body.push('');
         body.push(truncate(c.grey('    Every node has a graduated timeout and rtt baseline — the two'), W));
         body.push(truncate(c.grey('    that arm a detector —'), W));
-        const bandLine = `    for ${bandLabel(eng)}, and none is currently anomalous.`;
+        // WHAT THE BRANCH CHECKED (v0.79.9): `symptoms.length === 0`, so no
+        // symptom is firing. "None is currently anomalous" claimed a judgment
+        // the engine cannot make on a node whose 10-minute window is too thin.
+        const bandLine = `    for ${bandLabel(eng)}, and no symptom is firing.`;
         body.push(c.grey(visLen(bandLine) <= W ? bandLine
-          : `    for ${bandLabel(eng, true)}, none anomalous.`));
+          : `    for ${bandLabel(eng, true)}, no symptom firing.`));
+        // Those thin windows, as a count with no verdict word beside the ✓.
+        if (eng.timeoutWindowBlind > 0) {
+          const b = eng.timeoutWindowBlind;
+          const forms = [
+            `    (${b} of ${eng.total}: too little traffic in 10 min to rate timeouts.)`,
+            `    (${b} of ${eng.total}: too quiet in 10 min to rate timeouts.)`,
+            `    (${b}/${eng.total} too quiet to rate timeouts.)`,
+          ];
+          body.push(c.grey(clipWords(forms.find((f) => visLen(f) <= W) ?? forms[forms.length - 1], W)));
+        }
         body.push(...rssiNote());
         const eps = episodeLine();
         if (eps.length) body.push(...eps);
-        else body.push(c.grey('    New symptoms will surface here — advisory-first, nothing is acted on.'));
+        else if (autonomous) {
+          // A runner can write with no keypress (v0.79.9): "nothing is acted
+          // on" would be false. Stated as a capability, true while paused.
+          const forms = [
+            '    New symptoms surface here; the engine can also write on its own (ENGINE).',
+            '    The engine can also write on its own (ENGINE).',
+            '    The engine can write on its own.',
+          ];
+          body.push(c.grey(clipWords(forms.find((f) => visLen(f) <= W) ?? forms[forms.length - 1], W)));
+        } else {
+          const forms = [
+            '    New symptoms will surface here — advisory-first, nothing is acted on.',
+            '    New symptoms surface here; nothing is acted on.',
+            '    Advisory-first: nothing is acted on.',
+          ];
+          body.push(c.grey(clipWords(forms.find((f) => visLen(f) <= W) ?? forms[forms.length - 1], W)));
+        }
       }
     }
   } else {
     const crit = symptoms.filter((s) => s.severity === 'crit').length;
     const warn = symptoms.filter((s) => s.severity === 'warn').length;
-    body.push(truncate(c.grey('  ') + summaryLine(crit, warn, symptoms.length), W));
+    body.push(truncate(c.grey('  ') + summaryLine(crit, warn, symptoms.length, autonomous, W), W));
     body.push('');
     // frame() reserves masthead + title-rule + command-bar = 3 lines; the summary
     // + spacer above cost 2 more. The screen does not scroll, so build blocks
@@ -873,7 +958,7 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
   });
 }
 
-function summaryLine(crit: number, warn: number, total: number): string {
+function summaryLine(crit: number, warn: number, total: number, autonomous = false, W = Infinity): string {
   const bits: string[] = [];
   if (crit) bits.push(c.redB(`${crit} critical`));
   if (warn) bits.push(c.yellow(`${warn} warning`));
@@ -882,5 +967,18 @@ function summaryLine(crit: number, warn: number, total: number): string {
   // "nothing is acted on" was false ON THIS SCREEN: its own command bar
   // advertises [A] ACTIONS and `p` fires a ping immediately. The true claim is
   // about the ENGINE — it recommends and never executes; the operator does.
-  return bits.join(c.grey(' · ')) + c.grey('  —  the engine only recommends; you run the actions');
+  // WITH A RUNNER THAT IS FALSE (v0.79.9): auto-ping and the refresh trial
+  // write with no keypress. Stated as a capability, so it holds while auto-ping
+  // is paused or suppressed; the tail is shed whole, never cut mid-claim.
+  const head = bits.join(c.grey(' · '));
+  if (autonomous) {
+    const tail = ['  —  the engine can also write on its own; see ENGINE', '  —  the engine can also write on its own']
+      .find((t) => visLen('  ' + head + t) <= W) ?? '';
+    return head + c.grey(tail);
+  }
+  // The advisory tail sheds the same way (v0.79.9): cut blind, one warning's
+  // row read "you run the acti" at 60 columns.
+  const advisory = ['  —  the engine only recommends; you run the actions', '  —  the engine only recommends']
+    .find((t) => visLen('  ' + head + t) <= W) ?? '';
+  return head + c.grey(advisory);
 }

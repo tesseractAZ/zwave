@@ -64,10 +64,17 @@ const SEVERITY_RANK: Record<Symptom['severity'], number> = { crit: 0, warn: 1, w
 
 /** The headline for a summons (v0.72.1). The planner's node-down headline
  *  says a ping often revives the node — true before the ladder runs, false
- *  once it has spent its attempts. A ladder whose launches never left the
- *  add-on did not test the node at all, and says so. */
-function summonsHeadline(g: AutoPingNodeState): string {
-  if (g.launchGaveUp && !g.gaveUp) return 'Node is DOWN — auto-ping could not send its pings, so the node itself was not tested';
+ *  once it has spent its attempts. A ladder none of whose pings left the
+ *  add-on did not test the node at all, and says so. `attempts` counts only
+ *  pings that left (a failed launch gives its attempt back), and the launch
+ *  budget is not reset by a ping that did, so the launches can run out after
+ *  some pings went unanswered: that ladder did test the node, and says how
+ *  many times (v0.79.9). REMEDY's node-down card uses it too (v0.79.9), so the
+ *  screen and the sensor say the same. */
+export function summonsHeadline(g: AutoPingNodeState): string {
+  if (g.launchGaveUp && !g.gaveUp) return g.attempts === 0
+    ? 'Node is DOWN — auto-ping could not send its pings, so the node itself was not tested'
+    : `Node is DOWN — auto-ping could not send its pings after ${g.attempts} unanswered attempt${g.attempts === 1 ? '' : 's'}`;
   return `Node is DOWN — auto-ping gave up after ${g.attempts} unanswered attempt${g.attempts === 1 ? '' : 's'}`;
 }
 

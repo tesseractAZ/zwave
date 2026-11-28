@@ -1,6 +1,6 @@
 {
   "name": "zwave-tui-server",
-  "version": "0.79.8",
+  "version": "0.79.9",
   "engines": {
     "node": ">=22.0.0 <23.0.0"
   },

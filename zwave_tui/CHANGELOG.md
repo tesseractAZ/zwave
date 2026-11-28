@@ -1,5 +1,164 @@
 # Changelog
 
+## 0.79.9
+
+Screens no longer state what the engine never measured. With no auto-ping
+runner no verification probe is booked, and REMEDY says none is sent instead
+of calling a score pending; with one, REMEDY no longer says the engine only
+recommends. A node-down card whose ladder gave up says so, and neither it nor
+the summons says the node was not tested after a ping went unanswered; the
+quiet-node card and narrative state only what the detector checked, and the
+all-clear claims only that no symptom is firing. A driver refusal after a ping
+still indicts the detector, and ENGINE shows ghost-suspect's refusals.
+Interference names the driver link's state instead of saying to set
+`driver_ws_url`, Controller names it beside `not reported by HA`, and the Log
+names its in-memory ring wherever the ring does not reach back to the range
+start. The stored files keep their format.
+
+### Fixed — verification probes counted as owed, and the score called pending, with no auto-ping runner (0.47.0)
+
+- Only the auto-ping runner drains the verification queue, and it is started
+  only with auto-ping and write actions both on, both off by default. Every
+  episode on a listening node still booked a five-probe burst, so REMEDY's
+  card read `N verification probes still owed — the score is pending, not
+  absent` and DETAIL `N verification probes owed — episode evidence is not yet
+  confirmed for this node` (0.62.0) for probes nothing would send. No probe is
+  booked with no runner now, and a card of a kind with a recovery metric reads
+  `○ auto-ping is off — no verification probes are sent; any score must come
+  from the node’s other traffic`, in whole shorter forms at 60 and 40 columns:
+  each kind's evidence floor counts readings of its own signal from any
+  traffic, not only probe replies, so an episode of a kind with a recovery
+  metric can still be scored. A card of a kind whose metric is `none`
+  (`ghost-suspect`, `chatty-device`, `edge-cluster`) gets no such line.
+
+### Fixed — REMEDY said the engine only recommends while auto-ping could write on its own (0.30.0)
+
+- The summary line ended `the engine only recommends; you run the actions`
+  and the all-clear `advisory-first, nothing is acted on` whatever the add-on
+  ran, while auto-ping's ladder, sweep and verification probes and the
+  refresh trial write with no keypress. With an auto-ping runner they read
+  `the engine can also write on its own; see ENGINE` (the pointer shed, then
+  the clause, whole, where the row is narrow) and `New symptoms surface here;
+  the engine can also write on its own (ENGINE).`: a capability, true while
+  auto-ping is paused or suppressed. Without one the all-clear keeps its
+  words, shortened whole to `New symptoms surface here; nothing is acted on.`
+  and `Advisory-first: nothing is acted on.` where the row is narrow, and the
+  summary's tail sheds the same way, to `the engine only recommends` and then
+  whole: cut blind, the all-clear ended `surface here — adv` at 40 columns and
+  one warning's row `you run the acti` at 60.
+
+### Fixed — a node-down card kept "a ping often revives it" after the ladder gave up (0.37.0)
+
+- The planner's headline is true before auto-ping's ladder runs and false once
+  it has spent its attempts; the recommendation sensor has led a summons with
+  what the ladder did since 0.72.1, and REMEDY did not. A node-down card whose
+  ladder gave up now leads with the sensor's words: `Node is DOWN — auto-ping
+  gave up after N unanswered attempts`, or that its pings could not be sent,
+  and with shorter whole forms of them where they do not fit. At 40 columns
+  those are `DOWN — auto-ping gave up (N tries)` (or without the count where
+  it does not fit), `DOWN — N unanswered, then unsent` once a ping went
+  unanswered, and `DOWN — auto-ping pings not sent` only where none left.
+
+### Fixed — a summons said the node was not tested after its pings had gone unanswered (0.72.1)
+
+- `sensor.zwave_tui_recommendation` led the summons of a ladder whose
+  launches ran out with `auto-ping could not send its pings, so the node
+  itself was not tested`, whatever had gone before. A failed launch gives its
+  attempt back, and the launch-failure count is cleared only by a recovery or
+  the node's departure, so the launches can run out after a ping left and went
+  unanswered: that ping tested the node. With `attempts` above 0 the sensor's
+  headline, and the REMEDY card's, reads `Node is DOWN — auto-ping could not
+  send its pings after N unanswered attempts`; `not tested` stays for a ladder
+  none of whose pings left.
+
+### Fixed — the quiet-node card said no traffic was attempted, and its narrative cited a sweep that was not running (0.38.0)
+
+- The ping card's grounding line read `but no traffic was attempted`, while
+  with the sweep on every mains node is asked once a cadence and quiet-node
+  fires only after three of them. It reads `yet it is not marked Dead`, the
+  detector's own test. The narrative named the liveness sweep's cadence with
+  no sweep running and said the driver `still reports it Alive` of a node the
+  detector also admits when Unknown: the sweep is named only when one runs,
+  and it says the driver has not marked the node Dead.
+
+### Fixed — the all-clear said no node is anomalous where no detector could judge one (0.14.0)
+
+- `and none is currently anomalous` followed a branch that checks only that no
+  symptom is firing, on a fleet where a node whose 10-minute window holds
+  fewer than 20 sends is skipped by both return-path detectors. It reads `and
+  no symptom is firing`, and such nodes are counted beneath it with no verdict
+  word beside the ✓: `(N of T: too little traffic in 10 min to rate
+  timeouts.)`.
+
+### Fixed — ENGINE never showed a refusal of ghost-suspect, the one kind a refusal indicts (0.41.0)
+
+- LEARNED iterated only the scored kinds, which never held `ghost-suspect`, so
+  its refusal tally reached REMEDY's card and no ENGINE row, while two code
+  comments said two screens showed it. A kind outside the scored set that a
+  refusal can indict, derived from the planner's own table, gets two rows of
+  its own when its tally is above zero: `ghost-suspect` and `○ N refused as
+  misdiagnosis`, whole at 40 columns. The `n≈` legend renders only where a
+  LEARNED row shows a weight, so a block of refusal or unscoreable tallies
+  alone no longer explains a notation it does not show, and at 40 columns it
+  is a whole form, `n≈ decays, caps ~33; nodes cumulative`.
+
+### Fixed — a driver refusal after a ping on the same episode was dropped (0.43.1)
+
+- First action per episode wins the attribution, so a ping before `x` — the
+  operator's, or the ladder's, which starts again with the add-on and pings a
+  Dead mains ghost after its dwell — took the stamp, and the refused
+  `removeFailed` that followed filed nothing. A refusal claims no credit: it
+  now replaces an unrefused stamp on the episodes in its scope
+  (`ghost-suspect`, whose metric is `none`, so the stamp it replaces scored
+  nothing; a test holds every kind a refusal can indict to that metric). A
+  later success still takes no earlier action's credit, and a second refusal
+  keeps the first.
+
+### Fixed — Interference said to set `driver_ws_url` in every driver-link state (0.17.0)
+
+- With no fresh background-RSSI reading the screen printed `◷ unavailable —
+  the read-only driver-WS client is not connected.` and `(HA strips
+  backgroundRSSI; set driver_ws_url to enable this.)` whether the link was
+  live, connecting, retrying, dormant, stopped or absent, though the option
+  ships set. It names the state now: `not configured` and the hint only when
+  the option is empty; `no background-RSSI reading from the driver in 90 s`
+  for a live link; the link connecting, starting up, retrying, dormant or
+  stopped `(see ENGINE)`, with `(check driver_ws_url.)` below a link that is
+  retrying or stopped; and a homeId mismatch on a row of its own, its advice
+  moved to the next row where the fault does not fit, and the fault wrapped at
+  its ` — ` onto the rows below where it still does not, as at 40 columns.
+  Every other line has whole forms for 60 and 40 columns.
+- The Controller's empty per-channel row read `not reported by HA`, true and
+  silent about the driver link that would carry the reading (0.13.0). The
+  link's state rides beside it as one whole token, shed with `+1` where the
+  row has no room; a live link is only named there (`see INTERFERENCE`),
+  because that row is also empty when a reading lacks channel 0. The head
+  has a whole short form, `per-channel floor: not from HA`, taken where only
+  it carries the token or leaves room for the `+1`: cut blind at 40 columns,
+  the long head lost its last word, `HA`.
+
+### Fixed — the Log blamed the filters over an in-memory ring that did not reach back to the range (0.41.0)
+
+- The disclosure that the ring is in memory only rendered for the yesterday,
+  24-hour and seven-day ranges alone, so an empty ring — after a restart, or
+  with Home Assistant unreachable at boot — left today, the last hour and an
+  errors-only all-time list saying only that no event matched the filters. It
+  renders wherever the ring does not reach back to the range start, and not
+  where it covers the whole range.
+
+### Tests
+
+- 1,995 tests, 23 new: 8 in `remedyScreen.test.ts`, 3 in
+  `zwaveDataChurn.test.ts` and 3 in `interferenceScreen.test.ts`, 2 each in
+  `engineScreen.test.ts` and `outcomes.test.ts`, and one each in
+  `planner.test.ts`, `symptoms.test.ts`, `recommendation.test.ts`,
+  `controllerHeatmapScreen.test.ts` and `logScreen.test.ts`; 18 fixtures in
+  `zwaveDataChurn.test.ts` and 1 in `remedyScreen.test.ts` that use the
+  verification queue now model a running auto-ping, the 18 with one complete
+  snapshot. 2,114 mutation-harness entries (19 labelled equivalent): 47 new,
+  and 2 re-anchored to whole-form text: `remedy-advisory-claim` and
+  `legend-only-with-a-weight`.
+
 ## 0.79.8
 
 Each node's Dead and alive crossings are counted against one status that every
@@ -265,234 +424,6 @@ the run as a driver server on another network. Nothing stored on disk changes.
   `driverWsClient.test.ts`, 2 in `zwaveDataChurn.test.ts` and 1 in
   `deviceSwapSim.test.ts`; 2,008 mutation-harness entries (20 labelled
   equivalent, 2 of them new): 66 new, 2 re-anchored.
-
-## 0.79.5
-
-A forward clock step no longer makes a real outage a 90-minute start death, a
-waiting node-down dwell that ended no longer comes back after a crash restart,
-and a deploy during a Z-Wave JS outage keeps the driver start. A node whose own
-device changes in Home Assistant (a replacement by another product, another
-product included on its freed id, or a misread hardware id) drops the old
-device's dwells, evidence and baselines while the add-on keeps running, and
-`/api/health` reports no conclusions before they are judged. The update from
-0.79.4 carries no `driverDrop`, which 0.79.4 never wrote: a Z-Wave JS restart
-in progress at the update is not read as a driver start. The schema of
-`evidence.json` is otherwise unchanged, and a rollback to 0.79.4 ignores
-`driverDrop`.
-
-### Fixed — a forward clock step could make a real outage a 90-minute start death (0.79.3)
-
-- The host's boot (now minus uptime) was judged on every tick of a death's
-  5-minute dwell, so a forward wall-clock step could put it within 10 minutes
-  before the death and hold a `node-down` on a node not known to be listening
-  back for 90 minutes. The boot is now judged at a death's first Dead reading
-  only, where their distance is the host's uptime, and the verdict stays
-  both ways; a carried dwell keeps the one taken at its first Dead reading,
-  in whichever run first read it (for a dwell 0.79.3 or 0.79.4 wrote, the one
-  that version last took). A driver restart seen over the link is still
-  judged on every tick: its handshake can come after the first reading.
-
-### Fixed — a waiting node-down dwell that ended could come back after a crash restart (0.79.3)
-
-- Every save, the 15-minute flush included, wrote a node-down still on its
-  5-minute dwell, so one that ended after a flush came back after a crash
-  restart on the same boot with its old onset, and a node read Dead again
-  could be raised at once. Once the engine has taken the restored carry, the
-  saves made while the add-on runs write only raised node-downs and start
-  deaths; the shutdown save writes the waiting dwells too. A deploy, update or
-  restart of this add-on on the same boot keeps a waiting dwell's onset, and
-  the next run's first tick takes it off the disk. After a crash restart it
-  starts again at the next Dead reading. A raised node-down or a start death
-  that ends still reaches disk with the next prompt save, as in 0.79.3.
-
-### Fixed — a clock step back could hold off the prompt save (0.79.3)
-
-- The minute between prompt saves was measured on the wall clock, so a step
-  back of X right after a save held the next one off for X + 60 s. It is
-  measured on the host's uptime, which a wall-clock step does not move
-  (inferred: `os.uptime()` reads `/proc/uptime` on Linux). The first tick's
-  write-out of a restored carry no longer starts the minute, so a node-down
-  raised in the minute after a deploy is saved at once.
-
-### Fixed — a deploy during a Z-Wave JS outage lost the driver start (0.79.3)
-
-- A link the server ended was held by the driver client alone, and a stop
-  cleared it: when the add-on stopped before Z-Wave JS was back, the next
-  run's first handshake was no driver start, and a FLiRS node Dead after that
-  restart was raised 5 minutes in, not 90. An open link end now survives a
-  stop and is carried in `evidence.json` (`driverDrop`, written at every save
-  while open); the next run takes it on the same boot within 10 minutes of
-  the last save, and its first handshake closes it into a driver start. It
-  does not trigger the prompt save, so a crash restart during an outage can
-  lose one no save wrote. Before the engine's first tick a save writes the
-  driver link's part as this run holds it: a driver restart it saw, else the
-  restored one, and the drop as its driver client holds it, so a drop the
-  first handshake closed is written as the span it closed, not as open.
-
-### Fixed — a node's device changed in Home Assistant while its id stayed on the roster
-
-- `replace_failed_node` keeps the id on the roster, so the departed-node
-  eviction never ran for it, and the failed device's dwells (a raised
-  node-down included), evidence, baselines, readings, open episodes and the
-  refresh trial's open decision stayed on the id. While the add-on keeps
-  running, a registry load that shows the node's own device changed now drops
-  them, with a Log line (`node N's device changed in Home Assistant …`, or
-  `K in-flight episodes + node N's baselines discarded …` when episodes were
-  open): its device id differs from the one the last load that listed it
-  recorded, or its hardware id (`<home>-<node>-<manufacturer>:<type>:<id>`)
-  does. A hardware id change alone is another product included on a freed id
-  inside the 5-minute eviction dwell: Home Assistant gives it back the device
-  it deleted at the exclusion. No swap: an id with no record yet (a run's
-  first load, a device first seen, an id evicted since the last load), a load
-  that lists no own device on the id (the record is kept), a hardware id the
-  node already carried since it last left the network (the same hardware
-  filed again), and more than max(2, half the mapped nodes) changing at once
-  (a registry re-created: one line, nothing dropped). A replace by the same
-  product is the same Home Assistant device and keeps its state, and so does
-  one by a product the node already carried since it last left the network.
-  After an add-on restart before that load nothing is compared, and the old
-  state stays.
-- A node whose interview misreads its hardware ids in poor RF is filed by
-  Home Assistant under a new device, as a replacement by another product is
-  (it cannot tell the two apart): that costs the node its baselines and
-  evidence once for each misread value while the add-on runs, none when the
-  correct read comes before the next load. The correct read that files it
-  back is no swap while the add-on runs; an add-on restart between the two
-  costs a second reset.
-- A node's cached configuration parameters now go with any change of its
-  `ready` on the roster and with a swap, also when only the hardware id
-  changed (the device id Home Assistant restores kept them before), and an
-  answer or a failure for a configuration fetch the cache dropped meanwhile
-  (a device change, a departure, a write) is no longer stored as the node's:
-  Detail and the Actions menu do not offer a replacement, from the start of
-  its interview, the failed product's parameter numbers, and parameters read
-  mid-interview are asked again once the node reads ready.
-- After a replacement, or another product included on the freed id, the
-  node's statistics and status feeds stay bound to the old node (inferred,
-  below) until the next rebuild of the feeds (a Home Assistant reconnect, the
-  self-heal or a re-arm): until then the new device has no statistics feed
-  and its Dead/Alive crossings are not counted. Home Assistant binds each
-  feed to the node object it resolved at subscribe time, and a node replaced
-  or included is another object there (inferred).
-- Registry loads, where a swap shows: besides each Home Assistant
-  reconnection, the self-heal and a home-id change, the roster asks for one
-  when a node's `ready` goes false→true (Home Assistant files the interviewed
-  hardware ids then) or the node is back on the roster ready, when a poll
-  succeeds after failed ones with no load since them (an entry reload), at
-  the first poll that succeeds after a reconnect, whose own load can run
-  before Home Assistant has set zwave_js up again (at most one more load per
-  reconnect), once for a roster node with no record of this network, and for
-  an evicted id back on the roster; a re-arm for a dead statistics feed with
-  no entry reload seen asks for one too. A load the roster asks for runs in
-  that poll, before the roster the engine reads is published, so a
-  replacement's first reading does not log the failed device's node-down as
-  cleared; on a run's first successful poll and on a home-id change the next
-  poll's load serves it. The ready, failed-poll and reconnect asks are spaced
-  60 s apart: one asked sooner waits for the first poll past it, and the
-  engine may read the node first, as it may a replacement that reads Alive
-  while still being interviewed (inferred).
-- The node's own device (a `zwave_js` identifier exactly `<home>-<node>`)
-  stands for the node whatever the list order. An endpoint child, or the
-  orphan Home Assistant leaves when an interview reports other hardware ids
-  (`<home>-<node>-…`), still maps its entities to the node, and stands for it
-  only while the node's own device is not listed. Before, the last device
-  listed stood for the node: its name, area and entity list, and the
-  `device_id` its subscriptions, configuration parameters and actions use.
-- A node's entity list (Detail's LIVE ENTITIES) is its own device's entities
-  and its endpoint children's (`parent_device_id`: from Home Assistant 2026.11
-  a labelled endpoint's entities are on a child device of the node's own
-  device); an orphan's entities, and a child of another device's, are left
-  out. Before, it held the entities of the device standing for the node alone.
-- Another `zwave_js` config entry is another network, whose `<home>-<node>`
-  ids name its own nodes: its devices no longer join this network's nodes (a
-  device that lists no entry is kept). And once the network's home id is
-  known, only its devices hold a node's slot or join an entity to a node, as a
-  controller changed under the same entry leaves the old network's devices
-  listed on ids the new network may reuse; while none of that home id's own
-  devices is listed, every device is.
-
-### Fixed — `/api/health` before the engine's first tick
-
-- Until the first roster and the engine's first tick after a restart, it
-  reported conclusions not yet judged, so a carried node-down read
-  `degraded: false` there while Home Assistant was sent nothing. It asks the
-  publisher's gate now: until then `conclusionsReady: false` (a new key),
-  `degraded: null` and an empty `engine`; after it, the published
-  conclusions, Home Assistant's copy up to one 30-second publish behind while
-  its posts succeed (longer while it answers slowly or refuses them). `ok` and
-  the HTTP status code are unchanged.
-
-### Clarified
-
-- zwave-js-server (checked at source, 3.0.0 and master) ends a client's link
-  only when it shuts down or rebuilds a failed driver, or on a message that is
-  not JSON, which this client never sends (master also refuses a new
-  connection before its handshake while the driver is not ready, which reads
-  as nothing here); against it, a network fault is the one link end read as a
-  driver start without being one.
-
-### Corrected
-
-- Source comments no longer call the coarse tier the baselines' substrate
-  (baselines fold fine samples; it feeds the screens only), and the detection
-  engine is no longer handed it: no detector read it.
-
-### Tests
-
-- 1,853 tests, 84 new; 1,942 mutation-harness entries (18 labelled
-  equivalent, 1 of them new): 145 new, 1 retired with the check it covered (a
-  stop cleared an open peer close), 20 re-anchored; the full harness kills
-  every entry not labelled equivalent.
-
-## 0.79.4
-
-Documentation only: the option descriptions Home Assistant shows on the
-Configuration tab, and every document in the repository, now say what the code
-does. Nothing the add-on does has changed.
-
-### Corrected — the option descriptions (English and Spanish)
-
-- **Require login (direct access)** (`auth_enabled`): SSH needs it, and while
-  it is off every SSH login is refused. A web-console connection that does not
-  come through the HA sidebar (possible only from Home Assistant's internal
-  add-on network; port 8788 is not published on the LAN) opens with no login
-  while it is off.
-- **Max login attempts** (`auth_max_attempts`): the count starts an escalating
-  back-off per address (5 s, doubling, up to 5 min), kept across reconnects;
-  the description said the connection was dropped, which only the web
-  console's login screen does.
-- **Idle re-lock** (`auth_idle_lock_min`): it re-locks web-console sessions
-  only. A web-console connection idle for 5 minutes is also closed and
-  reconnects, so an idle gated session meets the login screen after 5 minutes
-  at most. SSH checks the password once, when the connection opens, and closes
-  a connection after 30 minutes with no inbound traffic.
-- **Evidence sample interval** (`route_poll_interval`, renamed from "route
-  poll interval"; the option key is unchanged): it is the detection engine's
-  tick and polls nothing; it also sets the span of the 240 controller samples
-  behind the INTERFERENCE screen's serial-link rates.
-- Auto-ping and the refresh trial are the only actions taken without a key
-  press, both off by default; auto-ping also starts the liveness sweep, and
-  its mesh-wide suppressor counts a quarter of the mains-powered nodes (at
-  least 4). The liveness sweep asks at most one node a minute. The log
-  archive is read from a shell add-on, not this add-on's SSH. The Core
-  WebSocket URL must reach this Home Assistant, since the data layer
-  authenticates with this add-on's own Supervisor token.
-
-### Corrected — the documents
-
-A scan of every `.md` file against the code, and four reviews of the corrected
-text as a whole, made 289 corrections where the code or another document
-contradicted the text, in `DOCS.md`, `README.md`, `DESIGN.md`,
-`PERFORMANCE.md`, `SECURITY.md`, `RESEARCH.md` and the option descriptions.
-`RESEARCH.md` now marks the parts of its design that are not built (among them
-the 0–10 rating and the `backup_nvm` rule). 44 more passages, among them
-passages in the older releases in `docs/CHANGELOG-history.md`, are reworded to
-the impersonal register.
-
-### Tests
-
-- The pin on the frozen history (`changelogContract.test.ts`) is updated for
-  the reworded older releases.
 
 ## Older releases
 

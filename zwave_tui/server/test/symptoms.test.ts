@@ -1377,6 +1377,27 @@ test('quiet-node\'s dwell follows the CONFIGURED sweep, not the default (v0.63.0
     'a lengthened sweep must lengthen the dwell — otherwise this fires before one sweep asked');
 });
 
+test('quiet-node names the sweep only when one runs, and says the node is not marked Dead rather than Alive (v0.79.9)', () => {
+  // With no sweep the bar is the QUIET_MS floor and nothing asked the node, so
+  // "far past the liveness sweep's cadence" described a lane that was off. And
+  // eligibility is `status !== Dead`: an Unknown node fires too, so "reports
+  // it Alive" named a status the detector never read.
+  const run = (over: Partial<NodeSnapshot>, sweepMs?: number): Symptom | undefined => settle(
+    (now: number) => ({
+      ...input({ nodes: [node(1), node(6, { stats: { lastSeen: T - 8 * 3600_000 } as never, ...over })], recent: new Map([[6, []]]), now }),
+      ...(sweepMs != null ? { sweepMs } : {}),
+    } as never),
+    new Map(), T, 8).find((x) => x.kind === 'quiet-node' && x.nodeId === 6);
+  const off = run({ status: NodeStatus.Unknown });
+  assert.ok(off, 'control: an Unknown mains node silent for 8 h with no sweep fires');
+  assert.doesNotMatch(off!.narrative, /sweep/, 'no sweep runs, so no sweep cadence is cited');
+  assert.doesNotMatch(off!.narrative, /reports it Alive/);
+  assert.match(off!.narrative, /The driver has not marked it Dead, because it does so only when a transmission it attempted fails\./);
+  const on = run({}, 120 * 60_000);
+  assert.ok(on, 'control: the same silence under a 2 h sweep fires');
+  assert.match(on!.narrative, /has not been heard from in [\d.]+h, far past the liveness sweep's cadence\./, 'with a sweep the clause stays');
+});
+
 /* ── v0.64.6: rate-fallback needs a PERSISTENT regression, not one retried frame ── */
 
 type RateMark = { at: number; rate?: number; routeKey?: string | null; fresh?: boolean; dTx?: number; dDropTx?: number };

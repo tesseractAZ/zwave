@@ -3,6 +3,234 @@
 Releases older than the ones in zwave_tui/CHANGELOG.md, newest first. The
 shipped changelog keeps only the newest releases so Home Assistant can render it.
 
+## 0.79.5
+
+A forward clock step no longer makes a real outage a 90-minute start death, a
+waiting node-down dwell that ended no longer comes back after a crash restart,
+and a deploy during a Z-Wave JS outage keeps the driver start. A node whose own
+device changes in Home Assistant (a replacement by another product, another
+product included on its freed id, or a misread hardware id) drops the old
+device's dwells, evidence and baselines while the add-on keeps running, and
+`/api/health` reports no conclusions before they are judged. The update from
+0.79.4 carries no `driverDrop`, which 0.79.4 never wrote: a Z-Wave JS restart
+in progress at the update is not read as a driver start. The schema of
+`evidence.json` is otherwise unchanged, and a rollback to 0.79.4 ignores
+`driverDrop`.
+
+### Fixed — a forward clock step could make a real outage a 90-minute start death (0.79.3)
+
+- The host's boot (now minus uptime) was judged on every tick of a death's
+  5-minute dwell, so a forward wall-clock step could put it within 10 minutes
+  before the death and hold a `node-down` on a node not known to be listening
+  back for 90 minutes. The boot is now judged at a death's first Dead reading
+  only, where their distance is the host's uptime, and the verdict stays
+  both ways; a carried dwell keeps the one taken at its first Dead reading,
+  in whichever run first read it (for a dwell 0.79.3 or 0.79.4 wrote, the one
+  that version last took). A driver restart seen over the link is still
+  judged on every tick: its handshake can come after the first reading.
+
+### Fixed — a waiting node-down dwell that ended could come back after a crash restart (0.79.3)
+
+- Every save, the 15-minute flush included, wrote a node-down still on its
+  5-minute dwell, so one that ended after a flush came back after a crash
+  restart on the same boot with its old onset, and a node read Dead again
+  could be raised at once. Once the engine has taken the restored carry, the
+  saves made while the add-on runs write only raised node-downs and start
+  deaths; the shutdown save writes the waiting dwells too. A deploy, update or
+  restart of this add-on on the same boot keeps a waiting dwell's onset, and
+  the next run's first tick takes it off the disk. After a crash restart it
+  starts again at the next Dead reading. A raised node-down or a start death
+  that ends still reaches disk with the next prompt save, as in 0.79.3.
+
+### Fixed — a clock step back could hold off the prompt save (0.79.3)
+
+- The minute between prompt saves was measured on the wall clock, so a step
+  back of X right after a save held the next one off for X + 60 s. It is
+  measured on the host's uptime, which a wall-clock step does not move
+  (inferred: `os.uptime()` reads `/proc/uptime` on Linux). The first tick's
+  write-out of a restored carry no longer starts the minute, so a node-down
+  raised in the minute after a deploy is saved at once.
+
+### Fixed — a deploy during a Z-Wave JS outage lost the driver start (0.79.3)
+
+- A link the server ended was held by the driver client alone, and a stop
+  cleared it: when the add-on stopped before Z-Wave JS was back, the next
+  run's first handshake was no driver start, and a FLiRS node Dead after that
+  restart was raised 5 minutes in, not 90. An open link end now survives a
+  stop and is carried in `evidence.json` (`driverDrop`, written at every save
+  while open); the next run takes it on the same boot within 10 minutes of
+  the last save, and its first handshake closes it into a driver start. It
+  does not trigger the prompt save, so a crash restart during an outage can
+  lose one no save wrote. Before the engine's first tick a save writes the
+  driver link's part as this run holds it: a driver restart it saw, else the
+  restored one, and the drop as its driver client holds it, so a drop the
+  first handshake closed is written as the span it closed, not as open.
+
+### Fixed — a node's device changed in Home Assistant while its id stayed on the roster
+
+- `replace_failed_node` keeps the id on the roster, so the departed-node
+  eviction never ran for it, and the failed device's dwells (a raised
+  node-down included), evidence, baselines, readings, open episodes and the
+  refresh trial's open decision stayed on the id. While the add-on keeps
+  running, a registry load that shows the node's own device changed now drops
+  them, with a Log line (`node N's device changed in Home Assistant …`, or
+  `K in-flight episodes + node N's baselines discarded …` when episodes were
+  open): its device id differs from the one the last load that listed it
+  recorded, or its hardware id (`<home>-<node>-<manufacturer>:<type>:<id>`)
+  does. A hardware id change alone is another product included on a freed id
+  inside the 5-minute eviction dwell: Home Assistant gives it back the device
+  it deleted at the exclusion. No swap: an id with no record yet (a run's
+  first load, a device first seen, an id evicted since the last load), a load
+  that lists no own device on the id (the record is kept), a hardware id the
+  node already carried since it last left the network (the same hardware
+  filed again), and more than max(2, half the mapped nodes) changing at once
+  (a registry re-created: one line, nothing dropped). A replace by the same
+  product is the same Home Assistant device and keeps its state, and so does
+  one by a product the node already carried since it last left the network.
+  After an add-on restart before that load nothing is compared, and the old
+  state stays.
+- A node whose interview misreads its hardware ids in poor RF is filed by
+  Home Assistant under a new device, as a replacement by another product is
+  (it cannot tell the two apart): that costs the node its baselines and
+  evidence once for each misread value while the add-on runs, none when the
+  correct read comes before the next load. The correct read that files it
+  back is no swap while the add-on runs; an add-on restart between the two
+  costs a second reset.
+- A node's cached configuration parameters now go with any change of its
+  `ready` on the roster and with a swap, also when only the hardware id
+  changed (the device id Home Assistant restores kept them before), and an
+  answer or a failure for a configuration fetch the cache dropped meanwhile
+  (a device change, a departure, a write) is no longer stored as the node's:
+  Detail and the Actions menu do not offer a replacement, from the start of
+  its interview, the failed product's parameter numbers, and parameters read
+  mid-interview are asked again once the node reads ready.
+- After a replacement, or another product included on the freed id, the
+  node's statistics and status feeds stay bound to the old node (inferred,
+  below) until the next rebuild of the feeds (a Home Assistant reconnect, the
+  self-heal or a re-arm): until then the new device has no statistics feed
+  and its Dead/Alive crossings are not counted. Home Assistant binds each
+  feed to the node object it resolved at subscribe time, and a node replaced
+  or included is another object there (inferred).
+- Registry loads, where a swap shows: besides each Home Assistant
+  reconnection, the self-heal and a home-id change, the roster asks for one
+  when a node's `ready` goes false→true (Home Assistant files the interviewed
+  hardware ids then) or the node is back on the roster ready, when a poll
+  succeeds after failed ones with no load since them (an entry reload), at
+  the first poll that succeeds after a reconnect, whose own load can run
+  before Home Assistant has set zwave_js up again (at most one more load per
+  reconnect), once for a roster node with no record of this network, and for
+  an evicted id back on the roster; a re-arm for a dead statistics feed with
+  no entry reload seen asks for one too. A load the roster asks for runs in
+  that poll, before the roster the engine reads is published, so a
+  replacement's first reading does not log the failed device's node-down as
+  cleared; on a run's first successful poll and on a home-id change the next
+  poll's load serves it. The ready, failed-poll and reconnect asks are spaced
+  60 s apart: one asked sooner waits for the first poll past it, and the
+  engine may read the node first, as it may a replacement that reads Alive
+  while still being interviewed (inferred).
+- The node's own device (a `zwave_js` identifier exactly `<home>-<node>`)
+  stands for the node whatever the list order. An endpoint child, or the
+  orphan Home Assistant leaves when an interview reports other hardware ids
+  (`<home>-<node>-…`), still maps its entities to the node, and stands for it
+  only while the node's own device is not listed. Before, the last device
+  listed stood for the node: its name, area and entity list, and the
+  `device_id` its subscriptions, configuration parameters and actions use.
+- A node's entity list (Detail's LIVE ENTITIES) is its own device's entities
+  and its endpoint children's (`parent_device_id`: from Home Assistant 2026.11
+  a labelled endpoint's entities are on a child device of the node's own
+  device); an orphan's entities, and a child of another device's, are left
+  out. Before, it held the entities of the device standing for the node alone.
+- Another `zwave_js` config entry is another network, whose `<home>-<node>`
+  ids name its own nodes: its devices no longer join this network's nodes (a
+  device that lists no entry is kept). And once the network's home id is
+  known, only its devices hold a node's slot or join an entity to a node, as a
+  controller changed under the same entry leaves the old network's devices
+  listed on ids the new network may reuse; while none of that home id's own
+  devices is listed, every device is.
+
+### Fixed — `/api/health` before the engine's first tick
+
+- Until the first roster and the engine's first tick after a restart, it
+  reported conclusions not yet judged, so a carried node-down read
+  `degraded: false` there while Home Assistant was sent nothing. It asks the
+  publisher's gate now: until then `conclusionsReady: false` (a new key),
+  `degraded: null` and an empty `engine`; after it, the published
+  conclusions, Home Assistant's copy up to one 30-second publish behind while
+  its posts succeed (longer while it answers slowly or refuses them). `ok` and
+  the HTTP status code are unchanged.
+
+### Clarified
+
+- zwave-js-server (checked at source, 3.0.0 and master) ends a client's link
+  only when it shuts down or rebuilds a failed driver, or on a message that is
+  not JSON, which this client never sends (master also refuses a new
+  connection before its handshake while the driver is not ready, which reads
+  as nothing here); against it, a network fault is the one link end read as a
+  driver start without being one.
+
+### Corrected
+
+- Source comments no longer call the coarse tier the baselines' substrate
+  (baselines fold fine samples; it feeds the screens only), and the detection
+  engine is no longer handed it: no detector read it.
+
+### Tests
+
+- 1,853 tests, 84 new; 1,942 mutation-harness entries (18 labelled
+  equivalent, 1 of them new): 145 new, 1 retired with the check it covered (a
+  stop cleared an open peer close), 20 re-anchored; the full harness kills
+  every entry not labelled equivalent.
+
+## 0.79.4
+
+Documentation only: the option descriptions Home Assistant shows on the
+Configuration tab, and every document in the repository, now say what the code
+does. Nothing the add-on does has changed.
+
+### Corrected — the option descriptions (English and Spanish)
+
+- **Require login (direct access)** (`auth_enabled`): SSH needs it, and while
+  it is off every SSH login is refused. A web-console connection that does not
+  come through the HA sidebar (possible only from Home Assistant's internal
+  add-on network; port 8788 is not published on the LAN) opens with no login
+  while it is off.
+- **Max login attempts** (`auth_max_attempts`): the count starts an escalating
+  back-off per address (5 s, doubling, up to 5 min), kept across reconnects;
+  the description said the connection was dropped, which only the web
+  console's login screen does.
+- **Idle re-lock** (`auth_idle_lock_min`): it re-locks web-console sessions
+  only. A web-console connection idle for 5 minutes is also closed and
+  reconnects, so an idle gated session meets the login screen after 5 minutes
+  at most. SSH checks the password once, when the connection opens, and closes
+  a connection after 30 minutes with no inbound traffic.
+- **Evidence sample interval** (`route_poll_interval`, renamed from "route
+  poll interval"; the option key is unchanged): it is the detection engine's
+  tick and polls nothing; it also sets the span of the 240 controller samples
+  behind the INTERFERENCE screen's serial-link rates.
+- Auto-ping and the refresh trial are the only actions taken without a key
+  press, both off by default; auto-ping also starts the liveness sweep, and
+  its mesh-wide suppressor counts a quarter of the mains-powered nodes (at
+  least 4). The liveness sweep asks at most one node a minute. The log
+  archive is read from a shell add-on, not this add-on's SSH. The Core
+  WebSocket URL must reach this Home Assistant, since the data layer
+  authenticates with this add-on's own Supervisor token.
+
+### Corrected — the documents
+
+A scan of every `.md` file against the code, and four reviews of the corrected
+text as a whole, made 289 corrections where the code or another document
+contradicted the text, in `DOCS.md`, `README.md`, `DESIGN.md`,
+`PERFORMANCE.md`, `SECURITY.md`, `RESEARCH.md` and the option descriptions.
+`RESEARCH.md` now marks the parts of its design that are not built (among them
+the 0–10 rating and the `backup_nvm` rule). 44 more passages, among them
+passages in the older releases in `docs/CHANGELOG-history.md`, are reworded to
+the impersonal register.
+
+### Tests
+
+- The pin on the frozen history (`changelogContract.test.ts`) is updated for
+  the reworded older releases.
+
 ## 0.79.3
 
 A deploy, update or restart of this add-on no longer withdraws a raised

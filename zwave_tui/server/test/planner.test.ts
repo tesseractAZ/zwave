@@ -265,3 +265,15 @@ test('the quiet-node ping card no longer claims pings are never automatic (v0.71
   assert.match(ping!.rationale, /one ACK-only attempt on the stored routes, so on a marginal link it can itself mark the node Dead/);
   assert.match(ping!.rationale, /by a routed read where the node has a switch\/light value/);
 });
+
+test('the quiet-node ping card says the node is not marked Dead, never that no traffic was attempted (v0.79.9)', () => {
+  // With auto-ping's sweep on, every mains node is asked once a cadence and
+  // quiet-node fires only after three of them: traffic WAS attempted. What the
+  // detector checks is `status !== Dead`, so that is what the card may say. The
+  // first rationale line is the one REMEDY renders as the card's grounding.
+  const p = planFor(sym('quiet-node', { nodeId: 7 }), node(7), ON);
+  const ping = p.candidates.find((c) => c.action === 'ping');
+  assert.ok(ping, 'fixture guard: the quiet-node plan offers a consented ping');
+  assert.doesNotMatch(ping!.rationale, /no traffic was attempted/);
+  assert.match(ping!.rationale, /^The node hasn’t communicated in a while, yet it is not marked Dead — silence is not proof of failure\./);
+});
