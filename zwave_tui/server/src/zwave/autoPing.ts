@@ -2141,6 +2141,16 @@ export function startAutoPing(o: AutoPingRunnerOptions): {
       if (answered) {
         // Only the fixed-cadence sweep feeds the persisted reply rate (v0.40.2).
         if (lane === 'sweep') o.onProbeResult?.(nodeId, true, cls, frame);
+        // THE OPERATOR'S OWN PING IS ANSWERED ON SCREEN (v0.80.0). A miss
+        // reached LOG and the ENGINE streak; an answer reached only debug, so
+        // `p` reported "sent" and then said nothing. One line per key a person
+        // pressed, so it is not the per-probe noise of the sweep below.
+        if (lane === 'manual') {
+          const m = `node ${nodeId} answered your ping (lastSeen advanced)`;
+          o.log('info', nodeId, m);
+          o.log2?.(`auto-ping: ${m}`);
+          continue;
+        }
         o.log2?.debug?.(`auto-ping: node ${nodeId} answered its probe`);
         continue;
       }

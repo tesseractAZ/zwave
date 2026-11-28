@@ -38,6 +38,9 @@ export interface PlanCandidate {
   action: ActionKind | null;
   /** Short recommendation label. */
   title: string;
+  /** A shorter whole form of `title` (v0.80.0), for a title that cannot keep
+   *  its [cost · basis] tag at 80 columns; REMEDY prefers it to a shed tag. */
+  short?: string;
   /** Grounded explanation — NO numeric dB claims (RESEARCH §1.7). */
   rationale: string;
   basis: Basis;
@@ -54,6 +57,8 @@ export interface Plan {
   nodeId: number | null;
   /** One-line headline recommendation. */
   headline: string;
+  /** A shorter whole form of `headline` (v0.80.0), for one over 74 columns. */
+  headlineShort?: string;
   /** Ranked candidates (best first). */
   candidates: PlanCandidate[];
 }
@@ -132,6 +137,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
   const lr = isLR(node, nodeId);
   const candidates: PlanCandidate[] = [];
   let headline = '';
+  let headlineShort: string | undefined;
 
   switch (symptom.kind) {
     case 'return-path-degraded':
@@ -188,7 +194,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
       // exist there (same guard the route-churn card carries).
       const s2LR = isLR(node, symptom.nodeId); // shared helper: fails closed on a roster miss
       candidates.push(s2LR
-        ? { action: null, title: 'Close the distance or clear the obstruction (Long-Range is a direct link)', rationale: 'S2 keeps a rolling nonce (SPAN) in step between controller and device. A storm of resyncs means frames are being lost faster than the sync recovers — the encryption is working, the radio link under it is not. This node is Long-Range: it holds a single direct link to the controller with no intermediate hop to strengthen, so the fix is distance, obstruction, or antenna placement at one end or the other.', basis: 'source', cost: 'physical', blocked: null }
+        ? { action: null, title: 'Close the distance or clear the obstruction (Long-Range is a direct link)', short: 'Close the distance or clear the obstruction', rationale: 'S2 keeps a rolling nonce (SPAN) in step between controller and device. A storm of resyncs means frames are being lost faster than the sync recovers — the encryption is working, the radio link under it is not. This node is Long-Range: it holds a single direct link to the controller with no intermediate hop to strengthen, so the fix is distance, obstruction, or antenna placement at one end or the other.', basis: 'source', cost: 'physical', blocked: null }
         : { action: null, title: 'Improve the RF path (distance, obstruction, interference)', rationale: 'S2 keeps a rolling nonce (SPAN) in step between controller and device. Resynchronisation is normal after an occasional missed frame, but a storm of resyncs means frames are being lost faster than the sync can recover — the encryption is working as designed, the radio link underneath it is not. Move the device or add a mains repeater on its path.', basis: 'source', cost: 'physical', blocked: null });
       candidates.push({ action: null, title: 'Check whether the device is rebooting', rationale: 'A device that keeps power-cycling loses its nonce state on every boot and produces the same resync pattern. If its other telemetry also restarts (uptime, battery, config reverting), treat it as a power/hardware fault rather than an RF one.', basis: 'lore', cost: 'physical', blocked: null });
       candidates.push({ action: 'reInterview', title: 'Re-interview — NOT a fix for nonce desync', rationale: 'Re-interviewing re-reads capabilities over the SAME degraded link; it neither re-keys the device nor repairs SPAN sync, and on a marginal link it often fails part-way and leaves the node half-interviewed. Fix the RF path first.', basis: 'source', cost: 'caution', blocked: 'RF-link symptom — will not repair it' });
@@ -224,7 +230,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
       const rfLR = isLR(node, symptom.nodeId);
       // Long-Range is a direct link: no repeater or route can help it (review).
       candidates.push(rfLR
-        ? { action: null, title: 'Close the distance or clear the obstruction (Long-Range is a direct link)', rationale: 'The node keeps repeating its frames because the controller\'s acknowledgements do not reach it. A Long-Range node talks to the controller directly, so only distance, obstruction or the antenna placement can change that: move the device or the controller, or clear what sits between them.', basis: 'lore', cost: 'physical', blocked: null }
+        ? { action: null, title: 'Close the distance or clear the obstruction (Long-Range is a direct link)', short: 'Close the distance or clear the obstruction', rationale: 'The node keeps repeating its frames because the controller\'s acknowledgements do not reach it. A Long-Range node talks to the controller directly, so only distance, obstruction or the antenna placement can change that: move the device or the controller, or clear what sits between them.', basis: 'lore', cost: 'physical', blocked: null }
         : { action: null, title: 'Check what sits between it and the controller', rationale: 'The node keeps repeating its frames because the controller\'s acknowledgements do not reach it: the link works one way. A repeater on the way that is often switched off, a metal box, or distance does this. A mains device placed between this node and the controller strengthens the return path.', basis: 'lore', cost: 'physical', blocked: null });
       if (!rfLR) {
         // Offered only to say when it can help (RESEARCH §4.1): a rebuild does
@@ -243,7 +249,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
 
     case 'chatty-device': {
       headline = 'Tune the device’s reporting — it is flooding the mesh';
-      candidates.push({ action: null, title: 'Reduce its reporting (change-based, not timed) or re-include without S0', rationale: 'A device sending orders of magnitude more reports than the mesh median degrades everyone. Fix the cause: raise its reporting thresholds, prefer change-based over timed reports, and avoid S0 security on sensors (it triples the airtime). These are device-config changes, done in the Z-Wave JS UI.', basis: 'source', cost: 'physical', blocked: null });
+      candidates.push({ action: null, title: 'Reduce its reporting (change-based, not timed) or re-include without S0', short: 'Reduce its reporting or re-include without S0', rationale: 'A device sending orders of magnitude more reports than the mesh median degrades everyone. Fix the cause: raise its reporting thresholds, prefer change-based over timed reports, and avoid S0 security on sensors (it triples the airtime). These are device-config changes, done in the Z-Wave JS UI.', basis: 'source', cost: 'physical', blocked: null });
       candidates.push({ action: 'reInterview', title: 'Re-interview (after changing its config)', rationale: 'Re-reads the device’s capabilities and config — useful after you change its reporting parameters, not a fix on its own.', basis: 'source', cost: 'caution', blocked: gateExecutable(node, ctx) });
       break;
     }
@@ -257,7 +263,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
 
     case 'controller-degraded': {
       headline = 'Controller serial link is struggling — fix the stick side';
-      candidates.push({ action: null, title: 'USB-2 port + a short passive extension, away from USB-3; relocate the stick', rationale: 'Rising serial NAK/CAN/timeouts are a host↔stick problem, not a per-node RF fault. Z-Wave sticks are prone to USB-3 broadband interference — move it to a USB-2 port on a short passive extension cable, away from USB-3 ports and metal, ideally central.', basis: 'source', cost: 'physical', blocked: null });
+      candidates.push({ action: null, title: 'USB-2 port + a short passive extension, away from USB-3; relocate the stick', short: 'USB-2 port + a short extension, away from USB-3', rationale: 'Rising serial NAK/CAN/timeouts are a host↔stick problem, not a per-node RF fault. Z-Wave sticks are prone to USB-3 broadband interference — move it to a USB-2 port on a short passive extension cable, away from USB-3 ports and metal, ideally central.', basis: 'source', cost: 'physical', blocked: null });
       break;
     }
 
@@ -266,7 +272,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
         ? 'Correlated mesh degradation — likely RF interference (unconfirmed)'
         : 'Correlated mesh degradation — a flooding device is the likely cause';
       if (symptom.basis === 'inferred') {
-        candidates.push({ action: null, title: 'Survey the RF environment (900 MHz interferers) — measurement needed to confirm', rationale: 'Many nodes degraded together with no controller-serial or flooding cause points to an RF-environment event. Common 900 MHz interferers: a utility smart meter, older cordless phones/baby monitors, LoRa/Sidewalk. Confirming this needs a noise-floor reading; treat this as a lead, not a verdict.', basis: 'inference', cost: 'physical', blocked: null });
+        candidates.push({ action: null, title: 'Survey the RF environment (900 MHz interferers) — measurement needed to confirm', short: 'Survey the RF environment — measurement needed', rationale: 'Many nodes degraded together with no controller-serial or flooding cause points to an RF-environment event. Common 900 MHz interferers: a utility smart meter, older cordless phones/baby monitors, LoRa/Sidewalk. Confirming this needs a noise-floor reading; treat this as a lead, not a verdict.', basis: 'inference', cost: 'physical', blocked: null });
       } else {
         candidates.push({ action: null, title: 'Fix the flooding device first (see its chatty-device card)', rationale: 'The correlated degradation coincides with a device flooding the mesh — that traffic is the likely cause, not RF interference. Tune the offender’s reporting before looking further.', basis: 'source', cost: 'physical', blocked: null });
       }
@@ -280,6 +286,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
       // (an edge-cluster head is never LR, but the guard must hold regardless).
       const shared = nodeId != null ? `#${nodeId}${node ? ' ' + node.name : ''}` : 'the shared node';
       headline = 'Correlated cluster on a shared route — check the common relay, not each node';
+      headlineShort = 'Correlated cluster on a shared route — check the common relay';
       candidates.push({
         action: null,
         title: `Inspect the shared upstream node (${shared})`,
@@ -309,7 +316,7 @@ export function planFor(symptom: Symptom, node: NodeSnapshot | undefined, ctx: P
       if (c.action != null) c.efficacy = ctx.efficacyFor(symptom.kind, c.action);
     }
   }
-  return { kind: symptom.kind, nodeId, headline, candidates };
+  return { kind: symptom.kind, nodeId, headline, ...(headlineShort ? { headlineShort } : {}), candidates };
 }
 
 /** Build plans for a list of symptoms (skips ones subsumed under a mesh event —

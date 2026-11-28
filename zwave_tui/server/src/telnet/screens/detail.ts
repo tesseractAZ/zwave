@@ -25,7 +25,7 @@
  */
 
 import { honestPct } from '../ledgerText';
-import { c, lr, padEnd, truncate, visLen } from '../ansi';
+import { c, clipWords, lr, padEnd, truncate, visLen } from '../ansi';
 import { gauge, meter, signalBars, sparkline } from '../gauges';
 import {
   NodeStatus,
@@ -494,7 +494,21 @@ export function renderDetail(ctx: ScreenCtx): string[] {
         const caveat = preEpoch
           ? c.grey(inner - KV_GUTTER >= caveatLong.trim().length ? caveatLong : caveatShort)
           : '';
-        body.push(kv('Probes', tone(`${cov.probesAnswered}/${cov.probesAsked} answered (${honestPct(cov.probesAnswered, cov.probesAsked)})`) + self, inner));
+        // THE WINDOW RIDES ON THE VALUE (v0.80.0). The ratio is cumulative over
+        // the add-on's life, and the only word that said so was the pre-v0.40.2
+        // caveat three rows below — which retires for a node first seen after
+        // the epoch, leaving a bare ratio that reads as a recent rate. Each form
+        // is whole, longest first; the self-proven count is shed with `+1`.
+        {
+          const a = cov.probesAnswered;
+          const k = cov.probesAsked;
+          const p = honestPct(a, k);
+          const room = inner - KV_GUTTER;
+          const forms = [`${a}/${k} answered (${p}, lifetime)`, `${a}/${k} (${p}, lifetime)`, `${a}/${k} lifetime`];
+          const ratio = forms.find((f) => f.length <= room) ?? forms[forms.length - 1];
+          const tail = self === '' ? '' : visLen(ratio) + visLen(self) <= room ? self : c.grey(' +1');
+          body.push(kv('Probes', tone(ratio) + (visLen(ratio) + visLen(tail) <= room ? tail : ''), inner));
+        }
         // THE FRAME (v0.71.0). The sweep sends a routed read wherever the node
         // has a switch/light value, and an answered read is a different fact
         // from an answered ping: the ping could use only the stored routes, the
@@ -753,7 +767,7 @@ export function renderDetail(ctx: ScreenCtx): string[] {
 
   const windowRows = rows.slice(scroll, scroll + contentRows);
   while (windowRows.length < contentRows) windowRows.push('');
-  windowRows.push(flagLegend(health.flags, W, health.state));
+  windowRows.push(flagLegend(health.flags, W, health.state, health.score));
 
   const st = statusColor(n.status)(n.statusLabel.toUpperCase());
   const sc = dead(n) ? c.grey('—') : scoreColor(health.score)(`${health.score} (${health.grade})`);
@@ -764,8 +778,14 @@ export function renderDetail(ctx: ScreenCtx): string[] {
       ? c.grey(' · ') +
         c.cyan(`${scroll > 0 ? '▲' : ' '}${scroll < maxScroll ? '▼' : ' '} ${scroll + 1}–${Math.min(total, scroll + contentRows)}/${total}`)
       : '';
+  // THE ONE-KEYSTROKE JUMPS, ADVERTISED (v0.80.0). Space/b page and G jumps
+  // to the end — where EVIDENCE sits, below the fold at 80x24 for every device
+  // shape — and the bar named only the one-row scroll. They are the first caps
+  // shed, with `+2`, where the bar does not fit them.
   const keys: Keycap[] = [
     ['↑↓', 'SCROLL'],
+    ['␣/b', 'PAGE', 3],
+    ['G', 'END', 3],
     ['< >', 'NODE', 2],
     ['A', 'ACTIONS', 1],
     ['1-9', 'SCREENS'],
@@ -786,13 +806,28 @@ function feedTag(name: string, live: boolean): string {
 }
 
 /** Per-node flag legend, pinned at the bottom of the Detail body. */
-function flagLegend(flags: string[], W: number, state?: string): string {
+function flagLegend(flags: string[], W: number, state?: string, score?: number): string {
   if (!flags.length) {
     // A node the controller has never contacted raises NO flags — it has no
     // measurements to raise them from — so "nominal" asserted health from an
     // absence, directly under a title rule reading UNKNOWN · SCORE —.
     if (state === 'unknown') return c.grey(' no measurements yet — nothing to assess');
     if (state === 'dead') return c.grey(' unreachable — the readings above are its last, not current');
+    // NOMINAL ONLY WHERE THE SCORE SAYS SO (v0.80.0). No flag means no lane
+    // crossed its own flag threshold, not that nothing is wrong: an unflagged
+    // 66/D read "RF health nominal" directly under `SCORE 66 (D)`. Below 80 the
+    // legend names where the points went instead — the route lane's hop count
+    // and data rate included, which the LWR row shows.
+    if (score != null && score < 80) {
+      const forms = [
+        ' no flag threshold crossed — the score is lost in sub-threshold lanes (see RTT/Margin/Timeouts/LWR)',
+        ' no flag threshold crossed — the score is lost in sub-threshold lanes',
+        ' no flag crossed — the score is lost in sub-threshold lanes',
+        ' no flag crossed — score lost below the thresholds',
+        ' no flag crossed — lost below thresholds',
+      ];
+      return c.grey(clipWords(forms.find((f) => f.length <= W) ?? forms[forms.length - 1], W));
+    }
     return c.grey(' RF health nominal');
   }
   const meanings = flags.map((f) => flagColor([f])(f) + c.grey(' ' + (FLAG_MEANING[f] ?? '?'))).join(c.grey(' · '));

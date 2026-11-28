@@ -432,14 +432,14 @@ test('the probe reply rate reaches the screen — a rate collected and never sho
   const out = evidenceLines(withProbes({ probesAsked: 84, probesAnswered: 81, probesSelfProven: 22, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 }));
   const row = out.find((l) => /^\s*Probes/.test(l));
   assert.ok(row, 'the Probes row must render');
-  assert.match(row!, /81\/84 answered \(96%\)/);
+  assert.match(row!, /81\/84 answered \(96%, lifetime\)/);
   assert.match(row!, /22 self-proven/, 'and how many the node had already answered for itself');
 });
 
 test('one unanswered probe is never "100%", and a sliver of fresh samples is never "0%" (v0.74.1)', () => {
   const out = evidenceLines(withProbes({ samples: 638906, freshSamples: 748, probesAsked: 475, probesAnswered: 474, probesSelfProven: 35, probesEchoOnly: 0, probesAttribUnknown: 0, probesUnheard: 0 }));
   const probes = out.find((l) => /^\s*Probes/.test(l)) ?? '';
-  assert.match(probes, /474\/475 answered \(>99%\)/, probes);
+  assert.match(probes, /474\/475 answered \(>99%, lifetime\)/, probes);
   const samples = out.find((l) => /^\s*Samples/.test(l)) ?? '';
   assert.match(samples, /fresh 748 \(<1% lifetime\)/, samples);
 });
@@ -1080,4 +1080,52 @@ test('the all-NoOp and all-read Frame forms fit whole, 60 to 200 columns (v0.71.
     }
     assert.deepEqual([...seen].sort(), ['long', 'short'], 'fixture guard: both forms are exercised');
   }
+});
+
+/* ── v0.80.0 ──────────────────────────────────────────────────────────────── */
+
+test('the Probes ratio carries its window on the value, so a post-epoch node still reads it as lifetime (v0.80.0)', () => {
+  // The only word saying the ratio is cumulative was the pre-v0.40.2 caveat
+  // three rows down, and that caveat retires for a node first seen after the
+  // epoch — leaving `84/98 answered (86%)`, which reads as a recent rate.
+  const post = withProbes({ probesAsked: 98, probesAnswered: 84, probesSelfProven: 31, firstSeenAt: 5_000, laneEpoch: 1_000, creditEpoch: 1_000 } as never);
+  const out = evidenceLines(post);
+  const row = out.find((l) => /^\s*Probes/.test(l)) ?? '';
+  assert.match(row, /84\/98 answered \(86%, lifetime\) · 31 self-proven/, row);
+  assert.ok(!out.some((l) => /lifetime tally/.test(l)), 'fixture: the caveat has retired for this node');
+  // Whole at every width: a shorter form of the ratio, the self-proven count shed with +1.
+  const at = (W: number): string => renderDetail(ctx(mkView(W, 80), post.data, post.nodes)).map(strip).find((l) => /^\s*Probes/.test(l)) ?? '';
+  assert.equal(at(40), '  Probes   84/98 (86%, lifetime) +1');
+  assert.equal(at(60), '  Probes   84/98 answered (86%, lifetime) · 31 self-proven');
+  assert.equal(at(80), '  Probes   84/98 answered (86%, lifetime) · 31 self-proven');
+});
+
+test("Detail's command bar shows the page and end keys at 80x24 (v0.80.0)", () => {
+  // Space/b page and G jumps to EVIDENCE, the section below the fold at 80x24,
+  // and the bar named only the one-row scroll.
+  const { data, nodes } = mkData();
+  const bar = (W: number): string => strip(renderDetail(ctx(mkView(W, 24), data, nodes)).at(-1) ?? '');
+  assert.match(bar(80), /\[␣\/b\] PAGE .*\[G\] END/, bar(80));
+  assert.match(bar(80), /\[Q\] BACK/, 'the way out stays');
+  // Narrower, they are the first caps shed, and the shed is counted.
+  assert.doesNotMatch(bar(60), /PAGE|END/);
+  assert.match(bar(60), /\+\d/, bar(60));
+});
+
+test('the flag legend says "RF health nominal" only when the score is 80 or more (v0.80.0)', () => {
+  // An unflagged 66/D read "RF health nominal" under `SCORE 66 (D)`: no lane
+  // crossed its own flag threshold, and the points were lost below them.
+  const legend = (score: number, grade: string, W = 80): string => {
+    const d = mkData();
+    d.data.scoreFor = () => ({ score, grade, state: 'ok', flags: [] });
+    const lines = renderDetail(ctx(mkView(W, 24), d.data, d.nodes)).map(strip);
+    return lines[lines.length - 2];
+  };
+  assert.equal(legend(66, 'D'), ' no flag threshold crossed — the score is lost in sub-threshold lanes');
+  assert.equal(legend(66, 'D', 120), ' no flag threshold crossed — the score is lost in sub-threshold lanes (see RTT/Margin/Timeouts/LWR)');
+  assert.equal(legend(66, 'D', 40), ' no flag crossed — lost below thresholds');
+  assert.equal(legend(79, 'C'), ' no flag threshold crossed — the score is lost in sub-threshold lanes');
+  // Control: at 80 and above nothing changes.
+  assert.equal(legend(80, 'B'), ' RF health nominal');
+  assert.equal(legend(95, 'A'), ' RF health nominal');
 });

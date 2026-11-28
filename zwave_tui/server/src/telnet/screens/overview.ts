@@ -309,10 +309,20 @@ function telemetryStrip(ctx: ScreenCtx): string {
     ? Math.max(0, all.length - dead - flaky - unknown - failing) / all.length
     : 0;
 
+  // THE ENGINE'S CRITICAL FINDINGS, COUNTED ON THE HOME SCREEN (v0.80.0). The
+  // roster's `!` mark is per row, so with the default health sort a crit on an
+  // A-scored node sat below the fold at 80x24 and 120x40 and nothing on the
+  // frame said one existed. The count is REMEDY's own `N critical`, mesh-wide
+  // symptoms included. Inserted right after DEAD, not appended: fieldStrip
+  // sheds from the END, and an appended field is dropped at exactly the 80
+  // columns that need it. Absent when there is none, so a healthy strip is
+  // unchanged.
+  const crit = data.symptoms().filter((s) => s.severity === 'crit').length;
   const fields = [
     field('NODES', String(all.length), c.whiteB),
     field('ONLINE', String(online), c.green),
     field('DEAD', String(dead), dead > 0 ? c.redB : c.grey),
+    ...(crit > 0 ? [field('CRIT', String(crit), c.redB)] : []),
     field('ASLEEP', String(asleep), asleep > 0 ? c.cyan : c.grey),
     field('FLAKY', String(flaky), flaky > 0 ? c.yellow : c.grey),
     ...(unknown > 0 ? [field('UNKNOWN', String(unknown), c.yellow)] : []),

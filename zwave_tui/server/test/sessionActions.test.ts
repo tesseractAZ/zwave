@@ -1015,3 +1015,24 @@ test('the pause acknowledgement is drawn from the pause\'s current state, shows 
   s.feed([esc]); s.draw();
   assert.doesNotMatch(strip(last()), /automatic writes paused since/, 'a stale ack is never shown');
 });
+
+test('a manual ping says where its answer will be judged when a runner exists, and HA\'s caveat when none does (v0.80.0)', async () => {
+  // With a runner the ping is pended on auto-ping's answer check, which books
+  // an answer or a miss as a LOG line; the notice said only "✓ Ping node".
+  const detail = async (d: DataProvider): Promise<string | null> => {
+    const { runner } = mkActions(true);
+    const { s } = mkSession(runner, d);
+    s.feed([key('p')]);
+    await flush(); await flush();
+    return (s as never as { actionNoticeDetail: string | null }).actionNoticeDetail;
+  };
+  const ap = { lastTickMs: 0, suppressed: 'paused', listening: 1, deadListening: 0, capabilityUnknown: 0, staleDue: null, stalestMs: null, verifyOwed: null,
+    config: { enabled: true, writeActions: true, afterMs: 600_000, maxAttempts: 3, staleMs: 0 }, nodes: [] };
+  assert.equal(await detail({ ...mkData(), autoPingState: () => ap as never }), 'auto-ping judges whether it answered — see LOG (e)',
+    'a paused runner still judges answers');
+  assert.equal(await detail(mkData()), 'HA does not return the answer — watch its Status / Last-seen');
+  // The Actions-menu path carries the same split in its CONFIRM-box note.
+  const { ACTION_CATALOG } = await import('../src/telnet/actionsCatalog');
+  const ping = ACTION_CATALOG.find((x) => x.kind === 'ping')!;
+  assert.match(ping.impactNote, /Where auto-ping runs it judges the answer in LOG; otherwise watch the node's Status \/ Last-seen\./);
+});

@@ -836,3 +836,128 @@ test('the n≈ legend needs a weight on screen: a refusal-only or tallies-only L
     assert.ok(forms.includes(row.trim()), `${cols}: "${row}" is a whole legend form`);
   }
 });
+
+/* ── v0.80.0: what the engine already knows, ordered by urgency at 80x24 ── */
+
+const apNode = (nodeId: number, over: Partial<AutoPingSnapshot['nodes'][number]> = {}): AutoPingSnapshot['nodes'][number] => ({
+  nodeId, deadSinceMs: null, attempts: 0, nextEligibleMs: null, missStreak: 0, launchFailures: 0, pending: 0,
+  gaveUp: false, launchGaveUp: false, talkingWhileDead: false, reads: 0, readOwed: false, readRevivals24h: 0,
+  probeKills24h: 0, probeHeldUntilMs: null, ...over,
+});
+
+test('ENGINE ranks the tracked nodes alarm-first before its 8-row cap (v0.80.0)', () => {
+  // The snapshot is in node-id order and the cap is a fixed 8: six low-id
+  // nodes holding a 24 h own-probe kill, plus two Dead ones, filled the list,
+  // and the highest-id node — the one that GAVE UP — fell into "1 more".
+  const ns = [
+    ...[2, 3, 4, 5, 6, 8].map((id) => apNode(id, { probeKills24h: 1 })),
+    apNode(9, { missStreak: 2 }),
+    apNode(10, { deadSinceMs: NOW - 25 * 60_000, attempts: 2 }),
+    apNode(38, { gaveUp: true, attempts: 3, deadSinceMs: NOW - 3_600_000 }),
+    apNode(39, { launchGaveUp: true }),
+  ];
+  const lines = plain(renderEngine(ctx(80, 24, { autoPingState: () => AP({ nodes: ns }) }))).split('\n');
+  const rows = lines.filter((l) => /^ {2}#\d+ /.test(l)).map((l) => Number(/#(\d+)/.exec(l)![1]));
+  assert.deepEqual(rows, [38, 39, 10, 9, 2, 3, 4, 5],
+    `give-ups first, then Dead, then a miss streak, then the rest by id: ${JSON.stringify(rows)}`);
+  assert.ok(lines.some((l) => /#38 .*GAVE UP — needs a human/.test(l)), 'the summons row survives the cap at 80x24');
+  assert.ok(lines.some((l) => /○ 2 more tracked node\(s\)/.test(l)), 'and the two it hides are counted');
+  // Control: with no alarm row the order is plain node id, as before.
+  const calm = plain(renderEngine(ctx(80, 24, { autoPingState: () => AP({ nodes: [5, 3, 4].map((id) => apNode(id, { probeKills24h: 1 })) }) })))
+    .split('\n').filter((l) => /^ {2}#\d+ /.test(l)).map((l) => Number(/#(\d+)/.exec(l)![1]));
+  assert.deepEqual(calm, [3, 4, 5]);
+});
+
+test('a dormant driver link names its cause and what it costs on rows of their own at 80x24 (v0.80.0)', () => {
+  // As the second bit the prose was shed at 80: `DRIVER LINK  dormant · +1`,
+  // with the schema mismatch and the watches it turned off on no row at all.
+  const prose = 'schema mismatch (server 20..31, tested 32..41) — driver telemetry dormant';
+  for (const st of ['dormant', 'backoff', 'stopped'] as const) {
+    const joined = plain(renderEngine(ctx(80, 24, { driverWsState: () => st, driverWsStatus: () => prose })));
+    const at = joined.split('\n').findIndex((l) => /DRIVER LINK/.test(l));
+    const rows = joined.split('\n').slice(at, at + 3);
+    assert.match(rows[0], new RegExp(`DRIVER LINK\\s+${st}$`), `the label row names the state alone: ${JSON.stringify(rows)}`);
+    assert.match(rows[1], /schema mismatch \(server 20\.\.31, tested 32\.\.41\)/, `the cause is on its own row: ${JSON.stringify(rows)}`);
+    assert.match(rows[2], /background RSSI, S2-desync and duplicate-frame watches are off/, `and what it costs: ${JSON.stringify(rows)}`);
+  }
+  // Disabled: the prose row, no consequence — the link was never configured.
+  const off = plain(renderEngine(ctx(80, 24, { driverWsState: () => 'disabled', driverWsStatus: () => 'disabled (no driver_ws_url)' })));
+  assert.match(off, /\n {4}disabled \(no driver_ws_url\)/);
+  assert.doesNotMatch(off, /watches are off/);
+  // Live, connecting and handshake keep the prose as a bit beside the state.
+  const live = plain(renderEngine(ctx(80, 24, { driverWsState: () => 'live', driverWsStatus: () => 'live (schema 41)' })));
+  assert.match(live, /DRIVER LINK\s+live · live \(schema 41\)/);
+  assert.doesNotMatch(live, /watches are off/);
+  for (const st of ['connecting', 'handshake'] as const) {
+    const up = plain(renderEngine(ctx(80, 24, { driverWsState: () => st, driverWsStatus: () => 'connecting to ws://core:3000' })));
+    assert.match(up, new RegExp(`DRIVER LINK\\s+${st} · connecting to ws://core:3000`), up);
+  }
+});
+
+const ep = (nodeId: number, kind: SymptomKind, over: Partial<OpenEpisodeSummary> = {}): OpenEpisodeSummary =>
+  ({ key: `${nodeId}:${kind}`, nodeId, kind, onsetMs: NOW - 15 * 60_000, actionKind: null, confounded: false, beforeFreshN: 4, confirming: false, ...over });
+
+test('LEDGER — LIVE keeps the arm bit at 80 columns by shortening the lifecycle word (v0.80.0)', () => {
+  // The 36-column long form made fitBits shed the ARM bit at 80, so a
+  // confounded episode and a clean control point both read
+  // `confirming — symptom absent, scoring · +3`.
+  const eps = [
+    ep(12, 'return-path-degraded', { confounded: true }),
+    ep(14, 'chronic-return-path', { confirming: true }),
+    ep(23, 'route-churn', { confirming: true, confounded: true }),
+  ];
+  const lines = plain(renderEngine(ctx(80, 24, { openEpisodes: () => eps }))).split('\n');
+  const row = (id: number): string => lines.find((l) => l.startsWith(`  #${id} `)) ?? '';
+  assert.match(row(12), /return-path-degraded\s+degraded · confounded — neither arm/, row(12));
+  assert.match(row(14), /chronic-return-path\s+confirming · no action — control arm/, row(14));
+  assert.match(row(23), /route-churn\s+confirming · confounded — neither arm/, row(23));
+  // Where the arm bit fits after it, the long form stays.
+  const wide = plain(renderEngine(ctx(200, 24, { openEpisodes: () => eps })));
+  assert.match(wide, /#14 chronic-return-path\s+confirming — symptom absent, scoring · no action — control arm/);
+});
+
+test('LEDGER — LIVE keeps a short arm word at 60 columns, so a confounded episode, a control point and an action arm read apart (v0.80.0)', () => {
+  // At 60, the session's minimum, even the one-word lifecycle form shed the
+  // arm behind a long kind name: both rows read `· +3`.
+  const eps = [
+    ep(12, 'return-path-degraded', { confounded: true }),
+    ep(14, 'chronic-return-path', { confirming: true }),
+    ep(23, 'route-churn', { confirming: true, confounded: true }),
+    ep(31, 'chronic-return-path', { actionKind: 'healNode' }),
+    ep(41, 'return-path-degraded', { confirming: true, actionKind: 'healNode' }),
+    ep(4000, 'return-path-degraded', { confirming: true, actionKind: 'refreshValues' }),
+  ];
+  const lines = plain(renderEngine(ctx(60, 24, { openEpisodes: () => eps }))).split('\n');
+  const row = (id: number): string => lines.find((l) => l.startsWith(`  #${id} `)) ?? '';
+  assert.equal(row(12), '  #12 return-path-degraded  degraded · confounded · +2');
+  assert.equal(row(14), '  #14 chronic-return-path  confirming · control arm · +2');
+  assert.notEqual(row(12).replace(/^ {2}#\d+ \S+\s+\S+/, ''), row(14).replace(/^ {2}#\d+ \S+\s+\S+/, ''), 'the two arms read differently');
+  assert.match(row(23), /^ {2}#23 route-churn {2}confirming · confounded · open 15m · \+1$/, row(23));
+  // An action arm that fits keeps its words, `action: healNode`.
+  assert.match(row(31), /degraded · action: healNode/, row(31));
+  // One that does not steps down to its kind, then to `action` — never the
+  // bare count a confounded row or a control point could also show.
+  assert.equal(row(41), '  #41 return-path-degraded  confirming · healNode · +2');
+  // A Long Range id and the longest kind leave room only for the word.
+  assert.equal(row(4000), '  #4000 return-path-degraded  confirming · action · +2');
+  for (const l of lines) assert.ok(l.length <= 60, `fits 60: "${l}"`);
+  // Control: at 80 the full arm words stay.
+  const wide = plain(renderEngine(ctx(80, 24, { openEpisodes: () => eps })));
+  assert.match(wide, /#12 return-path-degraded\s+degraded · confounded — neither arm/);
+  assert.match(wide, /#14 chronic-return-path\s+confirming · no action — control arm/);
+});
+
+test('LEDGER — LIVE lists confirming episodes first and counts the confirming ones it hides (v0.80.0)', () => {
+  // Oldest first, six rows: seven chronic episodes hid the one in its
+  // confirmation window, behind a bare `○ 2 more open episode(s)`.
+  const old = Array.from({ length: 7 }, (_, i) => ep(30 + i, 'chronic-return-path', { onsetMs: NOW - (90 - i) * 60_000 }));
+  const eps = [...old, ep(9, 'rtt-degraded', { confirming: true })];
+  const lines = plain(renderEngine(ctx(80, 24, { openEpisodes: () => eps }))).split('\n');
+  const ids = lines.filter((l) => /^ {2}#\d+ /.test(l)).map((l) => Number(/#(\d+)/.exec(l)![1]));
+  assert.deepEqual(ids, [9, 30, 31, 32, 33, 34], `the confirming one first, then the rest in ledger order: ${JSON.stringify(ids)}`);
+  assert.ok(lines.some((l) => /○ 2 more open episodes$/.test(l)), 'none of the hidden two is confirming');
+  // Eight confirming: the overflow line says how many of the hidden are.
+  const many = [...eps, ...Array.from({ length: 7 }, (_, i) => ep(50 + i, 'route-churn', { confirming: true }))];
+  const more = plain(renderEngine(ctx(80, 24, { openEpisodes: () => many })));
+  assert.match(more, /○ 9 more open episodes \(2 confirming\)/);
+});

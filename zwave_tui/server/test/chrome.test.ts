@@ -132,6 +132,18 @@ test('shedLine with no tail is just the head', () => {
   assert.deepEqual(shedLine('  ', 'bare', [], 40).map(strip), ['  bare']);
 });
 
+test('shedLine takes the mark between tail tokens as an argument, and its default is unchanged (v0.80.0)', () => {
+  // REMEDY's evidence row passes `  ·  `: several values carry a ` · ` inside
+  // themselves, and the same mark between measurements made a qualifier read
+  // as a measurement of its own. Every other caller keeps ` · `.
+  const ids = ['#4', '#17', '#23'];
+  assert.equal(strip(shedLine('  ', 'downstream', ids, 200)[0]), '  downstream  #4 · #17 · #23');
+  assert.equal(strip(shedLine('  ', 'downstream', ids, 200, false, '  ·  ')[0]), '  downstream  #4  ·  #17  ·  #23');
+  // The wider mark is measured too: at 26 columns one token fewer fits.
+  assert.equal(strip(shedLine('  ', 'downstream', ids, 26)[0]), '  downstream  #4 · #17 +1');
+  assert.equal(strip(shedLine('  ', 'downstream', ids, 26, false, '  ·  ')[0]), '  downstream  #4 +2');
+});
+
 /* ── v0.47.0: the standing auto-ping suppression chip ─────────────────────── */
 
 test('a SUPPRESSED sweep shows a standing chip; a running one shows nothing', () => {

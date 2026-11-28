@@ -11,7 +11,7 @@
 import type { ScreenCtx, Symptom, NodeSnapshot, SymptomKind, ActionKind, Efficacy } from '../../types';
 import { provenance, weight, unscoreableReason, subsumptionLabel } from '../ledgerText';
 import { c, clipWords, truncate, visLen } from '../ansi';
-import { frame, fieldStrip, shedLine } from '../chrome';
+import { frame, fieldStrip, shedLine, wrapWords } from '../chrome';
 import { planFor, type PlanCandidate } from '../../zwave/planner';
 import { summonsHeadline } from '../../zwave/recommendation';
 import type { AutoPingNodeState } from '../../zwave/autoPing';
@@ -76,7 +76,40 @@ function efficacyNote(e: Efficacy | null | undefined, blocked = false, width = I
     // symptom may be fully measured. The self-heal rate is the operator's
     // actual decision input here: if this kind clears itself 80% of the time,
     // that is worth knowing precisely BECAUSE the action is unproven.
-    if (heal == null) return null;
+    // A below-readiness arm whose attempts have ONLY made things worse is the
+    // arm an operator most needs warned about, and the readiness gate is
+    // exactly what was silencing it. Said, hedged honestly as too few.
+    const early = e.harmed >= 1 && e.harmed >= e.n - 1e-9
+      ? ' — ⚠ every attempt so far made it WORSE (too few to be sure)'
+      : e.harmed >= 0.5 ? ` — ⚠ ${weight(e.harmed)} of those made it worse` : '';
+    // The warning without its hedge (v0.80.0), so it outlasts the readiness
+    // fraction at 80 columns: the fraction beside it already says "too few".
+    // Where even that does not fit, a rung that keeps the warning comes ahead
+    // of the bare fraction: `≈ still learning — ⚠ every try made it WORSE` at
+    // 60 columns, and below the fraction the warning alone after the `≈`, which
+    // fits 40.
+    const earlyShort = e.harmed >= 1 && e.harmed >= e.n - 1e-9
+      ? ' — ⚠ every try made it WORSE'
+      : e.harmed >= 0.5 ? ` — ⚠ ${weight(e.harmed)} made it worse` : '';
+    const lead = `≈ still learning this action (${weight(e.n)} of ${e.minN})`;
+    // NO CONTROL ARM IS NOT NO ATTEMPTS (v0.80.0). This returned null whenever
+    // the kind's self-heal rate was unmeasured, before `n` or the harm warning
+    // above were looked at — so an arm tried 2.9 times, every one of them
+    // making it worse, rendered the same silence as one never tried at all.
+    // Only an arm with no attempts and no base rate has nothing to say.
+    if (heal == null) {
+      if (e.n <= 0) return null;
+      return c.grey(pick([
+        `${lead} — self-heal not yet measured${early}`,
+        `${lead}${early}`,
+        `${lead}${earlyShort}`,
+        ...(early ? [`≈ still learning${earlyShort}`] : []),
+        lead,
+        ...(early ? [`≈${earlyShort.slice(2)}`] : []),
+        `≈ still learning${early}`,
+        '≈ still learning',
+      ]));
+    }
     // An arm nobody has ever run is not "still learning" — there is nothing to
     // learn from. Say what IS known: how the kind behaves untouched.
     if (e.n <= 0) {
@@ -86,13 +119,6 @@ function efficacyNote(e: Efficacy | null | undefined, blocked = false, width = I
         '≈ never tried here',
       ]));
     }
-    // A below-readiness arm whose attempts have ONLY made things worse is the
-    // arm an operator most needs warned about, and the readiness gate is
-    // exactly what was silencing it. Said, hedged honestly as too few.
-    const early = e.harmed >= 1 && e.harmed >= e.n - 1e-9
-      ? ' — ⚠ every attempt so far made it WORSE (too few to be sure)'
-      : e.harmed >= 0.5 ? ` — ⚠ ${weight(e.harmed)} of those made it worse` : '';
-    const lead = `≈ still learning this action (${weight(e.n)} of ${e.minN})`;
     // `lead` itself is 38 columns before the 8-column indent, so it does NOT
     // fit a 40-column terminal — the shortest form must drop the readiness
     // fraction rather than let it be clipped to "n≈2".
@@ -100,7 +126,10 @@ function efficacyNote(e: Efficacy | null | undefined, blocked = false, width = I
       `${lead} — ${heal}${healProv}${early}`,
       `${lead} — ${heal}${early}`,
       `${lead}${early}`,
+      `${lead}${earlyShort}`,
+      ...(early ? [`≈ still learning${earlyShort}`] : []),
       lead,
+      ...(early ? [`≈${earlyShort.slice(2)}`] : []),
       `≈ still learning${early}`,
       '≈ still learning',
     ]));
@@ -283,6 +312,26 @@ interface Ledger {
  * survives.
  */
 const CAVEAT = /deletes|discards|priority route|half-interviewed|comes back|re-churn/i;
+const PRIORITY = /priority route/i;
+
+/**
+ * The caveat a candidate must show, whole, in `width` columns (v0.80.0), or
+ * null when its rationale carries none. The sentence naming priority routes
+ * comes first — it is the side effect an operator cannot undo — then any other
+ * CAVEAT sentence. A sentence that does not fit gives way to the clause inside
+ * it that carries the caveat, marked `… ` as part of a longer sentence; past
+ * that, clipWords of the clause.
+ */
+function caveatText(rationale: string, width: number): string | null {
+  if (width <= 0) return null;
+  const sentences = rationale.split(/(?<=[.!?])\s+/);
+  const hit = sentences.find((x) => PRIORITY.test(x)) ?? sentences.find((x) => CAVEAT.test(x));
+  if (hit == null) return null;
+  if (visLen(hit) <= width) return hit;
+  const re = PRIORITY.test(hit) ? PRIORITY : CAVEAT;
+  const clause = hit.split(/;\s+|\s+—\s+|,\s+(?=and |but )/).find((x) => re.test(x)) ?? hit;
+  return clipWords(clause === hit ? hit : `… ${clause}`, width);
+}
 
 function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number) => string, writeActions: boolean, nodeOf: (id: number) => NodeSnapshot | undefined, ledger: Ledger, selected = false): string[] {
   const { efficacyFor } = ledger;
@@ -307,10 +356,17 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
   );
   // Evidence line — leads with the full basis word (measured/inferred), then the
   // grey label = value pairs.
+  // One TOKEN per measurement (v0.80.0). This row was one join and a blind
+  // truncate, so at 80 columns weak-signal's `failed deliveries 13 …` lost its
+  // window and rtt-degraded's restart allowance stopped mid-word. shedLine
+  // drops whole measurements with a `+N`, and carries them to continuation
+  // rows only where not even the first one fits beside the basis word.
   {
     const basisWord = sym.basis === 'measured' ? c.green('measured') : c.yellow('inferred');
-    const parts = [basisWord, ...sym.evidence.map((e) => `${c.label(e.label)} ${c.white(e.value)}`)];
-    rows.push(truncate('    ' + parts.join(c.grey('  ·  ')), W));
+    // The two-space separator the row always used (v0.80.0): several values
+    // carry a ` · ` of their own (`38±6ms · capped at 300ms`), and a qualifier
+    // set off by the same mark reads as a separate measurement.
+    rows.push(...shedLine('    ', basisWord, sym.evidence.map((e) => `${c.label(e.label)} ${c.white(e.value)}`), W, /* wrapTail */ true, c.grey('  ·  ')));
   }
   // MEMBERS, as atomic tokens (v0.45.0). `Symptom.members` was populated by the
   // edge-cluster detector and read by NOTHING; the ids survived only inside an
@@ -325,12 +381,23 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
   // and no screen showed it — a strange omission for an ADVISORY engine, since
   // this is the one number that argues against the card it sits on. Shown only
   // when non-zero: a clean detector says nothing rather than boasting.
+  // WHOLE FORMS, NEVER A BLIND CUT (v0.80.0). Each tally line below was one
+  // sentence and a `truncate`, so at 80 columns they ended `weigh the evidence
+  // a`, `too few readings to ju`, `probe re-` — the count survived and the
+  // clause explaining it stopped mid-word. Each now picks the longest whole
+  // form that fits, with clipWords as the floor. No line wraps: the screen
+  // does not scroll, and a taller card would push the plan off the frame.
+  const tally = (forms: string[], tone: (x: string) => string = c.grey): string =>
+    '    ' + tone(clipWords(forms.find((f) => visLen(f) <= W - 4) ?? forms[forms.length - 1], W - 4));
   {
     const fp = ledger.falsePositives(sym.kind);
     if (fp > 0) {
-      rows.push(truncate(
-        '    ' + c.yellow(`⚠ this detector has been refused as a misdiagnosis ${fp}\u00d7`) +
-        c.grey(' — weigh the evidence above before acting'), W));
+      rows.push(tally([
+        `⚠ this detector has been refused as a misdiagnosis ${fp}\u00d7 — weigh the evidence above before acting`,
+        `⚠ this detector has been refused as a misdiagnosis ${fp}\u00d7 — weigh the evidence`,
+        `⚠ refused as a misdiagnosis ${fp}\u00d7 — weigh the evidence`,
+        `⚠ refused as misdiagnosis ${fp}\u00d7`,
+      ], c.yellow));
     }
     // What the ledger could not SCORE (v0.36). An empty efficacy table reads
     // exactly like a patient one, so a kind whose episodes all close
@@ -345,33 +412,52 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     // silently drained the meaning from the fixable one.
     const unver = ledger.unverifiable(sym.kind);
     if (unver > 0) {
-      rows.push(truncate(
-        '    ' + c.grey(`○ ${unver} past episode${unver === 1 ? '' : 's'} of this kind could not be scored — ` +
-          'too few readings to judge recovery'), W));
+      const eps = `past episode${unver === 1 ? '' : 's'}`;
+      rows.push(tally([
+        `○ ${unver} ${eps} of this kind could not be scored — too few readings to judge recovery`,
+        `○ ${unver} ${eps} could not be scored — too few readings to judge recovery`,
+        `○ ${unver} ${eps} could not be scored — too few readings`,
+        `○ ${unver} unscoreable — too few readings`,
+        `○ ${unver} unscoreable`,
+      ]));
     }
     const unprobe = ledger.unverifiableUnprobeable(sym.kind);
     if (unprobe > 0) {
-      rows.push(truncate(
-        '    ' + c.grey(`○ ${unprobe} more on sleeping device${unprobe === 1 ? '' : 's'} that cannot be probed — ` +
-          'unscoreable by design, not a gap'), W));
+      const dev = `sleeping device${unprobe === 1 ? '' : 's'}`;
+      rows.push(tally([
+        `○ ${unprobe} more on ${dev} that cannot be probed — unscoreable by design, not a gap`,
+        `○ ${unprobe} more on ${dev} that cannot be probed — by design`,
+        `○ ${unprobe} unprobeable — unscoreable by design`,
+        `○ ${unprobe} unprobeable — by design`,
+      ]));
     }
     const transient = ledger.unverifiableTransient(sym.kind);
     if (transient > 0) {
-      rows.push(truncate(
-        '    ' + c.grey(`○ ${transient} transient blink${transient === 1 ? '' : 's'} — over before the evidence floor filled; ` +
-          'unscoreable by design, not a gap'), W));
+      const blinks = `transient blink${transient === 1 ? '' : 's'}`;
+      rows.push(tally([
+        `○ ${transient} ${blinks} — over before the evidence floor filled; unscoreable by design, not a gap`,
+        `○ ${transient} ${blinks} — over before the evidence floor filled`,
+        `○ ${transient} ${blinks} — unscoreable by design`,
+        `○ ${transient} ${blinks}`,
+      ]));
     }
     const under = ledger.unverifiableUndersampled(sym.kind);
     if (under > 0) {
-      rows.push(truncate(
-        '    ' + c.grey(`○ ${under} could not be scored at this device's reporting rate — ` +
-          'it had the time, never the readings'), W));
+      rows.push(tally([
+        `○ ${under} could not be scored at this device's reporting rate — it had the time, never the readings`,
+        `○ ${under} could not be scored at this device's reporting rate`,
+        `○ ${under} undersampled — the device reports too rarely`,
+        `○ ${under} undersampled`,
+      ]));
     }
     const conf = ledger.confounded(sym.kind);
     if (conf > 0) {
-      rows.push(truncate(
-        '    ' + c.grey(`○ ${conf} confounded — credited to neither arm (a death, remediation or probe re-route ` +
-          'during or just before the episode)'), W));
+      rows.push(tally([
+        `○ ${conf} confounded — credited to neither arm (a death, remediation or probe re-route during or just before the episode)`,
+        `○ ${conf} confounded — credited to neither arm (a death, remediation or probe re-route)`,
+        `○ ${conf} confounded — credited to neither arm`,
+        `○ ${conf} confounded`,
+      ]));
     }
   }
   // WHY there are no ledger rows at all, for kinds where that is permanent
@@ -389,9 +475,12 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
     const canProbe = ledger.probeable(sym.nodeId);
     const owed = ledger.verifyOwedFor(sym.nodeId);
     if (canProbe === false) {
-      rows.push(truncate('    ' + c.grey(
-        '○ this device cannot be probed (sleeping/FLiRS) — its evidence windows ' +
-        'can never be filled, so outcomes here stay unscoreable'), W));
+      rows.push(tally([
+        '○ this device cannot be probed (sleeping/FLiRS) — its evidence windows can never be filled, so outcomes here stay unscoreable',
+        '○ this device cannot be probed (sleeping/FLiRS) — outcomes here stay unscoreable',
+        '○ cannot be probed (sleeping/FLiRS) — unscoreable here',
+        '○ cannot be probed — unscoreable',
+      ]));
     } else if (!ledger.laneLive && unscoreableReason(sym.kind) == null && metricOf(sym.kind) !== 'none') {
       // NO RUNNER, NO VERIFICATION LANE (v0.79.9): index.ts starts both
       // together. Each kind's evidence floor counts readings of its own signal
@@ -407,8 +496,12 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       ];
       rows.push(c.grey(clipWords(forms.find((f) => visLen(f) <= W) ?? forms[forms.length - 1], W)));
     } else if (owed > 0) {
-      rows.push(truncate('    ' + c.grey(
-        `○ ${owed} verification probe${owed === 1 ? '' : 's'} still owed — the score is pending, not absent`), W));
+      const probes = `verification probe${owed === 1 ? '' : 's'}`;
+      rows.push(tally([
+        `○ ${owed} ${probes} still owed — the score is pending, not absent`,
+        `○ ${owed} ${probes} still owed — score pending`,
+        `○ ${owed} verify probe${owed === 1 ? '' : 's'} owed — pending`,
+      ]));
     }
   }
   const noScore = unscoreableReason(sym.kind);
@@ -456,9 +549,11 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
         `Node is DOWN — auto-ping gave up after ${tried} attempt${tried === 1 ? '' : 's'}`,
         `DOWN — auto-ping gave up (${tried} ${tried === 1 ? 'try' : 'tries'})`,
         'DOWN — auto-ping gave up'];
-    rows.push(spent
-      ? '    ' + c.label('▎ ') + c.white(clipWords(spentForms.find((f) => visLen(f) <= W - 6) ?? spentForms[spentForms.length - 1], W - 6))
-      : truncate('    ' + c.label('▎ ') + c.white(plan.headline), W));
+    // The planner's headline the same way (v0.80.0): its own words, then its
+    // short form where it has one, clipWords as the floor — edge-cluster's
+    // ended `not each no` at 80 under a blind truncate.
+    const headForms = spent ? spentForms : [plan.headline, ...(plan.headlineShort ? [plan.headlineShort] : [])];
+    rows.push('    ' + c.label('▎ ') + c.white(clipWords(headForms.find((f) => visLen(f) <= W - 6) ?? headForms[headForms.length - 1], W - 6)));
     plan.candidates.slice(0, 3).forEach((cand, i) => {
       const runnable = cand.action != null && cand.blocked == null;
       const marker = cand.action != null ? (runnable ? c.green('▸') : c.grey('▸')) : c.grey('·');
@@ -477,11 +572,22 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       // folklore". Shed it whole with `+1` instead, the same convention
       // detail.ts uses. Measured over a 750-scenario sweep: 474 clipped rows to
       // 0, with no card lost at 80x24 and none at 40 either.
-      const headBase = `${marker} ${c.white(cand.title)}`;
-      const tagged = `${headBase} ${tags}`;
+      // A SHORT TITLE BEFORE A SHED TAG (v0.80.0). Four titles are 70-80
+      // columns, so with the 8-column indent they overflowed 80 on their own:
+      // shedLine clipped the head and the `+1` that discloses the shed tag went
+      // with it — mesh-interference's survey row ended `measurement needed to`
+      // with its `[physical · inference]` silently gone. The order: the title
+      // with its tag, the short title with its tag, either with `+1`, and the
+      // short title clipped to whole words with `+1` as the floor.
+      const titles = [cand.title, ...(cand.short ? [cand.short] : [])];
+      const fits = (h: string): boolean => visLen('      ' + h) <= W;
+      const headOf = (t: string): string => `${marker} ${c.white(t)}`;
+      const head = titles.map((t) => `${headOf(t)} ${tags}`).find(fits)
+        ?? titles.map((t) => headOf(t) + c.grey(' +1')).find(fits)
+        ?? headOf(clipWords(titles[titles.length - 1], Math.max(1, W - 6 - 2 - 3))) + c.grey(' +1');
       rows.push(...shedLine(
         '      ',
-        visLen('      ' + tagged) <= W ? tagged : headBase + c.grey(' +1'),
+        head,
         cand.blocked ? [c.grey('⊘ ' + cand.blocked)] : [],
         W,
         /* wrapTail */ true,
@@ -496,12 +602,15 @@ function symptomBlock(sym: Symptom, now: number, W: number, nameOf: (id: number)
       // EVERY executable when write actions are off, so on a read-only install
       // that form would ground all three candidates on every card and blow the
       // row budget.
-      const rl = wrap(cand.rationale, W - 8);
-      const caveatLine = rl.find((l) => CAVEAT.test(l));
-      if (i === 0 || caveatLine != null) {
-        const pick = i === 0 ? (caveatLine ?? rl[0]) : caveatLine;
-        if (pick != null) rows.push(truncate('        ' + c.grey(pick + (rl.length > 1 ? ' …' : '')), W));
-      }
+      // THE CAVEAT IS CHOSEN BY SENTENCE (v0.80.0), not by wrapped line. A
+      // wrap can split "priority" from "routes", and the line picked then lost
+      // its object — healNode read `…deletes any manually-set priority …` at 80
+      // — while the 8-space indent ate the ` …` at 120. The sentence that names
+      // priority routes wins; one too wide gives way to its own clause, and
+      // clipWords at W-8 is the floor, so the marker always fits.
+      const caveat = caveatText(cand.rationale, W - 8);
+      const ground = caveat ?? (i === 0 ? clipWords(cand.rationale, W - 8) : null);
+      if (ground != null && ground !== '') rows.push('        ' + c.grey(ground));
       // M5: the learned efficacy note. Every candidate the ledger can have an
       // opinion about gets one — i.e. every candidate with an action, blocked or
       // not. efficacyNote() carries the blocked framing so a "NOT recommended"
@@ -666,12 +775,24 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
     // learning vs genuinely all-healthy — never rendered identically.
     const eng = data.engineStatus();
     body.push('');
+    // A paragraph hard-wrapped for 80 columns, re-flowed where it is wider
+    // than the terminal (v0.80.0): kept line for line where every line fits,
+    // so the familiar text is unchanged, and word-wrapped otherwise — at 40
+    // columns the all-clear's first line was cut blind, and at 60 the
+    // disabled and no-nodes paragraphs were. Each of the five empty states'
+    // paragraphs goes through it, and the two-line ceiling note; the one-line
+    // notes pick from ladders of their own.
+    const para = (lines: string[]): string[] => (lines.every((l) => visLen(l) <= W)
+      ? lines
+      : wrapWords(lines.map((l) => l.trim()).join(' '), Math.max(8, W - 4)).map((l) => '    ' + l));
     if (!eng.enabled) {
       empty = 'disabled';
       body.push(c.yellow('    ● Engine disabled.'));
       body.push('');
-      body.push(c.grey('    The symptom engine is not running on this install (no baselines'));
-      body.push(c.grey('    store configured), so nothing is being diagnosed.'));
+      body.push(...para([
+        '    The symptom engine is not running on this install (no baselines',
+        '    store configured), so nothing is being diagnosed.',
+      ]).map((l) => c.grey(l)));
     } else if (eng.total === 0) {
       // The engine is on and has nothing to be on ABOUT (v0.43.1). Every count
       // below is 0/0, which passes all three "fully graduated" comparisons —
@@ -681,9 +802,11 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       empty = 'no-nodes';
       body.push(c.cyan('    ◷ No nodes yet.'));
       body.push('');
-      body.push(c.grey('    The engine is running but the roster is empty — nothing has been'));
-      body.push(c.grey('    measured, so nothing can be diagnosed or cleared. This is normal'));
-      body.push(c.grey('    for the first seconds after a restart.'));
+      body.push(...para([
+        '    The engine is running but the roster is empty — nothing has been',
+        '    measured, so nothing can be diagnosed or cleared. This is normal',
+        '    for the first seconds after a restart.',
+      ]).map((l) => c.grey(l)));
     } else {
       // Which DETECTORS cannot judge every node in THIS band, and on how many.
       //
@@ -712,8 +835,15 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         for (const f of forms) if (visLen(f) <= W) return f;
         return forms[forms.length - 1];
       };
+      // The longest whole form that fits, clipWords as the floor (v0.80.0).
+      const fitForm = (forms: string[]): string =>
+        '    ' + clipWords((forms.find((f) => visLen(f) <= W) ?? forms[forms.length - 1]).slice(4), W - 4);
       const counts = (): string[] => [
         c.grey(`      timeouts ${eng.timeoutReady}/${eng.total}`),
+        // v0.80.0: nodes whose 10-minute window is too thin to RATE timeouts —
+        // the return-path detectors skip them, so `timeouts 33/39` alone read
+        // as 33 nodes judged. Its own field beside the series it qualifies.
+        ...(eng.timeoutWindowBlind > 0 ? [c.grey(`unmeasured ${eng.timeoutWindowBlind}`)] : []),
         c.grey(`rtt ${eng.rttReady}/${eng.total}`),
         // v0.79.0: rtt nodes with no learned band whom the fixed ceiling still
         // judges. Its own field, so the rtt count keeps meaning "learned".
@@ -725,8 +855,10 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       // "would not be flagged" stopped being true of it — but only a severe
       // slowdown clears that ceiling, so it is not covered either.
       const ceilingNote = (): string[] => (eng.rttCeiling > 0
-        ? [c.grey(clipWords(`    rtt: ${eng.rttCeiling} with no learned normal are held to a fixed ${RTT_CEILING_MS} ms`, W)),
-          c.grey(clipWords('    ceiling meanwhile, so only a severe slowdown is flagged there.', W))]
+        ? para([
+          `    rtt: ${eng.rttCeiling} with no learned normal are held to a fixed ${RTT_CEILING_MS} ms`,
+          '    ceiling meanwhile, so only a severe slowdown is flagged there.',
+        ]).map((l) => c.grey(l))
         : []);
       // The ledger's open episodes belong to EVERY no-symptom state, not just
       // the green one (v0.46.0). An episode in its confirmation window has no
@@ -739,7 +871,24 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
       // as under partial coverage — "everything is graduated" would otherwise be
       // read as covering it.
       const rssiNote = (): string[] => (rssiShort > 0
-        ? [truncate(c.grey(`    (rssi is short on ${rssiShort} — a dossier yardstick only, it arms no detector.)`), W)]
+        ? [c.grey(fitForm([
+          `    (rssi is short on ${rssiShort} — a dossier yardstick only, it arms no detector.)`,
+          `    (rssi short on ${rssiShort} — a dossier yardstick, arms no detector.)`,
+          `    (rssi short on ${rssiShort}: arms no detector.)`,
+          `    (rssi short on ${rssiShort}: dossier only.)`,
+        ]))]
+        : []);
+      // The thin windows, in the partial and learning states too (v0.80.0).
+      // The all-clear has counted them since v0.79.9; the partial state is the
+      // one a routed mesh sits in, and its counts said nothing about them.
+      const unmeasuredNote = (): string[] => (eng.timeoutWindowBlind > 0
+        ? [c.grey(fitForm([
+          `    timeout: ${eng.timeoutWindowBlind} too quiet in 10 min to rate — the return-path detectors skip them.`,
+          `    timeout: ${eng.timeoutWindowBlind} too quiet in 10 min to rate — return-path detectors skip them.`,
+          `    timeout: ${eng.timeoutWindowBlind} too quiet to rate; return-path skips them.`,
+          `    timeout: ${eng.timeoutWindowBlind} too quiet in 10 min to rate.`,
+          `    timeout: ${eng.timeoutWindowBlind} too quiet to rate.`,
+        ]))]
         : []);
       const episodeLine = (): string[] => {
         const openEps = data.openEpisodes() ?? [];
@@ -781,11 +930,16 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         body.push('');
         body.push(fieldStrip(view, counts()));
         body.push('');
-        body.push(c.grey('    Each node’s normal is learned per series and per time-of-day band,'));
-        body.push(c.grey('    from the evidence stream across several distinct days, before its'));
-        body.push(c.grey(eng.rttCeiling > 0
-          ? '    learned detectors may fire. Nothing here is a health claim yet.'
-          : '    detectors may fire. Nothing here is a health claim yet.'));
+        body.push(...para([
+          '    Each node’s normal is learned per series and per time-of-day band,',
+          '    from the evidence stream across several distinct days, before its',
+          eng.rttCeiling > 0
+            ? '    learned detectors may fire. Nothing here is a health claim yet.'
+            : '    detectors may fire. Nothing here is a health claim yet.',
+        ]).map((l) => c.grey(l)));
+        // The counts above carry `unmeasured N` here too (v0.80.0), so the line
+        // that says what it means follows the paragraph, as in the partial state.
+        body.push(...unmeasuredNote());
         body.push(...ceilingNote());
       } else if (blind.length > 0) {
         empty = 'partial';
@@ -814,12 +968,15 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         body.push(fieldStrip(view, counts()));
         body.push('');
         const which = blind.map(([name, n]) => `${name} (${n})`).join(', ');
-        body.push(truncate(c.grey(`    No learned yardstick in this band: ${which} of ${eng.total} nodes.`), W));
-        body.push(c.grey(eng.rttCeiling > 0
-          ? '    A degradation on those nodes may go unflagged, so this is a'
-          : '    A degradation on those nodes would not be flagged, so this is a'));
-        body.push(c.grey('    statement about COVERAGE, not health. Baselines reset on a route'));
-        body.push(c.grey('    change, so routed nodes may never graduate.'));
+        body.push(...para([
+          `    No learned yardstick in this band: ${which} of ${eng.total} nodes.`,
+          eng.rttCeiling > 0
+            ? '    A degradation on those nodes may go unflagged, so this is a'
+            : '    A degradation on those nodes would not be flagged, so this is a',
+          '    statement about COVERAGE, not health. Baselines reset on a route',
+          '    change, so routed nodes may never graduate.',
+        ]).map((l) => c.grey(l)));
+        body.push(...unmeasuredNote());
         body.push(...ceilingNote());
         body.push(...rssiNote());
         body.push(...episodeLine());
@@ -827,10 +984,19 @@ export function renderRemedy(ctx: ScreenCtx): string[] {
         // FULL coverage in this band. "All clear" is a claim about the WHOLE
         // engine, and this screen only knows about live symptoms (v0.43.1).
         empty = 'clear';
-        body.push(c.green(`    ✓ All clear — ${eng.total} nodes learned, no symptoms detected.`));
+        // A whole headline at every width (v0.80.0): at 40 columns the one
+        // form was cut mid-word. clipWords is the floor below the ladder.
+        const clearForms = [
+          `    ✓ All clear — ${eng.total} nodes learned, no symptoms detected.`,
+          `    ✓ All clear — ${eng.total} learned, no symptoms.`,
+          '    ✓ All clear — no symptoms.',
+        ];
+        body.push(c.green(clipWords(clearForms.find((f) => visLen(f) <= W) ?? clearForms[clearForms.length - 1], W)));
         body.push('');
-        body.push(truncate(c.grey('    Every node has a graduated timeout and rtt baseline — the two'), W));
-        body.push(truncate(c.grey('    that arm a detector —'), W));
+        body.push(...para([
+          '    Every node has a graduated timeout and rtt baseline — the two',
+          '    that arm a detector —',
+        ]).map((l) => c.grey(l)));
         // WHAT THE BRANCH CHECKED (v0.79.9): `symptoms.length === 0`, so no
         // symptom is firing. "None is currently anomalous" claimed a judgment
         // the engine cannot make on a node whose 10-minute window is too thin.

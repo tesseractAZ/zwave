@@ -1,5 +1,187 @@
 # Changelog
 
+## 0.80.0
+
+What the engine already knows reaches the screen where an operator looks for
+it, ordered by urgency and whole at 80 columns. The Overview strip counts
+critical symptoms; ENGINE ranks its tracked nodes alarm-first, gives a down
+driver link's cause and cost rows of their own, and lists confirming episodes
+first with their arm kept at 80 columns. Detail labels its probe ratio as
+lifetime, shows its page and end keys, and says "RF health nominal" only at a
+score of 80 or more. REMEDY counts the nodes too quiet to rate timeouts, says a
+learning arm made things worse even with no measured control arm, and renders
+its tallies, evidence, titles, headlines and caveats as whole forms. LOG names
+an unverifiable closure's subtype beside its verdict and says when a manual
+ping was answered. The stored files keep their format.
+
+### Changed — the Overview strip counts critical symptoms
+
+- The roster's `!` mark is per row, so with the default health sort a crit on
+  an A-scored node sat below the fold at 80x24 and 120x40 and nothing else on
+  the home screen said one existed. The strip carries a red `CRIT N` right
+  after `DEAD` while any symptom is critical — the count REMEDY's summary calls
+  `N critical`, mesh-wide symptoms included. Inserted, not appended:
+  `fieldStrip` sheds from the end, and an appended field was the one dropped
+  at 80 columns. Absent at zero, so a healthy strip is unchanged.
+
+### Changed — ENGINE ranks its tracked nodes alarm-first before the 8-row cap
+
+- The auto-ping snapshot lists nodes in id order and ENGINE shows 8. Six
+  low-id nodes holding a 24 h own-probe kill and two Dead ones filled the
+  list, and a high-id `GAVE UP — needs a human` row fell into `○ 1 more
+  tracked node(s)` at every terminal size. The rows are ranked first: a
+  give-up (`GAVE UP` or `CANNOT SEND`), then a node Dead now, then a miss
+  streak, then the rest, node id breaking ties.
+
+### Changed — a driver link that is not live names its cause and cost on rows of their own
+
+- The client's prose was the label row's second bit, so at 80 columns a link
+  that went dormant mid-run read `DRIVER LINK  dormant · +1`. Outside `live`,
+  `connecting` and `handshake` the prose has its own row, clipped to whole
+  words, and a `dormant`, `backoff` or `stopped` link adds `background RSSI,
+  S2-desync and duplicate-frame watches are off`, in shorter whole forms
+  where the row is narrow.
+
+### Changed — LEDGER — LIVE lists confirming episodes first and keeps their arm at 80 columns
+
+- Episodes rendered oldest first, six rows: seven chronic episodes hid the one
+  in its confirmation window — the one an action now would confound — behind
+  a bare `○ 2 more open episode(s)`. Confirming episodes come first, in ledger
+  order within each group, and the overflow line counts how many it hides are
+  confirming: `○ 2 more open episodes (1 confirming)`.
+- The 36-column `confirming — symptom absent, scoring` made the arm bit the one
+  shed at 80 columns, so a confounded episode and a clean control point both
+  read `· +3`. The long form is used only where the arm bit still fits after
+  it; otherwise `confirming` or `degraded` carries the row: `#12
+  return-path-degraded  degraded · confounded — neither arm · open 15m · +1`.
+- At 60 to about 71 columns, behind a long node id and kind name, the one-word
+  form still shed the arm. There the arm takes shorter words — `confounded`,
+  `control arm`, and for an action `action: X`, then `X`, then `action` — so
+  the rows read apart: `#12 return-path-degraded  degraded · confounded · +2`,
+  `#14 chronic-return-path  confirming · control arm · +2` and `#41
+  return-path-degraded  confirming · healNode · +2`.
+
+### Changed — Detail labels its probe ratio as lifetime, shows its page and end keys, and says "nominal" only at 80 or more
+
+- The Probes ratio is cumulative, and the only word that said so was the
+  pre-0.40.2 caveat three rows below, which retires for a node first seen
+  after the epoch. The window rides on the value: `84/98 answered (86%,
+  lifetime) · 31 self-proven`, `84/98 (86%, lifetime) +1` at 40 columns.
+- Space/b page and `G` jumps to the end, where EVIDENCE sits below the fold at
+  80x24 for every device shape, and the bar named only the one-row scroll. It
+  reads `[↑↓] SCROLL [␣/b] PAGE [G] END [< >] NODE [A] ACTIONS [1-9] SCREENS
+  [Q] BACK` at 80; narrower, the two are the first caps shed, with `+2`.
+- No flag means no lane crossed its own flag threshold, and an unflagged 66/D
+  read `RF health nominal` under `SCORE 66 (D)`. Below 80 the legend reads
+  `no flag threshold crossed — the score is lost in sub-threshold lanes (see
+  RTT/Margin/Timeouts/LWR)`, or a shorter whole form: the route lane's hop
+  count and data rate are on the LWR row.
+
+### Changed — REMEDY counts the nodes too quiet to rate timeouts in the learning and partial states
+
+- Both return-path detectors skip a node whose 10-minute window holds under
+  20 sends, and the partial state's `timeouts 33/39` read as 33 nodes judged:
+  the screen was byte-identical with 0 and with 39 such nodes. In the
+  learning and partial states the counts carry `unmeasured N` after
+  `timeouts`, and a line after the paragraph says `timeout: N too quiet in 10
+  min to rate — the return-path detectors skip them.`, in shorter whole forms
+  where the row is narrow.
+
+### Fixed — a learning arm's harm warning was silent with no measured control arm (0.44.0)
+
+- `efficacyNote` returned nothing whenever the kind's self-heal rate was
+  unmeasured, before it looked at the attempts or the below-readiness harm
+  warning, so an arm tried 2.9 times with every attempt worse read the same
+  silence as one never tried. It renders `≈ still learning this action (n≈2.9
+  of 4) — self-heal not yet measured — ⚠ every attempt so far made it WORSE
+  (too few to be sure)`; nothing only with no attempts and no base rate.
+- In both learning ladders the hedge is shed before the warning: at 80
+  columns the note reads `≈ still learning this action (n≈2.9 of 4) — ⚠ every
+  try made it WORSE` where it read the readiness fraction alone. Where that
+  does not fit, a rung that keeps the warning comes ahead of the bare
+  fraction: `≈ still learning — ⚠ every try made it WORSE` at 60 columns, and
+  `≈ ⚠ every try made it WORSE` at 40. A partial harm sheds the same way, as
+  `⚠ n≈1.5 made it worse`.
+
+### Changed — REMEDY's tallies, evidence, titles, headlines and caveats are whole at 80 columns
+
+- Each tally line was one sentence and a blind truncate, ending `weigh the
+  evidence a`, `too few readings to ju` and `probe re-` at 80. Each takes the
+  longest whole form that fits, clipWords as the floor, and none wraps: the
+  screen does not scroll, and a taller card pushes the plan off the frame. The
+  owed-probe and cannot-be-probed lines do the same.
+- The evidence row was one join and a truncate: weak-signal's `failed
+  deliveries 13 …` lost its window, and rtt-degraded's restart allowance
+  stopped mid-word. Each measurement is a `shedLine` token, dropped whole with
+  `+N`, and carried to continuation rows only where not even the first fits.
+  The tokens keep the row's `  ·  `, wider than the ` · ` some values carry
+  inside themselves (`baseline 38±6ms · capped at 300ms`): `shedLine` takes
+  its separator as an argument, and every other caller keeps ` · `.
+- Four candidate titles are 70–80 columns before an 8-column indent, so the
+  head overflowed and the `+1` disclosing the shed tag went with it — the RF
+  survey row ended `measurement needed to` with `[physical · inference]`
+  silently gone. Those candidates carry a short title (`Survey the RF
+  environment — measurement needed [physical · inference]` at 80), and the
+  floor clips the short title to whole words with `+1`. The plan headline
+  takes a short form where the planner gives one (edge-cluster's `… check the
+  common relay`), with clipWords as the floor.
+- The caveat below a candidate is chosen by sentence, not by wrapped line: the
+  sentence naming priority routes first, its clause where the sentence is too
+  wide, clipWords at `W − 8` as the floor. A wrap had split "priority" from
+  "routes" (`…deletes any manually-set priority …` at 80) and the indent ate
+  the ` …` at 120; every rebuild card names priority routes at 80 and 120.
+- Every empty state's paragraph — disabled, no nodes, learning, partial, and
+  the all-clear's `Every node has a graduated timeout and rtt baseline` pair —
+  and the two-line ceiling note are kept line for line where they fit and
+  re-flowed to whole words where they do not. At 40 columns the all-clear's
+  first line read `Every node has a graduated timeout a`; at 60 the disabled
+  and no-nodes paragraphs were cut, and the ceiling note ended `slowdown is
+  …`. The rssi note takes the longest whole form that fits, and the ✓
+  headline sheds to `✓ All clear — N learned, no symptoms.` and then `✓ All
+  clear — no symptoms.`, with clipWords as the floor.
+
+### Changed — LOG names an unverifiable closure's subtype beside its verdict
+
+- The ring line carried no subtype — only the container's stdout line tagged a
+  transient or undersampled closure — so a structural, by-design or
+  cadence-limited closure all read `closed unverifiable (no action)`; and the
+  confounded tag sat at the end of the line, where the 80-column list row cut
+  it. The qualifier follows the verdict word: `rtt-degraded closed
+  unverifiable: transient (no action)`, `: undersampled`, `: unprobeable`, and
+  ` (confounded)` on a scored verdict credited to neither arm.
+
+### Changed — LOG says when the operator's ping was answered
+
+- A miss on a manual ping reached LOG and the ENGINE streak; an answer reached
+  only the debug log, so `p` reported the ping sent and then nothing. The judge
+  books `node N answered your ping (lastSeen advanced)` at info, for the
+  manual lane only. With a runner the `p` notice reads `auto-ping judges
+  whether it answered — see LOG (e)`, and without one `HA does not return the
+  answer — watch its Status / Last-seen`. The Actions-menu CONFIRM note says
+  `Where auto-ping runs it judges the answer in LOG; otherwise watch the
+  node's Status / Last-seen.`, and the whole note wraps to 6 lines at 80
+  columns and 7 at 60, so the box keeps its `type CONFIRM to arm` prompt and
+  `Esc = cancel` at 80x16 and 60x18.
+
+### Tests
+
+- 2,018 tests, 23 new: 9 in `remedyScreen.test.ts`, 5 in
+  `engineScreen.test.ts`, 3 in `detailScreen.test.ts`, and one each in
+  `actionsCatalog.test.ts`, `chrome.test.ts`, `overviewScreen.test.ts`,
+  `zwaveDataChurn.test.ts`, `autoPing.test.ts` and `sessionActions.test.ts`;
+  2 Probes-row assertions in `detailScreen.test.ts` now expect the lifetime
+  label, and the 0.71.0 Ping-note assertion in `actionsCatalog.test.ts`
+  expects the shorter note. 2,194 mutation-harness entries (19 labelled
+  equivalent): 80 new, and 15 re-anchored to the moved text:
+  `engine-confirming-is-labelled`, `engine-confound-outranks-action`,
+  `engine-shows-driver-link`, `detail-probes-honest`,
+  `baseline-counts-not-clipped`, `caveat-grounded-off-index`,
+  `caveat-not-every-candidate`, `remedy-tag-is-all-or-nothing`,
+  `confounded-row-names-reroute`, `confounded-row-verdict-first`,
+  `remedy-ceiling-note-partial`, `remedy-ceiling-note-learning`,
+  `remedy-learning-names-learned-detectors`, `remedy-may-go-unflagged` and
+  `remedy-gave-up-whole-forms`.
+
 ## 0.79.9
 
 Screens no longer state what the engine never measured. With no auto-ping
@@ -238,192 +420,6 @@ waits on a connection that is down. Nothing stored on disk changes.
   in `activityFeeds.test.ts`; 5 earlier tests assert the true counts where
   they had pinned the old ones. 2,067 mutation-harness entries (19 labelled
   equivalent): 25 new, 5 re-anchored, and 19 removed with the code they pinned.
-
-## 0.79.7
-
-A subscribe Home Assistant answers after the add-on's 10-second timeout is
-released on its socket instead of staying live with no handle, an activity
-feed the statistics rebuild could not make is subscribed again a minute on
-instead of staying dark until the next rebuild, and a status event read
-together with a roster poll's answer is no longer replaced by the poll's older
-reading. Nothing stored on disk changes.
-
-### Fixed — a subscribe Home Assistant answered after the client's timeout stayed live with no handle
-
-- Home Assistant handles one connection's commands in order, with no cancel,
-  and registers a subscription while it handles the subscribe. A subscribe the
-  client gave up on at its 10 s reply timeout therefore still registered when
-  Home Assistant reached it, under an id the client no longer routed, for the
-  life of the socket: a node's statistics or status listener (in 0.79.6 beside
-  the one the 60 s retry then made), a second controller feed beside the next
-  rebuild's, a `state_changed` feed of the whole house, or a
-  `zwave_js_notification` feed. The client now sends `unsubscribe_events` for
-  it in the turn the timeout passes, on the same socket, where Home Assistant
-  reaches it after the subscribe (`not_found` when the subscribe failed);
-  events sent under the id before it lands reach no handler, and a socket that
-  has closed, or is closing, takes the subscription with it. Other commands
-  are unchanged: an action Home Assistant has not answered in time still reads
-  as an unknown outcome.
-
-### Fixed — an activity feed a rebuild could not make stayed dark until the next rebuild (0.8.0)
-
-- A rebuild of the statistics feeds whose `state_changed` subscribe failed (no
-  answer within the client's 10-second timeout, or a connection closed under
-  it) kept its controller and node feeds and logged the failure, and nothing
-  made the feed before a Home Assistant reconnect, the self-heal or a re-arm:
-  no value or notification rows on the Log screen, Detail's LIVE ENTITIES and
-  the device menu's `now:` from the 10-minute full state read, and the pause
-  toggle turned on in Home Assistant read only there. The
-  `zwave_js_notification` subscribe, in the same try, was not sent, and one
-  that failed on its own was dropped without a line while the log named it
-  subscribed. Each activity feed is now a try of its own, and one a rebuild
-  could not make is subscribed after the first roster poll that succeeds a
-  minute after the attempt (on the host's uptime): only the feeds not made,
-  one attempt at a time, and again a minute after each that fails; the attempt
-  that makes the state feed reads the states again. Each handle it makes is
-  kept with the feed set's as it is made, so a re-arm releases it, one begun
-  while its second subscribe is out included; one answered after another
-  rebuild began, or while a re-arm releases the feed set, is released and not
-  kept. It stands aside while a rebuild runs or the feed set is down, but not
-  for a re-arm an entry reload latched, which leaves the activity feeds as
-  they are. The Log screen reads `activity feed down — its state_changed
-  subscribe failed; retried after a minute` until it is made, and the add-on
-  log names each failed feed (`activity subscribe failed (state_changed): …`).
-  A failure on a connection that is down adds no row, and the feeds after it
-  are not tried: the reconnect's rebuild makes them and adds the row.
-- A failed activity subscribe does not fail the rebuild: failed, the rebuild
-  would run again at every roster poll, making the controller's feed and every
-  node's two again each time.
-
-### Fixed — a status event read together with a roster poll's answer was taken as older than the poll's reading (0.79.6)
-
-- Over uncompressed frames the client can hand a status event Home Assistant
-  sent right after a `network_status` answer to its handler before the poll
-  that awaited the answer resumes, so the poll acted on its older reading
-  after the event. A revival read that way, after a poll that reads the node
-  Dead, re-subscribed its feeds for nothing; a death read with the first poll
-  since the node's status feed answered gave way to that poll's reading, which
-  left the death queued when the node revived before the next poll, or had
-  the next poll re-subscribe the node for nothing when it stayed dead. Each
-  alive, dead, sleep or wake up event now takes an order mark: a node whose
-  live status feed heard one after both the poll and the feed were sent is
-  neither judged by that poll nor given its reading as a baseline, and every
-  other poll's reading is the live feed's baseline (0.79.6: only the first
-  poll sent after the feed answered). With permessage-deflate, which the
-  client offers, Home Assistant's and the Supervisor's sockets compress every
-  frame (inferred from the aiohttp sources), and the poll acted first there.
-- A status a node's old status feed hears while the node's own re-subscribe
-  releases it (the statistics feed goes first, unless the 60 s retry made it
-  after the status feed) is counted once and kept as the newer: through
-  0.79.6 a poll that read such a death before the new status feed answered
-  counted it again, and the new feed was seeded with the older reading, which
-  left the death queued when it heard the revival.
-- A status a feed a re-arm is still releasing sets on a node whose rebuild
-  status subscribe fails no longer seeds the status feed the 60 s retry makes
-  once a roster poll has read the node since: in 0.79.6 the retry's feed kept
-  it, and a death it then heard first was not counted.
-
-### Tests
-
-- 1,951 tests, 57 new: 25 in `nodeFeeds.test.ts`, 10 of them pins that pass
-  on 0.79.6 too; 16 in `activityFeeds.test.ts`, a model of Home Assistant's
-  core event bus; 8 in `haWsClientLateSubscribe.test.ts`, a model of its
-  per-connection command order; 3 in `realClient.lateSubscribe.test.ts`, the
-  data layer over the real client and a mock Core with node objects
-  (`_realHa.ts`, `_realRun.ts`); 2 in `statusOrderRealClient.test.ts` and 2
-  in `statusReleaseRealClient.test.ts`, the real client with frames
-  uncompressed and compressed; and 1 in `activityFeedsLate.test.ts`. 2,061
-  mutation-harness entries (19 labelled equivalent): 56 new, 8 re-anchored,
-  and 3 removed with the code they pinned, one of them labelled equivalent.
-
-## 0.79.6
-
-A node replaced with `replace_failed_node`, or included on a freed id, has its
-statistics and status feeds made again on its new node object in Home
-Assistant, and the 60-second retry of a failed node subscribe now subscribes.
-A driver server on another network leaves the driver link stopped, not
-reading live, and a stick swap no longer stops the driver link for the rest of
-the run as a driver server on another network. Nothing stored on disk changes.
-
-### Fixed — a replaced node's feeds stayed on the failed node until the next rebuild
-
-- Home Assistant binds each node's statistics and status feed to the node
-  object it resolves at subscribe time, and a node replaced (by the same
-  product or another) or included on a freed id is a new object there, which
-  no earlier feed hears. Through 0.79.5 the new device had no statistics feed
-  and its Dead/Alive crossings were counted by neither the feed nor the roster
-  fallback until a Home Assistant reconnect, the self-heal or a re-arm, while
-  Detail's EVIDENCE badges read its feeds live. A node's two feeds are now
-  released and made again on their own after the roster poll that reads it not
-  ready after it read ready, shows a status change its status feed did not
-  deliver (the replacement of a failed node that read not ready; a new status
-  feed's baseline is the first poll sent after it answered), shows its device
-  changed, or lists it again after a poll found it off the roster (an id back
-  with no device as last loaded asks for a registry load). A re-interview of
-  the same node is re-subscribed too, as Home Assistant's websocket does not
-  tell the two apart: one release and subscribe more.
-- A node included after the feed set was built, or an evicted id back on the
-  roster, had no feeds until a rebuild either: it is subscribed after the poll
-  that lists it. An evicted node's feeds are released at the eviction, and
-  feeds a re-arm released are not released again.
-- A driver restart costs no per-node re-subscribe: the nodes wait for the
-  re-arm its entry reload latches, and a status feed made since the previous
-  poll is not judged by a change it may have missed, so a replacement by the
-  same product of a failed node that read not ready, landing between the
-  node's two subscribes, leaves its statistics feed on the removed node until
-  a later interview start, absence or swap re-subscribes it, or the feed set
-  is rebuilt. A per-node subscribe that resolves after a re-arm began, or on
-  another connection, is released and not kept. Neither a node's own
-  re-subscribe nor the retry runs beside a reconnect's rebuild, and a rebuild
-  it superseded that fails on the new connection no longer lets a roster poll
-  start a second one beside it. Feeds a node's own re-subscribe or the retry
-  makes never stamp the fleet's liveness clock, so the dead-feed watchdog and
-  `binary_sensor.zwave_tui_degraded` still see the rest of the feed set, the
-  controller's included, fall silent.
-
-### Fixed — a failed node subscribe was never retried (0.26.0)
-
-- The 60 s retry passed no list for the handles, and the optional-chained push
-  skipped the subscribe with it: a node whose subscribe failed was marked
-  subscribed with no feed made, its EVIDENCE badges reading live. The retry
-  now subscribes, by the node's device as last loaded, keeps the handles where
-  a re-arm releases them, stands aside while a rebuild runs, the feed set is
-  down or a node's own re-subscribe is out, and drops from its queue a node
-  the roster has shown gone (it is subscribed once it is back) or one with no
-  device as last loaded, such as one queued by an old network's device the
-  boot load admitted (it is subscribed once a load gives it one).
-
-### Fixed — a driver server on another network could leave the driver link reading live after it was stopped
-
-- When the homeId cross-check proved a mismatch inside the driver's state
-  dump (Home Assistant's home id already known when the dump landed, as after
-  a home-id change), it stopped the driver client, and the rest of the dump
-  then declared the stopped client live: DRIVER LINK read `live` with no
-  connection under it, the S2 lane read `refused` (`s2_lane` too), and
-  nothing reconnected it until the next home-id change or restart. The
-  client now stays `stopped`, beside the homeId mismatch row, and a dump cut
-  short by a stop hands on no further node and is not logged as processed. A
-  stop from the handshake's home-id callback ends the handshake the same way;
-  nothing in the add-on stops the client there today.
-
-### Fixed — a stick swap could stop the driver link for the rest of the run
-
-- A home-id change cycles the driver client, and kept the previous server's
-  home id until the new handshake: a read of the cross-check in between (the
-  sleeper watch reads it on every call) compared it with the new id, purged
-  the driver telemetry and stopped the client for the rest of the run, though
-  the driver server had moved to the new network too. The cycle forgets it now.
-  A driver link back on the new network before Home Assistant reports the new
-  home id still reads as one on another network, telemetry purged and client
-  stopped, until the roster poll that reads the new id runs the cycle.
-
-### Tests
-
-- 1,894 tests, 41 new: 34 in `nodeFeeds.test.ts`, a model of Home
-  Assistant's node feeds bound to zwave-js-server-python node objects, 4 in
-  `driverWsClient.test.ts`, 2 in `zwaveDataChurn.test.ts` and 1 in
-  `deviceSwapSim.test.ts`; 2,008 mutation-harness entries (20 labelled
-  equivalent, 2 of them new): 66 new, 2 re-anchored.
 
 ## Older releases
 

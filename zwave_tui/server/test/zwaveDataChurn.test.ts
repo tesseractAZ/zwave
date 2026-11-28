@@ -25,7 +25,7 @@ import { createEvidenceStore, COARSE_BUCKET_MS } from '../src/zwave/evidenceStor
 import { renderRemedy } from '../src/telnet/screens/remedy';
 import { renderDetail } from '../src/telnet/screens/detail';
 import { renderEngine } from '../src/telnet/screens/engine';
-import { mockData, mkView } from './_logHelpers';
+import { mockData, mkView, mkNode } from './_logHelpers';
 import type { DataProvider, Symptom } from '../src/types';
 import type { AutoPingSnapshot } from '../src/zwave/autoPing';
 
@@ -4313,5 +4313,64 @@ test('a home-id change the driver server made too: a cross-check read before the
     homeOverride = null;
     zd.stop();
     await srv.close();
+  }
+});
+
+test('an unverifiable closure names its subtype right after the verdict, and LOG keeps it at 80 columns (v0.80.0)', async () => {
+  // The ring line read `closed unverifiable (no action)` for a by-design blink
+  // and a fixable evidence gap alike; the subtype was computed and reached
+  // stdout only. Placed after the verdict word, it survives the ~46 columns of
+  // text a Log list row keeps at 80, where a tag at the end did not.
+  const { renderLog } = await import('../src/telnet/screens/log');
+  const W = (tx: number) => ({ tx, rx: tx, timeouts: 1, rate: 1 / tx, samples: 6,
+    freshN: 6, flaps: 0, s2: 0, s2Known: 6, routeChanges: 0, routeKnown: 6,
+    rssiMedian: null, rssiN: 0, rttMedian: null, rttN: 0, rateKbpsMin: null });
+  const closeOne = async (liveMin: number, unprobeableAtClose = false): Promise<string> => {
+    const ha = fakeHa();
+    const dir = mkdtempSync(join(tmpdir(), 'zwtui-subtype-'));
+    const zd = await bootedZwaveData(ha, {
+      refreshMs: 80, routePollMs: 120, evidenceSampleMs: 80,
+      evidencePath: join(dir, 'evidence.json'), baselinesPath: join(dir, 'baselines.json'),
+      outcomesPath: join(dir, 'outcomes.json'), driverWsUrl: null,
+    });
+    try {
+      const real = zd.snapshot();
+      const asListening = real.map((n) => (n.nodeId === 7 ? { ...n, isListening: true } : n));
+      const shadow = zd as unknown as {
+        snapshot: () => NodeSnapshot[]; updateEpisodes: (s: unknown[], now: number) => void;
+        nodeWindow: (id: number | null, now: number) => unknown; degradedWindow: (id: number | null, since: number, now: number) => unknown;
+      };
+      shadow.snapshot = () => asListening;
+      // BEFORE: 2 sends, under the timeout floor. AFTER: 100 sends, over it.
+      shadow.degradedWindow = () => W(2);
+      shadow.nodeWindow = () => W(100);
+      const t0 = 1_800_000_000_000;
+      const symptom = { kind: 'return-path-degraded', nodeId: 7, severity: 'warn', sinceMs: t0 - liveMin * 60_000 + 60_000,
+        basis: 'measured', evidence: [], narrative: 'n' };
+      shadow.updateEpisodes([symptom], t0);
+      shadow.updateEpisodes([], t0 + 60_000);
+      // A node that stopped listening before the close cannot be probed.
+      if (unprobeableAtClose) shadow.snapshot = () => real.map((n) => (n.nodeId === 7 ? { ...n, isListening: false } : n));
+      shadow.updateEpisodes([], t0 + 12 * 60_000);
+      return zd.events().find((e) => /closed/.test(e.text))?.text ?? '';
+    } finally {
+      zd.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const blink = await closeOne(3);
+  assert.equal(blink, 'return-path-degraded closed unverifiable: transient (no action)', blink);
+  const slow = await closeOne(30);
+  assert.equal(slow, 'return-path-degraded closed unverifiable: undersampled (no action)', slow);
+  const asleep = await closeOne(3, true);
+  assert.equal(asleep, 'return-path-degraded closed unverifiable: unprobeable (no action)', asleep);
+  // On the 80-column list row, behind a long node name, the subtype is kept.
+  for (const [kind, sub] of [['rtt-degraded', 'transient'], ['quiet-node', 'undersampled']] as const) {
+    const ev = { seq: 1, ts: Date.now(), source: 'engine' as const, severity: 'info' as const, kind: 'symptom' as const, nodeId: 7,
+      text: `${kind} closed unverifiable: ${sub} (no action)` };
+    const n7 = mkNode({ nodeId: 7, name: 'Back Porch Motion Sensor Long Name' });
+    const rows = renderLog({ view: mkView({ screen: 'log', cols: 80, rows: 24 }), data: mockData({ events: [ev], nodes: [n7] }),
+      visibleNodes: [n7], filtering: false, actionsEnabled: true }).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    assert.ok(rows.some((l) => l.includes(`${kind} closed unverifiable: ${sub}`)), `${kind}: the subtype survives 80 columns:\n${rows.slice(2, 5).join('\n')}`);
   }
 });

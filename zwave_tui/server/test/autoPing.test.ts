@@ -3810,3 +3810,33 @@ test('a sweep or verification probe is PLANNED at its slot when it is pended, so
   assert.deepEqual(R.of('sent').map((c) => c.id), [50, 100, 101]);
   R.h.stop();
 });
+
+test("an ANSWERED manual ping reaches the event ring, in the operator's words (v0.80.0)", async () => {
+  // A miss reached LOG and the ENGINE streak; an answer reached only debug,
+  // so `p` reported "sent" and then said nothing on any screen.
+  const { startAutoPing } = await import('../src/zwave/autoPing');
+  let clock = T;
+  const ring: { sev: string; id: number | null; text: string }[] = [];
+  const server: string[] = [];
+  const debugged: string[] = [];
+  const log2 = Object.assign((m: string) => { server.push(m); }, { debug: (m: string) => { debugged.push(m); } });
+  const answered = { stats: { lastSeen: T + 40 } as never };
+  const nodes = mesh(20, [node(7, answered), node(8, answered)]);
+  const h = startAutoPing({
+    nodes: () => nodes, controller: () => null, ready: () => true,
+    ping: async () => {}, log: (sev, id, text) => { ring.push({ sev, id, text }); }, log2,
+    config: cfg(), tickMs: 1_000_000, now: () => clock,
+  });
+  try {
+    h.notePending(7, 'manual', T);       // the operator's ping
+    h.notePending(8, 'sweep', T);        // control: our own probe, answered the same way
+    clock = T + 2 * MIN;                 // past the answer grace
+    h.tick();
+    const mine = ring.filter((r) => /answered your ping/.test(r.text));
+    assert.deepEqual(mine, [{ sev: 'info', id: 7, text: 'node 7 answered your ping (lastSeen advanced)' }],
+      `exactly the manual one, at info: ${JSON.stringify(ring)}`);
+    assert.ok(server.some((l) => /node 7 answered your ping/.test(l)), 'and the container log');
+    assert.ok(!ring.some((r) => /node 8/.test(r.text)), 'an answered sweep probe stays off the ring');
+    assert.ok(debugged.some((l) => /node 8 answered its probe/.test(l)), 'at debug, as before');
+  } finally { h.stop(); }
+});
