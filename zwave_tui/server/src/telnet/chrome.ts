@@ -159,6 +159,9 @@ export function field(label: string, value: string, color: (s: string) => string
  *   the row, emit it on continuation rows at the same indent instead of
  *   dropping it — used for the blocked-reason chip, which is the one thing on a
  *   "NOT recommended" row an operator must read.
+ * @param sep the mark between tail tokens (v0.80.0). REMEDY's evidence row
+ *   passes the wider `  ·  `, because several evidence values carry a ` · `
+ *   inside themselves and a qualifier must not read as a measurement of its own.
  */
 export function shedLine(
   indent: string,
@@ -166,8 +169,8 @@ export function shedLine(
   tail: string[],
   cols: number,
   wrapTail = false,
+  sep: string = c.grey(' · '),
 ): string[] {
-  const sep = c.grey(' · ');
   const headRow = indent + head;
   // (a) The head is never shed. If it alone overflows there is nothing to
   //     compose — clip it and say nothing further, rather than emitting a

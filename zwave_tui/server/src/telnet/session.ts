@@ -1166,7 +1166,14 @@ export class TuiSession {
     // What the reply said (v0.72.0 review): a success can carry a note — a
     // heal's unreported return-route step, a config write queued for a
     // sleeper's wake-up — and an UNKNOWN outcome is not a failure.
-    const note = res.ok ? res.message.split(' — ').slice(1).join(' — ') : '';
+    // A PING'S ANSWER HAS A HOME WHERE A RUNNER EXISTS (v0.80.0): the manual
+    // ping is pended on auto-ping's answer check, which books an answer or a
+    // miss as a LOG line. With no runner nothing judges it, and the notice
+    // keeps HA's own caveat: the request was sent, the answer is not known.
+    const pingNote = res.ok && action.kind === 'ping'
+      ? (this.data.autoPingState?.() != null ? 'auto-ping judges whether it answered — see LOG (e)' : 'HA does not return the answer — watch its Status / Last-seen')
+      : '';
+    const note = [res.ok ? res.message.split(' — ').slice(1).join(' — ') : '', pingNote].filter(Boolean).join(' · ');
     this.actionNotice = res.ok ? `✓  ${action.label}` : res.unknown ? `◷  ${res.message}` : `✗  ${res.message}`;
     this.actionNoticeDetail = [note, this.pauseAckText()].filter(Boolean).join(' · ') || null;
     this.pauseAckPending = false;

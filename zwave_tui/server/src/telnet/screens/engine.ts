@@ -33,7 +33,7 @@
 import { UNWATCHED_TEXT, type UnwatchedReason } from '../../zwave/missedReport';
 import { ADMISSION_SUMMARY } from '../../zwave/admission';
 import { PAUSE_ENTITY } from '../../zwave/autonomyPause';
-import { c, truncate, visLen } from '../ansi';
+import { c, clipWords, truncate, visLen } from '../ansi';
 import { provenance, weight, unscoreableReason } from '../ledgerText';
 import { REFUSAL_INDICTS } from '../../zwave/planner';
 import { frame } from '../chrome';
@@ -270,6 +270,15 @@ export function renderEngine(ctx: ScreenCtx): string[] {
         push('    ' + c.yellow('flag dump is the only source. This is a MONITORING gap, not a healthy mesh.'));
       }
     } else {
+      // ALARM RANK BEFORE THE CAP (v0.80.0). The snapshot lists nodes in id
+      // order and the cap is a fixed 8, so on a bad day eight low-id nodes
+      // holding a 24 h own-probe kill filled the list and a high-id GAVE UP row
+      // fell into the "more tracked" count at every terminal size. The rows
+      // that ask for a human come first, then a node Dead now, then a miss
+      // streak, then the rest; node id breaks ties. `tracked` is a fresh array.
+      const rank = (n: (typeof tracked)[number]): number =>
+        n.gaveUp || n.launchGaveUp ? 0 : n.deadSinceMs != null ? 1 : n.missStreak > 0 ? 2 : 3;
+      tracked.sort((a, b) => rank(a) - rank(b) || a.nodeId - b.nodeId);
       for (const n of tracked.slice(0, 8)) {
         const name = data.nodeById?.(n.nodeId)?.name ?? `node ${n.nodeId}`;
         // ALARMS FIRST. These two are the only rows that ask for a human, so
@@ -394,8 +403,26 @@ export function renderEngine(ctx: ScreenCtx): string[] {
     // `s2LaneLive` collapsed four causes into one boolean whose callers record
     // `null`, so "nothing to report" and "cannot report" were the same value.
     const s2 = data.s2LaneFault?.() ?? null;
+    // THE PROSE ON ITS OWN ROW WHEN THE LINK IS DOWN (v0.80.0). As the second
+    // bit it was shed at 80 columns, so a link that went dormant mid-run read
+    // `dormant · +1`: the cause ("schema mismatch …") and what it costs were on
+    // no row an operator at the modal size could see. Live, connecting and
+    // handshake keep the prose as a bit — it is status there, not a cause.
+    const down = st !== 'live' && st !== 'connecting' && st !== 'handshake';
     push(fitBits(c.label('DRIVER LINK') + '  ',
-      [tone(st), c.grey(ws), ...(s2 ? [c.yellowB(`S2 lane ${s2}`)] : [])], view.cols));
+      [tone(st), ...(down ? [] : [c.grey(ws)]), ...(s2 ? [c.yellowB(`S2 lane ${s2}`)] : [])], view.cols));
+    if (down) {
+      push('    ' + tone(clipWords(ws, view.cols - 4)));
+      // What a link that is not live costs, for the states that had a URL to
+      // reach. `disabled` has none, and its row above already says so.
+      if (st === 'dormant' || st === 'backoff' || st === 'stopped') {
+        push('    ' + c.grey(clipWords(pick(view.cols - 4, [
+          'background RSSI, S2-desync and duplicate-frame watches are off',
+          'bgRSSI, S2-desync and duplicate-frame watches off',
+          'bgRSSI, S2 and dup-frame watches off',
+        ]), view.cols - 4)));
+      }
+    }
     if (s2) {
       const resumeAt = data.s2LaneResumeAt?.() ?? null;
       push('    ' + c.yellow(s2 === 'storm-paused'
@@ -450,24 +477,51 @@ export function renderEngine(ctx: ScreenCtx): string[] {
       '○ no open episodes.',
     ])));
   } else {
-    for (const ep of open.slice(0, 6)) {
+    // CONFIRMING FIRST (v0.80.0). The ledger lists episodes oldest first, so a
+    // chronic kind's old episodes filled the six rows and the one in its
+    // confirmation window — the episode an action now would confound — was
+    // hidden behind a bare count. A stable sort keeps the age order inside
+    // each group, and the overflow line says how many it hides are confirming.
+    const ranked = [...open].sort((a, b) => (b.confirming ? 1 : 0) - (a.confirming ? 1 : 0));
+    for (const ep of ranked.slice(0, 6)) {
       const who = ep.nodeId == null ? c.blue('MESH') : c.cyan(`#${ep.nodeId}`);
       // Ordered by what an operator loses least by having truncated: the
       // lifecycle state and the arm this episode will (or will not) feed come
       // FIRST, because a clipped "confounded" reads as a clean control point —
       // the v0.35 lesson about the basis glyph, applied to the ledger.
-      const bits: string[] = [];
-      bits.push(ep.confirming
-        ? c.green('confirming — symptom absent, scoring')
-        : c.yellow('degraded — symptom live'));
-      if (ep.confounded) bits.push(c.grey('confounded — neither arm'));
-      else if (ep.actionKind) bits.push(c.white(`action: ${ep.actionKind}`));
-      else bits.push(c.grey('no action — control arm'));
-      bits.push(c.grey(`open ${age(now - ep.onsetMs)}`));
-      if (ep.beforeFreshN != null) bits.push(c.grey(`fresh=${ep.beforeFreshN}`));
-      push(fitBits('  ' + who + ' ' + c.white(ep.kind) + '  ', bits, view.cols));
+      const arm = ep.confounded ? c.grey('confounded — neither arm')
+        : ep.actionKind ? c.white(`action: ${ep.actionKind}`)
+          : c.grey('no action — control arm');
+      const rest = [c.grey(`open ${age(now - ep.onsetMs)}`), ...(ep.beforeFreshN != null ? [c.grey(`fresh=${ep.beforeFreshN}`)] : [])];
+      const head = '  ' + who + ' ' + c.white(ep.kind) + '  ';
+      // THE LIFECYCLE FORM IS CHOSEN BY FIT (v0.80.0). The long form is 36
+      // columns, so at 80 fitBits shed the ARM bit behind it — a confounded
+      // episode and a clean control point both read `confirming — symptom
+      // absent, scoring · +3`. The long form is used only where the arm bit
+      // still fits after it; otherwise the one-word state carries the row.
+      // Where even that sheds the arm — 60 columns, behind a long kind name —
+      // the arm itself steps down through shorter words, so a confounded
+      // episode, a control point and an action arm still read apart:
+      // `confounded`, `control arm`, and `action: X` → `X` → `action`. The
+      // first rung that survives is used; the last is shed like any bit.
+      const life = ep.confirming ? c.green('confirming') : c.yellow('degraded');
+      const long = fitBits(head, [ep.confirming ? c.green('confirming — symptom absent, scoring') : c.yellow('degraded — symptom live'), arm, ...rest], view.cols);
+      const short = fitBits(head, [life, arm, ...rest], view.cols);
+      const armShort = ep.confounded ? [c.grey('confounded')]
+        : ep.actionKind ? [c.white(`action: ${ep.actionKind}`), c.white(ep.actionKind), c.white('action')]
+          : [c.grey('control arm')];
+      const fitted = armShort.map((a) => fitBits(head, [life, a, ...rest], view.cols));
+      const k = fitted.findIndex((r, i) => r.includes(armShort[i]));
+      push(long.includes(arm) ? long
+        : short.includes(arm) ? short
+          : fitted[k < 0 ? fitted.length - 1 : k]);
     }
-    if (open.length > 6) push('  ' + c.grey(`○ ${open.length - 6} more open episode(s)`));
+    if (open.length > 6) {
+      const more = open.length - 6;
+      const hiddenConfirming = ranked.slice(6).filter((e) => e.confirming).length;
+      const k = hiddenConfirming > 0 ? ` (${hiddenConfirming} confirming)` : '';
+      push('  ' + c.grey(pick(view.cols - 2, [`○ ${more} more open episode${more === 1 ? '' : 's'}${k}`, `○ ${more} more${k}`])));
+    }
   }
 
   /* ── LEDGER: LEARNED ───────────────────────────────────────────────────── */

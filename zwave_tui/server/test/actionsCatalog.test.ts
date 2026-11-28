@@ -274,7 +274,29 @@ test('the Ping node note says an unanswered ping marks the node Dead — never "
   assert.ok(ping, 'ping is in the catalog');
   assert.doesNotMatch(ping.impactNote, /harmless/i);
   assert.match(ping.impactNote, /ONE ACK-only attempt on the stored routes: if it goes unanswered the driver marks the node Dead — even a working one/);
-  assert.match(ping.impactNote, /request was SENT, not that the node answered/, 'and it keeps the result caveat');
+  assert.match(ping.impactNote, /HA does not return the ping's result, so a success means the request was SENT\./, 'and it keeps the result caveat');
+});
+
+test('the Ping node CONFIRM box keeps its prompt and Esc = cancel at 60x18, 80x16 and 120x16 (v0.80.0)', () => {
+  // `centeredNotice` ends in out.slice(0, H), and the session clamps rows to 16
+  // or more. A ping note that wrapped to 7 lines at noteW 64 (9 at 52) pushed
+  // `Esc = cancel` off the bottom at 80x16 and 120x16, and at 60x18 too.
+  const strip = (x: string) => x.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  const ping = describeAction('ping')!;
+  const box = (cols: number, rows: number): string[] => renderTypeConfirm({ cols, rows } as ViewState, {
+    label: ping.label, target: '#16 Kitchen Lights', impact: ping.impact,
+    desc: ping.desc, impactNote: ping.impactNote, buffer: '',
+  } as never).map(strip);
+  for (const [cols, rows] of [[60, 18], [80, 16], [120, 16]] as const) {
+    const lines = box(cols, rows);
+    assert.equal(lines.length, rows, `${cols}x${rows}: the frame is exactly the terminal`);
+    assert.ok(lines.some((l) => /type CONFIRM to arm/.test(l)), `${cols}x${rows}: the arming prompt:\n${lines.join('\n')}`);
+    assert.ok(lines.some((l) => /Esc = cancel/.test(l)), `${cols}x${rows}: the way out:\n${lines.join('\n')}`);
+  }
+  // One row taller, the whole box fits, bottom border included.
+  for (const [cols, rows] of [[60, 18], [80, 17]] as const) {
+    assert.ok(box(cols, rows).some((l) => /╚═+╝/.test(l)), `${cols}x${rows}: the box closes:\n${box(cols, rows).join('\n')}`);
+  }
 });
 
 test('the local-decision predicate covers the identity AND autonomy kinds, and no mesh action (v0.72.0)', () => {

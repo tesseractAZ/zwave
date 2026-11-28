@@ -281,3 +281,27 @@ test('OVERVIEW shows the PAUSED chip too — it builds its masthead with the sha
   const top = renderOverview({ view: mkView(120, 20, 0), data: d, visibleNodes: nodes, filtering: false, actionsEnabled: true }).map(strip)[0];
   assert.match(top, /⚠ AUTO-PING PAUSED 2h/);
 });
+
+test('a critical symptom is counted on the strip at 80x24 even when its row is below the fold (v0.80.0)', () => {
+  // The roster's `!` is per row. With 39 nodes and the default health sort a
+  // crit on an A-scored node sits below the fold at 80x24, and nothing else on
+  // the frame said a crit existed. The count sits right after DEAD: fieldStrip
+  // sheds from the END, so an appended field was dropped at exactly this size.
+  const crit = { kind: 'dead-flap', nodeId: 38, severity: 'crit', sinceMs: now - 60_000, narrative: 'x', basis: 'measured', evidence: [] };
+  const warn = { kind: 'route-churn', nodeId: 20, severity: 'warn', sinceMs: now - 60_000, narrative: 'x', basis: 'measured', evidence: [] };
+  const mesh = { kind: 'mesh-interference', nodeId: null, severity: 'crit', sinceMs: now - 60_000, narrative: 'x', basis: 'inferred', evidence: [] };
+  const v = { ...mkView(80, 24, 0), sortKey: 'health' } as ViewState;
+  const render = (syms: unknown[]): string[] => {
+    const d: DataProvider = { ...data, symptoms: () => syms as never };
+    return renderOverview({ view: { ...v }, data: d, visibleNodes: visibleNodesFor(d, v), filtering: false, actionsEnabled: true });
+  };
+  const lines = render([crit, warn]).map(strip);
+  assert.ok(!lines.some((l) => /Node 38 With/.test(l)), 'fixture: the crit node is below the fold');
+  const s = lines.find((l) => /NODES\s+\d+/.test(l)) ?? '';
+  assert.match(s, /DEAD\s+0\s+CRIT\s+1\b/, `the crit count follows DEAD and survives 80 columns: "${s}"`);
+  // A warning is not counted, and a mesh-wide crit is (REMEDY's own `N critical`).
+  assert.match(render([crit, warn, mesh]).map(strip).find((l) => /NODES/.test(l)) ?? '', /CRIT\s+2\b/);
+  // Healthy: the strip is byte-identical to one rendered with no symptoms at all.
+  assert.deepEqual(render([warn]), render([]), 'no crit symptom ⇒ no CRIT field and nothing else changes');
+  assert.doesNotMatch(render([]).map(strip).join('\n'), /CRIT/);
+});

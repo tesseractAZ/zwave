@@ -2119,9 +2119,19 @@ class ZwaveDataImpl implements ZwaveData {
         // `worse` lifts to warn. A regression logged at info is a regression
         // nobody sees. Deliberately NOT 'error': the errorsOnly filter is for
         // things that FAILED, and a closure verdict is a measurement.
+        // THE QUALIFIER SITS ON THE VERDICT (v0.80.0). An unverifiable verdict
+        // carries which kind it is — a structural one (unprobeable), a blink
+        // (transient), or the device's own cadence (undersampled) — and a
+        // confounded one says so, right after the verdict word. This line
+        // carried no subtype before: only the outcomes stdout line did, so on
+        // the ring a by-design blink read the same as a fixable evidence gap.
+        // The confounded tag sat at the END, and the Log list row, which keeps
+        // about 46 columns of text at 80, cut it.
+        const sub = ep.verdict === 'unverifiable'
+          ? (ep.unprobeable ? ': unprobeable' : ep.transient ? ': transient' : ep.undersampled ? ': undersampled' : '')
+          : ep.confounded && ep.verdict !== 'refused-misdiagnosis' ? ' (confounded)' : '';
         this.pushEvent('engine', ep.verdict === 'worse' ? 'warn' : 'info', 'symptom', ep.nodeId,
-          `${ep.kind} closed ${ep.verdict}${ep.action ? ` after ${ep.action.kind} (${ep.action.origin ?? 'you'})` : ' (no action)'}` +
-          (ep.confounded && ep.verdict !== 'unverifiable' && ep.verdict !== 'refused-misdiagnosis' ? ' (confounded)' : '') +
+          `${ep.kind} closed ${ep.verdict}${sub}${ep.action ? ` after ${ep.action.kind} (${ep.action.origin ?? 'you'})` : ' (no action)'}` +
           (ep.killedAfter ? ` (went Dead ≤${KILLED_AFTER_MS / 60_000}m after it)` : ''));
       }
     }

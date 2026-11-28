@@ -1324,3 +1324,213 @@ test('the quiet-node card grounds itself on what the detector checked, not on tr
     assert.match(row, /The node hasn’t communicated in a while, yet it is not marked Dead/, `${cols}: "${row}"`);
   }
 });
+
+/* ── v0.80.0: what the engine knows, whole at 80 columns ─────────────────── */
+
+const PARTIAL = { enabled: true as const, ready: 33, total: 39, timeoutReady: 33, timeoutWindowBlind: 0, rttReady: 23, rttCeiling: 9, rssiReady: 30, band: 3, bands: 6 };
+
+test('partial coverage counts the nodes too quiet to rate timeouts, beside the timeout count (v0.80.0)', () => {
+  // `timeouts 33/39` read as 33 nodes judged while the two return-path
+  // detectors skip every node whose 10-minute window holds under 20 sends —
+  // and the output was byte-identical for timeoutWindowBlind 0 and 39.
+  const quiet = plain(renderRemedy(engCtx(80, 24, { ...PARTIAL, timeoutWindowBlind: 38 })));
+  assert.match(quiet, /timeouts 33\/39\s+unmeasured 38\s+rtt 23\/39/, `the token follows the series it qualifies: ${quiet}`);
+  assert.match(quiet, /timeout: 38 too quiet in 10 min to rate — return-path detectors skip them\./, quiet);
+  assert.match(plain(renderRemedy(engCtx(120, 24, { ...PARTIAL, timeoutWindowBlind: 38 }))), /— the return-path detectors skip them\./);
+  const none = plain(renderRemedy(engCtx(80, 24, PARTIAL)));
+  assert.doesNotMatch(none, /unmeasured|too quiet/, 'no thin window ⇒ neither the token nor the line');
+  assert.notEqual(quiet, none, 'the screen changes with timeoutWindowBlind');
+});
+
+test('a below-readiness arm with NO measured control arm still speaks — its harm warning included (v0.80.0)', () => {
+  // `if (heal == null) return null` ran before the n check and the harm
+  // warning: n≈2.9 with every attempt worse rendered the same silence as n=0.
+  const harmed = (): Eff => ({ expectedEfficacy: null, n: 2.9, baseRate: null, nodes: 2, ready: false,
+    lowerBound: null, bar: null, minN: 4, baseN: 1, baseNodes: 1, harmed: 2.9, baseHarmed: 0 });
+  const joined = plain(renderRemedy(ctx(200, 40, [sym()], harmed)));
+  assert.match(joined, /still learning this action \(n≈2\.9 of 4\) — self-heal not yet measured — ⚠ every attempt so far made it WORSE/, joined);
+  // At 80 the clauses go before the warning does: it keeps its place beside the readiness fraction.
+  assert.match(plain(renderRemedy(ctx(80, 40, [sym()], harmed))), /still learning this action \(n≈2\.9 of 4\) — ⚠ every try made it WORSE\n/);
+  // The measured-control branch sheds the same way.
+  const withBase = (): Eff => ({ ...harmed()!, baseRate: 0.6, baseN: 6, baseNodes: 3 });
+  assert.match(plain(renderRemedy(ctx(80, 40, [sym()], withBase))), /still learning this action \(n≈2\.9 of 4\) — ⚠ every try made it WORSE\n/);
+  // At 60, the session's minimum, neither branch falls back to the bare
+  // fraction: the warning outlasts it. At 40 the warning stands alone after `≈`.
+  const note = (W: number, e: () => Eff): string =>
+    plain(renderRemedy(ctx(W, 40, [sym()], e))).split('\n').find((l) => /^ {8}≈ /.test(l)) ?? '';
+  for (const e of [harmed, withBase]) {
+    assert.match(note(60, e), /WORSE|made it worse/, `60: "${note(60, e)}"`);
+    assert.equal(note(60, e), '        ≈ still learning — ⚠ every try made it WORSE');
+    assert.equal(note(40, e), '        ≈ ⚠ every try made it WORSE');
+  }
+  // A partial harm sheds the same way: its count stays with the warning.
+  const some = (): Eff => ({ ...harmed()!, harmed: 1.5 });
+  const someBase = (): Eff => ({ ...withBase()!, harmed: 1.5 });
+  for (const e of [some, someBase]) {
+    assert.equal(note(60, e), '        ≈ still learning — ⚠ n≈1.5 made it worse');
+    assert.equal(note(40, e), '        ≈ ⚠ n≈1.5 made it worse');
+  }
+  // Control: with no harm the 60-column note is the readiness fraction, unchanged,
+  // and at 40 the bare `≈ still learning` — no warning rung without a warning.
+  const clean = (): Eff => ({ ...withBase()!, harmed: 0 });
+  assert.equal(note(60, clean), '        ≈ still learning this action (n≈2.9 of 4)');
+  assert.equal(note(40, clean), '        ≈ still learning');
+  assert.equal(note(40, (): Eff => ({ ...harmed()!, harmed: 0 })), '        ≈ still learning');
+  // Control: no attempts and no base rate is still no note.
+  const never = (): Eff => ({ ...harmed()!, n: 0, harmed: 0, nodes: 0 });
+  assert.doesNotMatch(plain(renderRemedy(ctx(120, 40, [sym()], never))), /≈ still learning|never tried/);
+});
+
+test('REMEDY tally lines end on whole words at 80x24, and the plan still renders under five of them (v0.80.0)', () => {
+  // Each was one sentence and a blind truncate: `weigh the evidence a`,
+  // `too few readings to ju`, `probe re-`.
+  const d: DataProvider = { ...data([sym({ kind: 'rtt-degraded', evidence: [{ label: 'RTT', value: '412ms' }] })]),
+    falsePositives: () => 2, unverifiableCount: () => 3, unverifiableUnprobeableCount: () => 1,
+    unverifiableTransientCount: () => 4, unverifiableUndersampledCount: () => 5, confoundedCount: () => 6 };
+  const lines = renderRemedy({ view: mkView(80, 24), data: d, visibleNodes: nodes, filtering: false, actionsEnabled: true })
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+  const tallies = lines.filter((l) => /^ {4}(⚠ |○ \d)/.test(l));
+  assert.equal(tallies.length, 6, `all six tallies render: ${JSON.stringify(tallies)}`);
+  const ends = [/acting$|evidence$|misdiagnosis 2×$/, /recovery$|readings$|unscoreable$/, /not a gap$|by design$/,
+    /not a gap$|floor filled$|by design$|blinks$/, /readings$|reporting rate$|too rarely$|undersampled$/, /episode\)$|re-route\)$|neither arm$|confounded$/];
+  tallies.forEach((t, i) => assert.match(t.trimEnd(), ends[i], `tally ${i} must end on a whole clause: "${t}"`));
+  assert.ok(lines.some((l) => /▎ /.test(l)), 'the plan headline still renders');
+  assert.ok(lines.some((l) => /^ {6}[▸·] /.test(l)), 'and at least one candidate');
+});
+
+test('every empty state, its ceiling note and the all-clear headline are whole at 40 and 60 columns (v0.80.0)', () => {
+  // `Every node has a graduated timeout a` at 40: the first of two hard-wrapped
+  // lines was cut blind, and the rssi note likewise. The disabled and no-nodes
+  // paragraphs were cut at 60, the session's minimum, the ceiling note's second
+  // line ended `slowdown is …`, and the ✓ headline stopped mid-word at 40.
+  const words = (W: number, eng: ReturnType<DataProvider['engineStatus']>): { lines: string[]; text: string } => {
+    const lines = renderRemedy(engCtx(W, 30, eng)).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    fits(lines, W, `${W}`);
+    for (const l of lines) assert.doesNotMatch(l, / …$/, `${W}: no paragraph line is clipped: "${l}"`);
+    return { lines, text: lines.slice(3, -1).map((l) => l.trim()).filter(Boolean).join(' ') };
+  };
+  const OFF = { ...ENG, enabled: false, total: 0, ready: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0 };
+  const NONE = { ...ENG, total: 0, ready: 0, timeoutReady: 0, rttReady: 0, rssiReady: 0 };
+  const LEARN = { ...ENG, total: 39, ready: 0, timeoutReady: 0, rttReady: 0, rttCeiling: 9, rssiReady: 0 };
+  const CEILING = /rtt: 9 with no learned normal are held to a fixed 300 ms ceiling meanwhile, so only a severe slowdown is flagged there\./;
+  for (const W of [40, 60]) {
+    const clear = words(W, { ...ENG, rssiReady: 1 });
+    assert.match(clear.text, /Every node has a graduated timeout and rtt baseline — the two that arm a detector —/, `${W}: ${clear.text}`);
+    assert.match(clear.text, /\(rssi (is )?short on 2[:—]/, `${W}: the rssi note is a whole form: ${clear.text}`);
+    for (const l of clear.lines) assert.doesNotMatch(l, /graduated timeout a$|rtt bas$|— th$/, `${W}: no line ends mid-word: "${l}"`);
+    assert.match(words(W, OFF).text, /The symptom engine is not running on this install \(no baselines store configured\), so nothing is being diagnosed\./, `${W}: disabled`);
+    assert.match(words(W, NONE).text, /The engine is running but the roster is empty — nothing has been measured, so nothing can be diagnosed or cleared\. This is normal for the first seconds after a restart\./, `${W}: no nodes`);
+    assert.match(words(W, LEARN).text, CEILING, `${W}: learning`);
+    assert.match(words(W, PARTIAL).text, CEILING, `${W}: partial`);
+  }
+  // The ✓ headline: its own words where they fit, then shorter whole forms.
+  const head = (W: number, total: number): string => words(W, { ...ENG, total, ready: total, timeoutReady: total, rttReady: total, rssiReady: total })
+    .lines.find((l) => /✓ All clear/.test(l)) ?? '';
+  assert.equal(head(60, 39), '    ✓ All clear — 39 nodes learned, no symptoms detected.');
+  assert.equal(head(50, 39), '    ✓ All clear — 39 learned, no symptoms.');
+  assert.equal(head(40, 39), '    ✓ All clear — no symptoms.');
+  // At 80 the familiar lines are unchanged.
+  const wide = plain(renderRemedy(engCtx(80, 30, ENG)));
+  assert.match(wide, /\n {4}✓ All clear — 3 nodes learned, no symptoms detected\.\n/);
+  assert.match(wide, /\n {4}Every node has a graduated timeout and rtt baseline — the two\n {4}that arm a detector —\n/);
+  assert.match(plain(renderRemedy(engCtx(80, 30, OFF))), /\n {4}The symptom engine is not running on this install \(no baselines\n {4}store configured\), so nothing is being diagnosed\.\n/);
+  assert.match(plain(renderRemedy(engCtx(80, 30, LEARN))), /\n {4}rtt: 9 with no learned normal are held to a fixed 300 ms\n {4}ceiling meanwhile, so only a severe slowdown is flagged there\.\n/);
+});
+
+test('the learning state says what its `unmeasured N` means, on a line of its own (v0.80.0)', () => {
+  // The counts strip carried `unmeasured 38` in the learning state too, and
+  // only the partial state had the line explaining it.
+  const LEARN = { ...ENG, total: 39, ready: 0, timeoutReady: 0, rttReady: 0, rttCeiling: 0, rssiReady: 0 };
+  const quiet = plain(renderRemedy(engCtx(80, 24, { ...LEARN, timeoutWindowBlind: 38 })));
+  assert.match(quiet, /◷ Learning/, 'fixture guard: the learning branch');
+  assert.match(quiet, /timeouts 0\/39\s+unmeasured 38/, quiet);
+  assert.match(quiet, /\n {4}timeout: 38 too quiet in 10 min to rate — return-path detectors skip them\.\n/, quiet);
+  assert.match(plain(renderRemedy(engCtx(120, 24, { ...LEARN, timeoutWindowBlind: 38 }))), /— the return-path detectors skip them\./);
+  // It follows the paragraph, and comes before the ceiling note.
+  const both = plain(renderRemedy(engCtx(80, 24, { ...LEARN, timeoutWindowBlind: 38, rttCeiling: 9 }))).split('\n');
+  const para = both.findIndex((l) => /Nothing here is a health claim yet/.test(l));
+  const line = both.findIndex((l) => /too quiet in 10 min to rate/.test(l));
+  const ceil = both.findIndex((l) => /^ {4}rtt: 9 with no learned normal/.test(l));
+  assert.ok(para >= 0 && line === para + 1 && ceil === line + 1, `order: ${para}, ${line}, ${ceil}`);
+  // Control: no thin window, neither the token nor the line.
+  assert.doesNotMatch(plain(renderRemedy(engCtx(80, 24, LEARN))), /unmeasured|too quiet/);
+});
+
+test('the evidence row sheds whole measurements, never one cut mid-value (v0.80.0)', () => {
+  const rtt = sym({ kind: 'rtt-degraded', evidence: [
+    { label: 'RTT', value: '412ms' },
+    { label: 'baseline', value: '38±6ms · capped at 300ms' },
+    { label: 'restart allowance', value: '41ms (212 tx since driver start)' },
+    { label: 'newest round trips', value: '380, 402, 455ms' },
+  ] });
+  const weak = sym({ kind: 'weak-signal', evidence: [
+    { label: 'SNR margin', value: '4dB' },
+    { label: 'failed deliveries', value: '13 in 30m (too few sends for a rate)' },
+  ] });
+  for (const s of [rtt, weak]) {
+    const lines = plain(renderRemedy(ctx(80, 30, [s]))).split('\n');
+    const row = lines.find((l) => /^ {4}measured /.test(l)) ?? '';
+    // Every label printed is followed by its WHOLE value.
+    for (const e of s.evidence) {
+      if (row.includes(e.label + ' ')) assert.ok(row.includes(`${e.label} ${e.value}`), `"${e.label}" is whole or absent: "${row}"`);
+    }
+    assert.ok(row.includes(`${s.evidence[0].label} ${s.evidence[0].value}`), `the first measurement leads: "${row}"`);
+    const shown = s.evidence.filter((e) => row.includes(`${e.label} ${e.value}`)).length;
+    if (shown < s.evidence.length) assert.match(row, new RegExp(`\\+${s.evidence.length - shown}$`), `a shed one is counted: "${row}"`);
+  }
+  // At 40 the first measurement still fits beside the basis word; the rest is counted.
+  const narrow = plain(renderRemedy(ctx(40, 30, [weak]))).split('\n').find((l) => /^ {4}measured/.test(l)) ?? '';
+  assert.equal(narrow, '    measured  SNR margin 4dB +1');
+});
+
+test('the evidence row sets its measurements apart with `  ·  `, never the ` · ` a value carries inside itself (v0.80.0)', () => {
+  // `baseline 38±6ms · capped at 300ms` is ONE measurement; with shedLine's
+  // ` · ` between tokens too, `capped at 300ms` read as a measurement of its own.
+  const rtt = sym({ kind: 'rtt-degraded', evidence: [
+    { label: 'RTT', value: '412ms' },
+    { label: 'baseline', value: '38±6ms · capped at 300ms' },
+    { label: 'newest round trips', value: '380, 402, 455ms' },
+  ] });
+  const row = (W: number): string => plain(renderRemedy(ctx(W, 30, [rtt]))).split('\n').find((l) => /^ {4}measured /.test(l)) ?? '';
+  assert.equal(row(120), '    measured  RTT 412ms  ·  baseline 38±6ms · capped at 300ms  ·  newest round trips 380, 402, 455ms');
+  // The wider mark is counted when it sheds: at 80 the third measurement goes, whole, with +1.
+  assert.equal(row(80), '    measured  RTT 412ms  ·  baseline 38±6ms · capped at 300ms +1');
+});
+
+test('an over-80 candidate title keeps its [cost · basis] tag through a short form (v0.80.0)', () => {
+  // The survey row was 87 columns with its indent: shedLine clipped the head
+  // at `measurement needed to` and the `+1` disclosing the tag went with it.
+  const mesh = sym({ kind: 'mesh-interference', nodeId: null, basis: 'inferred', evidence: [{ label: 'active nodes degraded', value: '9/30 in the same window' }] });
+  const at80 = plain(renderRemedy(ctx(80, 30, [mesh])));
+  assert.match(at80, /· Survey the RF environment — measurement needed \[physical · inference\]/, at80);
+  const at120 = plain(renderRemedy(ctx(120, 30, [mesh])));
+  assert.match(at120, /Survey the RF environment \(900 MHz interferers\) — measurement needed to confirm \[physical · inference\]/);
+  // At 40 even the short form cannot keep its tag: whole words and a `+1`.
+  const at40 = plain(renderRemedy(ctx(40, 30, [mesh]))).split('\n');
+  assert.match(at40.find((l) => /Survey/.test(l)) ?? '', /^ {6}· Survey the RF .*\+1$/);
+  // The plan headline the same way: its short form at 80, whole words at 40.
+  assert.match(at40.find((l) => /▎ /.test(l)) ?? '', /^ {4}▎ Correlated mesh degradation — …$/);
+  const edge = sym({ kind: 'edge-cluster', members: [7] });
+  const head80 = plain(renderRemedy(ctx(80, 30, [edge]))).split('\n').find((l) => /▎ /.test(l)) ?? '';
+  assert.equal(head80, '    ▎ Correlated cluster on a shared route — check the common relay');
+  assert.match(plain(renderRemedy(ctx(120, 30, [edge]))), /▎ Correlated cluster on a shared route — check the common relay, not each node\n/);
+});
+
+test('every rebuild (healNode) candidate on REMEDY names priority routes at 80 and 120 columns (v0.80.0)', () => {
+  // Picked by wrapped line, the caveat lost its object — `…deletes any
+  // manually-set priority …` at 80 — and route-churn's never named it at all.
+  const kinds: SymptomKind[] = ['route-churn', 'rate-fallback', 'return-path-degraded', 'chronic-return-path', 'weak-signal', 'rtt-degraded'];
+  for (const W of [80, 120]) {
+    for (const kind of kinds) {
+      const lines = plain(renderRemedy(ctx(W, 40, [sym({ kind })]))).split('\n');
+      const at = lines.findIndex((l) => /▸ Rebuild routes/.test(l));
+      if (at < 0) continue;
+      const below = lines.slice(at + 1, at + 4);
+      const row = below.find((l) => /priority route/i.test(l));
+      assert.ok(row, `${kind} at ${W}: the rebuild's caveat names priority routes:\n${lines.slice(at, at + 4).join('\n')}`);
+      assert.match(row!, /[.)]$| …$/, `${kind} at ${W}: and ends whole: "${row}"`);
+    }
+  }
+  const seen = kinds.filter((kind) => plain(renderRemedy(ctx(120, 40, [sym({ kind })]))).includes('▸ Rebuild routes'));
+  assert.ok(seen.length >= 4, `fixture: most of these kinds carry a rebuild candidate: ${seen.join(', ')}`);
+});
